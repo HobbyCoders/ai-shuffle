@@ -1,7 +1,8 @@
 #!/bin/bash
-# Launches Google Chrome (headless, offscreen) so the bundled Claude Code CLI's
+# Launches Chromium (headless, offscreen) so the bundled Claude Code CLI's
 # "Claude in Chrome" integration (--chrome) has a real browser to drive inside
-# the container.
+# the container. (CHROME_EXECUTABLE points at google-chrome-stable, which is a
+# symlink to /usr/bin/chromium on both arches — see Dockerfile.)
 #
 # Runs as the SAME user as the app/CLI (appuser). The CLI writes its
 # native-messaging host manifest to ~/.config/google-chrome/NativeMessagingHosts/.
@@ -63,6 +64,33 @@ if [ "${CHROME_DEBUG:-0}" = "1" ]; then
           TCP:127.0.0.1:"$CDP_PORT" &
 fi
 
+# Memory-reduction flags. This is a long-lived, single-tab headless browser; the
+# concern is steady-state RSS, not throughput. Every flag here is safe for
+# extensions + native messaging (we deliberately do NOT use --single-process or
+# --no-zygote, which break extension/IPC plumbing).
+#   --js-flags=--max-old-space-size=512  cap each V8 heap at 512MB so a busy page
+#       can't grow the renderer heap unbounded (the main RAM sink for one tab).
+#   --renderer-process-limit=2  cap renderer processes — a single setup/agent tab
+#       never needs more, and it stops Chrome from spinning up extra processes.
+#   --disk-cache-size=33554432  bound the on-disk HTTP cache at 32MB (default is
+#       large and grows in the persisted profile volume).
+#   --disable-software-rasterizer  we already --disable-gpu; this also stops the
+#       SwiftShader fallback allocating a software raster path we never display.
+#   --disable-background-networking  kill background fetchers (safe-browsing
+#       update pings, field-trial/component fetches) that wake the browser and
+#       hold buffers; the extension's own native-messaging bridge is unaffected.
+#   --disable-features=Translate,BackForwardCache  Translate loads an unused
+#       model; BackForwardCache keeps whole pages alive in memory after
+#       navigation — both pure memory cost for this single-tab use.
+MEM_ARGS=(
+    --js-flags=--max-old-space-size=512
+    --renderer-process-limit=2
+    --disk-cache-size=33554432
+    --disable-software-rasterizer
+    --disable-background-networking
+    --disable-features=Translate,BackForwardCache
+)
+
 # --ozone-platform=headless: full browser (extensions, native messaging)
 #   rendered offscreen — no X server / Xvfb required. (Plain --headless does
 #   NOT load extensions or native messaging, so we must use ozone headless.)
@@ -78,6 +106,7 @@ exec "$CHROME_BIN" \
     --no-default-browser-check \
     --user-data-dir="$PROFILE" \
     --window-size=1440,900 \
+    "${MEM_ARGS[@]}" \
     "${DEBUG_ARGS[@]}" \
     "$@" \
     about:blank
