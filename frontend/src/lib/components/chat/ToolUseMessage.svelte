@@ -3,6 +3,8 @@
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { mediaHtml } from '$lib/utils/media';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		name: string;
@@ -412,9 +414,13 @@
 			</div>
 		</details>
 		<!-- Screenshot (e.g. Claude-in-Chrome) rendered directly below the tool
-		     call — no wrapper or border, shown regardless of expand/collapse. -->
+		     call, using the shared media UI so it gets the same expand button,
+		     download button, and click-to-open lightbox as generated images.
+		     Shown regardless of the tool block's expand/collapse state. -->
 		{#if screenshot}
-			<img class="tool-screenshot" src={screenshot} alt="Screenshot from {name}" loading="lazy" />
+			<div class="tool-screenshot">
+				{@html sanitizeHtml(mediaHtml('image', screenshot, `Screenshot from ${name}`))}
+			</div>
 		{/if}
 	</div>
 </div>
@@ -429,11 +435,9 @@
 		outline-offset: -2px;
 	}
 
-	/* Directly below the tool call: no border, no card wrapper. */
+	/* Screenshot sits directly below the tool call; the inner
+	   .generated-media-container supplies its own spacing/border/shadow. */
 	.tool-screenshot {
 		display: block;
-		max-width: 100%;
-		height: auto;
-		margin-top: 0.5rem;
 	}
 </style>
