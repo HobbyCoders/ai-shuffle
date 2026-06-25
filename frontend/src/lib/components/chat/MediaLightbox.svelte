@@ -9,6 +9,22 @@
 	import { onMount } from 'svelte';
 	import { lightbox, openLightbox, closeLightbox } from '$lib/stores/lightbox';
 
+	/**
+	 * Portal action: moves the overlay to document.body so it escapes the
+	 * containment of the message area (content-visibility / overflow / any
+	 * ancestor stacking context). Without this the `fixed` overlay is trapped
+	 * inside MessageArea and on mobile renders behind the bottom nav / chrome
+	 * instead of front-and-fullscreen.
+	 */
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
+	}
+
 	function handleDocClick(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
 		if (!target) return;
@@ -83,7 +99,8 @@
 
 {#if $lightbox.open}
 	<div
-		class="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 backdrop-blur-sm"
+		use:portal
+		class="fixed inset-0 z-[300] flex items-center justify-center bg-black/85 backdrop-blur-sm"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Media preview"
@@ -91,8 +108,12 @@
 		onclick={closeLightbox}
 		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeLightbox(); }}
 	>
-		<!-- Top-right actions -->
-		<div class="absolute top-4 right-4 flex gap-2" role="presentation" onclick={(e) => e.stopPropagation()}>
+		<!-- Top-right actions — offset for the mobile safe area (notch / status bar). -->
+		<div
+			class="absolute top-[calc(0.75rem+env(safe-area-inset-top,0px))] right-[calc(0.75rem+env(safe-area-inset-right,0px))] flex gap-2"
+			role="presentation"
+			onclick={(e) => e.stopPropagation()}
+		>
 			<a
 				href={$lightbox.src}
 				download={downloadName($lightbox.src)}
@@ -117,13 +138,14 @@
 			</button>
 		</div>
 
-		<!-- Media (stop propagation so clicking it doesn't close) -->
-		<div class="max-w-[92vw] max-h-[88vh] flex items-center justify-center" role="presentation" onclick={(e) => e.stopPropagation()}>
+		<!-- Media (stop propagation so clicking it doesn't close). Edge-to-edge
+		     fullscreen on mobile (100vw/100dvh, no rounding); framed on >=sm. -->
+		<div class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] flex items-center justify-center" role="presentation" onclick={(e) => e.stopPropagation()}>
 			{#if $lightbox.type === 'video'}
 				<!-- svelte-ignore a11y_media_has_caption -->
-				<video src={$lightbox.src} controls autoplay playsinline class="max-w-[92vw] max-h-[88vh] rounded-lg shadow-2xl"></video>
+				<video src={$lightbox.src} controls autoplay playsinline class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl"></video>
 			{:else}
-				<img src={$lightbox.src} alt="Preview" class="max-w-[92vw] max-h-[88vh] rounded-lg shadow-2xl object-contain" />
+				<img src={$lightbox.src} alt="Preview" class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain" />
 			{/if}
 		</div>
 	</div>

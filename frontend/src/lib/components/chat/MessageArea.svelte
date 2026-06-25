@@ -737,6 +737,37 @@
 		};
 	});
 
+	// Re-pin to the bottom once a late-loading image/video actually decodes.
+	//
+	// Screenshots (tool results) and generated media render via {@html} with no
+	// intrinsic size until the browser decodes them. The content effect's
+	// scrollToBottom() fires against the PRE-decode layout — zero-height media —
+	// so the new image lands below the fold. `load`/`loadeddata` don't bubble,
+	// but they DO fire during the capture phase on ancestors, so a single
+	// capture-phase listener on the container catches every child <img>/<video>
+	// the instant it finishes loading. We only re-pin while stick-to-bottom is
+	// still engaged, so a user who scrolled up to read isn't yanked back down.
+	$effect(() => {
+		if (!containerRef || !isMounted) return;
+		const el = containerRef;
+		const onMediaLoad = (e: Event) => {
+			const t = e.target as HTMLElement | null;
+			if (!t || (t.tagName !== 'IMG' && t.tagName !== 'VIDEO')) return;
+			if (!shouldAutoScroll) return;
+			// eslint-disable-next-line no-console
+			if (STREAM_DEBUG) console.log(`[AS] media load → scrollToBottom tag=${t.tagName} SH=${el.scrollHeight} ST=${el.scrollTop} CH=${el.clientHeight}`);
+			requestAnimationFrame(() => { if (shouldAutoScroll) scrollToBottom(); });
+		};
+		// capture: load/loadeddata do not bubble, so a delegated listener must
+		// observe the capture phase to receive them from descendant media.
+		el.addEventListener('load', onMediaLoad, true);
+		el.addEventListener('loadeddata', onMediaLoad, true);
+		return () => {
+			el.removeEventListener('load', onMediaLoad, true);
+			el.removeEventListener('loadeddata', onMediaLoad, true);
+		};
+	});
+
 	// Track previous values to detect actual content changes (not just re-renders)
 	let prevMessagesLength = $state(0);
 	let prevLastContent = $state('');
@@ -758,6 +789,11 @@
 			// During streaming, toolInput is not yet parsed — track partialToolInput
 			// so auto-scroll triggers as content streams in (e.g. TodoWrite).
 			else if (lastMsg.partialToolInput) content = lastMsg.partialToolInput;
+			// A screenshot (e.g. Claude-in-Chrome) landing on the last tool call
+			// grows the layout but never touches toolInput — fold its presence in
+			// so the scroll effect re-fires when it arrives. The image-load listener
+			// then re-pins once the browser has actually decoded it.
+			if (lastMsg.toolScreenshot) content += `|s:${lastMsg.toolScreenshot.length}`;
 		} else {
 			content = lastMsg.content || '';
 		}
