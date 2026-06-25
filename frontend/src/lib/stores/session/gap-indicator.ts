@@ -45,6 +45,31 @@ export function isEmptyStreamingAssistantText(m: ChatMessage): boolean {
 }
 
 /**
+ * Whether a text/undefined assistant message should render its bubble at all.
+ *
+ * The turn-start synthetic (an empty streaming assistant-text) is re-appended to
+ * the tail during post-tool think-gaps and while parked on a subagent. When it
+ * is NOT the streaming anchor it renders only a bare "Name • time" header — no
+ * body, no inline cursor — which reads as a second, confusing streaming
+ * indicator (the empty "Principal Engineer …" bubble in the chat). Suppress it
+ * so the SINGLE activity signal is the bottom gap dots (shouldShowGapIndicator)
+ * or the real streaming message's own inline cursor.
+ *
+ * Renders ⟺ the message has content, OR it is the active streaming anchor (which
+ * owns the inline cursor / placeholder dots even before its first delta lands).
+ *
+ * @param content        The message's text content.
+ * @param isStreamAnchor Whether this message is the streaming anchor for the turn
+ *                       (i.e. messageIndex === findStreamingAnchorIndex(...)).
+ */
+export function shouldRenderAssistantText(
+	content: string | undefined,
+	isStreamAnchor: boolean
+): boolean {
+	return Boolean(content) || isStreamAnchor;
+}
+
+/**
  * Index of the message that should own the single streaming indicator / cursor,
  * or -1 if none. Only ONE message shows the bouncing dots, otherwise a row of
  * them appears after every tool call. Trailing EMPTY streaming assistant-text

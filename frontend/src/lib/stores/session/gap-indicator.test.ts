@@ -17,6 +17,7 @@ import type { ChatMessage } from '../types';
 import {
 	findStreamingAnchorIndex,
 	isEmptyStreamingAssistantText,
+	shouldRenderAssistantText,
 	shouldShowGapIndicator
 } from './gap-indicator';
 
@@ -87,6 +88,25 @@ describe('findStreamingAnchorIndex', () => {
 	it('returns -1 when the only streaming message is a phantom', () => {
 		const msgs = [userMsg(), completeTool(), phantom()];
 		expect(findStreamingAnchorIndex(msgs)).toBe(-1);
+	});
+});
+
+describe('shouldRenderAssistantText', () => {
+	// The empty phantom that is NOT the streaming anchor must be suppressed so the
+	// chat never shows a bare "Principal Engineer • time" header with no body.
+	it('suppresses an empty phantom that is not the streaming anchor', () => {
+		expect(shouldRenderAssistantText('', false)).toBe(false);
+		expect(shouldRenderAssistantText(undefined, false)).toBe(false);
+	});
+
+	it('renders the active streaming anchor even before its first delta', () => {
+		// Anchor owns the inline cursor / placeholder dots; render it even empty.
+		expect(shouldRenderAssistantText('', true)).toBe(true);
+	});
+
+	it('renders any message that has real content', () => {
+		expect(shouldRenderAssistantText('hello', false)).toBe(true); // finalized text
+		expect(shouldRenderAssistantText('typing', true)).toBe(true); // streaming text
 	});
 });
 

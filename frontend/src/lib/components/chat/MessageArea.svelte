@@ -22,7 +22,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { findStreamingAnchorIndex, shouldShowGapIndicator } from '$lib/stores/session/gap-indicator';
+	import { findStreamingAnchorIndex, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
 	import {
 		isNearBottom as computeIsNearBottom,
 		isUserScrollUpGesture,
@@ -953,20 +953,30 @@
 							profileName={getProfileName(message)}
 						/>
 					{:else if message.type === 'text' || !message.type}
-						<AssistantMessage
-							content={message.content}
-							wsContent={message.streaming && messageIndex === lastStreamingMessageIndex ? $activeSession.wsStreamContent : undefined}
-							messageIndex={messageIndex}
-							messageId={message.id}
-							messageUuid={message.jsonlUuid}
-							sessionId={$activeSession.sessionId}
-							streaming={message.streaming && messageIndex === lastStreamingMessageIndex}
-							{hasPartialMessages}
-							{fileCheckpointingEnabled}
-							metadata={message.metadata}
-							onRewindComplete={handleRewindComplete}
-							profileName={getProfileName(message)}
-						/>
+						{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}
+						<!-- Suppress empty phantom assistant-text bubbles. The turn-start
+						     synthetic (empty streaming text) is re-appended to the tail during
+						     post-tool think-gaps and while parked on a subagent; when it is not
+						     the streaming anchor it renders only a bare "Name • time" header —
+						     no body, no indicator — the confusing empty "Principal Engineer …"
+						     bubble. The single activity signal is the bottom gap dots or the
+						     real streaming message's own inline cursor. -->
+						{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
+							<AssistantMessage
+								content={message.content}
+								wsContent={isStreamAnchor ? $activeSession.wsStreamContent : undefined}
+								messageIndex={messageIndex}
+								messageId={message.id}
+								messageUuid={message.jsonlUuid}
+								sessionId={$activeSession.sessionId}
+								streaming={isStreamAnchor}
+								{hasPartialMessages}
+								{fileCheckpointingEnabled}
+								metadata={message.metadata}
+								onRewindComplete={handleRewindComplete}
+								profileName={getProfileName(message)}
+							/>
+						{/if}
 					{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 						<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
 						{@const todos = extractTodosFromMessage(message)}
