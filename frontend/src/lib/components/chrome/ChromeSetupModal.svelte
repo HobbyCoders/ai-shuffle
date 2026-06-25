@@ -148,7 +148,11 @@
 
 			<div class="toolbar">
 				<span class="dot" class:live={connState === 'live'} class:err={connState === 'error'}></span>
-				<span class="conn">{connState === 'live' ? 'Connected' : connState}</span>
+				<span
+					class="conn"
+					title="Live view of the headless browser. This only means the screen is streaming — it is not the extension/account connection (see the status badge)."
+					>{connState === 'live' ? 'Live view' : connState}</span
+				>
 
 				{#if status}
 					{#if status.paired}
@@ -206,6 +210,11 @@
 			{:else if status?.connected}
 				<p class="done">✓ Signed in and connected. {pairMsg ||
 						'Pinning this browser so it stays selected…'}</p>
+			{:else if status}
+				<!-- Not connected yet. The live view above may be streaming, but the
+				     extension still needs to be installed/signed in. Show the backend's
+				     concrete next step so the panel never looks "done" when it isn't. -->
+				<p class="pairmsg">{pairMsg || status.next_step}</p>
 			{:else if pairMsg}
 				<p class="pairmsg">{pairMsg}</p>
 			{/if}
