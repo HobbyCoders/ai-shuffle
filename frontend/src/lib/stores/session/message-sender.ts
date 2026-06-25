@@ -757,6 +757,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					project_id: projectId,
 					prompt,
 					profile_id: queryProfileId,
+					// Registry-targeted offload: when the device picker chose an install,
+					// the session runs there and is owned by it (no local proxy row).
+					target_instance_id: _state.cloudTargetInstanceId || undefined,
 					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 				}, { keepalive: true });

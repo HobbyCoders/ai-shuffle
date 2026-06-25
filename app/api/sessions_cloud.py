@@ -39,6 +39,10 @@ class CreateCloudSessionRequest(BaseModel):
     base_branch: Optional[str] = None
     pending_upload_paths: Optional[List[str]] = None
     overrides: Optional[Dict[str, Any]] = None
+    # Registry-targeted offload: run on this registered install instead of the
+    # single manually-configured second install. When set, the result is an
+    # ordinary cross-install session (no local proxy row, no cloud_remote_*).
+    target_instance_id: Optional[str] = None
 
 
 class CloudSessionResponse(BaseModel):
@@ -78,13 +82,18 @@ async def create_cloud_session(
     body: CreateCloudSessionRequest,
     token: str = Depends(require_auth),
 ):
-    """Offload a new session to the configured second install."""
+    """Offload a new session to a registered install (or the legacy second install)."""
     from app.core import cloud_relay
     from app.core.sync_engine import sync_engine
 
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
+
+    # Preferred path: offload onto a registered install chosen from the device
+    # picker. The session is owned by that install and shared cluster-wide.
+    if body.target_instance_id:
+        return await _create_offload_via_registry(request, body, prompt)
 
     if not cloud_relay.is_configured():
         raise HTTPException(
@@ -180,6 +189,87 @@ async def create_cloud_session(
 
     return CloudSessionResponse(
         session_id=session_id,
+        remote_session_id=remote_session_id,
+        remote_url=base_url,
+        project_id=body.project_id,
+        status="active",
+        query_started=bool(intake.get("query_started")),
+    )
+
+
+async def _create_offload_via_registry(
+    request: Request,
+    body: CreateCloudSessionRequest,
+    prompt: str,
+) -> CloudSessionResponse:
+    """Offload onto a registered install resolved from the registry.
+
+    Unlike the legacy path this creates NO local proxy row: on a shared database
+    the worker's session is already visible everywhere, and its ``instance_id``
+    marks the owning device so the cross-install relay (live/send/interrupt) can
+    reach it. We just kick off the work on the target and return its session id.
+    """
+    from app.core import cloud_relay
+
+    # Verify the project exists locally and the caller may access it.
+    project = await run_sync(database.get_project, body.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {body.project_id}")
+
+    api_user = get_api_user_from_request(request)
+    if api_user and api_user.get("project_id") and api_user["project_id"] != body.project_id:
+        raise HTTPException(status_code=403, detail="Access denied to this project")
+
+    # Resolve the chosen device's reachable URL (online + advertises a base_url).
+    try:
+        base_url = await run_sync(
+            cloud_relay.resolve_install_base_url, body.target_instance_id
+        )
+    except cloud_relay.InstallOffline as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    clone_url, github_repo_name, default_branch = await run_sync(
+        _resolve_github_repo, body.project_id
+    )
+
+    # Forward any locally-uploaded attachments to the target's workspace.
+    remote_upload_paths: List[str] = []
+    for path in body.pending_upload_paths or []:
+        try:
+            remote = await cloud_relay.cluster_upload_file(base_url, path)
+            if remote:
+                remote_upload_paths.append(remote)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Offload attachment upload failed for %s: %s", path, e)
+
+    # Hand off to the target (creates/links project, worktree, starts query).
+    try:
+        intake = await cloud_relay.cluster_intake(
+            base_url,
+            project_id=body.project_id,
+            repo_url=clone_url,
+            github_repo_name=github_repo_name,
+            default_branch=default_branch,
+            prompt=prompt,
+            profile_id=body.profile_id,
+            branch_name=body.branch_name,
+            base_branch=body.base_branch,
+            pending_upload_paths=remote_upload_paths,
+            overrides=body.overrides,
+        )
+    except cloud_relay.InstallOffline as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except cloud_relay.CloudRelayError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    remote_session_id = intake.get("session_id")
+    if not remote_session_id:
+        raise HTTPException(status_code=502, detail="Target device did not return a session id")
+
+    # The session id is shared across the cluster — the frontend opens it like
+    # any other (remote) session. No proxy row, no cloud_remote_* written.
+    return CloudSessionResponse(
+        session_id=remote_session_id,
         remote_session_id=remote_session_id,
         remote_url=base_url,
         project_id=body.project_id,

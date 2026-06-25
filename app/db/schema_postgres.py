@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 47
 
 
 def create_postgres_schema(cursor) -> None:
@@ -680,6 +680,29 @@ def create_postgres_schema(cursor) -> None:
             last_seen TIMESTAMP WITH TIME ZONE
         )
     """)
+
+    # ------------------------------------------------------------------
+    # 36b. Installs (cross-install registry for a shared database)
+    #      Each AI Shuffle install self-registers a row keyed by its
+    #      instance_id so peers can list every install, show which device
+    #      owns a session, and relay live control to the owning install.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS installs (
+            id TEXT PRIMARY KEY,
+            device_name TEXT NOT NULL,
+            base_url TEXT,
+            platform TEXT,
+            version TEXT,
+            capabilities JSONB DEFAULT '{}',
+            last_seen TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)"
+    )
 
     # ------------------------------------------------------------------
     # 37. Pending actions (waiting for mobile confirmation)

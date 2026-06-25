@@ -43,6 +43,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		scrollTop: 250,
 		streamStartTime: 123456,
 		executionMode: 'local',
+		cloudTargetInstanceId: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: true,

@@ -92,6 +92,20 @@ class Settings(BaseSettings):
     # Falls back to service_name if not set (stable across Docker rebuilds).
     instance_id: Optional[str] = None
 
+    # Cross-install cluster (shared-database fleet). When multiple installs
+    # share one database they form a cluster: each self-registers in the
+    # ``installs`` table and can relay live session control to the install that
+    # owns a running session.
+    #   - cluster_secret: shared bearer secret peers present to each other. If
+    #     unset, one is auto-generated and persisted in system_settings so all
+    #     installs on the shared DB converge on the same value.
+    #   - cluster_advertise_url: this install's externally peer-reachable base
+    #     URL (e.g. https://box-a.example.com). If unset we fall back to a
+    #     best-effort guess; installs with no reachable URL stay viewable but
+    #     cannot be controlled remotely.
+    cluster_secret: Optional[str] = None
+    cluster_advertise_url: Optional[str] = None
+
     # Session
     session_secret: Optional[str] = None
     session_expire_days: int = 30

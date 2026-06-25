@@ -78,6 +78,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     require_session,
     enrich_sessions_with_tags,
     enrich_search_results_with_tags,
+    _annotate_cluster_fields,
     _apply_session_filters,
     BatchDeleteRequest,
     SessionImportData,
@@ -572,6 +573,10 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         session["worktree_path"] = wt_meta["worktree_path"]
         session["worktree_deleted"] = wt_meta["worktree_deleted"]
 
+    # Annotate owning device + controllability so the chat view can gate live
+    # send/interrupt when the session belongs to another (possibly offline) install.
+    await run_sync(_annotate_cluster_fields, [session])
+
     logger.debug(f"Returning session {session_id} with {len(messages)} messages")
     return session
 
@@ -628,6 +633,24 @@ async def get_live_session(
         if session.get("title"):
             meta.setdefault("title", session.get("title"))
         data["session_meta"] = meta
+        return data
+
+    # Cross-install session: owned by another install on the shared DB. History
+    # is already local; relay only the live stream to the owning install. If that
+    # install is offline/view-only, surface 503 so the UI shows "device offline"
+    # while keeping the persisted history readable.
+    from app.core import cloud_relay
+    if cloud_relay.is_remote_session(session):
+        try:
+            code, data = await cloud_relay.relay_live(session, since_update_id)
+        except cloud_relay.InstallOffline as e:
+            logger.debug("Cluster live unavailable for %s: %s", session_id, e)
+            return Response(status_code=503)
+        except cloud_relay.CloudRelayError as e:
+            logger.warning("Cluster live relay failed for %s: %s", session_id, e)
+            return Response(status_code=503)
+        if code == 304 or data is None:
+            return Response(status_code=304)
         return data
 
     # Compute session metadata from DB session — included in all response

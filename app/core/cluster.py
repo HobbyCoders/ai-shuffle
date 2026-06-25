@@ -1,0 +1,204 @@
+"""Cross-install cluster primitives: shared secret, peer auth, advertise URL.
+
+When multiple AI Shuffle installs share one database they form a cluster. They
+authenticate to each other with a single shared *cluster secret* (every install
+on the shared DB converges on the same value) rather than per-peer API keys.
+This module owns:
+
+- ``get_cluster_secret()`` — the shared bearer secret (env override or
+  auto-generated once in system_settings).
+- ``require_cluster_auth`` — a FastAPI dependency that gates the peer-facing
+  ``/api/v1/cluster`` endpoints.
+- ``advertise_url()`` / ``register_self()`` — how this install publishes its
+  identity + peer-reachable URL into the registry, plus a heartbeat helper.
+
+The trust boundary is the shared database + shared secret: any install that can
+read the DB and present the secret is trusted to drive any session. This is the
+same boundary as sharing a Postgres today.
+"""
+
+from __future__ import annotations
+
+import hmac
+import logging
+import secrets
+import socket
+from typing import Optional
+
+from fastapi import HTTPException, Request, status
+
+from app.core.config import settings
+from app.db import database
+
+logger = logging.getLogger(__name__)
+
+CLUSTER_SECRET_SETTING = "cluster_secret"
+CLUSTER_ADVERTISE_URL_SETTING = "cluster_advertise_url"
+
+
+def get_cluster_secret() -> str:
+    """Return the shared cluster secret.
+
+    Priority: explicit ``CLUSTER_SECRET`` env var → else a value auto-generated
+    once and persisted in ``system_settings`` (so every install on the shared
+    database reads the same secret). Generation is race-safe across simultaneous
+    boots via ``get_or_create_system_setting`` (INSERT … ON CONFLICT DO NOTHING).
+    """
+    if settings.cluster_secret and settings.cluster_secret.strip():
+        return settings.cluster_secret.strip()
+    return database.get_or_create_system_setting(
+        CLUSTER_SECRET_SETTING,
+        lambda: secrets.token_urlsafe(32),
+    )
+
+
+def regenerate_cluster_secret() -> str:
+    """Rotate the auto-generated cluster secret (admin action).
+
+    No-op semantics for an env-pinned secret: if ``CLUSTER_SECRET`` is set we
+    cannot override it from the DB, so we just return the effective value.
+    """
+    if settings.cluster_secret and settings.cluster_secret.strip():
+        return settings.cluster_secret.strip()
+    new_secret = secrets.token_urlsafe(32)
+    database.set_system_setting(CLUSTER_SECRET_SETTING, new_secret)
+    return new_secret
+
+
+def verify_cluster_secret(presented: Optional[str]) -> bool:
+    """Constant-time comparison of a presented bearer against the cluster secret."""
+    if not presented:
+        return False
+    return hmac.compare_digest(presented, get_cluster_secret())
+
+
+def require_cluster_auth(request: Request) -> str:
+    """FastAPI dependency: authenticate a peer install via the cluster secret.
+
+    Distinct from ``require_auth`` (per-API-user): peer endpoints are
+    install-to-install, authenticated by the single shared secret. Returns the
+    calling install's instance_id (from the ``X-Install-Id`` header) when known,
+    for logging/diagnostics; access does not depend on it.
+    """
+    from app.api.auth import get_api_key
+
+    presented = get_api_key(request)
+    if not verify_cluster_secret(presented):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing cluster secret.",
+        )
+    return request.headers.get("X-Install-Id", "")
+
+
+def cluster_headers() -> dict:
+    """Auth headers an install presents when calling a peer's cluster API."""
+    return {
+        "Authorization": f"Bearer {get_cluster_secret()}",
+        "X-Install-Id": settings.effective_instance_id,
+    }
+
+
+def _guess_advertise_url() -> Optional[str]:
+    """Best-effort peer-reachable URL when none is configured.
+
+    Uses the host's name (often resolvable on a shared LAN or Docker network).
+    A wrong guess simply surfaces later as an unreachable peer — recoverable by
+    setting ``CLUSTER_ADVERTISE_URL`` or the advertise-URL override.
+    """
+    try:
+        host = socket.getfqdn() or socket.gethostname()
+    except OSError:
+        host = None
+    if not host or host in ("localhost", "localhost.localdomain"):
+        return None
+    return f"http://{host}:{settings.port}"
+
+
+def advertise_url() -> tuple[Optional[str], str]:
+    """Resolve this install's peer-reachable base URL and where it came from.
+
+    Returns ``(url, source)`` where source is ``"config"`` (env or admin
+    override), ``"guess"`` (host-name fallback), or ``"none"``. A NULL url means
+    this install is view-only: its sessions are visible/readable cluster-wide
+    but cannot be controlled remotely.
+    """
+    explicit = (settings.cluster_advertise_url or "").strip()
+    if not explicit:
+        explicit = (database.get_system_setting(CLUSTER_ADVERTISE_URL_SETTING) or "").strip()
+    if explicit:
+        return explicit.rstrip("/"), "config"
+    guess = _guess_advertise_url()
+    if guess:
+        return guess.rstrip("/"), "guess"
+    return None, "none"
+
+
+def advertise_status() -> dict:
+    """Snapshot of this install's advertised address for the Devices UI.
+
+    ``env_pinned`` means ``CLUSTER_ADVERTISE_URL`` is set, so the admin override
+    is ignored; ``override`` echoes the stored override (None when unset).
+    """
+    url, source = advertise_url()
+    env_pinned = bool((settings.cluster_advertise_url or "").strip())
+    override = (database.get_system_setting(CLUSTER_ADVERTISE_URL_SETTING) or "").strip() or None
+    return {
+        "url": url,
+        "source": source,
+        "env_pinned": env_pinned,
+        "override": override,
+        "instance_id": settings.effective_instance_id,
+    }
+
+
+def set_advertise_url_override(value: Optional[str]) -> dict:
+    """Set (or clear, when blank) the admin advertise-URL override.
+
+    Re-registers this install immediately so the new ``base_url`` is published to
+    the registry without waiting for a restart. No-op semantics when env-pinned:
+    the override is still stored but ``advertise_url()`` keeps preferring the env.
+    """
+    cleaned = (value or "").strip().rstrip("/")
+    database.set_system_setting(CLUSTER_ADVERTISE_URL_SETTING, cleaned)
+    register_self()
+    return advertise_status()
+
+
+def default_device_name() -> str:
+    """Human-friendly default name for this install (host name, else instance id)."""
+    try:
+        name = socket.gethostname()
+    except OSError:
+        name = ""
+    return name or settings.effective_instance_id
+
+
+def register_self() -> None:
+    """Self-register this install's registry row (called once on startup)."""
+    url, source = advertise_url()
+    try:
+        database.register_install(
+            install_id=settings.effective_instance_id,
+            device_name=default_device_name(),
+            base_url=url,
+            platform=("docker" if not settings.is_local_mode() else "local"),
+            version=settings.version,
+            capabilities={"advertise_url_source": source},
+        )
+        logger.info(
+            "Registered install %s in cluster registry (base_url=%s, source=%s)",
+            settings.effective_instance_id,
+            url or "<none/view-only>",
+            source,
+        )
+    except Exception:  # noqa: BLE001 — registration must never block startup
+        logger.exception("Failed to register install in cluster registry")
+
+
+def heartbeat_self() -> None:
+    """Bump this install's last_seen (called periodically by the heartbeat task)."""
+    try:
+        database.touch_install_last_seen(settings.effective_instance_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Cluster heartbeat failed", exc_info=True)

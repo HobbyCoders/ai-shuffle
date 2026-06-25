@@ -101,6 +101,7 @@ function mockState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		executionMode: 'local',
+		cloudTargetInstanceId: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: '',
 		worktreeCreateNewBranch: true,

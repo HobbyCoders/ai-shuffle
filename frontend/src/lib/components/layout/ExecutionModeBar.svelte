@@ -15,9 +15,10 @@
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
-	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud } from 'lucide-svelte';
+	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import { api } from '$lib/api/client';
+	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 
 	// --- UI state ---
@@ -35,32 +36,79 @@
 	let creatingWorktree = $state(false);
 	let localWorktreeError = $state<string | null>(null);
 
-	// --- Cloud offload config status ---
-	// null while loading. The Cloud execution-mode option is only offered when a
-	// second install is configured (Settings → System → Cloud Offload), so this is
-	// loaded eagerly on mount and the Cloud pill stays hidden until it resolves true.
-	let cloudConfigured = $state<boolean | null>(null);
+	// --- Cloud offload targets (registered installs) ---
+	// `installs` is null while loading. Cloud offload now targets a *registered*
+	// install picked from a device dropdown (auto-registered on the shared DB);
+	// the legacy single-install config is still honored as a fallback so existing
+	// setups keep working. The Cloud pill stays hidden until at least one valid
+	// target (online + reachable base_url) or the legacy config resolves.
+	let installs = $state<Install[] | null>(null);
+	let legacyCloudConfigured = $state(false);
+	let cloudLoaded = $state(false);
+
+	// Device-picker dropdown (shown next to the mode pill when Cloud is active).
+	let showDeviceDropdown = $state(false);
+	let deviceDropdownRef = $state<HTMLDivElement | null>(null);
+
+	const offloadTargets = $derived(installs ? computeOffloadTargets(installs) : []);
+	const cloudAvailable = $derived(offloadTargets.length > 0 || legacyCloudConfigured);
 
 	async function loadCloudConfig() {
-		if (cloudConfigured !== null) return;
+		if (cloudLoaded) return;
+		cloudLoaded = true;
+		// Registered offload targets (preferred) and the legacy config (fallback)
+		// are independent — load both so either can enable Cloud mode.
+		try {
+			const resp = await listInstalls();
+			installs = resp.installs;
+		} catch {
+			installs = [];
+		}
 		try {
 			const cfg = await api.get<{ configured: boolean }>('/settings/cloud');
-			cloudConfigured = !!cfg.configured;
+			legacyCloudConfigured = !!cfg.configured;
 		} catch {
-			cloudConfigured = false;
+			legacyCloudConfigured = false;
 		}
 	}
 
 	$effect(() => {
-		// Check cloud config on mount so we know whether to show the Cloud option.
+		// Load offload targets on mount so we know whether to show the Cloud option.
 		loadCloudConfig();
-		// Once it resolves: if no second install is configured but a stale persisted
-		// preference left this session in cloud mode, fall back to local — the Cloud
-		// pill is hidden, so the toggle would otherwise have no active option.
-		if (cloudConfigured === false && untrack(() => $activeSession.executionMode) === 'cloud') {
+		// Once it resolves: if Cloud isn't available but a stale persisted preference
+		// left this session in cloud mode, fall back to local — the Cloud pill is
+		// hidden, so the toggle would otherwise have no active option.
+		if (cloudLoaded && !cloudAvailable && untrack(() => $activeSession.executionMode) === 'cloud') {
 			setMode('local');
 		}
 	});
+
+	// Auto-pick a default offload target when entering Cloud mode so the user can
+	// fire off a session without a manual selection. Prefers the currently-chosen
+	// target if still valid; else the first online reachable device.
+	$effect(() => {
+		if ($activeSession.executionMode !== 'cloud') return;
+		const targets = offloadTargets;
+		if (targets.length === 0) return;
+		const current = untrack(() => $activeSession.cloudTargetInstanceId);
+		if (current && targets.some((t) => t.id === current)) return;
+		// No valid selection yet: default to the first device (null only stays
+		// valid when there are no registered targets but legacy cloud is configured).
+		activeSession.setCloudTarget(targets[0].id);
+	});
+
+	// The device whose name shows on the picker pill (null → legacy default).
+	const selectedTarget = $derived(
+		offloadTargets.find((t) => t.id === $activeSession.cloudTargetInstanceId) ?? null
+	);
+	const deviceLabel = $derived(
+		selectedTarget ? selectedTarget.device_name : legacyCloudConfigured ? 'Default install' : 'Pick device'
+	);
+
+	function selectDevice(install: Install | null) {
+		activeSession.setCloudTarget(install ? install.id : null);
+		showDeviceDropdown = false;
+	}
 
 	// --- Git-repo gating ---
 	// Worktree/Cloud modes and the branch selector only make sense for a git
@@ -161,7 +209,7 @@
 			mode: 'cloud',
 			label: 'Cloud',
 			icon: Cloud,
-			title: 'Offload this session to a second AI Shuffle install (GitHub repos only)'
+			title: 'Offload this session to another registered AI Shuffle device (GitHub repos only)'
 		}
 	};
 
@@ -175,7 +223,7 @@
 		const modes: ModeOption[] = [MODE_OPTIONS.local];
 		if (isGitRepo) {
 			modes.push(MODE_OPTIONS.worktree);
-			if (cloudConfigured === true) modes.push(MODE_OPTIONS.cloud);
+			if (cloudAvailable) modes.push(MODE_OPTIONS.cloud);
 		}
 		return modes;
 	});
@@ -316,6 +364,9 @@
 		}
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
 			showModeDropdown = false;
+		}
+		if (showDeviceDropdown && deviceDropdownRef && !deviceDropdownRef.contains(e.target as Node)) {
+			showDeviceDropdown = false;
 		}
 	}
 
@@ -477,6 +528,62 @@
 			{/if}
 		</div>
 		{/if}
+
+		<!-- Device picker (shown when cloud mode active) — choose which registered
+		     install runs the offload. Mirrors the branch selector pill. -->
+		{#if $activeSession.executionMode === 'cloud' && offloadTargets.length > 0}
+			<div class="device-selector" bind:this={deviceDropdownRef}>
+				<button
+					type="button"
+					class="branch-trigger"
+					class:auto-mode={!selectedTarget && legacyCloudConfigured}
+					onclick={() => (showDeviceDropdown = !showDeviceDropdown)}
+					title={selectedTarget ? `Offload to ${selectedTarget.device_name}` : 'Choose the device to offload to'}
+					aria-haspopup="menu"
+					aria-expanded={showDeviceDropdown}
+				>
+					<Server size={12} strokeWidth={1.5} />
+					<span class="branch-name">{deviceLabel}</span>
+					<ChevronDown size={12} strokeWidth={1.5} />
+				</button>
+
+				{#if showDeviceDropdown}
+					<div class="branch-dropdown" role="menu">
+						<div class="branch-section-label">Devices</div>
+						{#each offloadTargets as t (t.id)}
+							<button
+								type="button"
+								class="branch-item"
+								class:active={$activeSession.cloudTargetInstanceId === t.id}
+								onclick={() => selectDevice(t)}
+								role="menuitemradio"
+								aria-checked={$activeSession.cloudTargetInstanceId === t.id}
+							>
+								<Server size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">{t.device_name}</span>
+								{#if t.platform}<span class="device-platform">{t.platform}</span>{/if}
+								<span class="device-online-dot"></span>
+							</button>
+						{/each}
+						{#if legacyCloudConfigured}
+							<div class="branch-divider"></div>
+							<button
+								type="button"
+								class="branch-item"
+								class:active={!$activeSession.cloudTargetInstanceId}
+								onclick={() => selectDevice(null)}
+								role="menuitemradio"
+								aria-checked={!$activeSession.cloudTargetInstanceId}
+							>
+								<Cloud size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">Default install</span>
+								<span class="auto-hint">legacy</span>
+							</button>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
@@ -582,6 +689,29 @@
 	.branch-selector {
 		position: relative;
 		min-width: 0;
+	}
+
+	/* Device picker (cloud mode) — shares the branch pill/dropdown visuals */
+	.device-selector {
+		position: relative;
+		min-width: 0;
+	}
+	.device-platform {
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+		color: var(--muted-foreground);
+		text-transform: capitalize;
+	}
+	.device-online-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: color-mix(in oklch, var(--primary) 70%, #22c55e);
+		box-shadow: 0 0 4px color-mix(in oklch, var(--primary) 50%, #22c55e);
 	}
 
 	.branch-trigger {
@@ -848,7 +978,8 @@
 		   (relatively-positioned) .execution-mode-bar and stretch it edge-to-edge
 		   within the viewport. The bar is wider in worktree mode (mode + branch
 		   pills), which is the only state this dropdown appears in. */
-		.branch-selector {
+		.branch-selector,
+		.device-selector {
 			position: static;
 		}
 

@@ -42,6 +42,14 @@ export interface Session {
 	worktree_deleted?: boolean;
 	created_at: string;
 	updated_at: string;
+	// Cross-install (cluster) annotation — populated server-side when sessions
+	// are shared across installs on a shared database.
+	instance_id?: string | null;  // Owning install (null = legacy/this install)
+	device_name?: string | null;  // Human-friendly owning-device name
+	device_online?: boolean;  // Owning install seen recently (heartbeat)
+	is_remote?: boolean;  // Owned by another install (not this one)
+	controllable?: boolean;  // Live send/interrupt reachable right now
+	project_name?: string | null;  // Resolved server-side (cross-install projects)
 }
 
 export interface SessionMessage {

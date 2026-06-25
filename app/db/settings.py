@@ -145,6 +145,33 @@ def delete_system_setting(key: str) -> bool:
         return cursor.rowcount > 0
 
 
+def get_or_create_system_setting(key: str, default_factory) -> str:
+    """Return the stored value for ``key``, atomically seeding it if absent.
+
+    Unlike ``set_system_setting`` (which clobbers via DO UPDATE), this uses
+    ON CONFLICT DO NOTHING then re-reads, so concurrent installs booting against
+    the same shared database converge on a single first-written value (used for
+    the auto-generated cluster secret). ``default_factory`` is a zero-arg
+    callable producing the seed value; it is only consulted when seeding.
+    """
+    existing = get_system_setting(key)
+    if existing:
+        return existing
+    now = datetime.now(timezone.utc).isoformat()
+    value = default_factory()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO system_settings (key, value, updated_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT(key) DO NOTHING""",
+            (key, value, now),
+        )
+    # Re-read: another install may have won the insert race, so return the
+    # value that actually landed rather than our candidate.
+    return get_system_setting(key) or value
+
+
 def get_all_system_settings() -> Dict[str, str]:
     """Get all system settings as a dictionary"""
     with get_db() as conn:

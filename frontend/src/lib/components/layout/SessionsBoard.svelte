@@ -11,7 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch, Monitor } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -40,6 +40,50 @@
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
 
+	// --- Cross-install device filter ---
+	// null = all devices. Only surfaced when sessions from more than one device
+	// are present, so single-install users never see it.
+	let deviceFilter = $state<string | null>(null);
+
+	interface DeviceOpt { id: string; name: string; online: boolean }
+
+	// Distinct devices represented across the loaded sessions. A NULL/own
+	// instance_id is bucketed as "This device".
+	const deviceOptions = $derived.by((): DeviceOpt[] => {
+		const map = new Map<string, DeviceOpt>();
+		for (const s of $sessions) {
+			const id = s.is_remote && s.instance_id ? s.instance_id : '__local__';
+			if (map.has(id)) {
+				if (s.device_online) map.get(id)!.online = true;
+				continue;
+			}
+			map.set(id, {
+				id,
+				name: id === '__local__' ? 'This device' : s.device_name || 'Unknown device',
+				online: id === '__local__' ? true : !!s.device_online
+			});
+		}
+		return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+	});
+
+	function sessionDeviceId(s: Session): string {
+		return s.is_remote && s.instance_id ? s.instance_id : '__local__';
+	}
+
+	// Sessions after applying the device filter — every list below derives from
+	// this so the filter cuts across pinned/recent/projects uniformly.
+	const visibleSessions = $derived(
+		deviceFilter ? $sessions.filter((s) => sessionDeviceId(s) === deviceFilter) : $sessions
+	);
+
+	// Drop a stale filter if its device disappears (e.g. its last session deleted)
+	// so the board never shows an empty list with no visible way to reset.
+	$effect(() => {
+		if (deviceFilter && !deviceOptions.some((d) => d.id === deviceFilter)) {
+			deviceFilter = null;
+		}
+	});
+
 	function isStreaming(id: string): boolean {
 		if ($activeSession.sessionId === id) return $activeSession.isStreaming;
 		return $streamingSessions.has(id);
@@ -57,10 +101,13 @@
 		});
 	}
 	function projectName(s: Session): string {
+		// Prefer the server-resolved name: $projects is instance-filtered, so a
+		// cross-install session's project isn't in projectsById.
+		if (s.project_name) return s.project_name;
 		return s.project_id ? projectsById.get(s.project_id)?.name || 'Ungrouped' : 'Ungrouped';
 	}
 
-	const totalCount = $derived($sessions.length);
+	const totalCount = $derived(visibleSessions.length);
 
 	interface Group {
 		key: string;
@@ -74,16 +121,21 @@
 
 	const projectGroups = $derived.by((): Group[] => {
 		const groups = new Map<string, Session[]>();
-		for (const s of $sessions) {
+		for (const s of visibleSessions) {
 			const key = s.project_id || UNGROUPED;
 			if (!groups.has(key)) groups.set(key, []);
 			groups.get(key)!.push(s);
 		}
 		const arr: Group[] = [...groups.entries()].map(([key, list]) => {
 			const sorted = sortSessions(list);
+			// Resolve the display name: $projects is instance-filtered, so cross-install
+			// projects fall back to the server-provided project_name on a session.
+			const name = key === UNGROUPED
+				? 'Ungrouped'
+				: projectsById.get(key)?.name || list.find((s) => s.project_name)?.project_name || 'Ungrouped';
 			return {
 				key,
-				name: key === UNGROUPED ? 'Ungrouped' : projectsById.get(key)?.name || 'Ungrouped',
+				name,
 				projectId: key === UNGROUPED ? null : key,
 				sessions: list,
 				lastActivity: list.reduce((m, s) => Math.max(m, tsOf(s)), 0),
@@ -98,9 +150,9 @@
 	// Pinned (favorited) sessions get their own section so they always stay
 	// visible at the top instead of competing with everything else for the
 	// limited Recent slots. Recent therefore excludes favorites.
-	const pinned = $derived($sessions.filter((s) => s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)));
+	const pinned = $derived(visibleSessions.filter((s) => s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)));
 	const recent = $derived(
-		$sessions.filter((s) => !s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT)
+		visibleSessions.filter((s) => !s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT)
 	);
 
 	const selectedGroup = $derived(selectedKey ? projectGroups.find((g) => g.key === selectedKey) ?? null : null);
@@ -202,6 +254,20 @@
 				<span class="board-count">{totalCount}</span>
 			{/if}
 		</div>
+		{#if mode === 'overview' && deviceOptions.length > 1}
+			<div class="board-head-right">
+				<div class="device-filter" title="Filter sessions by device">
+					<Monitor size={13} strokeWidth={1.6} />
+					<select class="device-filter-select" bind:value={deviceFilter} aria-label="Filter by device">
+						<option value={null}>All devices</option>
+						{#each deviceOptions as d (d.id)}
+							<option value={d.id}>{d.name}{d.online ? '' : ' · offline'}</option>
+						{/each}
+					</select>
+					<ChevronRight size={13} strokeWidth={1.6} class="device-filter-chevron" />
+				</div>
+			</div>
+		{/if}
 	</header>
 
 	<!-- Body -->
@@ -303,6 +369,19 @@
 				<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
 			</div>
 			<div class="row-line2">
+				{#if session.is_remote && session.device_name}
+					<span
+						class="row-device"
+						class:offline={!session.device_online}
+						title={session.device_online
+							? (session.controllable ? `On ${session.device_name} (online)` : `On ${session.device_name} (online, view-only)`)
+							: `On ${session.device_name} (offline — history only)`}
+					>
+						<Monitor size={11} strokeWidth={1.6} />
+						<span class="row-device-name">{session.device_name}</span>
+						<span class="device-dot" class:online={session.device_online}></span>
+					</span>
+				{/if}
 				{#if showProject}
 					<span class="row-proj">{projectName(session)}</span>
 				{/if}
@@ -368,6 +447,37 @@
 		flex-shrink: 0;
 	}
 	.board-head-left { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+	.board-head-right { margin-left: auto; display: flex; align-items: center; flex-shrink: 0; }
+	.device-filter {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		padding: 3px 8px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 35%, transparent);
+		transition: border-color 120ms ease, color 120ms ease;
+	}
+	.device-filter:hover { border-color: var(--primary); color: var(--foreground); }
+	.device-filter :global(svg) { flex-shrink: 0; }
+	.device-filter :global(.device-filter-chevron) { transform: rotate(90deg); opacity: 0.6; pointer-events: none; }
+	.device-filter-select {
+		appearance: none;
+		-webkit-appearance: none;
+		border: none;
+		background: transparent;
+		color: inherit;
+		font-size: 0.75rem;
+		font-weight: 500;
+		padding: 0;
+		padding-right: 2px;
+		cursor: pointer;
+		max-width: 160px;
+		outline: none;
+	}
+	.device-filter-select option { color: var(--foreground); background: var(--card); }
 	.board-title {
 		font-family: var(--font-display, Georgia, serif);
 		font-size: 1.35rem;
@@ -621,6 +731,39 @@
 		color: color-mix(in oklch, var(--primary) 85%, var(--muted-foreground));
 	}
 	.row-branch :global(svg) { flex-shrink: 0; }
+
+	.row-device {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+		max-width: 160px;
+		padding: 1px 7px;
+		border-radius: 999px;
+		color: color-mix(in oklch, var(--primary) 80%, var(--muted-foreground));
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+	}
+	.row-device.offline {
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 45%, transparent);
+	}
+	.row-device :global(svg) { flex-shrink: 0; }
+	.row-device-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.device-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: var(--muted-foreground);
+	}
+	.device-dot.online {
+		background: color-mix(in oklch, var(--primary) 70%, #22c55e);
+		box-shadow: 0 0 4px color-mix(in oklch, var(--primary) 50%, #22c55e);
+	}
 
 	.row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 	.row-action {
