@@ -28,6 +28,12 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 # their own secret-based authentication, or OAuth callbacks).
 _EXEMPT_PATHS = frozenset({
     "/api/v1/webhooks/receive",  # Inbound webhooks authenticate via secret
+    # Native mobile device registration: the request that *obtains* the mobile
+    # API key, so it has no Bearer token yet and no browser Origin header. It
+    # uses no cookie auth and returns a fresh key (unreadable cross-origin via
+    # CORS), so it carries no CSRF risk. Every other /api/v1/mobile/* endpoint
+    # is a safe GET or already Bearer-authenticated (exempt below).
+    "/api/v1/mobile/register",
 })
 
 # Prefixes that are exempt from CSRF checks.
