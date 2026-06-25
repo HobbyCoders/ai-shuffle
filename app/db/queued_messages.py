@@ -10,7 +10,7 @@ import logging
 import uuid
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict
 
 
 class QueuedMessageRow(TypedDict):
@@ -22,6 +22,23 @@ class QueuedMessageRow(TypedDict):
     project_id: Optional[str]
     position: int
     created_at: str
+
+
+def _normalize_row(row: Any) -> QueuedMessageRow:
+    """Convert a DB row to a JSON-safe dict.
+
+    Postgres returns ``created_at`` as a ``datetime`` object, but this row gets
+    broadcast over the WebSocket (in ``queue_updated`` events) where the JSON
+    encoder can't serialize raw datetimes. Coerce it to an ISO string so the
+    row matches the declared ``created_at: str`` contract and never breaks a
+    send. (A non-serializable datetime here previously poisoned the whole chat
+    connection, silently dropping "Send later" messages.)
+    """
+    d = row_to_dict(row)
+    created = d.get("created_at")
+    if created is not None and hasattr(created, "isoformat"):
+        d["created_at"] = created.isoformat()
+    return d
 
 
 def add_queued_message(
@@ -49,7 +66,7 @@ def add_queued_message(
             (msg_id, session_id, content, profile_id, project_id, position)
         )
         cursor.execute("SELECT * FROM queued_messages WHERE id = %s", (msg_id,))
-        return row_to_dict(cursor.fetchone())
+        return _normalize_row(cursor.fetchone())
 
 
 def get_queued_messages(session_id: str) -> List[QueuedMessageRow]:
@@ -60,7 +77,7 @@ def get_queued_messages(session_id: str) -> List[QueuedMessageRow]:
             "SELECT * FROM queued_messages WHERE session_id = %s ORDER BY position ASC",
             (session_id,)
         )
-        return rows_to_list(cursor.fetchall())
+        return [_normalize_row(r) for r in cursor.fetchall()]
 
 
 def pop_next_queued_message(session_id: str) -> Optional[QueuedMessageRow]:
@@ -77,7 +94,7 @@ def pop_next_queued_message(session_id: str) -> Optional[QueuedMessageRow]:
         row = cursor.fetchone()
         if not row:
             return None
-        msg = row_to_dict(row)
+        msg = _normalize_row(row)
         cursor.execute("DELETE FROM queued_messages WHERE id = %s", (msg["id"],))
         return msg
 
@@ -107,7 +124,7 @@ def requeue_message_at_front(
             (msg_id, session_id, content, profile_id, project_id)
         )
         cursor.execute("SELECT * FROM queued_messages WHERE id = %s", (msg_id,))
-        return row_to_dict(cursor.fetchone())
+        return _normalize_row(cursor.fetchone())
 
 
 def remove_queued_message(message_id: str) -> bool:

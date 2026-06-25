@@ -28,6 +28,7 @@ from app.core.webhook_service import dispatch_session_complete, dispatch_session
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.worktree_session_meta import enrich_session_worktree_meta
+from app.api.ws_utils import safe_ws_send, WSPayloadEncodeError
 
 logger = logging.getLogger(__name__)
 
@@ -838,8 +839,19 @@ class ChatWebSocketHandler:
             try:
                 self._ws_seq += 1
                 data["_seq"] = self._ws_seq
-                await self.websocket.send_json(data)
+                await safe_ws_send(self.websocket, data)
                 return True
+            except WSPayloadEncodeError as e:
+                # Non-serializable payload (e.g. a raw datetime from a DB row) —
+                # a bug in this one message, not a dead socket. Drop it but keep
+                # the connection healthy so a later queue drain can still send.
+                self._ws_drops += 1
+                msg_type = data.get("type") or data.get("event_type", "unknown")
+                logger.warning(
+                    f"Dropping non-serializable WebSocket message "
+                    f"[type={msg_type}, device={self.device_id}]: {e}"
+                )
+                return False
             except Exception as e:
                 self._ws_drops += 1
                 self.connection_healthy = False
