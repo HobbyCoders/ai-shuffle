@@ -3,6 +3,7 @@
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import ToolScreenshot from './ToolScreenshot.svelte';
 
 	interface Props {
 		name: string;
@@ -12,9 +13,11 @@
 		status: 'running' | 'complete' | 'error';
 		streaming?: boolean;
 		serverSide?: boolean;
+		/** Data URI of a screenshot from MCP image results (e.g. Claude-in-Chrome), shown inline below the tool call. */
+		screenshot?: string;
 	}
 
-	let { name, input, partialInput, result, status, streaming = false, serverSide = false }: Props = $props();
+	let { name, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
@@ -180,6 +183,8 @@
 				data.image_url ||
 				data.image_base64 ||
 				data.video_url ||
+				data.audio_url ||
+				data.audio_base64 ||
 				data.file_url
 			);
 		} catch {
@@ -187,25 +192,33 @@
 		}
 	}
 
-	function toolResultHasVideo(content: string): boolean {
+	// Short label for the generated-media kind ("Image" | "Video" | "Audio").
+	function toolResultMediaLabel(content: string): string {
 		try {
 			const data = JSON.parse(content);
-			return data.success && data.video_url;
+			if (data.video_url) return 'Video';
+			if (data.audio_url || data.audio_base64) return 'Audio';
+			return 'Image';
 		} catch {
-			return false;
+			return 'Image';
 		}
 	}
 
 	// Extract media URL from tool result JSON for rendering
-	function getMediaFromResult(content: string): { type: 'image' | 'video'; src: string; filename?: string } | null {
+	function getMediaFromResult(content: string): { type: 'image' | 'video' | 'audio'; src: string; filename?: string } | null {
 		try {
 			const data = JSON.parse(content);
 			if (!data.success) return null;
 			if (data.video_url) return { type: 'video', src: data.video_url, filename: data.filename };
+			if (data.audio_url) return { type: 'audio', src: data.audio_url, filename: data.filename };
 			if (data.image_url) return { type: 'image', src: data.image_url, filename: data.filename };
 			if (data.image_base64) {
 				const mime = data.mime_type || 'image/png';
 				return { type: 'image', src: `data:${mime};base64,${data.image_base64}`, filename: data.filename };
+			}
+			if (data.audio_base64) {
+				const mime = data.mime_type || 'audio/mpeg';
+				return { type: 'audio', src: `data:${mime};base64,${data.audio_base64}`, filename: data.filename };
 			}
 			return null;
 		} catch {
@@ -380,7 +393,7 @@
 									<div class="max-h-60 overflow-auto">
 										{#if result}
 											{#if toolResultHasMedia(result)}
-												<span class="text-[10px] text-green-500">&#10003; {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
+												<span class="text-[10px] text-green-500">&#10003; {toolResultMediaLabel(result)} generated</span>
 											{:else}
 												<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
 											{/if}
@@ -399,6 +412,14 @@
 				{/if}
 			</div>
 		</details>
+		<!-- Screenshot (e.g. Claude-in-Chrome) rendered directly below the tool
+		     call, OUTSIDE the <details> so it shows regardless of expand/collapse
+		     state. When this tool is grouped, ToolUseGroup omits the screenshot
+		     here and hoists it below the whole group instead (so it isn't trapped
+		     inside the collapsed group). -->
+		{#if screenshot}
+			<ToolScreenshot {screenshot} {name} />
+		{/if}
 	</div>
 </div>
 

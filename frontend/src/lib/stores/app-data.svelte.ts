@@ -11,7 +11,6 @@
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import type { Project } from './types';
-import { messageCache } from './message-cache';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
 
@@ -346,7 +345,6 @@ export const appData = {
 			sessions: s.sessions.filter(x => x.id !== sessionId),
 			sessionsTotal: Math.max(0, s.sessionsTotal - 1),
 		}));
-		messageCache.delete(sessionId);
 
 		try {
 			await api.delete(`/sessions/${sessionId}`);
@@ -374,9 +372,6 @@ export const appData = {
 			selectionMode: false,
 			selectedSessionIds: new Set<string>(),
 		}));
-		for (const id of sessionIds) {
-			messageCache.delete(id);
-		}
 
 		try {
 			await api.post('/sessions/batch-delete', { session_ids: sessionIds });

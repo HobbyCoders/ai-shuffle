@@ -20,7 +20,7 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe } from 'lucide-svelte';
 	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
 
 	// Sub-components
@@ -29,6 +29,7 @@
 	import ConnectionsSection from './settings/ConnectionsSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
+	import BrowserSection from './settings/BrowserSection.svelte';
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
@@ -41,7 +42,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -61,6 +62,7 @@
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
 					{ id: 'connectors', label: 'Connectors', icon: Plug },
+					{ id: 'browser', label: 'Browser', icon: Globe },
 					{ id: 'system', label: 'System', icon: SlidersHorizontal },
 					{ id: 'logs', label: 'Logs', icon: ScrollText }
 				]
@@ -312,10 +314,15 @@
 	}
 
 	// OAuth functions
-	async function startClaudeOAuth() {
+	//
+	// `forceReauth` drives the recovery path: it deletes the existing (possibly
+	// expired / unrefreshable) credential server-side and starts a fresh OAuth
+	// flow, so a green-but-dead token can be replaced from the UI. The non-forced
+	// path short-circuits when already authenticated.
+	async function startClaudeOAuth(forceReauth = false) {
 		claudeLoginLoading = true;
 		try {
-			const result = await startClaudeLogin();
+			const result = await startClaudeLogin(forceReauth);
 			if (result.already_authenticated) {
 				await auth.checkAuth();
 				return;
@@ -323,6 +330,7 @@
 			if (result.success && result.oauth_url && result.state) {
 				claudeOAuthUrl = result.oauth_url;
 				claudeOAuthState = result.state;
+				claudeAuthCode = '';
 				window.open(result.oauth_url, '_blank', 'width=600,height=700');
 			} else {
 				error = result.error || result.message || 'Failed to start OAuth';
@@ -332,6 +340,11 @@
 		} finally {
 			claudeLoginLoading = false;
 		}
+	}
+
+	// Force a fresh login even if a credential already exists on disk.
+	function startClaudeReauth() {
+		return startClaudeOAuth(true);
 	}
 
 	async function completeClaudeOAuth() {
@@ -456,7 +469,8 @@
 							{githubToken}
 							onGithubTokenChange={(v) => githubToken = v}
 							{githubLoginLoading}
-							onStartClaudeOAuth={startClaudeOAuth}
+							onStartClaudeOAuth={() => startClaudeOAuth(false)}
+							onStartClaudeReauth={startClaudeReauth}
 							onCompleteClaudeOAuth={completeClaudeOAuth}
 							onConnectGithub={connectGithub}
 							onDisconnectGithub={disconnectGithub}
@@ -475,6 +489,13 @@
 				{#if activeTab === 'connectors' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<ConnectorManager />
+					</div>
+				{/if}
+
+				<!-- BROWSER -->
+				{#if activeTab === 'browser' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<BrowserSection />
 					</div>
 				{/if}
 

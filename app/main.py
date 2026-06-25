@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cloud
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cloud
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -122,12 +122,26 @@ async def lifespan(app: FastAPI):
     monitor_task = await start_resource_monitor(interval_seconds=300)
     plugin_task = start_plugin_auto_update()
 
+    # One-time, unbounded backfill: heal any sessions orphaned by a past
+    # mid-turn crash (NULL sdk_session_id but an intact transcript in the store →
+    # blank history in postgres_only). Runs off the event loop and logs an ERROR
+    # per heal so the operator is alerted. Periodic re-sweeps (bounded to recent
+    # sessions) continue inside the resource monitor loop.
+    from app.core.resource_monitor import reconcile_orphans_once
+    orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
 
     # Shutdown
+    if not orphan_backfill_task.done():
+        orphan_backfill_task.cancel()
+    try:
+        await orphan_backfill_task
+    except asyncio.CancelledError:
+        pass
     for task in bg_tasks:
         task.cancel()
         try:
@@ -319,6 +333,7 @@ app.include_router(import_export.router)
 app.include_router(settings_api.router)
 app.include_router(generated_images.router)
 app.include_router(generated_videos.router)
+app.include_router(generated_audio.router)
 app.include_router(shared_files.router)
 app.include_router(tags.router)
 app.include_router(analytics.router)
@@ -341,6 +356,7 @@ app.include_router(project_agents.router)
 app.include_router(project_plugins.router)
 app.include_router(project_memory.router)
 app.include_router(mcp.router)
+app.include_router(chrome_mcp.router)
 app.include_router(mobile.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)

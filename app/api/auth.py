@@ -316,6 +316,11 @@ async def get_auth_status(request: Request):
         "is_admin": is_admin_authenticated,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": auth_service.is_claude_authenticated(),
+        # Honest token-validity signal: True only when the on-disk Claude OAuth
+        # token is present AND not expired. Lets the UI surface a "token expired —
+        # reconnect" state even though `claude_authenticated` stays True (file
+        # exists) for back-compat.
+        "claude_token_valid": auth_service.get_claude_token_status()["token_valid"],
         "github_authenticated": auth_service.is_github_authenticated(),
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,

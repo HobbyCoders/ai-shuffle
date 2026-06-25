@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.streaming_context import StreamingContext
 from app.db import database
 from app.db.async_database import run_sync
-from app.db.base import WorktreeStatus
+from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.connectors.manager import connector_manager
 from app.core.project_utils import get_project_working_dir
@@ -52,15 +52,12 @@ from app.api.ws_cleanup import (  # noqa: F401
     _drain_pumps,
     _draining_sessions,
     _interrupt_pending_sessions,
-    _pending_cleanup_tasks,
     _stopped_sessions,
-    cancel_pending_cleanup,
     cleanup_session_handlers,
-    schedule_delayed_cleanup,
     stop_all_drain_pumps,
     stop_drain_pump,
 )
-from app.api.ws_utils import ping_loop  # noqa: F401
+from app.api.ws_utils import ping_loop, safe_ws_send, WSPayloadEncodeError  # noqa: F401
 from app.api.ws_cli import (  # noqa: F401
     _active_cli_bridges,
     router as _cli_router,
@@ -183,8 +180,18 @@ async def chat_websocket(
                 return False
 
             try:
-                await websocket.send_json(data)
+                await safe_ws_send(websocket, data)
                 return True
+            except WSPayloadEncodeError as e:
+                # The payload couldn't be serialized (e.g. a raw datetime from a
+                # DB row). This is a bug in THIS message, not a dead socket — drop
+                # it but keep the connection healthy. Marking the connection dead
+                # here used to silently abort the post-query queue drain, dropping
+                # "Send later" messages entirely (no display, no persistence).
+                logger.warning(
+                    f"Dropping non-serializable WebSocket message (type={data.get('type')}): {e}"
+                )
+                return False
             except Exception as e:
                 connection_healthy = False
                 logger.warning(f"Failed to send WebSocket message (type={data.get('type')}): {e}")
@@ -213,8 +220,19 @@ async def chat_websocket(
         window_seconds=settings.ws_rate_limit_window_seconds,
     )
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None):
-        """Execute query and stream results directly to WebSocket"""
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None, is_queued_drain: bool = False):
+        """Execute query and stream results directly to WebSocket.
+
+        ``is_queued_drain`` marks a query started by draining the server-side
+        message queue (a "Send later" message). For these, a failure to send the
+        opening ``start`` frame means THIS handler's socket has gone away (e.g.
+        the user reloaded or reconnected mid-stream), but the message was queued
+        on purpose and a fresh socket is typically registered for the session.
+        So instead of aborting (which dropped the message — the original "Send
+        later" bug) we fall through and stream anyway: the live store +
+        ``sync_engine`` broadcasts + polling deliver it to the reconnected /
+        polling client regardless of this socket's state.
+        """
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
@@ -444,9 +462,26 @@ async def chat_websocket(
             ctx.info(logger, f"Query start profile={profile_id} project={project_id}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 ctx.warning(logger, "Connection lost before query could start")
-                await live_session_store.cleanup_session(session_id)
-                await cleanup_session_handlers(session_id)
-                return  # Exit early - connection is dead
+                if is_queued_drain:
+                    # The originating socket is gone — the client reloaded or
+                    # reconnected mid-stream, so THIS handler's websocket is dead
+                    # while a fresh one is registered for the same session. The
+                    # message was queued on purpose, and the streaming loop below
+                    # carries every event to the live store + ``sync_engine``
+                    # broadcasts + polling, which reach the reconnected/polling
+                    # client regardless of this socket. So DON'T abort and DON'T
+                    # re-queue: aborting dropped the message entirely (the original
+                    # "Send later" bug), and re-queuing here made the post-query
+                    # teardown re-pop it forever in a tight loop. Fall through and
+                    # stream exactly as the loop does on any failed send.
+                    ctx.info(logger, "start frame undeliverable on origin socket — streaming via sync_engine + polling")
+                else:
+                    # An explicit (non-queued) query whose own socket died before
+                    # it could even start: there is no other client to stream to,
+                    # so tear down rather than stream into the void.
+                    await live_session_store.cleanup_session(session_id)
+                    await cleanup_session_handlers(session_id)
+                    return  # Exit early - connection is dead
 
             # NOTE: Don't call start_assistant_message here!
             # Creating an empty text message before content arrives causes the "Claude [time]"
@@ -606,8 +641,10 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer. The buffer stays warm for reconnecting
+            # clients until the session ages out of the pool.
 
             # Broadcast stream end with interrupted flag
             if stream_state.stream_started:
@@ -633,8 +670,9 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer.
 
             # Broadcast stream end on error
             if stream_state.stream_started:
@@ -727,15 +765,17 @@ async def chat_websocket(
             async with _active_sessions_lock:
                 if _active_chat_sessions.get(session_id) is current_task:
                     del _active_chat_sessions[session_id]
-                ctx.info(logger, f"Query teardown: active_sessions={len(_active_chat_sessions)} pending_cleanups={len(_pending_cleanup_tasks)}")
+                ctx.info(logger, f"Query teardown: active_sessions={len(_active_chat_sessions)}")
 
-            # If no devices are connected after query finished, schedule cleanup
-            # (don't destroy immediately — user may reopen within 30s)
+            # If no devices are connected after the query finished, only force-clean
+            # an ABNORMAL still-streaming buffer. A normal ended buffer is left warm
+            # for a reconnecting client and ages out via pool eviction (LRU/idle) —
+            # we no longer destroy it on a standalone timer.
             remaining_devices = sync_engine.get_device_count(session_id)
             if remaining_devices == 0:
-                ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                     # Only force-cleanup if still marked as streaming (abnormal state)
+                    ctx.debug(logger, "Query finished but no devices connected and session stuck streaming, cleaning up")
                     await live_session_store.cleanup_session(session_id)
                     await cleanup_session_handlers(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
@@ -765,6 +805,13 @@ async def chat_websocket(
         auto-process when the current query finishes).
 
         Returns True if a query was started, False otherwise.
+
+        Note: this intentionally does NOT bail on an unhealthy ``websocket``.
+        Delivery of the drained message rides on ``sync_engine`` broadcasts and
+        the live-store + polling path (see ``run_query``'s streaming loop), so a
+        drain still reaches a client that reconnected on a *different* socket
+        while this handler's query was running. The per-socket ``send_json``
+        calls are best-effort notifications layered on top of that.
         """
         # Atomically decide-and-reserve. The interrupt/stop/idle checks and the
         # drain reservation must happen under the same lock acquisition,
@@ -886,7 +933,7 @@ async def chat_websocket(
                     preempted = True
                 else:
                     q_task = asyncio.create_task(
-                        run_query(q_content, sid, q_profile, q_project, None, q_worktree)
+                        run_query(q_content, sid, q_profile, q_project, None, q_worktree, is_queued_drain=True)
                     )
                     _active_chat_sessions[sid] = q_task
             if preempted:
@@ -1400,26 +1447,23 @@ async def chat_websocket(
                                             streaming_usage = None
                                             active_block_type = None
 
-                                # Add worktree info if session is linked to a worktree
+                                # Add worktree info if session is linked to a
+                                # worktree. Worktree sessions are always reopenable —
+                                # we never null worktree_id; worktree_deleted only
+                                # means "not materialized right now" (recreated on
+                                # next send). See helper.
                                 worktree_id = session.get("worktree_id")
-                                if worktree_id:
-                                    worktree = await run_sync(database.get_worktree, worktree_id)
-                                    if worktree and worktree.get("status") == WorktreeStatus.ACTIVE:
-                                        session["worktree_id"] = worktree_id
-                                        session["worktree_branch"] = worktree.get("branch_name")
-                                        session["worktree_path"] = worktree.get("worktree_path")
-                                        session["worktree_deleted"] = False
-                                    elif worktree and worktree.get("status") == WorktreeStatus.COMPLETED:
-                                        session["worktree_id"] = worktree_id
-                                        session["worktree_branch"] = worktree.get("branch_name")
-                                        session["worktree_path"] = worktree.get("worktree_path")
-                                        session["worktree_deleted"] = True
-                                    else:
-                                        session["worktree_id"] = None
-                                        session["worktree_deleted"] = True
-                                elif session.get("worktree_branch"):
-                                    # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
-                                    session["worktree_deleted"] = True
+                                worktree = (
+                                    await run_sync(database.get_worktree, worktree_id)
+                                    if worktree_id
+                                    else None
+                                )
+                                wt_meta = enrich_session_worktree_meta(session, worktree)
+                                if wt_meta:
+                                    session["worktree_id"] = wt_meta["worktree_id"]
+                                    session["worktree_branch"] = wt_meta["worktree_branch"]
+                                    session["worktree_path"] = wt_meta["worktree_path"]
+                                    session["worktree_deleted"] = wt_meta["worktree_deleted"]
 
                                 # Build response with optional streamingUsage and activeBlockType for late-joiners
                                 history_response = {
@@ -1451,6 +1495,17 @@ async def chat_websocket(
                                     device_id=device_id,
                                     is_new=False  # Resuming existing session
                                 )
+
+                                # Recover any messages that were left queued while the
+                                # session was idle — e.g. a "Send later" message whose
+                                # drain was dropped because the originating socket went
+                                # away (the user reloaded). drain_next_queued_if_idle is
+                                # a no-op if the session is busy, interrupting, or stopped.
+                                if not is_streaming:
+                                    try:
+                                        await drain_next_queued_if_idle(session_id, log_prefix="load-session")
+                                    except Exception as exc:
+                                        logger.warning(f"[Queue] Failed to drain on load_session for {session_id}: {exc}")
                             else:
                                 await send_json({"type": "session_not_found", "session_id": session_id})
 
@@ -1709,7 +1764,7 @@ async def chat_websocket(
                     if remaining_devices == 0 and is_task_done:
                         # No more devices watching and no active query
                         # Only cleanup sessions still in streaming state (abnormal);
-                        # ended sessions are handled by _delayed_session_cleanup
+                        # ended sessions age out via pool eviction (LRU/idle)
                         logger.debug(f"Last device disconnected from session {current_session_id}")
                         if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
                             await live_session_store.cleanup_session(current_session_id)

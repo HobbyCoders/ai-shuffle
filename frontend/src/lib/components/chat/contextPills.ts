@@ -3,12 +3,10 @@
  *
  * The badge is the project/worktree indicator that used to live in the page
  * header. It moved into the pill bar above the chat input, where it fills in
- * for the interactive BranchSelector pill whenever that pill is suppressed but
- * the session still has context worth surfacing:
- *
- *   • the worktree was cleaned up (the branch pill is hidden for deleted
- *     worktrees, so the badge is the only remaining reminder of where it ran), or
- *   • GitHub CLI isn't authenticated (no branch controls exist at all).
+ * for the interactive BranchSelector pill when GitHub CLI isn't authenticated
+ * (no branch controls exist at all) but the session still has project/worktree
+ * context worth surfacing. (Worktree sessions whose folder was cleaned up still
+ * show the normal — read-only-in-worktree-mode — branch pill, not a badge.)
  *
  * Extracted so the gating — which has several interacting conditions — can be
  * unit-tested independently of the Svelte component.
@@ -25,8 +23,6 @@ export interface ContextBadgeInput {
 	selectedWorktreeBranch: string | null;
 	/** Branch the worktree was/will be created on. */
 	worktreeBranch: string | null;
-	/** True once the session's worktree has been cleaned up. */
-	worktreeDeleted: boolean;
 	/** Whether GitHub CLI is authenticated (gates the interactive branch pill). */
 	githubAuthenticated: boolean;
 }
@@ -34,8 +30,6 @@ export interface ContextBadgeInput {
 export interface ContextBadge {
 	/** Worktree branch to show, or null to show only the project. */
 	branch: string | null;
-	/** Read-only "cleaned up" styling (muted + dashed + lock). */
-	deleted: boolean;
 	/** Tooltip text. */
 	title: string;
 	/** True for cloud sessions (renders a cloud indicator instead of a branch). */
@@ -55,7 +49,6 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 		executionMode,
 		selectedWorktreeBranch,
 		worktreeBranch,
-		worktreeDeleted,
 		githubAuthenticated
 	} = input;
 
@@ -69,7 +62,6 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 		const prefix = projectName ? `${projectName} · ` : '';
 		return {
 			branch: null,
-			deleted: false,
 			cloud: true,
 			title: `${prefix}Running on the cloud install`
 		};
@@ -79,26 +71,19 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 	const branch =
 		executionMode === 'worktree' ? selectedWorktreeBranch || worktreeBranch || null : null;
 
-	// When GitHub CLI is authenticated and the worktree is still live, the
-	// interactive BranchSelector pill is shown instead — never both.
-	const branchPillShown = githubAuthenticated && !worktreeDeleted;
-	if (branchPillShown) return null;
+	// When GitHub CLI is authenticated the interactive BranchSelector pill is
+	// shown instead — never both. This now includes cleaned-up worktree sessions:
+	// they show the normal (read-only-in-worktree-mode) branch pill, not a badge.
+	if (githubAuthenticated) return null;
 
-	const deleted = worktreeDeleted && !!branch;
-
-	// Show a badge only when there's context to convey: a cleaned-up worktree, or
-	// (unauthenticated) a known project/branch.
-	const applies = deleted || (!githubAuthenticated && (!!projectName || !!branch));
+	// Unauthenticated: surface read-only project/branch context, when present.
+	const applies = !!projectName || !!branch;
 	if (!applies) return null;
 
 	const prefix = projectName ? `${projectName} · ` : '';
-	const title = deleted
-		? `${prefix}Worktree cleaned up — branch: ${branch}`
-		: branch
-			? `${prefix}Worktree branch: ${branch}`
-			: `Project: ${projectName}`;
+	const title = branch ? `${prefix}Worktree branch: ${branch}` : `Project: ${projectName}`;
 
-	return { branch, deleted, title };
+	return { branch, title };
 }
 
 export interface EmptyStateBranchInput {

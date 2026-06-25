@@ -77,6 +77,25 @@ class TaskRegistry:
         # completes AFTER its spawning turn — is handled by the between-turns
         # drain pump, which is unaffected by this set.)
         self._started_this_turn: Dict[str, set] = {}
+        # session_id -> set of PARENT launch tool_use_ids that the parent issued
+        # with run_in_background=true. This is the gate that distinguishes a
+        # GENUINELY-backgrounded sub-agent from two look-alikes that must NEVER
+        # fire a spurious follow-up turn:
+        #   1. A SYNCHRONOUS sub-agent (run_in_background=false): the parent already
+        #      received its FULL result INLINE as a tool_result during the turn (the
+        #      node was completed at query_engine yield "subagent_done"). The SDK
+        #      STILL emits an at-rest TaskNotificationMessage for it AFTER the turn's
+        #      receive_response() returns; that notification carries no NEW info and
+        #      must not wake the model to say "nothing to act on."
+        #   2. A grandchild background task launched BY a sub-agent: the parent never
+        #      processed that launch tool_use, so its tool_use_id is absent here.
+        # The terminal notification's tool_use_id equals the parent's launch
+        # tool_use block id (see query_engine._task_notification_frame), so a simple
+        # membership test gates the unpark. UNLIKE _started_this_turn, this set is
+        # NOT reset per-turn — only cleared on clear_session — because the legit
+        # slow path is a background agent launched in turn N whose notification
+        # arrives between turn N and N+1.
+        self._background_launches: Dict[str, set] = {}
 
     def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
         """Idempotency latch for the parent "unpark" follow-up turn.
@@ -131,6 +150,36 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._started_this_turn.get(session_id, set())
+
+    def mark_background_launch(self, session_id: str, tool_use_id: str) -> None:
+        """Record that the PARENT launched ``tool_use_id`` with run_in_background=true.
+
+        Called from the streaming loop the moment a Task/Agent tool_use carrying the
+        backgrounded flag is seen. ``tool_use_id`` is the parent's launch tool_use
+        block id — the SAME id the SDK puts on the eventual terminal
+        TaskNotificationMessage — so the unpark gate can later confirm a
+        notification belongs to a genuinely-backgrounded sub-agent (and NOT a
+        synchronous one whose result already returned inline, nor a sub-agent's own
+        grandchild the parent never tracked).
+
+        Defensive: a missing ``session_id``/``tool_use_id`` never records, so a stray
+        message can't strand state.
+        """
+        if not session_id or not tool_use_id:
+            return
+        self._background_launches.setdefault(session_id, set()).add(tool_use_id)
+
+    def was_background_launch(self, session_id: str, tool_use_id: str) -> bool:
+        """True iff the parent launched ``tool_use_id`` with run_in_background=true.
+
+        The unpark gate (both the in-stream stash and the between-turns drain pump)
+        uses this to suppress the spurious at-rest follow-up turn for synchronous
+        sub-agents (result already inline) and sub-agent-launched grandchildren
+        (never recorded → False).
+        """
+        if not session_id or not tool_use_id:
+            return False
+        return tool_use_id in self._background_launches.get(session_id, set())
 
     def start_task(
         self,
@@ -209,6 +258,36 @@ class TaskRegistry:
         records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return [to_wire(r) for r in records]
 
+    def has_active_background_agent(self, session_id: str) -> bool:
+        """True iff a background sub-agent (kind=="agent") is still running.
+
+        This is the single source of truth for "this session has in-flight
+        background work" — the busy signal the session pool honors so it never
+        evicts/disconnects a PARKED session out from under a live sub-agent.
+
+        A parked session looks idle to every other signal: its parent turn's
+        ``receive_response()`` already returned at the parent ResultMessage, so
+        ``is_streaming`` is False and there are no team members — yet a backgrounded
+        sub-agent is still executing and its terminal TaskNotificationMessage has
+        not yet arrived (it is caught by the between-turns drain pump). Evicting the
+        pooled SDK client now would kill the sub-agent mid-run, strand its live-store
+        node "running", and wipe the unpark gate so the parent never resumes. Gating
+        eviction on this predicate closes that hole.
+
+        Only ``kind=="agent"`` counts: shell subprocesses (the Monitor tool family)
+        are independent of the pooled SDK client's lifecycle and must not pin a
+        session in the pool.
+
+        Defensive: a missing ``session_id`` returns ``False``.
+        """
+        bucket = self._tasks.get(session_id)
+        if not bucket:
+            return False
+        return any(
+            r.get("kind") == "agent" and r.get("status") == "running"
+            for r in bucket.values()
+        )
+
     def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.
 
@@ -237,12 +316,14 @@ class TaskRegistry:
         self._tasks.pop(session_id, None)
         self._notified.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
+        self._background_launches.pop(session_id, None)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
         self._tasks.clear()
         self._notified.clear()
         self._started_this_turn.clear()
+        self._background_launches.clear()
 
 
 # Global instance

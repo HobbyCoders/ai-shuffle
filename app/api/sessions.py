@@ -58,9 +58,9 @@ from app.core.models import (
 )
 from app.db import database
 from app.db.async_database import run_sync
-from app.db.base import WorktreeStatus
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import api_error_handler
+from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.core.project_utils import get_project_working_dir
 
 import logging
@@ -443,6 +443,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "toolId": m.get("toolId"),
                         "toolResult": m.get("toolResult"),  # Tool output grouped with tool_use
                         "toolStatus": m.get("toolStatus"),  # Status: running, complete, error
+                        "toolScreenshot": m.get("toolScreenshot"),  # Inline screenshot (Chrome/computer-use, Read of image)
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
@@ -559,28 +560,17 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     session["tags"] = await run_sync(database.get_session_tags, session_id)
     session["has_forks"] = await run_sync(database.session_has_forks, session_id)
 
-    # Add worktree info if session is linked to a worktree
+    # Add worktree info if session is linked to a worktree. Worktree sessions are
+    # always reopenable — we never null worktree_id; worktree_deleted only means
+    # "not materialized right now" (recreated on next send). See helper.
     worktree_id = session.get("worktree_id")
-    if worktree_id:
-        worktree = await run_sync(database.get_worktree, worktree_id)
-        if worktree and worktree.get("status") == WorktreeStatus.ACTIVE:
-            session["worktree_id"] = worktree_id
-            session["worktree_branch"] = worktree.get("branch_name")
-            session["worktree_path"] = worktree.get("worktree_path")
-            session["worktree_deleted"] = False
-        elif worktree and worktree.get("status") == WorktreeStatus.COMPLETED:
-            # Worktree completed (merged & cleaned up) — record preserved for reopen
-            session["worktree_id"] = worktree_id
-            session["worktree_branch"] = worktree.get("branch_name")
-            session["worktree_path"] = worktree.get("worktree_path")
-            session["worktree_deleted"] = True
-        else:
-            # Worktree record missing or in DELETED/ORPHANED state
-            session["worktree_id"] = None
-            session["worktree_deleted"] = True
-    elif session.get("worktree_branch"):
-        # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
-        session["worktree_deleted"] = True
+    worktree = await run_sync(database.get_worktree, worktree_id) if worktree_id else None
+    wt_meta = enrich_session_worktree_meta(session, worktree)
+    if wt_meta:
+        session["worktree_id"] = wt_meta["worktree_id"]
+        session["worktree_branch"] = wt_meta["worktree_branch"]
+        session["worktree_path"] = wt_meta["worktree_path"]
+        session["worktree_deleted"] = wt_meta["worktree_deleted"]
 
     logger.debug(f"Returning session {session_id} with {len(messages)} messages")
     return session
@@ -650,32 +640,37 @@ async def get_live_session(
         session_meta["title"] = session_title
 
     wt_id = session.get("worktree_id")
-    if wt_id:
-        wt = await run_sync(database.get_worktree, wt_id)
-        if wt and wt.get("status") == WorktreeStatus.ACTIVE:
-            session_meta["worktree_id"] = wt_id
-            session_meta["worktree_branch"] = wt.get("branch_name")
-            session_meta["worktree_deleted"] = False
-            session_meta["execution_mode"] = "worktree"
-        elif wt and wt.get("status") == WorktreeStatus.COMPLETED:
-            session_meta["worktree_id"] = wt_id
-            session_meta["worktree_branch"] = wt.get("branch_name")
-            session_meta["worktree_deleted"] = True
-            session_meta["execution_mode"] = "worktree"
-        else:
-            session_meta["worktree_id"] = None
-            session_meta["worktree_branch"] = session.get("worktree_branch")
-            session_meta["worktree_deleted"] = True
-            session_meta["execution_mode"] = "worktree"
-    elif session.get("worktree_branch"):
-        session_meta["worktree_id"] = None
-        session_meta["worktree_branch"] = session.get("worktree_branch")
-        session_meta["worktree_deleted"] = True
-        session_meta["execution_mode"] = "worktree"
+    wt = await run_sync(database.get_worktree, wt_id) if wt_id else None
+    wt_meta = enrich_session_worktree_meta(session, wt)
+    if wt_meta:
+        session_meta["worktree_id"] = wt_meta["worktree_id"]
+        session_meta["worktree_branch"] = wt_meta["worktree_branch"]
+        session_meta["worktree_deleted"] = wt_meta["worktree_deleted"]
+        session_meta["execution_mode"] = wt_meta["execution_mode"]
 
-    # Check if session is in live store (actively streaming)
+    # Check if session is in the live store.
+    #
+    # A session stays in the live store AFTER its turn ends: end_streaming() keeps
+    # it in memory with is_streaming=False as a fast-reconnect snapshot. That
+    # snapshot is normally the full transcript, but it can be LESS complete than
+    # the authoritative Postgres store when the turn that produced it crashed
+    # mid-stream (OOM/SIGKILL) or was seeded with empty history because the session
+    # had no sdk_session_id yet. Serving such a stale buffer renders the chat with
+    # missing messages — the orphaned-session symptom.
+    #
+    # Rule: while a turn is ACTIVELY streaming, the in-memory buffer is the source
+    # of truth (it holds in-progress deltas the mirror hasn't written yet) and we
+    # serve it directly. Once the turn has ENDED, on a fresh load (since_update_id
+    # == 0) we fall through to the store loader and serve whichever source is MORE
+    # complete (see the completeness check before the response is built). This
+    # heals stale/truncated buffers left by a crashed or empty-seeded turn while
+    # preserving the brief post-turn window where the buffer leads the not-yet-
+    # flushed mirror. Parked delta polls (since_update_id > 0) keep their existing
+    # 304/delta behavior — a fresh open always resets to 0, which is where the
+    # completeness check runs.
+    pending_live_full = None
     if live_session_store.has_session(session_id):
-        # Check if there are updates since last poll
+        streaming_now = live_session_store.is_streaming(session_id)
         if since_update_id > 0:
             live_data = live_session_store.get_session_since(session_id, since_update_id)
             if live_data is None:
@@ -700,13 +695,19 @@ async def get_live_session(
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
-        else:
+        elif streaming_now:
+            # Fresh load of an actively-streaming session — in-memory is authoritative.
             live_data = live_session_store.get_session_dict(session_id)
             if live_data:
                 live_data["activeTasks"] = active_tasks
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
+        else:
+            # Fresh load of an ENDED session that still has an in-memory snapshot.
+            # Hold it as a candidate and fall through to the store loader; the
+            # completeness check below serves whichever is more complete.
+            pending_live_full = live_session_store.get_session_dict(session_id)
 
     # Not streaming — load from DB first (fast path), fall back to JSONL
     sdk_session_id = session.get("sdk_session_id")
@@ -762,6 +763,7 @@ async def get_live_session(
                 _OPTIONAL_LIVE_FIELDS = (
                     "subtype", "systemSubtype", "systemData",
                     "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
+                    "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)
                     "agentId", "agentType", "agentDescription", "agentStatus", "agentChildren",
                     "metadata",
                 )
@@ -805,6 +807,30 @@ async def get_live_session(
                 )
         except Exception as e:
             logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
+
+    # Heal stale/truncated live-store snapshots. If a kept (non-streaming) buffer
+    # exists and is MORE complete than the store transcript we just loaded, prefer
+    # it — this covers the brief post-turn window before the Postgres mirror has
+    # flushed the final messages. Otherwise the store wins, which is what recovers
+    # a session whose in-memory buffer was left truncated/empty by a mid-stream
+    # crash (OOM/SIGKILL) or an empty history seed. Without this, that stale buffer
+    # shadows the full transcript and the chat renders with missing messages.
+    if pending_live_full is not None:
+        live_msgs = pending_live_full.get("messages") or []
+        if len(live_msgs) > len(messages):
+            logger.debug(
+                f"Live endpoint: serving in-memory snapshot for {session_id} "
+                f"({len(live_msgs)} msgs > store {len(messages)} msgs)"
+            )
+            pending_live_full["activeTasks"] = active_tasks
+            if session_meta:
+                pending_live_full["session_meta"] = session_meta
+            return pending_live_full
+        logger.debug(
+            f"Live endpoint: store transcript for {session_id} is complete "
+            f"({len(messages)} msgs >= snapshot {len(live_msgs)} msgs) — "
+            f"healed any stale buffer"
+        )
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     # This ensures the poller gets cost data on the first poll after streaming ends

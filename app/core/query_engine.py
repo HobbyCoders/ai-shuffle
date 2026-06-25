@@ -81,7 +81,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
-    requires_reconnect, graceful_disconnect
+    requires_reconnect, graceful_disconnect, mark_subprocess_oom_killable
 )
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
@@ -744,6 +744,14 @@ async def stream_query(
         existing_state = None
 
     if not reusing_client:
+        # Admission backpressure: refuse a NEW session if the box is at its
+        # process/RAM/pool ceiling, rather than killing in-flight work later.
+        refusal = pool.admission_check()
+        if refusal is not None:
+            logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
+            yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
+            return
+
         # Evict LRU if pool is full
         await pool.evict_if_needed()
 
@@ -812,6 +820,10 @@ async def stream_query(
     tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
     sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
+    # Persist-on-init guard (see stream_to_websocket): write the SDK session id
+    # to the sessions row the moment it's captured so a mid-turn crash can't
+    # orphan the session.
+    sdk_link_persisted = False
     interrupted = False
 
     try:
@@ -844,6 +856,22 @@ async def stream_query(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"Captured SDK session ID: {sdk_session_id}")
+                    # Link it onto the sessions row immediately (decoupled from
+                    # end-of-turn persistence) so a mid-turn crash can't leave
+                    # sdk_session_id NULL and orphan the session.
+                    if resume_id is None and session_id and not sdk_link_persisted:
+                        try:
+                            await run_sync(
+                                database.update_session,
+                                session_id,
+                                sdk_session_id=sdk_session_id,
+                            )
+                            sdk_link_persisted = True
+                        except Exception as link_err:
+                            logger.warning(
+                                f"early sdk_session_id link failed for "
+                                f"{session_id}: {link_err}"
+                            )
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -1488,6 +1516,14 @@ async def stream_to_websocket(
                 options.hooks = hooks_config
                 logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
+        # Admission backpressure: refuse a NEW session if the box is at its
+        # process/RAM/pool ceiling, rather than killing in-flight work later.
+        refusal = pool.admission_check()
+        if refusal is not None:
+            logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
+            yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
+            return
+
         # Evict LRU session if pool is full
         evicted = await pool.evict_if_needed()
         if evicted:
@@ -1547,8 +1583,23 @@ async def stream_to_websocket(
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
+    # Make this session's node subprocess (and the subagents it is about to fork,
+    # which inherit the score) the kernel's preferred OOM-kill target. If the HOST
+    # runs out of memory mid-fan-out, the global OOM-killer then reaps one session's
+    # disposable, auto-recoverable subprocess instead of the Python orchestrator
+    # (which runs every session) or the database. Best-effort; set every turn,
+    # before the query() below triggers the fan-out. No-op if disabled/unprivileged.
+    mark_subprocess_oom_killable(state)
+
     # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
     sdk_session_id = resume_id
+    # Persist-on-init guard: a brand-new session's sdk_session_id is only known
+    # once the SDK emits its `init` SystemMessage. We write it to the sessions
+    # row immediately (once) so a mid-turn crash can't orphan the session.
+    sdk_link_persisted = False
+    # Set when the turn dies via `except Exception`; suppresses the trailing
+    # `done` frame (we already emitted `error`) while persistence still runs.
+    crashed = False
 
     # Execute query
     # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
@@ -1675,6 +1726,27 @@ async def stream_to_websocket(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"[WS] Captured SDK session ID: {sdk_session_id}")
+                    # Link the SDK session id onto the sessions row the instant
+                    # it's known — decoupled from end-of-turn _persist_turn_results.
+                    # If the turn later crashes (OOM/SIGKILL during a subagent
+                    # fan-out), the old `except ... return` skipped persistence and
+                    # left sdk_session_id NULL, orphaning the whole session (blank
+                    # history in postgres_only mode). The session store entries are
+                    # already keyed by this id, so writing it here alone is enough
+                    # to recover the full transcript on reload.
+                    if resume_id is None and not sdk_link_persisted:
+                        try:
+                            await run_sync(
+                                database.update_session,
+                                session_id,
+                                sdk_session_id=sdk_session_id,
+                            )
+                            sdk_link_persisted = True
+                        except Exception as link_err:
+                            logger.warning(
+                                f"[WS] early sdk_session_id link failed for "
+                                f"{session_id}: {link_err}"
+                            )
 
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
@@ -1977,6 +2049,19 @@ async def stream_to_websocket(
                                     or tool_input.get("runInBackground")
                                 ),
                             }
+                            # Gate for the spurious-unpark fix: record the launch
+                            # tool_use_id IFF the parent launched it in the
+                            # background. The SDK puts this SAME id on the eventual
+                            # at-rest TaskNotificationMessage, so the unpark paths can
+                            # later confirm a notification belongs to a genuinely-
+                            # backgrounded sub-agent. A SYNCHRONOUS sub-agent's result
+                            # already returns INLINE this turn (node completed at the
+                            # "subagent_done" yield below) and must NOT wake the model
+                            # with a stale <task-notification>; recording nothing here
+                            # leaves the gate closed for it. Side-effect-only — does
+                            # not change what is yielded.
+                            if task_tool_uses[tool_id]["run_in_background"]:
+                                task_registry.mark_background_launch(session_id, tool_id)
                             # Initialize children collector for this subagent
                             subagent_children[tool_id] = []
                             # Record subagent in ordered turn events for persistence
@@ -2026,8 +2111,9 @@ async def stream_to_websocket(
                             }
 
                     elif isinstance(block, ToolResultBlock):
-                        # Extract screenshot from MCP content blocks before truncation
-                        screenshot_b64 = extract_mcp_image(block.content)
+                        # Extract screenshot (as a data URI) from MCP content blocks
+                        # before truncation strips the image data for display.
+                        screenshot = extract_mcp_image(block.content)
                         output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
@@ -2105,8 +2191,8 @@ async def stream_to_websocket(
                                 "is_error": getattr(block, 'is_error', False)
                             }
                             # Include screenshot for browser tools (MCP content has image blocks)
-                            if screenshot_b64:
-                                event["screenshot"] = screenshot_b64
+                            if screenshot:
+                                event["screenshot"] = screenshot
                             yield event
 
                     elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
@@ -2415,8 +2501,15 @@ async def stream_to_websocket(
     except Exception as e:
         logger.error(f"[WS] Query error for session {session_id}: {e}")
         state.is_connected = False
+        crashed = True
         yield {"type": "error", "message": str(e)}
-        return
+        # Do NOT early-return here. Fall through to `finally` and the
+        # _persist_turn_results call below so the partial turn AND the
+        # sdk_session_id link are written even on a mid-turn crash. The bare
+        # `return` that used to live here skipped all persistence — that is how
+        # OOM/SIGKILL crashes orphaned sessions (sdk_session_id stayed NULL →
+        # blank history). The `crashed` flag suppresses the trailing `done`
+        # frame since we've already emitted an `error`.
 
     finally:
         # Mark as not streaming and reset interrupt flag
@@ -2465,7 +2558,7 @@ async def stream_to_websocket(
     # For slash commands that produced no visible content, yield a notification
     # SDK built-in commands like /memory, /cost, /model execute inside the subprocess
     # and may not produce any streaming events visible to the frontend
-    if is_slash_command and not has_visible_content and not interrupted:
+    if is_slash_command and not has_visible_content and not interrupted and not crashed:
         cmd_name = prompt.strip().split()[0]  # e.g., "/memory"
         logger.info(f"[WS] Slash command {cmd_name} produced no visible output for session {session_id}")
         yield {
@@ -2474,8 +2567,13 @@ async def stream_to_websocket(
             "data": {"content": f"Command {cmd_name} completed (no output)."}
         }
 
-    # Yield done or interrupted event
-    if interrupted:
+    # Yield done or interrupted event. On a crash we've already emitted an
+    # `error` frame above; emitting `done` too would mislead the frontend into
+    # treating the turn as a clean completion, so skip the terminal frame
+    # entirely (persistence has already run).
+    if crashed:
+        pass
+    elif interrupted:
         yield {
             "type": "interrupted",
             "session_id": session_id,

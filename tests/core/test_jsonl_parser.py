@@ -835,6 +835,48 @@ class TestParseSessionHistory:
                 assert result[0]["id"] == "tool-tool-abc"
                 assert "tool-use-1" not in result[0]["id"], "id must not depend on the JSONL uuid"
 
+    def test_parse_tool_result_reconstructs_screenshot(self):
+        """An MCP image block in a tool_result is reconstructed as a
+        toolScreenshot data URI so reloaded sessions show the screenshot
+        below the tool call, exactly like the live store does."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session"
+            jsonl_file = project_dir / f"{session_id}.jsonl"
+            tool_use = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-shot", "name": "mcp__claude-in-chrome__computer", "input": {"action": "screenshot"}}]}, "uuid": "tool-use-1", "timestamp": "2024-01-01T00:00:00Z"}
+            tool_result = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-shot", "content": [
+                {"type": "text", "text": "screenshot of page"},
+                {"type": "image", "data": "iVBORscreenshot", "mimeType": "image/png"},
+            ], "is_error": False}]}, "uuid": "tool-result-1", "timestamp": "2024-01-01T00:00:01Z"}
+            jsonl_file.write_text(json.dumps(tool_use) + '\n' + json.dumps(tool_result) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
+                assert len(result) == 1
+                assert result[0]["type"] == "tool_use"
+                assert result[0]["toolScreenshot"] == "data:image/png;base64,iVBORscreenshot"
+                # Text is still extracted for the result body.
+                assert "screenshot of page" in result[0]["toolResult"]
+
+    def test_parse_tool_result_without_image_has_no_screenshot(self):
+        """Plain tool results must not carry a toolScreenshot key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session"
+            jsonl_file = project_dir / f"{session_id}.jsonl"
+            tool_use = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-abc", "name": "Bash", "input": {}}]}, "uuid": "tool-use-1", "timestamp": "2024-01-01T00:00:00Z"}
+            tool_result = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-abc", "content": "ok", "is_error": False}]}, "uuid": "tool-result-1", "timestamp": "2024-01-01T00:00:01Z"}
+            jsonl_file.write_text(json.dumps(tool_use) + '\n' + json.dumps(tool_result) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
+                assert len(result) == 1
+                assert "toolScreenshot" not in result[0]
+
     def test_skip_queue_operations(self):
         """Should skip queue-operation entries."""
         with tempfile.TemporaryDirectory() as tmpdir:

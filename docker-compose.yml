@@ -71,8 +71,10 @@ services:
       - claude-auth:/home/appuser/.claude
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
-      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing)
-      - browser-profile:/home/appuser/.config/google-chrome
+      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing).
+      # Non-default dir on purpose — Chrome 136+ disables the DevTools debug port
+      # on the default ~/.config/google-chrome profile (see docker/start-chrome.sh).
+      - browser-profile:/home/appuser/chrome-profile
       # Persist database and session data
       - ai-shuffle-data:/data
       # Mount workspace directory for projects
@@ -84,9 +86,11 @@ services:
     # Port mapping
     ports:
       - "${PORT:-8000}:8000"
-      # Uncomment for the ONE-TIME Claude in Chrome extension sign-in/pairing
-      # (set CHROME_DEBUG=1). Exposes the headless browser's DevTools — anyone
-      # who can reach this port can control the browser, so turn it off after.
+      # Claude in Chrome sign-in/pairing is done IN-APP (Settings → Browser →
+      # Set up browser) over a localhost-only DevTools port proxied behind the
+      # admin login — no port mapping needed. The line below is the legacy
+      # CHROME_DEBUG=1 escape hatch that exposes DevTools on the network; leave
+      # it commented unless you specifically need raw DevTools access.
       # - "${CHROME_DEBUG_PORT:-9222}:9222"
 
     # Health check
@@ -100,11 +104,36 @@ services:
     # Resource limits (adjust based on your Unraid server)
     # Note: The container runs Python + Node.js (Claude CLI) + MCP servers
     # concurrently. 4 CPUs is recommended; reduce to 2 for constrained hosts.
+    #
+    # IMPORTANT — memory & the OOM crash:
+    #   * This `deploy.resources.limits` block is IGNORED by plain
+    #     `docker compose up` (it only applies under `docker stack deploy` /
+    #     swarm, or `docker compose --compatibility up`). So the memory value
+    #     below is NOT enforced by default and the container can use all host RAM.
+    #   * The crash that stops live sessions is the GLOBAL host kernel OOM-killer
+    #     SIGKILLing our node subprocesses when the WHOLE host runs out of memory
+    #     during a subagent fan-out across many sessions — NOT a container limit.
+    #     With little/no host swap there is ZERO cushion for a transient spike.
+    #   * Strongly recommended on the host (Unraid): provision real swap or zram
+    #     (e.g. 8-16G). Swap turns a fan-out spike into a brief slowdown instead
+    #     of an instant kill — it is the single biggest cushion and cannot be set
+    #     from inside the container.
+    #   * The app also mitigates in software: admission backpressure refuses NEW
+    #     sessions only when host MemAvailable nears the cliff (does NOT cap how
+    #     many you can run), and node subprocesses are marked preferred OOM
+    #     victims so a kill reaps one recoverable session, not the orchestrator.
+    #     See sdk_admission_min_available_mb / sdk_subprocess_oom_score_adj.
+    #   * The memory value below is a GENEROUS hint sized for ~5-10 concurrent
+    #     sessions with subagents. To actually ENFORCE a ceiling (contains the
+    #     blast radius to this container's own cgroup instead of risking a global
+    #     OOM that can reap other containers), move it to a top-level
+    #     `mem_limit:` AND pair it with host swap — never enforce a tight cap
+    #     without swap or sessions will be killed constantly.
     deploy:
       resources:
         limits:
           cpus: '4.0'
-          memory: 4G
+          memory: 24G
         reservations:
           cpus: '1.0'
           memory: 512M

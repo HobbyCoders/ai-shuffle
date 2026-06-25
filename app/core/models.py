@@ -258,6 +258,7 @@ class SubagentChildMessage(BaseModel):
     toolInput: Optional[Dict[str, Any]] = None
     toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
     toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
+    toolScreenshot: Optional[str] = None  # data: URI of an inline screenshot (Chrome/computer-use, Read of image)
     timestamp: Optional[str] = None
 
 
@@ -275,6 +276,7 @@ class SessionMessage(BaseModel):
     toolId: Optional[str] = None  # Tool ID for matching tool_use to tool_result
     toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
     toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
+    toolScreenshot: Optional[str] = None  # data: URI of an inline screenshot (Chrome/computer-use, Read of image)
     metadata: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
     # Subagent-specific fields (for type='subagent')
@@ -330,7 +332,7 @@ class Session(SessionBase):
     worktree_id: Optional[str] = None  # ID of linked worktree (if any)
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
-    worktree_deleted: bool = False  # True if worktree was cleaned up (reopenable on next message)
+    worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
     created_at: datetime
     updated_at: datetime
 

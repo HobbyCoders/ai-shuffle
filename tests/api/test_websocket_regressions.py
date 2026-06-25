@@ -225,7 +225,10 @@ class TestMCPContentExtraction:
         assert result == ""
 
     def test_extract_mcp_image(self):
-        """extract_mcp_image should find image data in content block lists."""
+        """extract_mcp_image returns a data URI for the first image block.
+
+        Mime defaults to image/png when the block omits mimeType.
+        """
         from app.core.query_engine import extract_mcp_image
 
         content = [
@@ -233,7 +236,71 @@ class TestMCPContentExtraction:
             {"type": "image", "data": "base64imagedata"},
         ]
         result = extract_mcp_image(content)
-        assert result == "base64imagedata"
+        assert result == "data:image/png;base64,base64imagedata"
+
+    def test_extract_mcp_image_uses_block_mime(self):
+        """The block's mimeType is honored in the data URI when present."""
+        from app.core.query_engine import extract_mcp_image
+
+        content = [{"type": "image", "data": "abc", "mimeType": "image/jpeg"}]
+        assert extract_mcp_image(content) == "data:image/jpeg;base64,abc"
+
+    def test_extract_mcp_image_pydantic_object_block(self):
+        """SDK ImageContent objects (not dicts) are also extracted."""
+        from app.core.query_engine import extract_mcp_image
+        from mcp.types import ImageContent
+
+        block = ImageContent(type="image", data="objdata", mimeType="image/png")
+        assert extract_mcp_image([block]) == "data:image/png;base64,objdata"
+
+    def test_extract_mcp_image_api_source_format(self):
+        """Anthropic API format (data nested under ``source``) is extracted.
+
+        This is the shape the Agent SDK actually delivers at runtime and writes
+        to the JSONL transcript for Claude-in-Chrome / computer-use screenshots:
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/jpeg",
+                        "data": "<base64>"}}
+        Regression guard for #419, where the extractor only read a flat top-level
+        ``data`` key and silently returned None for every real screenshot.
+        """
+        from app.core.query_engine import extract_mcp_image
+
+        content = [
+            {"type": "text", "text": "Successfully captured screenshot"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "realb64data",
+                },
+            },
+        ]
+        assert extract_mcp_image(content) == "data:image/jpeg;base64,realb64data"
+
+    def test_extract_mcp_image_api_source_pydantic_block(self):
+        """SDK ImageBlock objects with a ``.source`` attribute are extracted."""
+        from types import SimpleNamespace
+
+        from app.core.query_engine import extract_mcp_image
+
+        block = SimpleNamespace(
+            type="image",
+            source=SimpleNamespace(
+                type="base64", media_type="image/png", data="objsrcdata"
+            ),
+        )
+        assert extract_mcp_image([block]) == "data:image/png;base64,objsrcdata"
+
+    def test_extract_mcp_image_api_source_empty_data_is_ignored(self):
+        """An API-format image block with empty source data yields None."""
+        from app.core.query_engine import extract_mcp_image
+
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}
+        ]
+        assert extract_mcp_image(content) is None
 
     def test_extract_mcp_image_no_images(self):
         """extract_mcp_image should return None when no images present."""
@@ -242,6 +309,13 @@ class TestMCPContentExtraction:
         content = [{"type": "text", "text": "just text"}]
         result = extract_mcp_image(content)
         assert result is None
+
+    def test_extract_mcp_image_empty_data_is_ignored(self):
+        """An image block without data must not produce a bare 'data:...,' URI."""
+        from app.core.query_engine import extract_mcp_image
+
+        assert extract_mcp_image([{"type": "image", "data": ""}]) is None
+        assert extract_mcp_image([{"type": "image"}]) is None
 
     def test_extract_mcp_image_non_list(self):
         """extract_mcp_image should return None for non-list content."""

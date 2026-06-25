@@ -103,7 +103,10 @@
 			<span class="bml-tag">{getServerTypeLabel(server.type)}</span>
 			<span class="bml-dot" class:on={server.enabled} title={server.enabled ? 'Enabled' : 'Disabled'}></span>
 		</div>
-		{#if !server.builtin}
+		{#if server.builtin}
+			<!-- Empty buffer keeps the meta column aligned with deletable (custom) rows. -->
+			<div class="bml-actions"></div>
+		{:else}
 			<div class="bml-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 				<button class="bml-act bml-act--danger" title="Delete" onclick={() => (pendingName = server.name)}>
 					<Trash2 size={15} strokeWidth={1.7} />
@@ -232,7 +235,9 @@
 	.bml-dot { width: 8px; height: 8px; border-radius: 50%; background: color-mix(in oklch, var(--muted-foreground) 50%, transparent); flex-shrink: 0; }
 	.bml-dot.on { background: var(--success, #3b9c6e); }
 
-	.bml-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
+	/* Fixed width reserves the delete-button slot so built-in (non-deletable) rows
+	   keep their meta column aligned with custom rows. */
+	.bml-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 28px; opacity: 0; transition: opacity 120ms ease; }
 	.bml-row:hover .bml-actions, .bml-row:focus-within .bml-actions { opacity: 1; }
 	.bml-act {
 		display: grid; place-items: center; width: 28px; height: 28px;

@@ -70,6 +70,7 @@ function makeSwitcher(initial: ActiveSessionState) {
 		pendingTools: new Set<string>(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
 		interruptConfirmResolve: null,
@@ -85,10 +86,6 @@ function makeSwitcher(initial: ActiveSessionState) {
 		sessionEphemeralCache: {
 			save: (id, e) => { ephemeralStore.set(id, e); },
 			restore: (id) => ephemeralStore.get(id) ?? null,
-		},
-		messageCache: {
-			get: vi.fn(async () => null),
-			delete: vi.fn(async () => {}),
 		},
 		sessionPoller: {
 			stop: vi.fn(),

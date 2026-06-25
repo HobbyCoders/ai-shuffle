@@ -10,7 +10,7 @@
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
-import type { ChatMessage, ExecutionMode } from '../types';
+import type { ExecutionMode } from '../types';
 import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
@@ -38,10 +38,6 @@ export interface SessionSwitcherDeps {
 	sessionEphemeralCache: {
 		save: (sessionId: string, ephemeral: SessionEphemeral) => void;
 		restore: (sessionId: string) => SessionEphemeral | null;
-	};
-	messageCache: {
-		get: (sessionId: string) => Promise<ChatMessage[] | null>;
-		delete: (sessionId: string) => Promise<void>;
 	};
 	sessionPoller: {
 		stop: (sessionId: string) => void;
@@ -141,7 +137,7 @@ export async function loadSelectionFromBackend(): Promise<{ selectedProfile: str
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
-	const { update, getState, wsSend, internal, sessionEphemeralCache, messageCache, sessionPoller, onPersistTimerChanged } = deps;
+	const { update, getState, wsSend, internal, sessionEphemeralCache, sessionPoller, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
@@ -304,13 +300,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const targetProject = projectId || ephemeral?.project || state.project;
 
-		// Hydrate from IndexedDB cache for instant render
-		const cachedMessages = await messageCache.get(sessionId);
-
-		// A newer switchSession/newChat call was made while we were awaiting — bail out.
-		if (generation !== _switchGeneration) return;
-
-		// Single update: set sessionId, cached messages, reset + restore ephemeral state.
+		// Single update: set sessionId, reset + restore ephemeral state.
 		// This is one _update call instead of the previous two, preventing
 		// Svelte 5 double-update issues.
 		//
@@ -328,7 +318,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionId,
 			title: resolvedTitle,
 			project: targetProject,
-			messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
+			// Start empty; the authoritative messages load from the server via
+			// sessionPoller.loadSession() below. No cache-first render — showing a
+			// stale snapshot first caused a visible flash before the real history.
+			messages: [],
 			error: null,
 			pendingPermissions: [],
 			deferredPermissions: [],
@@ -442,14 +435,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Tell backend to release session lock
 		if (leavingSessionId) {
 			wsSend({ type: 'close_session' });
-		}
-
-		// Clear stale cached messages for the old session from IndexedDB.
-		// Without this, a component lifecycle edge case (e.g., init() re-running
-		// after a WS reconnect/remount) could hydrate from the cache and show
-		// old messages in the "new chat" view.
-		if (leavingSessionId) {
-			messageCache.delete(leavingSessionId).catch(() => {});
 		}
 
 		// Reset all internal state

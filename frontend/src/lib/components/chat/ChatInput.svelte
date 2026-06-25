@@ -132,6 +132,25 @@
 		}
 	});
 
+	// Restore a discarded interrupted prompt back into the editor so the user can
+	// edit or resend it. Set by the backend's `user_message_discarded` event when
+	// a turn is stopped before any assistant output (the orphan user message is
+	// removed from chat). Only fill an EMPTY editor so we never clobber text the
+	// user has already started typing; either way clear the pending prompt so it
+	// fires exactly once.
+	$effect(() => {
+		const pending = $activeSession.pendingInterruptPrompt;
+		if (!pending) return;
+		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
+		if (current.length === 0) {
+			inputValue = pending;
+			plainTextValue = pending;
+			editorRef?.setContent(pending);
+			tick().then(() => editorRef?.focus());
+		}
+		activeSession.clearPendingInterruptPrompt();
+	});
+
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
@@ -572,16 +591,6 @@
 			</div>
 		{/if}
 
-		<!-- Legacy worktree session: permanently deleted, can't reopen -->
-		{#if $activeSession.worktreeDeleted && !$activeSession.worktreeId && !$activeSession.isReopeningWorktree}
-			<div class="error-banner worktree-completed">
-				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
-				</svg>
-				<span>This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.</span>
-			</div>
-		{/if}
-
 		<!-- Worktree reopening spinner (shown briefly while recreating worktree) -->
 		{#if $activeSession.isReopeningWorktree}
 			<div class="error-banner worktree-completed reopening">
@@ -690,8 +699,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.isReopeningWorktree || ($activeSession.worktreeDeleted && !$activeSession.worktreeId)}
-									title={($activeSession.worktreeDeleted && !$activeSession.worktreeId) ? "Worktree permanently deleted — start a new session" : $activeSession.isReopeningWorktree ? "Reopening worktree..." : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.isReopeningWorktree}
+									title={$activeSession.isReopeningWorktree ? "Reopening worktree..." : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

@@ -144,6 +144,13 @@ async def _run_background_query(
         existing_state = None
 
     if not reusing_client:
+        # Admission backpressure: refuse a NEW session if the box is at its
+        # process/RAM/pool ceiling, rather than killing in-flight work later.
+        refusal = pool.admission_check()
+        if refusal is not None:
+            logger.warning(f"[Admission] Refusing new background session {session_id}: {refusal}")
+            raise RuntimeError(f"Server is at capacity — {refusal}. Please retry shortly.")
+
         # Evict LRU if pool is full
         await pool.evict_if_needed()
 

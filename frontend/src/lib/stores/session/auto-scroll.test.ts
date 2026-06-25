@@ -15,9 +15,12 @@ import { describe, expect, it } from 'vitest';
 import {
 	NEAR_BOTTOM_THRESHOLD,
 	USER_SCROLL_UP_MIN_DELTA,
+	USER_TOUCH_DRAG_MIN,
+	USER_WHEEL_UP_MIN_DELTA,
 	type ScrollMetrics,
 	distanceFromBottom,
 	isNearBottom,
+	isUserScrollUpGesture,
 	nextStickToBottom,
 	shouldAutoScrollOnChange
 } from './auto-scroll';
@@ -140,6 +143,37 @@ describe('nextStickToBottom', () => {
 		expect(
 			nextStickToBottom(true, prev, next, { nearBottomThreshold: 10, userScrollUpMinDelta: 10 })
 		).toBe(false);
+	});
+});
+
+describe('isUserScrollUpGesture', () => {
+	it('releases on an upward wheel (negative deltaY)', () => {
+		expect(isUserScrollUpGesture(-100, 0)).toBe(true);
+	});
+
+	it('releases at exactly the min upward wheel delta (inclusive)', () => {
+		expect(isUserScrollUpGesture(-USER_WHEEL_UP_MIN_DELTA, 0)).toBe(true);
+	});
+
+	it('does NOT release on a downward wheel (scrolling toward the bottom)', () => {
+		expect(isUserScrollUpGesture(120, 0)).toBe(false);
+	});
+
+	it('does NOT release on a zero / horizontal wheel event', () => {
+		expect(isUserScrollUpGesture(0, 0)).toBe(false);
+	});
+
+	it('releases on a downward finger drag (touch scroll-up) past the threshold', () => {
+		expect(isUserScrollUpGesture(0, USER_TOUCH_DRAG_MIN)).toBe(true);
+		expect(isUserScrollUpGesture(0, 200)).toBe(true);
+	});
+
+	it('does NOT release on sub-threshold touch jitter from a stationary press', () => {
+		expect(isUserScrollUpGesture(0, USER_TOUCH_DRAG_MIN - 1)).toBe(false);
+	});
+
+	it('does NOT release on an upward finger drag (touch scroll-down toward bottom)', () => {
+		expect(isUserScrollUpGesture(0, -200)).toBe(false);
 	});
 });
 

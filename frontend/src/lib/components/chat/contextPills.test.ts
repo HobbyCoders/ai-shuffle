@@ -3,9 +3,10 @@
  *
  * Regression guard for the "worktree badge wasn't moved to the pills" fix: the
  * project/worktree badge that used to live in the page header must now appear in
- * the pill bar in exactly the cases the interactive branch pill can't cover —
- * a cleaned-up worktree, or an unauthenticated session — and must stay hidden
- * whenever the interactive branch pill is showing or the chat is empty.
+ * the pill bar in exactly the case the interactive branch pill can't cover —
+ * an unauthenticated session — and must stay hidden whenever the interactive
+ * branch pill is showing or the chat is empty. (Cleaned-up worktree sessions
+ * keep the normal branch pill, so they no longer surface a badge.)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -24,7 +25,6 @@ function base(overrides: Partial<ContextBadgeInput> = {}): ContextBadgeInput {
 		executionMode: 'worktree',
 		selectedWorktreeBranch: null,
 		worktreeBranch: 'feat/login',
-		worktreeDeleted: false,
 		githubAuthenticated: true,
 		...overrides
 	};
@@ -33,32 +33,33 @@ function base(overrides: Partial<ContextBadgeInput> = {}): ContextBadgeInput {
 describe('computeContextBadge', () => {
 	it('returns null in the empty/new-session state (mode toggle owns that row)', () => {
 		expect(computeContextBadge(base({ messageCount: 0 }))).toBeNull();
-		// Even an unauthenticated, cleaned-up worktree shows nothing before the
-		// first message.
+		// Even an unauthenticated session shows nothing before the first message.
 		expect(
-			computeContextBadge(
-				base({ messageCount: 0, githubAuthenticated: false, worktreeDeleted: true })
-			)
+			computeContextBadge(base({ messageCount: 0, githubAuthenticated: false }))
 		).toBeNull();
 	});
 
-	it('returns null while the interactive branch pill is shown (authenticated + live)', () => {
+	it('returns null while the interactive branch pill is shown (authenticated)', () => {
 		expect(computeContextBadge(base())).toBeNull();
-		// Local mode, still authenticated and live → branch pill, no badge.
+		// Local mode, still authenticated → branch pill, no badge.
 		expect(computeContextBadge(base({ executionMode: 'local', worktreeBranch: null }))).toBeNull();
 	});
 
-	it('shows a read-only deleted badge for a cleaned-up worktree (authenticated)', () => {
-		const badge = computeContextBadge(base({ worktreeDeleted: true }));
-		expect(badge).not.toBeNull();
-		expect(badge!.deleted).toBe(true);
-		expect(badge!.branch).toBe('feat/login');
-		expect(badge!.title).toBe('my-app · Worktree cleaned up — branch: feat/login');
+	it('returns null for a cleaned-up worktree when authenticated (branch pill takes over)', () => {
+		// The normal — read-only-in-worktree-mode — branch pill is shown for
+		// cleaned-up worktree sessions now, so there is no separate badge.
+		expect(computeContextBadge(base())).toBeNull();
 	});
 
 	it('prefers the explicitly selected worktree branch over the create branch', () => {
+		// Branch preference only matters where the badge surfaces a branch — i.e.
+		// the unauthenticated worktree path.
 		const badge = computeContextBadge(
-			base({ worktreeDeleted: true, selectedWorktreeBranch: 'fix/bug', worktreeBranch: 'feat/login' })
+			base({
+				githubAuthenticated: false,
+				selectedWorktreeBranch: 'fix/bug',
+				worktreeBranch: 'feat/login'
+			})
 		);
 		expect(badge!.branch).toBe('fix/bug');
 	});
@@ -66,7 +67,6 @@ describe('computeContextBadge', () => {
 	it('shows project + branch when GitHub CLI is not authenticated (worktree)', () => {
 		const badge = computeContextBadge(base({ githubAuthenticated: false }));
 		expect(badge).not.toBeNull();
-		expect(badge!.deleted).toBe(false);
 		expect(badge!.branch).toBe('feat/login');
 		expect(badge!.title).toBe('my-app · Worktree branch: feat/login');
 	});
@@ -101,14 +101,11 @@ describe('computeContextBadge', () => {
 		expect(badge!.title).toBe('Project: my-app');
 	});
 
-	it('the deleted badge requires a branch name to surface', () => {
-		// A cleaned-up worktree always carries a branch in practice; guard the edge
-		// where one is missing. Authenticated + deleted suppresses the branch pill,
-		// but with no branch there is no worktree context to show → no badge.
+	it('an authenticated cleaned-up worktree shows no badge regardless of branch', () => {
+		// Authentication alone hands the slot to the branch pill — even with no
+		// branch resolved yet, there is no badge.
 		expect(
-			computeContextBadge(
-				base({ worktreeDeleted: true, worktreeBranch: null, selectedWorktreeBranch: null })
-			)
+			computeContextBadge(base({ worktreeBranch: null, selectedWorktreeBranch: null }))
 		).toBeNull();
 	});
 
@@ -121,7 +118,6 @@ describe('computeContextBadge', () => {
 		expect(badge).not.toBeNull();
 		expect(badge!.cloud).toBe(true);
 		expect(badge!.branch).toBeNull();
-		expect(badge!.deleted).toBe(false);
 		expect(badge!.title).toBe('my-app · Running on the cloud install');
 	});
 

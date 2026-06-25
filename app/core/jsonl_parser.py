@@ -28,6 +28,7 @@ from typing import List, Dict, Any, Optional, Generator
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.core.query_streaming import extract_mcp_image
 from app.core.system_message_filter import is_hidden_system_subtype
 
 logger = logging.getLogger(__name__)
@@ -1089,6 +1090,15 @@ def _transform_entries(
                             is_error = block.get("is_error", False)
                             tool_use_id = block.get("tool_use_id")
 
+                            # Reconstruct any inline screenshot (data URI) from MCP
+                            # image content blocks so reloaded sessions show the
+                            # screenshot below the tool call, just like live. The
+                            # image lives in the tool_result content blocks (and,
+                            # for some tools, in toolUseResult.content).
+                            screenshot = extract_mcp_image(raw_content)
+                            if not screenshot and isinstance(tool_result, dict):
+                                screenshot = extract_mcp_image(tool_result.get("content"))
+
                             # Handle content that can be string or list of content blocks
                             # Some tool results have content as [{'type': 'text', 'text': '...'}]
                             if isinstance(raw_content, list):
@@ -1175,6 +1185,8 @@ def _transform_entries(
                                 msg = messages[msg_idx]
                                 if msg.get("type") == "tool_use":
                                     msg["toolResult"] = output[:2000] if output else ""
+                                    if screenshot:
+                                        msg["toolScreenshot"] = screenshot
                                     if is_error:
                                         msg["toolStatus"] = "error"
                                     elif _is_background_ack_result(msg, output):

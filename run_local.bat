@@ -75,6 +75,19 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Dependencies installed
 
+REM Native-only deps (computer-use: mss + pynput). Best-effort - mirrors
+REM run_local.py. A failure here just disables computer-use; it must not
+REM block startup (so we do NOT exit on a non-zero errorlevel).
+if exist "requirements-native.txt" (
+    echo [INFO] Installing native ^(computer-use^) dependencies...
+    pip install -r requirements-native.txt
+    if !errorlevel! equ 0 (
+        echo [OK] Native ^(computer-use^) dependencies installed
+    ) else (
+        echo [WARN] Native deps failed - computer-use will be unavailable
+    )
+)
+
 REM Build frontend if npm is available
 where npm >nul 2>&1
 if %errorlevel% equ 0 (

@@ -146,8 +146,6 @@ def _run_query_patches(handler, fake_stream, created):
 
     # websocket helpers (lazy-imported inside run_query).
     import app.api.websocket as ws_mod
-    stack.enter_context(patch.object(ws_mod, "cancel_pending_cleanup", new=MagicMock()))
-    stack.enter_context(patch.object(ws_mod, "schedule_delayed_cleanup", new=MagicMock()))
     stack.enter_context(
         patch.object(ws_mod, "_active_chat_sessions", new={})
     )
@@ -175,6 +173,12 @@ def _count_followup_run_query_coros(created, handler):
 @pytest.mark.asyncio
 async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
     task_registry.reset_all()
+    # The parent launched this sub-agent in the background (its launch tool_use_id
+    # is the notification's tool_use_id "tu-1"); _background_launches is not reset
+    # per turn, so pre-setting it survives run_query's start-of-turn reset. Without
+    # it, the in-stream stash correctly suppresses the notification as a
+    # synchronous sub-agent whose result already returned inline.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("FULL SUBAGENT RESULT TEXT", encoding="utf-8")
 
@@ -224,6 +228,9 @@ async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
 @pytest.mark.asyncio
 async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
     task_registry.reset_all()
+    # Genuine background launch (tool_use_id "tu-1") so the foreground gate passes
+    # and the dedup under test (same uuid twice) is what suppresses the second.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("RESULT", encoding="utf-8")
 
@@ -267,6 +274,8 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
 async def test_already_notified_uuid_spawns_none(tmp_path):
     """If the uuid was already marked notified before the stream, no follow-up."""
     task_registry.reset_all()
+    # Genuine background launch so the dedup (mark_notified) is the thing under test.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("RESULT", encoding="utf-8")
     # Pre-arm: this exact (task, uuid) was already delivered.

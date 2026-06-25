@@ -18,14 +18,14 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import { messageCache } from '$lib/stores/message-cache';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { findStreamingAnchorIndex, shouldShowGapIndicator } from '$lib/stores/session/gap-indicator';
+	import { findStreamingAnchorIndex, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
 	import {
 		isNearBottom as computeIsNearBottom,
+		isUserScrollUpGesture,
 		nextStickToBottom,
 		shouldAutoScrollOnChange,
 		type ScrollMetrics
@@ -42,6 +42,7 @@
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import MediaLightbox from './MediaLightbox.svelte';
 
 	// Non-reactive scroll position cache to avoid triggering effects.
 	// Module-level so it persists across component instances.
@@ -74,14 +75,10 @@
 			activeSession.addSystemMessage(warning, 'rewind_warning');
 		}
 
-		// Clear stale messages from the store and IndexedDB cache.
+		// Clear stale messages from the store before reloading.
 		// Without this, the defensive check in the history handler would
 		// preserve old (broken) messages when the reload returns fewer/zero.
-		const sessionId = $activeSession.sessionId;
 		activeSession.clearMessages();
-		if (sessionId) {
-			messageCache.delete(sessionId);
-		}
 
 		activeSession.reloadSession(true);
 	}
@@ -196,14 +193,14 @@
 	// activity — the dead air after a completed tool call and before the next
 	// assistant message, where the model is thinking/generating the next tool_use
 	// and the chat otherwise looks frozen for many seconds. A trailing empty
-	// streaming synthetic is treated as transparent so it can't suppress this;
-	// active background tasks defer to the calm "waiting" indicator instead. See
+	// streaming synthetic is treated as transparent so it can't suppress this.
+	// Background tasks do NOT gate the dots — the main turn streams concurrently
+	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
 	const showGapIndicator = $derived(
 		shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
-			$activeSession.activeTasks?.length ?? 0,
 			chatPrefs?.showThinkingBlocks !== false
 		)
 	);
@@ -487,6 +484,53 @@
 		});
 	}
 
+	/**
+	 * Release stick-to-bottom in response to a genuine user scroll-up gesture.
+	 *
+	 * This is THE fix for "streaming yanks me back to the bottom even though I
+	 * scrolled up to read". While streaming, scrollToBottom() fires on every
+	 * delta, so programmaticScrollDepth is elevated almost continuously and
+	 * handleScroll keeps swallowing the user's scroll-up (the programmatic-scroll
+	 * guard) — shouldAutoScroll never flips false and the next message/tool call
+	 * drags them back down. Wheel/touch events are emitted ONLY for real user
+	 * input (never by a programmatic scrollTop assignment), so they let us
+	 * disengage immediately, regardless of the guard.
+	 *
+	 * Re-engagement is left to handleScroll: once disengaged, no programmatic
+	 * scroll fires, so the guard clears and a normal scroll back to the bottom
+	 * re-sticks via nextStickToBottom().
+	 */
+	function disengageAutoScroll() {
+		if (!shouldAutoScroll && !pendingScrollToBottom) return;
+		// Stop any in-flight programmatic scroll loop so it can't keep fighting
+		// the user after they've expressed intent to read earlier content.
+		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		pendingScrollToBottom = false;
+		shouldAutoScroll = false;
+		// eslint-disable-next-line no-console
+		if (STREAM_DEBUG) console.log(`[AS] disengageAutoScroll (user gesture) ST=${containerRef?.scrollTop} SH=${containerRef?.scrollHeight} CH=${containerRef?.clientHeight}`);
+	}
+
+	// Wheel/trackpad: an upward wheel is an unambiguous intent to read earlier
+	// content. Passive — we never preventDefault, just observe direction.
+	function handleWheel(e: WheelEvent) {
+		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
+	}
+
+	// Touch: dragging the finger DOWN reveals earlier content (scroll-up). Track
+	// the finger delta between touchmove events to detect that direction. Wheel
+	// events don't fire on touch devices, so this is the mobile equivalent.
+	let touchLastY = 0;
+	function handleTouchStart(e: TouchEvent) {
+		touchLastY = e.touches[0]?.clientY ?? 0;
+	}
+	function handleTouchMove(e: TouchEvent) {
+		const y = e.touches[0]?.clientY ?? touchLastY;
+		const touchDeltaY = y - touchLastY; // finger moved down (>0) ⇒ scrolling up
+		touchLastY = y;
+		if (isUserScrollUpGesture(0, touchDeltaY)) disengageAutoScroll();
+	}
+
 	// Restore scroll position only on mount - not on every reactive update
 	onMount(() => {
 		isMounted = true;
@@ -693,6 +737,65 @@
 		};
 	});
 
+	// Re-pin to the bottom once a late-loading image/video actually decodes.
+	//
+	// Screenshots (tool results) and generated media render via {@html} with no
+	// intrinsic size until the browser decodes them. The content effect's
+	// scrollToBottom() fires against the PRE-decode layout — zero-height media —
+	// so the new image lands below the fold. `load`/`loadeddata` don't bubble,
+	// but they DO fire during the capture phase on ancestors, so a single
+	// capture-phase listener on the container catches every child <img>/<video>
+	// the instant it finishes loading. We only re-pin while stick-to-bottom is
+	// still engaged, so a user who scrolled up to read isn't yanked back down.
+	$effect(() => {
+		if (!containerRef || !isMounted) return;
+		const el = containerRef;
+		const onMediaLoad = (e: Event) => {
+			const t = e.target as HTMLElement | null;
+			if (!t || (t.tagName !== 'IMG' && t.tagName !== 'VIDEO')) return;
+			if (!shouldAutoScroll) return;
+			// eslint-disable-next-line no-console
+			if (STREAM_DEBUG) console.log(`[AS] media load → scrollToBottom tag=${t.tagName} SH=${el.scrollHeight} ST=${el.scrollTop} CH=${el.clientHeight}`);
+			requestAnimationFrame(() => { if (shouldAutoScroll) scrollToBottom(); });
+		};
+		// capture: load/loadeddata do not bubble, so a delegated listener must
+		// observe the capture phase to receive them from descendant media.
+		el.addEventListener('load', onMediaLoad, true);
+		el.addEventListener('loadeddata', onMediaLoad, true);
+		return () => {
+			el.removeEventListener('load', onMediaLoad, true);
+			el.removeEventListener('loadeddata', onMediaLoad, true);
+		};
+	});
+
+	// Keep the bottom gap indicator in view when it appears.
+	//
+	// The gap dots render BELOW the last message, and they appear on transitions
+	// the content-scroll effect does NOT track as a "content change" — most often a
+	// tail tool flipping running→complete (its toolInput, the tracked signal, is
+	// unchanged; toolStatus is not tracked) or a trailing empty phantom clearing.
+	// So no scrollToBottom() fires for that transition and the freshly-shown dots
+	// land ~one indicator-height below the fold: they ARE in the DOM but sit just
+	// past the viewport bottom (captured live as ~30px short of true bottom). A
+	// page refresh re-pins to the true bottom, which is why "refresh brings the
+	// indicator back" — the dots were never missing, just off-screen.
+	//
+	// When the indicator is showing and we're still stuck to the bottom, pin across
+	// two frames (the StreamingIndicator's dots can lay out a frame late) so its
+	// full height is revealed. Gated on shouldAutoScroll so a user who scrolled up
+	// to read is not yanked back down.
+	$effect(() => {
+		if (!showGapIndicator || !containerRef || !isMounted) return;
+		if (!shouldAutoScroll) return;
+		tick().then(() => {
+			if (!shouldAutoScroll || !containerRef) return;
+			scrollToBottom();
+			requestAnimationFrame(() => {
+				if (shouldAutoScroll) scrollToBottom();
+			});
+		});
+	});
+
 	// Track previous values to detect actual content changes (not just re-renders)
 	let prevMessagesLength = $state(0);
 	let prevLastContent = $state('');
@@ -714,6 +817,11 @@
 			// During streaming, toolInput is not yet parsed — track partialToolInput
 			// so auto-scroll triggers as content streams in (e.g. TodoWrite).
 			else if (lastMsg.partialToolInput) content = lastMsg.partialToolInput;
+			// A screenshot (e.g. Claude-in-Chrome) landing on the last tool call
+			// grows the layout but never touches toolInput — fold its presence in
+			// so the scroll effect re-fires when it arrives. The image-load listener
+			// then re-pins once the browser has actually decoded it.
+			if (lastMsg.toolScreenshot) content += `|s:${lastMsg.toolScreenshot.length}`;
 		} else {
 			content = lastMsg.content || '';
 		}
@@ -809,8 +917,13 @@
 					pin();
 				});
 			} else {
-				// Normal streaming: single scroll is enough.
-				tick().then(() => requestAnimationFrame(scrollToBottom));
+				// Normal streaming: single scroll is enough. Re-check shouldAutoScroll
+				// in the deferred callback — the user may have scrolled up (wheel/touch
+				// disengage) in the frames between scheduling this and it running, and
+				// we must not yank them back down after they've released.
+				tick().then(() => requestAnimationFrame(() => {
+					if (shouldAutoScroll) scrollToBottom();
+				}));
 			}
 		}
 
@@ -824,6 +937,11 @@
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
+	onwheel={handleWheel}
+	ontouchstart={handleTouchStart}
+	ontouchmove={handleTouchMove}
+	role="log"
+	aria-label="Conversation messages"
 	class="flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if $activeSession.messages.length === 0}
@@ -899,20 +1017,30 @@
 							profileName={getProfileName(message)}
 						/>
 					{:else if message.type === 'text' || !message.type}
-						<AssistantMessage
-							content={message.content}
-							wsContent={message.streaming && messageIndex === lastStreamingMessageIndex ? $activeSession.wsStreamContent : undefined}
-							messageIndex={messageIndex}
-							messageId={message.id}
-							messageUuid={message.jsonlUuid}
-							sessionId={$activeSession.sessionId}
-							streaming={message.streaming && messageIndex === lastStreamingMessageIndex}
-							{hasPartialMessages}
-							{fileCheckpointingEnabled}
-							metadata={message.metadata}
-							onRewindComplete={handleRewindComplete}
-							profileName={getProfileName(message)}
-						/>
+						{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}
+						<!-- Suppress empty phantom assistant-text bubbles. The turn-start
+						     synthetic (empty streaming text) is re-appended to the tail during
+						     post-tool think-gaps and while parked on a subagent; when it is not
+						     the streaming anchor it renders only a bare "Name • time" header —
+						     no body, no indicator — the confusing empty "Principal Engineer …"
+						     bubble. The single activity signal is the bottom gap dots or the
+						     real streaming message's own inline cursor. -->
+						{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
+							<AssistantMessage
+								content={message.content}
+								wsContent={isStreamAnchor ? $activeSession.wsStreamContent : undefined}
+								messageIndex={messageIndex}
+								messageId={message.id}
+								messageUuid={message.jsonlUuid}
+								sessionId={$activeSession.sessionId}
+								streaming={isStreamAnchor}
+								{hasPartialMessages}
+								{fileCheckpointingEnabled}
+								metadata={message.metadata}
+								onRewindComplete={handleRewindComplete}
+								profileName={getProfileName(message)}
+							/>
+						{/if}
 					{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 						<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
 						{@const todos = extractTodosFromMessage(message)}
@@ -946,6 +1074,7 @@
 							status={message.toolStatus || 'running'}
 							streaming={message.streaming}
 							serverSide={message.serverSide ?? message.server_side ?? false}
+							screenshot={message.toolScreenshot}
 						/>
 					{:else if message.type === 'tool_result'}
 						<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
@@ -992,6 +1121,9 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Fullscreen media preview overlay (driven by the lightbox store) -->
+<MediaLightbox />
 
 <style>
 	/* Browser-native virtualization: skip paint/layout for off-screen messages.

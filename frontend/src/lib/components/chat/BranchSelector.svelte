@@ -48,10 +48,15 @@
 	let searchInputRef = $state<HTMLInputElement | null>(null);
 
 	// Current branch: the worktree's branch when locked, otherwise the repo's
-	// checked-out branch.
+	// checked-out branch. In worktree mode fall back to the loaded git branch
+	// only for a LIVE worktree (its git state IS the worktree's). For a
+	// cleaned-up worktree the git store holds the MAIN repo, so never fall back
+	// to it — show nothing rather than main's branch until it's recreated.
 	const currentBranch = $derived(
 		isWorktreeMode
-			? (worktreeBranch ?? $gitStatus?.current_branch ?? null)
+			? (worktreeBranch ??
+					($activeSession.worktreeDeleted ? null : $gitStatus?.current_branch) ??
+					null)
 			: ($gitStatus?.current_branch ?? null)
 	);
 

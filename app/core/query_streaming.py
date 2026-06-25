@@ -20,18 +20,65 @@ DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 def extract_mcp_image(content: Any) -> Optional[str]:
     """
-    Extract base64 image data from MCP-style content block lists.
+    Extract the first image from a tool-result content block list as a data URI.
 
-    MCP tools can return content as a list of blocks:
-    [{"type": "text", "text": "..."}, {"type": "image", "data": "base64...", "mimeType": "image/jpeg"}]
+    Image tool results (e.g. the Claude-in-Chrome browser tool / computer-use)
+    arrive in one of two block shapes, depending on the path:
 
-    Returns the first image's base64 data, or None if no image found.
+    1. Anthropic API format (what the Agent SDK actually delivers at runtime and
+       what is written to the JSONL transcript)::
+
+           {"type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg",
+                       "data": "<base64>"}}
+
+    2. MCP wire format (raw MCP server output, kept as a fallback)::
+
+           {"type": "image", "data": "<base64>", "mimeType": "image/png"}
+
+    Blocks may be plain dicts (parsed JSONL / MCP wire) or Pydantic content
+    objects (SDK ImageContent), so both forms are handled for each shape.
+
+    Returns a ready-to-render ``data:<mime>;base64,<data>`` URI for the first
+    image block, or None if the content has no image. The mime type defaults to
+    ``image/png`` when the block omits it.
     """
     if not isinstance(content, list):
         return None
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "image":
-            return block.get("data")
+        # dict-based blocks (Anthropic API format / MCP wire / parsed JSONL)
+        if isinstance(block, dict):
+            if block.get("type") != "image":
+                continue
+            # Anthropic API format: data nested under "source".
+            source = block.get("source")
+            if isinstance(source, dict) and source.get("data"):
+                mime = source.get("media_type") or source.get("mimeType") or "image/png"
+                return f"data:{mime};base64,{source['data']}"
+            # MCP wire format: flat "data" on the block.
+            if block.get("data"):
+                mime = block.get("mimeType") or block.get("mime_type") or "image/png"
+                return f"data:{mime};base64,{block['data']}"
+        # Pydantic content-block objects (e.g. ImageContent from the SDK)
+        elif getattr(block, "type", None) == "image":
+            # Anthropic API format: data nested under ``.source``.
+            source = getattr(block, "source", None)
+            if source is not None:
+                data = (
+                    source.get("data") if isinstance(source, dict)
+                    else getattr(source, "data", None)
+                )
+                if data:
+                    mime = (
+                        source.get("media_type") if isinstance(source, dict)
+                        else getattr(source, "media_type", None)
+                    ) or "image/png"
+                    return f"data:{mime};base64,{data}"
+            # MCP wire format: flat ``.data``.
+            data = getattr(block, "data", None)
+            if data:
+                mime = getattr(block, "mimeType", None) or "image/png"
+                return f"data:{mime};base64,{data}"
     return None
 
 
@@ -60,14 +107,26 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     # Extract text content so downstream consumers get usable strings instead of Python repr
     if isinstance(content, list):
         text_parts = []
+        has_image = False
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
             elif hasattr(block, "type") and hasattr(block, "text") and getattr(block, "type") == "text":
                 # Pydantic TextBlock objects from the Anthropic SDK
                 text_parts.append(getattr(block, "text", ""))
+            elif (isinstance(block, dict) and block.get("type") == "image") \
+                    or getattr(block, "type", None) == "image":
+                has_image = True
         if text_parts:
             content = "\n".join(text_parts)
+        elif has_image:
+            # Image-only result (e.g. a Chrome/computer screenshot or a Read of
+            # an image file). The image itself is surfaced separately via
+            # extract_mcp_image -> tool_screenshot, so the text output is empty.
+            # NEVER str() the block here: that dumps the raw base64 image dict as
+            # literal tool-output text — the {"type":"image","source":{...}} leak
+            # that showed up as the tool result on history reload.
+            return ""
         # else: fall through to str() for non-standard lists
 
     # Convert to string for size checking

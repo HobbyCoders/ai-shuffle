@@ -350,6 +350,45 @@ class TestToolHandling:
         assert msg.streaming is False
 
     @pytest.mark.asyncio
+    async def test_add_tool_result_stores_and_serializes_screenshot(self, streaming_session):
+        """A screenshot data URI must be stored on the tool_use message and
+        surfaced as ``toolScreenshot`` in the serialized payload."""
+        data_uri = "data:image/png;base64,iVBORscreenshot"
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-shot",
+            name="mcp__claude-in-chrome__computer",
+            tool_input={"action": "screenshot"},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-shot",
+            result="took a screenshot",
+            is_error=False,
+            screenshot=data_uri,
+        )
+
+        session = streaming_session.get_session("session-1")
+        msg = session.messages[0]
+        assert msg.tool_screenshot == data_uri
+        assert msg.to_dict()["toolScreenshot"] == data_uri
+
+    @pytest.mark.asyncio
+    async def test_add_tool_result_without_screenshot_omits_field(self, streaming_session):
+        """Tools with no image result must not carry a toolScreenshot key."""
+        await streaming_session.add_tool_use(
+            "session-1", tool_id="tool-x", name="Read", tool_input={}
+        )
+        await streaming_session.add_tool_result(
+            "session-1", tool_id="tool-x", result="contents", is_error=False
+        )
+
+        session = streaming_session.get_session("session-1")
+        msg = session.messages[0]
+        assert msg.tool_screenshot is None
+        assert "toolScreenshot" not in msg.to_dict()
+
+    @pytest.mark.asyncio
     async def test_tool_result_error_status(self, streaming_session):
         """Should mark tool as error when is_error=True."""
         await streaming_session.add_tool_use(
@@ -1074,3 +1113,104 @@ class TestMessageIdUniqueness:
         assert len(hex_part) == 12
         # Verify it's hex (would raise ValueError if not)
         int(hex_part, 16)
+
+
+# =============================================================================
+# Discard Empty Interrupted User Turn Tests
+# =============================================================================
+
+class TestDiscardEmptyUserTurn:
+    """Tests for discard_empty_user_turn — used when a user presses Stop before
+    any assistant output is produced. The orphan user message (which never gets
+    durably saved) is removed from the live store and its text returned so the
+    frontend can restore it to the input box."""
+
+    @pytest.mark.asyncio
+    async def test_discards_orphan_user_message(self, store):
+        """Stop before any output: the lone user message is removed and returned."""
+        await store.start_streaming("session-1", initial_messages=[])
+        await store.add_user_message("session-1", "draft me a poem", "user-1")
+        # End streaming as interrupted (no assistant output was produced).
+        await store.end_streaming("session-1", metadata={}, interrupted=True)
+
+        discarded = await store.discard_empty_user_turn("session-1")
+
+        assert discarded == "draft me a poem"
+        session = store.get_session("session-1")
+        assert all(m.role != "user" for m in session.messages)
+        assert session.needs_full_refresh is True
+
+    @pytest.mark.asyncio
+    async def test_keeps_turn_with_assistant_output(self, store):
+        """A turn that produced assistant text must NOT be discarded."""
+        await store.start_streaming("session-1", initial_messages=[])
+        await store.add_user_message("session-1", "hello", "user-1")
+        await store.start_assistant_message("session-1", "asst-1")
+        await store.append_text("session-1", "Hi there")
+        await store.end_streaming("session-1", metadata={}, interrupted=True)
+
+        discarded = await store.discard_empty_user_turn("session-1")
+
+        assert discarded is None
+        session = store.get_session("session-1")
+        assert any(m.role == "user" and m.content == "hello" for m in session.messages)
+
+    @pytest.mark.asyncio
+    async def test_preserves_prior_history(self, store):
+        """Only THIS turn's user message is removed; prior history is untouched."""
+        history = [
+            {"id": "h-1", "role": "user", "content": "first question"},
+            {"id": "h-2", "role": "assistant", "content": "first answer", "type": "text"},
+        ]
+        await store.start_streaming("session-1", initial_messages=history)
+        await store.add_user_message("session-1", "second question", "user-2")
+        await store.end_streaming("session-1", metadata={}, interrupted=True)
+
+        discarded = await store.discard_empty_user_turn("session-1")
+
+        assert discarded == "second question"
+        session = store.get_session("session-1")
+        # Prior history is intact (the new orphan prompt is the only thing removed).
+        # NB: end_streaming independently tags the last assistant message with a
+        # "[Stopped]" marker — that's existing behavior unrelated to discard — so
+        # assert on the user prompts, which is what discard governs.
+        user_contents = [m.content for m in session.messages if m.role == "user"]
+        assert user_contents == ["first question"]
+        assert any(m.role == "assistant" and m.content.startswith("first answer")
+                   for m in session.messages)
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_no_turn_message_added(self, store):
+        """If the turn added nothing (last message is history), discard is a no-op."""
+        history = [
+            {"id": "h-1", "role": "user", "content": "lonely user message"},
+        ]
+        await store.start_streaming("session-1", initial_messages=history)
+        # No add_user_message — simulate a turn that produced nothing at all.
+        await store.end_streaming("session-1", metadata={}, interrupted=True)
+
+        discarded = await store.discard_empty_user_turn("session-1")
+
+        assert discarded is None
+        session = store.get_session("session-1")
+        assert len(session.messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_op_on_nonexistent_session(self, store):
+        """Discard on a missing session returns None and does not raise."""
+        assert await store.discard_empty_user_turn("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_ignores_task_notification_user_message(self, store):
+        """A trailing SDK task-notification is not a user prompt — never discarded.
+
+        (In practice end_streaming filters these out first; this guards the
+        method directly in case it's called on un-filtered state.)"""
+        await store.start_streaming("session-1", initial_messages=[])
+        await store.add_user_message(
+            "session-1", "<task-notification>agent done</task-notification>", "user-1"
+        )
+
+        discarded = await store.discard_empty_user_turn("session-1")
+
+        assert discarded is None

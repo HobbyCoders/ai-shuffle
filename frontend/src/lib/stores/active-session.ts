@@ -37,7 +37,6 @@ import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 
 // Caches and helpers
-import { messageCache } from './message-cache';
 import { sessionEphemeralCache } from './session-cache';
 import { getOrCreateDeviceId } from './device-id';
 import { appData } from './app-data.svelte';
@@ -263,6 +262,7 @@ const internal: InternalMutableState = {
 	pendingTools: new Set(),
 	interruptPending: false,
 	awaitingNewSession: false,
+	stopRequestedBeforeSession: false,
 	worktreeCreationGeneration: 0,
 	worktreeCreateAbort: null,
 	interruptConfirmResolve: null,
@@ -370,7 +370,6 @@ const switcher = createSessionSwitcher({
 	wsSend: (data) => wsConn.send(data),
 	internal,
 	sessionEphemeralCache,
-	messageCache,
 	sessionPoller,
 	sessionState,
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },
@@ -432,10 +431,8 @@ const sessionInitModule = createSessionInit({
 	setState: (s) => { _state = s; },
 	internal,
 	sessionPoller,
-	sessionState,
 	wsConn,
 	switcher,
-	messageCache,
 	appData,
 	disconnect,
 	persistSession,

@@ -1093,3 +1093,30 @@ button, a, .clickable {
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
+/* ── Generated media (images / video / audio rendered inline in chat) ────────
+   Markup is produced by src/lib/utils/media.ts and injected via {@html}, so
+   these styles must be global (Svelte scoped styles do not reach {@html}). */
+.generated-media-container {
+	position: relative;
+}
+/* Hover/focus reveal for the download + expand overlay buttons */
+.media-overlay-buttons {
+	opacity: 0;
+}
+.generated-media-container:hover .media-overlay-buttons,
+.media-overlay-buttons:focus-within {
+	opacity: 1;
+}
+/* Touch devices have no hover — keep the controls visible */
+@media (hover: none) {
+	.media-overlay-buttons {
+		opacity: 1;
+	}
+}
+.generated-media-container .media-zoomable {
+	cursor: zoom-in;
+}
+.generated-media-container.generated-audio audio {
+	height: 2.25rem;
+}
+

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { KeyRound, Plug, Info, Image } from 'lucide-svelte';
-	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { KeyRound, Plug, Info, Image, AlertTriangle, RefreshCw } from 'lucide-svelte';
+	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
 
 	interface Props {
 		claudeLoginLoading: boolean;
@@ -14,6 +14,9 @@
 		onGithubTokenChange: (value: string) => void;
 		githubLoginLoading: boolean;
 		onStartClaudeOAuth: () => void;
+		/** Force a fresh OAuth login even if a credential already exists
+		 *  (recovers from an expired/unrefreshable token). */
+		onStartClaudeReauth: () => void;
 		onCompleteClaudeOAuth: () => void;
 		onConnectGithub: () => void;
 		onDisconnectGithub: () => void;
@@ -30,10 +33,17 @@
 		onGithubTokenChange,
 		githubLoginLoading,
 		onStartClaudeOAuth,
+		onStartClaudeReauth,
 		onCompleteClaudeOAuth,
 		onConnectGithub,
 		onDisconnectGithub,
 	}: Props = $props();
+
+	// Token present but expired/invalid: the file exists (so $claudeAuthenticated
+	// is true) yet the OAuth token can't be used — generations fail with 401 and
+	// there's no refresh token to renew it. Surface this honestly and steer the
+	// user to the Re-authenticate action.
+	let tokenExpired = $derived($claudeAuthenticated && !$claudeTokenValid);
 
 	// ----- Anthropic API key (self-contained: this section owns its state) -----
 	// This key is a Claude Code AUTHENTICATION method. When set, Claude Code
@@ -233,16 +243,16 @@
 		</div>
 		<div class="kc-body">
 			<h4>Claude account
-				{#if $claudeAuthenticated && !usingApiKeyAuth}<span class="sb ok">Active</span>
+				{#if tokenExpired}<span class="sb warn">Token expired — reconnect</span>
+				{:else if $claudeAuthenticated && !usingApiKeyAuth}<span class="sb ok">Active</span>
 				{:else if $claudeAuthenticated}<span class="sb off">Connected · overridden by API key</span>
 				{:else}<span class="sb off">Not connected</span>{/if}
 			</h4>
 			<p>Sign in with your Claude subscription. Used as the login method whenever no API key is set.</p>
 		</div>
 		<div class="kc-acts">
-			{#if $claudeAuthenticated}
-				<span class="kc-val">Authenticated</span>
-			{:else if claudeOAuthUrl}
+			{#if claudeOAuthUrl}
+				<!-- OAuth in progress (connect OR re-auth): paste the code from the browser. -->
 				<input
 					type="text"
 					value={claudeAuthCode}
@@ -253,6 +263,23 @@
 				<button type="button" class="ed-btn primary" onclick={onCompleteClaudeOAuth} disabled={claudeCompletingLogin || !claudeAuthCode}>
 					{claudeCompletingLogin ? '…' : 'Complete'}
 				</button>
+			{:else if $claudeAuthenticated}
+				<!-- Re-authenticate is ALWAYS available while connected — the primary
+				     recovery path when generations fail with an auth error (e.g. an
+				     expired token with no refresh token). When the token is still
+				     expired it becomes the prominent (primary-styled) action. -->
+				{#if !tokenExpired}<span class="kc-val authed">Authenticated</span>{/if}
+				<button
+					type="button"
+					class="ed-btn kc-reauth"
+					class:primary={tokenExpired}
+					onclick={onStartClaudeReauth}
+					disabled={claudeLoginLoading}
+					title="Force a fresh login even if currently connected — use this if generations fail with an auth error."
+				>
+					<RefreshCw />
+					{claudeLoginLoading ? '…' : 'Re-authenticate'}
+				</button>
 			{:else}
 				<button type="button" class="ed-btn primary" onclick={onStartClaudeOAuth} disabled={claudeLoginLoading}>
 					{claudeLoginLoading ? '…' : 'Connect'}
@@ -260,6 +287,13 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if tokenExpired}
+		<div class="kc-foot warn" role="alert">
+			<AlertTriangle />
+			<span>Your Claude token has expired and can't be refreshed automatically. Generations will fail with an authentication error until you <b>Re-authenticate</b> above.</span>
+		</div>
+	{/if}
 
 	<!-- Anthropic API key (API-key login method) -->
 	<div class="keycard">
@@ -440,11 +474,19 @@
 		font-size: 11.5px;
 		color: var(--muted-foreground);
 	}
+	/* The "Authenticated" status word reads green to match the "Active" badge
+	   (same --success token). Masked key values keep the muted .kc-val color. */
+	.kc-val.authed {
+		color: var(--success, #16a34a);
+	}
 	.kc-acts {
 		flex-shrink: 0;
 		display: flex;
 		gap: 8px;
 		align-items: center;
+		/* Vertically center the action column against the taller left body
+		   (the card itself stays flex-start so the icon aligns with the title). */
+		align-self: center;
 		flex-wrap: wrap;
 		justify-content: flex-end;
 	}
@@ -470,6 +512,15 @@
 		color: var(--muted-foreground);
 		background: var(--muted);
 	}
+	.sb.warn {
+		color: var(--warning, #d97706);
+		background: color-mix(in oklch, var(--warning, #d97706) 16%, transparent);
+	}
+	/* Re-authenticate keeps its icon compact and aligned with the label. */
+	.kc-reauth :global(svg) {
+		width: 14px;
+		height: 14px;
+	}
 	.kc-foot {
 		padding: 8px 18px 12px;
 		font-size: 12.5px;
@@ -479,6 +530,20 @@
 	}
 	.kc-foot.err {
 		color: var(--destructive);
+	}
+	/* Expired-token warning: icon + wrapped explanatory text. */
+	.kc-foot.warn {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		color: var(--warning, #d97706);
+		line-height: 1.5;
+	}
+	.kc-foot.warn :global(svg) {
+		width: 16px;
+		height: 16px;
+		flex-shrink: 0;
+		margin-top: 1px;
 	}
 
 	@media (max-width: 560px) {

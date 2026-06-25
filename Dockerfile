@@ -73,28 +73,25 @@ RUN node --version && npm --version && gh --version
 # socat relays Chrome's localhost-only DevTools port when CHROME_DEBUG=1 (one-time
 # extension sign-in/pairing).
 #
-# amd64: install REAL Google Chrome (glibc). Anthropic officially supports it and
-#   it avoids the Chromium native-messaging-host manifest-dir workaround
-#   (anthropics/claude-code#14391). google-chrome-stable pulls its own runtime deps.
-# arm64: Google Chrome publishes no arm64 Linux build, so install Chromium and
-#   symlink it to /usr/bin/google-chrome-stable (so CHROME_EXECUTABLE and
-#   start-chrome.sh resolve unchanged). Chromium reads user native-messaging host
-#   manifests from ~/.config/chromium/... but the CLI writes them under
-#   ~/.config/google-chrome/...; entrypoint.sh bridges that at runtime (#14391).
+# BOTH arches install Debian **Chromium** (this is python:3.11-slim / bookworm,
+# package name `chromium`) and symlink it to /usr/bin/google-chrome-stable so
+# CHROME_EXECUTABLE and start-chrome.sh resolve unchanged. We switched amd64 off
+# full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
+# in this headless single-tab setup; Chromium is far leaner and behaves
+# identically for the extension + native-messaging path used here.
+#
+# Native-messaging caveat (#14391): Chromium reads user native-messaging host
+# manifests from ~/.config/chromium/NativeMessagingHosts/, but the bundled CLI
+# writes them under ~/.config/google-chrome/NativeMessagingHosts/. entrypoint.sh
+# already bridges that at runtime for any chromium-resolving CHROME_EXECUTABLE,
+# so it now applies on amd64 too. The managed-policy files below are written to
+# BOTH /etc/opt/chrome/... and /etc/chromium/... so the force-install applies
+# regardless; Chromium honours /etc/chromium/policies/managed/.
 ARG TARGETARCH
 RUN set -eux; \
-    if [ "$TARGETARCH" = "arm64" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends \
-            chromium socat; \
-        ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable; \
-    else \
-        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-            | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; \
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
-            | tee /etc/apt/sources.list.d/google-chrome.list; \
-        apt-get update && apt-get install -y --no-install-recommends \
-            google-chrome-stable socat; \
-    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        chromium socat; \
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable; \
     rm -rf /var/lib/apt/lists/*
 
 # Auto-install the "Claude in Chrome" extension via enterprise policy so it
@@ -102,8 +99,9 @@ RUN set -eux; \
 # DeveloperToolsAvailability=1 lifts the default ban on DevTools for
 # force-installed extensions — the pairing/sign-in pages can only be reached
 # through DevTools in this headless setup (CHROME_DEBUG=1).
-# Written to both the Google Chrome (amd64) and Chromium (arm64) managed-policy
-# dirs so the force-install applies whichever browser this arch ships.
+# Written to both the Google Chrome (/etc/opt/chrome) and Chromium (/etc/chromium)
+# managed-policy dirs so the force-install applies regardless of which dir the
+# installed browser reads (we now ship Chromium on both arches → /etc/chromium).
 RUN echo '{"ExtensionInstallForcelist":["fcoeoabgfenejglbffodgkkbkcdhcgfn;https://clients2.google.com/service/update2/crx"],"DeveloperToolsAvailability":1}' \
       > /tmp/claude-extension.json && \
     mkdir -p /etc/opt/chrome/policies/managed /etc/chromium/policies/managed && \
@@ -147,10 +145,15 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-do
 RUN chown appuser:appuser /app
 
 # ── Claude in Chrome integration defaults ──
-# START_CHROME=1 launches headless Google Chrome at container start so the
-# bundled CLI's --chrome integration has a browser to drive (set 0 to disable).
-# CHROME_DEBUG=1 exposes DevTools on :9222 for the one-time extension sign-in.
+# START_CHROME=1 launches headless Chromium at container start so the bundled
+# CLI's --chrome integration has a browser to drive (set 0 to disable).
+# CHROME_CDP=1 binds DevTools to a localhost-only port so the AI Shuffle backend
+#   can proxy it for the in-app "Set up browser" panel (one-time sign-in/pairing
+#   with no exposed port). Set 0 to disable the in-app browser setup UI.
+# CHROME_DEBUG=1 additionally relays DevTools out to :9222 for manual/legacy
+#   access — prefer the in-app panel; this exposes the browser to the network.
 ENV START_CHROME=1 \
+    CHROME_CDP=1 \
     CHROME_DEBUG=0 \
     CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
 

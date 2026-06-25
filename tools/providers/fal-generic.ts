@@ -184,6 +184,7 @@ function getApiPath(outputType: string): string {
   switch (outputType) {
     case 'image': return '/api/generated-images/by-path';
     case 'video': return '/api/generated-videos/by-path';
+    case 'audio': return '/api/generated-audio/by-path';
     default: return '/api/files/by-path';
   }
 }

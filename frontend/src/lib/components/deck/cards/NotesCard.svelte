@@ -8,6 +8,7 @@
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
+	import { resizeToFitContent } from './notes-textarea-resize';
 	import './card-design-system.css';
 	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
 	import {
@@ -355,8 +356,10 @@
 		// Skip auto-resize on mobile/touch — let the textarea scroll internally
 		// to prevent the view from jumping when the virtual keyboard is open
 		if (mobile || window.matchMedia('(pointer: coarse)').matches) return;
-		textareaEl.style.height = 'auto';
-		textareaEl.style.height = textareaEl.scrollHeight + 'px';
+		// Resize while preserving the editor column's scroll position, so typing
+		// past the viewport doesn't yank the view to the top (see helper docs).
+		const scroller = textareaEl.closest('.ns-editorcol') as HTMLElement | null;
+		resizeToFitContent(textareaEl, scroller);
 	}
 
 	// Auto-resize when textarea is bound or content changes externally (e.g. opening a note)

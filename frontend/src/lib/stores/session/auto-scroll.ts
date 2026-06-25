@@ -69,11 +69,50 @@ export const NEAR_BOTTOM_THRESHOLD = 64;
 export const USER_SCROLL_UP_MIN_DELTA = 24;
 
 /**
+ * Minimum upward wheel delta (px) treated as a deliberate scroll-up gesture.
+ * A WheelEvent is pure user input — a programmatic `scrollTop =` assignment
+ * never emits one — so even a single upward notch is intent. Kept just above 0
+ * so a horizontal/precision wheel event carrying deltaY of ±epsilon doesn't
+ * register as a scroll-up.
+ */
+export const USER_WHEEL_UP_MIN_DELTA = 1;
+
+/**
+ * Minimum downward finger drag (px) on a touch device treated as a scroll-up
+ * gesture. On a touchscreen, dragging the finger DOWN reveals earlier content
+ * (scrollTop decreases) — i.e. a scroll-up. Small but non-zero so the jitter of
+ * a stationary press / tap isn't misread as a drag.
+ */
+export const USER_TOUCH_DRAG_MIN = 8;
+
+/**
  * Whether the viewport is at/near the bottom of the container (within
  * `threshold` px). When true the chat should stick to the bottom.
  */
 export function isNearBottom(m: ScrollMetrics, threshold: number = NEAR_BOTTOM_THRESHOLD): boolean {
 	return distanceFromBottom(m) <= threshold;
+}
+
+/**
+ * Whether a raw input gesture means the user is deliberately scrolling UP
+ * (toward earlier content), so auto-scroll should release immediately.
+ *
+ * THIS IS THE STREAMING DISENGAGE PATH. Inferring scroll-up from scrollTop
+ * deltas alone is unreliable mid-stream: the component fires scrollToBottom()
+ * on every delta, which keeps its programmatic-scroll guard engaged almost
+ * continuously, so the scroll-position handler keeps ignoring the user's
+ * scroll-up and the next delta yanks them back down. Wheel/touch events are
+ * emitted ONLY for real user input (never by a programmatic scrollTop
+ * assignment), so they let us release even while that guard is up.
+ *
+ * @param wheelDeltaY  WheelEvent.deltaY (negative = up). Pass 0 when not a wheel event.
+ * @param touchDeltaY  Change in finger clientY since the last touchmove
+ *                     (positive = finger moved down = content scrolls up). Pass 0 when not a touch event.
+ */
+export function isUserScrollUpGesture(wheelDeltaY: number, touchDeltaY: number): boolean {
+	if (wheelDeltaY <= -USER_WHEEL_UP_MIN_DELTA) return true;
+	if (touchDeltaY >= USER_TOUCH_DRAG_MIN) return true;
+	return false;
 }
 
 /**

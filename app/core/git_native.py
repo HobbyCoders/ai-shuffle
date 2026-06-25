@@ -129,6 +129,35 @@ def _resolve_oid(repo: "pygit2.Repository", ref_str: str) -> Optional["pygit2.Oi
         return None
 
 
+def _branch_differs_from_base(
+    repo: "pygit2.Repository",
+    head_oid: "pygit2.Oid",
+    base_oid: "pygit2.Oid",
+) -> bool:
+    """Whether *head_oid* carries real content over *base_oid*.
+
+    Equivalent to "the three-dot diff ``base...HEAD`` is non-empty": True iff
+    HEAD's tree differs from the merge-base tree. Commit *count* ahead is a poor
+    proxy for "has something to ship" — empty commits or changes that cancel out
+    leave commits "ahead" with zero net diff (and a cleaned-up/merged worktree
+    branch can sit ahead by count yet add nothing). Trees are content-addressed,
+    so comparing the two root tree Oids is an exact O(1) check (no diff walk).
+
+    On any failure we report True so callers fall back to their commit-count
+    signal — i.e. never hide a control that should be shown.
+    """
+    try:
+        merge_base_oid = repo.merge_base(head_oid, base_oid)
+        if merge_base_oid is None:
+            # Unrelated histories — treat as differing (there is content to ship).
+            return True
+        head_tree = repo.get(head_oid).peel(pygit2.Tree).id
+        base_tree = repo.get(merge_base_oid).peel(pygit2.Tree).id
+        return head_tree != base_tree
+    except Exception:
+        return True
+
+
 def _format_timestamp(epoch: int, offset_minutes: int) -> str:
     """Format a commit timestamp as ISO 8601 with timezone offset."""
     tz = timezone(timedelta(minutes=offset_minutes))
@@ -356,6 +385,7 @@ class GitNativeReader:
             "untracked": [],
             "ahead": 0,
             "behind": 0,
+            "differs_from_base": False,
             "conflicts": [],
         }
 
@@ -442,6 +472,13 @@ class GitNativeReader:
                             ahead, behind = repo.ahead_behind(local_oid, remote_oid)
                             status["ahead"] = ahead
                             status["behind"] = behind
+                            # Only commits *with net content* over the base count as
+                            # shippable — see _branch_differs_from_base. Skip the
+                            # check when not ahead (nothing committed beyond base).
+                            if ahead > 0:
+                                status["differs_from_base"] = _branch_differs_from_base(
+                                    repo, local_oid, remote_oid
+                                )
                         except Exception:
                             pass
                         break

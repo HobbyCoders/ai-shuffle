@@ -164,3 +164,118 @@ def test_local_session_returns_none(mocks):
     result = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
     assert result == (None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# No linked row but branch + project present → CREATE + link a fresh worktree
+# (the never-a-dead-end path). These exercise the create-from-branch fallback.
+# ---------------------------------------------------------------------------
+
+def _patch_create_path(mocks, monkeypatch, *, branches, create_returns):
+    """Wire up the DB/manager boundary used by the create+link fallback."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-1",
+    }
+    monkeypatch.setattr(
+        qo.database, "get_git_repository_by_project",
+        MagicMock(return_value={"default_branch": "main"}),
+    )
+    monkeypatch.setattr(
+        qo.database, "get_project",
+        MagicMock(return_value={"id": "proj-1", "path": "/repo"}),
+    )
+    update_session = MagicMock(name="update_session")
+    monkeypatch.setattr(qo.database, "update_session", update_session)
+    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: "/repo")
+    mocks.wm.git_service.list_branches.return_value = branches
+    mocks.wm.create_worktree.return_value = create_returns
+    mocks.wm.is_worktree_valid.return_value = True
+    return update_session
+
+
+def test_no_row_with_existing_branch_creates_and_links(mocks, monkeypatch):
+    """worktree_id NULLed but branch still exists locally → reuse it, link the new row."""
+    new_wt = _wt(status="active", wt_id="wt-new", branch="feat/recreate")
+    update_session = _patch_create_path(
+        mocks,
+        monkeypatch,
+        branches=[{"name": "feat/recreate", "is_remote": False}],
+        create_returns=new_wt,
+    )
+
+    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    assert working_dir == "/abs/.worktrees/feat/recreate"
+    assert info == {"branch": "feat/recreate", "base_branch": "main"}
+    # Reuse existing branch: create_new_branch False, no base_branch.
+    mocks.wm.create_worktree.assert_called_once_with(
+        "proj-1", "feat/recreate", create_new_branch=False, base_branch=None
+    )
+    update_session.assert_called_once_with(SESSION_ID, worktree_id="wt-new")
+
+
+def test_no_row_missing_branch_creates_new_off_default(mocks, monkeypatch):
+    """Branch is gone (merged + pruned) → create a fresh branch off the default."""
+    new_wt = _wt(status="active", wt_id="wt-new2", branch="feat/recreate")
+    _patch_create_path(
+        mocks,
+        monkeypatch,
+        branches=[{"name": "main", "is_remote": False}],
+        create_returns=new_wt,
+    )
+
+    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    assert working_dir and working_dir.startswith("/abs/")
+    # Branch missing → create_new_branch True, based on the default branch.
+    mocks.wm.create_worktree.assert_called_once_with(
+        "proj-1", "feat/recreate", create_new_branch=True, base_branch="main"
+    )
+
+
+def test_no_row_create_failure_raises_unavailable(mocks, monkeypatch):
+    """If git can't create the worktree, surface WorktreeUnavailableError — never main."""
+    _patch_create_path(
+        mocks,
+        monkeypatch,
+        branches=[{"name": "feat/recreate", "is_remote": False}],
+        create_returns=None,
+    )
+    mocks.wm.create_worktree.side_effect = RuntimeError("git add-worktree boom")
+
+    with pytest.raises(WorktreeUnavailableError) as ei:
+        _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert ei.value.branch_name == "feat/recreate"
+    assert "git add-worktree boom" in str(ei.value)
+
+
+def test_no_row_non_git_project_raises(mocks, monkeypatch):
+    """A worktree-flagged session in a non-git project can't recreate → raises."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-1",
+    }
+    monkeypatch.setattr(
+        qo.database, "get_git_repository_by_project", MagicMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        qo.database, "get_project",
+        MagicMock(return_value={"id": "proj-1", "path": "/repo"}),
+    )
+
+    with pytest.raises(WorktreeUnavailableError):
+        _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    mocks.wm.create_worktree.assert_not_called()

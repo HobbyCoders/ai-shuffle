@@ -368,28 +368,20 @@ class WorktreeManager:
         """
         Check if a worktree is valid on disk.
 
-        A valid git worktree has:
-        1. The directory exists
-        2. Contains a .git file (not directory) that points to the main repo
+        Availability is exactly two rules:
+        1. The folder exists, AND
+        2. It contains a git repo (``.git`` present).
 
-        An empty folder or folder without .git file is NOT a valid worktree.
+        ``.git`` may be a FILE (standard linked worktree pointing at the main
+        repo) OR a DIRECTORY (a regular checkout) — both count as valid.
         """
         if not worktree:
             return False
         worktree_path = get_worktree_working_dir_as_path(worktree)
         if not worktree_path.exists():
             return False
-
-        # Check for .git file (worktrees have a .git FILE, not directory)
-        git_file = worktree_path / ".git"
-        if not git_file.exists():
-            return False
-
-        # .git should be a file (pointing to main repo), not a directory
-        if git_file.is_dir():
-            return False
-
-        return True
+        # A valid git repo: .git present as a file (standard worktree) OR a directory.
+        return (worktree_path / ".git").exists()
 
     def create_worktree(
         self,
@@ -1019,20 +1011,26 @@ class WorktreeManager:
 
     def recreate_worktree(self, worktree_id: str) -> Dict:
         """
-        Recreate a completed worktree so the user can resume the session.
+        Recreate a worktree from its branch (last git state) so the user can
+        resume the session — regardless of the record's prior status.
 
-        Creates a new git worktree with the same branch name (new branch from
-        default branch, since the old branch was merged and deleted). Updates
-        the existing DB record back to ACTIVE with the new path.
+        Worktree sessions are never a dead end: this recreates from ANY status
+        (COMPLETED, DELETED, ORPHANED, or ACTIVE-but-invalid-on-disk). It reuses
+        the existing branch if it still exists locally, otherwise creates a new
+        branch off the default branch. The existing DB record is flipped back to
+        ACTIVE with the new path.
+
+        The only fast path: if the record is ACTIVE and still valid on disk, the
+        existing worktree is returned unchanged.
 
         Args:
-            worktree_id: The completed worktree to recreate
+            worktree_id: The worktree record to recreate
 
         Returns:
             Updated worktree dict
 
         Raises:
-            WorktreeError: If worktree not found, not completed, or recreation fails
+            WorktreeError: If worktree not found or git recreation fails
         """
         worktree = database.get_worktree(worktree_id)
         if not worktree:
@@ -1044,11 +1042,8 @@ class WorktreeManager:
                 return worktree
             # Active but missing on disk — proceed with recreation
 
-        if worktree["status"] not in (WorktreeStatus.COMPLETED, WorktreeStatus.ACTIVE):
-            raise WorktreeError(
-                f"Worktree {worktree_id} has status '{worktree['status']}' — "
-                f"only completed worktrees can be reopened"
-            )
+        # Recreate regardless of prior status (COMPLETED, DELETED, ORPHANED, or
+        # ACTIVE-but-invalid). A worktree session must always be reopenable.
 
         # Get repository and project
         repo = database.get_git_repository(worktree["repository_id"])
@@ -1119,7 +1114,7 @@ class WorktreeManager:
 
         logger.info(
             f"Recreated worktree {worktree_id} at {worktree_path} "
-            f"for branch {branch_name} (was COMPLETED)"
+            f"for branch {branch_name} (prior status was {worktree['status']})"
         )
         return updated
 

@@ -5,12 +5,18 @@
 	 */
 	import type { ChatMessage } from '$lib/stores/types';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import ToolScreenshot from './ToolScreenshot.svelte';
 
 	interface Props {
 		tools: ChatMessage[];
 	}
 
 	let { tools }: Props = $props();
+
+	// Tools whose result carried a screenshot. These are hoisted out of the
+	// collapsible group and rendered below it — otherwise a screenshot is hidden
+	// inside the collapsed <details> where the user would never see it.
+	const screenshotTools = $derived(tools.filter(t => t.toolScreenshot));
 
 	let userToggled = $state(false);
 	let detailsOpen = $state(false);
@@ -74,6 +80,7 @@
 			</summary>
 			<div class="px-3 pt-2 pb-3 space-y-2">
 				{#each tools as tool (tool.id)}
+					<!-- screenshot intentionally omitted here — hoisted below the group -->
 					<ToolUseMessage
 						name={tool.toolName || 'Tool'}
 						input={tool.toolInput}
@@ -86,6 +93,10 @@
 				{/each}
 			</div>
 		</details>
+		<!-- Screenshots hoisted out of the collapsed group so they stay visible. -->
+		{#each screenshotTools as tool (tool.id)}
+			<ToolScreenshot screenshot={tool.toolScreenshot ?? ''} name={tool.toolName || 'Tool'} />
+		{/each}
 	</div>
 </div>
 

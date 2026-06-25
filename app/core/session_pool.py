@@ -13,11 +13,12 @@ user messages, avoiding repeated subprocess spawns and JSONL history replays.
 
 import asyncio
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, Awaitable
 
 from claude_agent_sdk import ClaudeAgentOptions
 
@@ -79,6 +80,68 @@ def is_subprocess_alive(state: SessionState) -> bool:
     return state.adapter.is_alive()
 
 
+def subprocess_pid(state: SessionState) -> Optional[int]:
+    """Best-effort PID of the SDK subprocess for a session, or None.
+
+    Used by the dead-tree reaper to record which process tree to reap once
+    the SDK subprocess has terminated. Never raises.
+    """
+    try:
+        client = state.adapter.sdk_client
+        if client is None:
+            return None
+        from app.core.sdk_process_handle import SdkProcessHandle
+        return SdkProcessHandle(client).pid
+    except Exception:
+        return None
+
+
+def _host_available_mb() -> Optional[float]:
+    """Host MemAvailable in MB from /proc/meminfo, or None if unavailable.
+
+    MemAvailable already accounts for reclaimable page cache, so it is a good
+    proxy for "how close is the WHOLE host to OOM" — which, on a shared host
+    with little/no swap, is exactly what trips the global kernel OOM-killer that
+    reaps our subprocesses. Whole-host, every-container view. Returns None on any
+    error (non-Linux, missing file) so callers fail open.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+def mark_subprocess_oom_killable(state: SessionState) -> None:
+    """Make the SDK subprocess the kernel's preferred OOM-kill victim.
+
+    Writes a positive ``oom_score_adj`` to the subprocess; subagents it forks
+    afterward inherit the value. Under a host OOM the kernel then reaps one
+    session's disposable, auto-recoverable node subprocess instead of the Python
+    orchestrator (PID 1, which runs EVERY session) or the database. Raising the
+    score needs no privilege — only lowering does — so this works in an
+    unprivileged container. Best-effort: never raises, never blocks a turn.
+    """
+    try:
+        from app.core.config import settings
+        adj = int(getattr(settings, "sdk_subprocess_oom_score_adj", 0) or 0)
+    except Exception:
+        adj = 0
+    if adj <= 0:
+        return
+    pid = subprocess_pid(state)
+    if not pid:
+        return
+    try:
+        with open(f"/proc/{pid}/oom_score_adj", "w") as f:
+            f.write(str(min(adj, 1000)))
+    except Exception:
+        pass  # non-Linux, missing /proc, or denied — degrade silently
+
+
 async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> None:
     """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
@@ -90,6 +153,167 @@ async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> N
         logger.debug(f"[Pool] Disconnected adapter for session {session_id}")
     except Exception as e:
         logger.warning(f"[Pool] Error during graceful disconnect for {session_id}: {e}")
+
+
+# ─── Dead process-tree reaper ─────────────────────────────────────────────
+#
+# When an SDK subprocess terminates (natural exit, eviction-disconnect, or a
+# silently-dead subprocess we removed), it can leave behind orphaned descendant
+# processes — e.g. the node CLIs spawned for each subagent in a large fan-out.
+# These orphans never get cleaned up by the normal lifecycle and show up as the
+# "N child processes but pool size is M" leak.
+#
+# We record the PID of each TERMINATED session's subprocess into a bounded
+# registry. reap_terminated_process_trees() then walks the descendants of those
+# PIDs and kills any that are still alive. This only ever touches the process
+# tree of a subprocess that has ALREADY terminated — it never signals a live
+# session. (Note: once the parent PID is gone the OS reparents orphans, so we
+# snapshot the descendant set at record time and reap by that snapshot.)
+
+# Bounded set of (pid, [descendant_pids]) snapshots awaiting reaping.
+_terminated_trees: "OrderedDict[int, list[int]]" = OrderedDict()
+_TERMINATED_TREES_MAX = 256
+
+
+def snapshot_descendants(pid: Optional[int]) -> list[int]:
+    """Return the PIDs of all live descendants of `pid` (recursive), or [].
+
+    Must be called WHILE the parent is still alive — once the parent exits the
+    OS reparents orphans and they can no longer be discovered via the parent.
+    Never raises.
+    """
+    if not pid:
+        return []
+    try:
+        import psutil
+    except ImportError:
+        return []
+    try:
+        return [c.pid for c in psutil.Process(pid).children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+        return []
+
+
+def record_terminated_subprocess(pid: Optional[int], descendants: Optional[list[int]] = None) -> None:
+    """Record a now-terminated SDK subprocess's descendant tree for reaping.
+
+    Pass `descendants` captured via snapshot_descendants() BEFORE the parent
+    exited; if omitted we try to snapshot now (only useful if the parent is
+    still resolvable). Safe to call with None / without psutil — no-ops.
+    """
+    if not pid:
+        return
+    if descendants is None:
+        descendants = snapshot_descendants(pid)
+    if not descendants:
+        return
+    _terminated_trees[pid] = descendants
+    _terminated_trees.move_to_end(pid)
+    while len(_terminated_trees) > _TERMINATED_TREES_MAX:
+        _terminated_trees.popitem(last=False)
+
+
+def reap_terminated_process_trees() -> int:
+    """Kill orphaned descendants of subprocesses that have already terminated.
+
+    Walks each recorded terminated-subprocess descendant snapshot and, for any
+    descendant PID that is BOTH still alive AND no longer has a live ancestor
+    inside our own server process, sends SIGTERM (then SIGKILL on stragglers).
+
+    This is process hygiene only — it operates exclusively on the recorded
+    descendants of subprocesses that have already exited, so it can never kill
+    a live session. Returns the number of orphans reaped.
+
+    Safe no-op if psutil is unavailable or there is nothing to reap.
+    """
+    if not _terminated_trees:
+        return 0
+    try:
+        import psutil
+    except ImportError:
+        _terminated_trees.clear()
+        return 0
+
+    reaped = 0
+    own_pid = os.getpid()
+    # PIDs of all SDK subprocesses we currently know are LIVE — descendants of
+    # these must never be touched (they belong to an active session).
+    live_subprocess_pids: set[int] = set()
+    try:
+        if _session_pool is not None:
+            for st in _session_pool._pool.values():
+                p = subprocess_pid(st)
+                if p and is_subprocess_alive(st):
+                    live_subprocess_pids.add(p)
+    except Exception:
+        pass
+
+    def _has_live_protected_ancestor(proc: "psutil.Process") -> bool:
+        """True if the process descends from a still-live SDK subprocess.
+
+        Guards against killing a descendant that, after the original parent
+        died, happens to share a PID-reuse or got reparented under a new live
+        session. We walk up to our own server PID; if we cross a live SDK
+        subprocess PID on the way, the process is protected.
+        """
+        try:
+            cur = proc
+            for _ in range(64):  # bounded walk
+                ppid = cur.ppid()
+                if ppid in live_subprocess_pids:
+                    return True
+                if ppid in (0, 1) or ppid == own_pid:
+                    return False
+                cur = psutil.Process(ppid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            return False
+        return False
+
+    to_kill: list["psutil.Process"] = []
+    for parent_pid, descendant_pids in list(_terminated_trees.items()):
+        # If the recorded parent is somehow alive again, skip — only reap trees
+        # whose parent has genuinely terminated.
+        try:
+            if psutil.pid_exists(parent_pid) and psutil.Process(parent_pid).is_running():
+                # Parent still around (rare PID reuse) — leave its tree alone.
+                _terminated_trees.pop(parent_pid, None)
+                continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            pass
+        for dpid in descendant_pids:
+            try:
+                proc = psutil.Process(dpid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                continue
+            if _has_live_protected_ancestor(proc):
+                continue
+            to_kill.append(proc)
+        _terminated_trees.pop(parent_pid, None)
+
+    if not to_kill:
+        return 0
+
+    # SIGTERM first, then SIGKILL the stragglers.
+    for proc in to_kill:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            continue
+    gone, alive = psutil.wait_procs(to_kill, timeout=2.0)
+    reaped += len(gone)
+    for proc in alive:
+        try:
+            proc.kill()
+            reaped += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            continue
+
+    if reaped:
+        logger.warning(
+            f"[Pool] Reaped {reaped} orphaned descendant process(es) of "
+            f"terminated SDK subprocess(es)"
+        )
+    return reaped
 
 
 class SessionPool:
@@ -110,6 +334,46 @@ class SessionPool:
         self._pool: OrderedDict[str, SessionState] = OrderedDict()
         self._max_size = max(1, max_size)
         self._eviction_lock = asyncio.Lock()
+        # Optional async hook fired from _do_evict AFTER a session leaves the pool
+        # (LRU + idle paths, which both funnel through _do_evict). It lets a higher
+        # layer tear down the per-session artifacts the pool itself knows nothing
+        # about — the live-store message buffer and the task registry — so a
+        # session's lifecycle is driven by ONE clock (pool membership) instead of a
+        # separate cleanup timer. See SessionPool.set_eviction_callback and the
+        # resource_monitor wiring. The pool stays decoupled: it never imports the
+        # live store or registry; the callback is injected at startup.
+        # NOTE: dead-eviction (evict_dead) does NOT go through _do_evict and is
+        # cleaned by the resource monitor directly, so it does not double-fire here.
+        self._eviction_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+
+    def set_eviction_callback(
+        self, callback: Optional[Callable[[str, str], Awaitable[None]]]
+    ) -> None:
+        """Register the async hook fired after a session is evicted via _do_evict.
+
+        The callback receives ``(session_id, reason)`` where reason ∈
+        {"lru", "lru_force", "idle"}. Injected at startup so the pool need not
+        import the live store or task registry. Passing ``None`` clears it.
+        """
+        self._eviction_callback = callback
+
+    def _has_background_work(self, session_id: str) -> bool:
+        """True iff a backgrounded sub-agent is still running for this session.
+
+        Lazy-imports the task registry (a leaf module that imports nothing back)
+        to avoid an import cycle while keeping ONE source of truth for the busy
+        signal. A session that is parked on an in-flight background sub-agent looks
+        idle to ``is_streaming`` (its parent turn already returned), so without this
+        check LRU/idle eviction would disconnect the pooled SDK client out from
+        under the running sub-agent — killing it mid-run and stranding the parent.
+        Defensive: any failure resolves to ``False`` (never block eviction on a
+        registry hiccup; the hard-cap force path remains the ultimate bound).
+        """
+        try:
+            from app.core.task_registry import task_registry
+            return task_registry.has_active_background_agent(session_id)
+        except Exception:
+            return False
 
     @property
     def max_size(self) -> int:
@@ -151,6 +415,88 @@ class SessionPool:
         """
         return len(self._pool) >= self.hard_cap
 
+    def admission_check(self) -> Optional[str]:
+        """Admission backpressure: decide whether a NEW session may be admitted.
+
+        This is the non-destructive alternative to a watchdog that reaps
+        in-flight work. When the box is at a ceiling (pool hard cap, too many
+        descendant processes from subagent fan-out, or RAM), we REFUSE to admit
+        a new top-level session rather than killing a running one.
+
+        Returns None if admission is allowed, or a human-readable refusal reason
+        string if the new session should be rejected. Never terminates anything.
+        """
+        # 1) Pool hard cap (subprocess count for top-level sessions).
+        if self.is_at_hard_cap():
+            return (
+                f"server busy: session pool at hard cap "
+                f"({len(self._pool)}/{self.hard_cap})"
+            )
+
+        # 2) Host memory floor. The crash that stops live sessions is the GLOBAL
+        #    kernel OOM-killer (NOT a cgroup limit — this container has none) SIGKILLing
+        #    our node subprocesses when the WHOLE host is out of memory, which is
+        #    catastrophic with little/no swap. When host MemAvailable is below the
+        #    floor, refuse to admit a NEW top-level session so we stop piling on at
+        #    the cliff — existing sessions and their subagent fan-out keep running.
+        #    This is the only check that sees the whole host (every container), not
+        #    just our own tree. Fails open (None) on any read error.
+        try:
+            from app.core.config import settings
+            min_avail_mb = getattr(settings, "sdk_admission_min_available_mb", 0) or 0
+        except Exception:
+            min_avail_mb = 0
+        if min_avail_mb > 0:
+            avail_mb = _host_available_mb()
+            if avail_mb is not None and avail_mb < min_avail_mb:
+                return (
+                    f"host low on memory: {avail_mb:.0f}MB available "
+                    f"< floor {min_avail_mb}MB"
+                )
+
+        # 3) Process / RAM ceiling (covers subagent node subprocess fan-out,
+        #    which is NOT counted by the pool). Configurable; disabled at 0.
+        try:
+            from app.core.config import settings
+            max_children = getattr(settings, "sdk_max_child_processes", 0) or 0
+            max_rss_mb = getattr(settings, "sdk_admission_rss_mb", 0) or 0
+        except Exception:
+            max_children = 0
+            max_rss_mb = 0
+
+        if max_children <= 0 and max_rss_mb <= 0:
+            return None  # ceiling checks disabled
+
+        try:
+            import psutil
+            proc = psutil.Process(os.getpid())
+            if max_children > 0:
+                child_count = len(proc.children(recursive=True))
+                if child_count >= max_children:
+                    return (
+                        f"server busy: {child_count} descendant processes "
+                        f">= ceiling {max_children}"
+                    )
+            if max_rss_mb > 0:
+                tree_rss = proc.memory_info().rss
+                for c in proc.children(recursive=True):
+                    try:
+                        tree_rss += c.memory_info().rss
+                    except Exception:
+                        continue
+                tree_rss_mb = tree_rss / (1024 * 1024)
+                if tree_rss_mb >= max_rss_mb:
+                    return (
+                        f"server busy: tree RSS {tree_rss_mb:.0f}MB "
+                        f">= ceiling {max_rss_mb}MB"
+                    )
+        except ImportError:
+            return None  # psutil unavailable — cannot enforce, allow
+        except Exception:
+            return None  # never block admission on a measurement error
+
+        return None
+
     async def evict_if_needed(self) -> Optional[str]:
         """If pool is at capacity, evict the LRU non-streaming session.
 
@@ -165,39 +511,68 @@ class SessionPool:
             if len(self._pool) < self._max_size:
                 return None
 
-            # Find the LRU session that is NOT streaming
+            # Find the LRU session that is neither streaming NOR parked on an
+            # in-flight background sub-agent. Evicting either would disconnect the
+            # pooled SDK client out from under live work: a streaming turn, or a
+            # backgrounded sub-agent whose parent turn already returned (parked).
             for session_id, state in self._pool.items():
-                if not state.is_streaming:
-                    return await self._do_evict(session_id, state)
+                if not state.is_streaming and not self._has_background_work(session_id):
+                    return await self._do_evict(session_id, state, "lru")
 
-            # All sessions are streaming — allow temporary over-capacity
-            # up to the hard cap
+            # Every session is busy (streaming or running a background sub-agent)
+            # — allow temporary over-capacity up to the hard cap.
             hard_cap = self.hard_cap
             if len(self._pool) < hard_cap:
                 logger.warning(
-                    f"[Pool] At capacity ({self._max_size}) with all sessions streaming. "
-                    f"Allowing temporary over-capacity ({len(self._pool)}/{hard_cap} sessions)."
+                    f"[Pool] At capacity ({self._max_size}) with all sessions busy "
+                    f"(streaming or background work). Allowing temporary over-capacity "
+                    f"({len(self._pool)}/{hard_cap} sessions)."
                 )
                 return None
 
-            # Hard cap reached — forcibly evict the LRU session (even if streaming)
-            # to prevent unbounded memory/subprocess growth
+            # Hard cap reached — forcibly evict the LRU session even if busy, to
+            # prevent unbounded memory/subprocess growth. This is the ultimate
+            # bound: it CAN kill a parked background sub-agent, but only when the
+            # box is already over 2x capacity with every session busy.
             lru_session_id, lru_state = next(iter(self._pool.items()))
             logger.error(
-                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU streaming "
+                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU busy "
                 f"session {lru_session_id} to prevent resource exhaustion."
             )
-            return await self._do_evict(lru_session_id, lru_state)
+            return await self._do_evict(lru_session_id, lru_state, "lru_force")
 
-    async def _do_evict(self, session_id: str, state: SessionState) -> str:
-        """Evict a specific session. Returns the evicted session_id."""
+    async def _do_evict(
+        self, session_id: str, state: SessionState, reason: str = "evicted"
+    ) -> str:
+        """Evict a specific session. Returns the evicted session_id.
+
+        After the subprocess is torn down, fires ``_eviction_callback`` (if set)
+        so the higher layer can clean up the live-store buffer + task registry for
+        this session. This is the single funnel for LRU + idle eviction, which is
+        why wiring cleanup here covers both without a separate timer. The callback
+        is best-effort: its failure never propagates out of eviction.
+        """
         del self._pool[session_id]
+        # Snapshot the subprocess PID + descendant tree BEFORE disconnect (while
+        # the parent is still alive and its children are discoverable) so the
+        # dead-tree reaper can clean up any orphaned descendants (e.g. subagent
+        # node CLIs) that outlive the parent after disconnect terminates it.
+        pid = subprocess_pid(state)
+        descendants = snapshot_descendants(pid)
         if state.is_connected and is_subprocess_alive(state):
             try:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
+        record_terminated_subprocess(pid, descendants)
         logger.info(f"[Pool] Evicted session {session_id} (pool size: {len(self._pool)})")
+        if self._eviction_callback is not None:
+            try:
+                await self._eviction_callback(session_id, reason)
+            except Exception:
+                logger.warning(
+                    f"[Pool] Eviction callback failed for {session_id}", exc_info=True
+                )
         return session_id
 
     async def remove(self, session_id: str) -> Optional[SessionState]:
@@ -208,11 +583,14 @@ class SessionPool:
         state = self._pool.pop(session_id, None)
         if state is None:
             return None
+        pid = subprocess_pid(state)
+        descendants = snapshot_descendants(pid)
         if state.is_connected and is_subprocess_alive(state):
             try:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
+        record_terminated_subprocess(pid, descendants)
         logger.info(f"[Pool] Removed session {session_id} (pool size: {len(self._pool)})")
         return state
 
@@ -246,12 +624,14 @@ class SessionPool:
             state = self._pool.get(session_id)
             if state is None:
                 continue
-            # Never evict sessions that are currently streaming
-            if state.is_streaming:
+            # Never evict sessions that are currently streaming, nor sessions
+            # parked on an in-flight background sub-agent (the parent turn has
+            # returned so they look idle, but disconnecting would kill the agent).
+            if state.is_streaming or self._has_background_work(session_id):
                 continue
             idle_seconds = (now - state.last_activity).total_seconds()
             if idle_seconds >= max_idle_seconds:
-                await self._do_evict(session_id, state)
+                await self._do_evict(session_id, state, "idle")
                 evicted.append(session_id)
                 logger.info(
                     f"[Pool] Idle-evicted session {session_id} "
@@ -280,7 +660,12 @@ class SessionPool:
                 continue
             if state.is_connected and not is_subprocess_alive(state):
                 was_streaming = state.is_streaming
+                pid = subprocess_pid(state)
                 del self._pool[session_id]
+                # Subprocess is already dead, so its descendants are already
+                # orphaned (reparented to init). Best-effort record so the
+                # reaper still tries; descendants may be empty here.
+                record_terminated_subprocess(pid)
                 if was_streaming:
                     logger.warning(
                         f"[Pool] Removed dead STREAMING subprocess for session {session_id} "
@@ -294,47 +679,45 @@ class SessionPool:
                 evicted.append(session_id)
         return evicted
 
-    async def evict_stuck_streaming(self, max_streaming_seconds: int = 1800) -> list[str]:
-        """Evict sessions that have been streaming for too long.
+    def report_long_streaming(self, warn_after_seconds: int = 600) -> list[tuple[str, float]]:
+        """OBSERVE-ONLY report of sessions that have been streaming a long time.
 
-        If is_streaming=True for longer than max_streaming_seconds, the SDK
-        subprocess is likely hung (deadlocked tool, infinite loop, network hang).
-        Force-evict to prevent unbounded resource consumption.
+        WHY THIS IS NOT AN EVICTION ANYMORE
+        -----------------------------------
+        Elapsed wall-clock streaming time cannot distinguish a legitimately busy
+        long orchestration (e.g. driving 30+ subagents overnight) from a
+        genuinely hung session. The previous `evict_stuck_streaming` force-
+        terminated LIVE sessions on a timer, which in production SIGTERM'd a
+        healthy orchestrator mid-run, discarded its in-memory transcript,
+        truncated the Postgres mirror, and orphaned the subagent child trees —
+        i.e. the watchdog CREATED the very leak it existed to detect.
 
-        This is the safety net for the critical leak path:
-        - SDK subprocess hangs → is_streaming stays True
-        - evict_idle() skips streaming sessions
-        - Pool entry persists forever, consuming ~50-100MB per subprocess
-
-        Args:
-            max_streaming_seconds: Maximum streaming duration (default: 30 minutes).
+        The SDK owns query lifecycle and is the ONLY thing that ends a live
+        session (completion or user interrupt). Genuinely dead subprocesses are
+        reaped by evict_dead() + the dead-tree reaper. This method therefore
+        only OBSERVES: it returns (session_id, streaming_seconds) for sessions
+        streaming longer than warn_after_seconds so the monitor can log a
+        warning. It NEVER evicts, disconnects, or signals a live session.
 
         Returns:
-            List of evicted session IDs.
+            List of (session_id, streaming_seconds) for long-streaming sessions.
         """
         now = datetime.now(timezone.utc)
-        evicted = []
+        report: list[tuple[str, float]] = []
         for session_id in list(self._pool.keys()):
             state = self._pool.get(session_id)
             if state is None:
                 continue
             if not state.is_streaming:
                 continue
-            # Check streaming duration
             started = state.streaming_started_at
             if started is None:
                 # Legacy session without timestamp — use last_activity as fallback
                 started = state.last_activity
             streaming_seconds = (now - started).total_seconds()
-            if streaming_seconds >= max_streaming_seconds:
-                logger.error(
-                    f"[Pool] Force-evicting STUCK streaming session {session_id} "
-                    f"(streaming for {streaming_seconds:.0f}s > {max_streaming_seconds}s, "
-                    f"subprocess_alive={is_subprocess_alive(state)})"
-                )
-                await self._do_evict(session_id, state)
-                evicted.append(session_id)
-        return evicted
+            if streaming_seconds >= warn_after_seconds:
+                report.append((session_id, streaming_seconds))
+        return report
 
     async def evict_orphaned_worktree_sessions(self) -> list[str]:
         """Evict sessions whose working directory no longer exists.

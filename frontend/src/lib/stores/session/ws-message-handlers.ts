@@ -13,7 +13,6 @@
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
-import { messageCache } from '../message-cache';
 import { toast } from '../toast';
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
@@ -31,6 +30,12 @@ export interface InternalMutableState {
 	/** True when sendMessage() sent a query for a NEW session (no sessionId yet).
 	 *  Used by session_created/start to know whether to accept the sessionId. */
 	awaitingNewSession: boolean;
+	/** True when the user clicked Stop on a brand-new session BEFORE the backend
+	 *  minted its sessionId (stopGeneration had no id to send, so the stop would
+	 *  otherwise be dropped — "Stop fired before the session started"). Consumed
+	 *  by the session_created/start handlers: once the id is known they send the
+	 *  deferred stop so the backend can discard the orphan (no-output) turn. */
+	stopRequestedBeforeSession: boolean;
 	/** Monotonic counter incremented on every session switch / new-chat.
 	 *  autoCreateWorktree captures the value at start and bails if it changes
 	 *  during an await, preventing the async callback from clobbering the
@@ -430,6 +435,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// Set the sessionId and title so the header shows the correct
 					// session title immediately (not stale 'New Chat').
 					update(s => ({ ...s, sessionId, ...(title ? { title } : {}) }));
+					// Deliver a Stop the user clicked before the id existed (see
+					// stopRequestedBeforeSession). Now that we have the id, the
+					// backend can interrupt and discard the no-output orphan turn.
+					if (internal.stopRequestedBeforeSession) {
+						internal.stopRequestedBeforeSession = false;
+						wsSend({ type: 'stop', session_id: sessionId });
+					}
 					onPersistSession();
 				}
 				appLoadSessions();
@@ -450,6 +462,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					(!currentState.sessionId && internal.awaitingNewSession);
 				if (acceptStart) {
 					internal.awaitingNewSession = false;
+					// Deliver a Stop deferred before the id existed (see
+					// stopRequestedBeforeSession) in case 'start' beat
+					// 'session_created' here. The flag self-clears so we never
+					// double-send.
+					if (internal.stopRequestedBeforeSession) {
+						internal.stopRequestedBeforeSession = false;
+						wsSend({ type: 'stop', session_id: sessionId });
+					}
 					// Set sessionId, streamStartTime, and inject a synthetic streaming
 					// assistant message so the streaming indicator appears immediately
 					// (don't wait for the poller to deliver the first assistant message).
@@ -711,6 +731,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'interrupted':
 				handleStoppedOrInterrupted(data);
 				break;
+
+			case 'user_message_discarded': {
+				// The user pressed Stop before any assistant output. The backend
+				// removed the orphan user message from the live store (so the
+				// turn isn't shown as a saved-but-empty exchange) and sent its
+				// text back so we can restore it to the input box for editing or
+				// resending. Set pendingInterruptPrompt (ChatInput watches it and
+				// repopulates the editor) and run a final poll so the poller —
+				// the sole authority for the chat view — drops the now-removed
+				// user message.
+				const discardedSessionId = data.session_id as string | undefined;
+				const prompt = typeof data.prompt === 'string' ? data.prompt : '';
+				const discardState = getState();
+				if (discardedSessionId && discardedSessionId === discardState.sessionId) {
+					update(s => ({ ...s, pendingInterruptPrompt: prompt }));
+					sessionPoller.pollFinal(discardedSessionId);
+				}
+				break;
+			}
 
 			case 'error': {
 				internal.interruptPending = false;
