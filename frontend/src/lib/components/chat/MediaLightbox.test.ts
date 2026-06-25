@@ -78,4 +78,45 @@ describe('MediaLightbox', () => {
 		await tick();
 		expect(dialog()).toBeNull();
 	});
+
+	it('toggles zoom on the image when clicked, and back when clicked again', async () => {
+		render(MediaLightbox);
+		openLightbox('image', PNG);
+		await tick();
+
+		const img = dialog()!.querySelector('img') as HTMLImageElement;
+		// Starts unzoomed: zoom-in cursor, no scale.
+		expect(img.className).toContain('cursor-zoom-in');
+		expect(img.className).not.toContain('scale-[2]');
+
+		// Click → zoomed: scaled up, zoom-out cursor.
+		img.click();
+		await tick();
+		expect(img.className).toContain('scale-[2]');
+		expect(img.className).toContain('cursor-zoom-out');
+
+		// Click again → back to unzoomed.
+		img.click();
+		await tick();
+		expect(img.className).not.toContain('scale-[2]');
+		expect(img.className).toContain('cursor-zoom-in');
+	});
+
+	it('resets zoom when the media source changes', async () => {
+		render(MediaLightbox);
+		openLightbox('image', PNG);
+		await tick();
+
+		const img = dialog()!.querySelector('img') as HTMLImageElement;
+		img.click();
+		await tick();
+		expect(img.className).toContain('scale-[2]');
+
+		// Opening a different image should start unzoomed again.
+		openLightbox('image', PNG + '#second');
+		await tick();
+		const img2 = dialog()!.querySelector('img') as HTMLImageElement;
+		expect(img2.className).not.toContain('scale-[2]');
+		expect(img2.className).toContain('cursor-zoom-in');
+	});
 });

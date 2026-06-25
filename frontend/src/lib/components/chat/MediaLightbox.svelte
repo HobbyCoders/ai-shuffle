@@ -79,6 +79,28 @@
 		};
 	});
 
+	// Click/tap the image to zoom in, again to zoom out. Reset whenever the
+	// lightbox opens or the media source changes so each image starts unzoomed.
+	let zoomed = $state(false);
+	$effect(() => {
+		void $lightbox.open;
+		void $lightbox.src;
+		zoomed = false;
+	});
+
+	function toggleZoom(e: MouseEvent) {
+		e.stopPropagation(); // don't let the click bubble to the backdrop (which closes)
+		zoomed = !zoomed;
+	}
+
+	function handleZoomKey(e: KeyboardEvent) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			e.stopPropagation(); // don't let the overlay's Enter/Space handler close it
+			zoomed = !zoomed;
+		}
+	}
+
 	function downloadName(src: string): string {
 		const m = src.match(/[?&]path=([^&]+)/);
 		if (m) {
@@ -139,13 +161,31 @@
 		</div>
 
 		<!-- Media (stop propagation so clicking it doesn't close). Edge-to-edge
-		     fullscreen on mobile (100vw/100dvh, no rounding); framed on >=sm. -->
-		<div class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] flex items-center justify-center" role="presentation" onclick={(e) => e.stopPropagation()}>
+		     fullscreen on mobile (100vw/100dvh, no rounding); framed on >=sm.
+		     When the image is zoomed it can overflow this box — allow scrolling
+		     so the user can pan around the enlarged image. -->
+		<div class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] flex items-center justify-center {zoomed ? 'overflow-auto' : ''}" role="presentation" onclick={(e) => e.stopPropagation()}>
 			{#if $lightbox.type === 'video'}
 				<!-- svelte-ignore a11y_media_has_caption -->
 				<video src={$lightbox.src} controls autoplay playsinline class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl"></video>
 			{:else}
-				<img src={$lightbox.src} alt="Preview" class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain" />
+				<!-- Click / tap (or Enter / Space) to toggle zoom in and out. The
+				     button uses display:contents so it doesn't add a layout box —
+				     the image stays the flex item and keeps its size constraints. -->
+				<button
+					type="button"
+					class="contents"
+					aria-label={zoomed ? 'Zoom out' : 'Zoom in'}
+					onclick={toggleZoom}
+					onkeydown={handleZoomKey}
+				>
+					<img
+						src={$lightbox.src}
+						alt="Preview"
+						class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain select-none transition-transform duration-200 {zoomed ? 'scale-[2] cursor-zoom-out' : 'cursor-zoom-in'}"
+						draggable="false"
+					/>
+				</button>
 			{/if}
 		</div>
 	</div>
