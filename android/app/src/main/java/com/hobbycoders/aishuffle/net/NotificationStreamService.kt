@@ -57,6 +57,9 @@ class NotificationStreamService : Service() {
             // 25s keepalive so a *silent* drop is detected and triggers reconnect.
             .readTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            // Don't chase a Cloudflare Access login redirect; fail and reconnect.
+            .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 
@@ -112,13 +115,17 @@ class NotificationStreamService : Service() {
     private fun connect(conn: Connection) {
         if (conn.closed) return
         val server = conn.server
-        val request = Request.Builder()
+        val builder = Request.Builder()
             .url("${server.baseUrl}/api/v1/mobile/notifications/stream")
             .header("Authorization", "Bearer ${server.apiKey}")
             .header("Accept", "text/event-stream")
-            .build()
+        // Authorize against Cloudflare Access when a service token is configured.
+        if (server.hasCfAccess) {
+            builder.header("CF-Access-Client-Id", server.cfAccessClientId!!)
+            builder.header("CF-Access-Client-Secret", server.cfAccessClientSecret!!)
+        }
         conn.source = EventSources.createFactory(client)
-            .newEventSource(request, StreamListener(conn))
+            .newEventSource(builder.build(), StreamListener(conn))
     }
 
     private inner class StreamListener(private val conn: Connection) : EventSourceListener() {

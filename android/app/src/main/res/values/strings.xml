@@ -17,6 +17,16 @@
     <string name="connect">Connect</string>
     <string name="error_invalid_input">Please check your input</string>
 
+    <!-- Cloudflare Access (shown only when detected on the entered server) -->
+    <string name="cf_access_title">Cloudflare Access</string>
+    <string name="cf_access_explainer">This server is protected by Cloudflare Access. Create a service token in Cloudflare Zero Trust (Access → Service Auth) and add a policy that allows it, then paste its Client ID and Secret below.</string>
+    <string name="cf_access_client_id">Access Client ID</string>
+    <string name="cf_access_client_secret">Access Client Secret</string>
+    <string name="cf_access_detected">This server is behind Cloudflare Access. Add a service token to continue.</string>
+    <string name="cf_access_missing">Enter both the Access Client ID and Secret.</string>
+    <string name="cf_access_connect">Connect with token</string>
+    <string name="cf_access_reauth">Cloudflare Access blocked this session. Remove and re-add the server with a valid service token.</string>
+
     <!-- Chat / WebView -->
     <string name="error_server_missing">Server not found</string>
     <string name="error_open_external">Couldn\'t open link</string>

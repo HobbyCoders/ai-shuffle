@@ -12,6 +12,9 @@ import java.util.UUID
  * @param apiKey        the `aim_` device API key returned by /register
  * @param deviceId      uuid generated per-server and sent during registration
  * @param unifiedPushEndpoint last endpoint registered with this server, if any
+ * @param cfAccessClientId     Cloudflare Access service-token Client ID, set only
+ *                             when the server sits behind Cloudflare Access
+ * @param cfAccessClientSecret Cloudflare Access service-token Client Secret
  */
 data class Server(
     val id: String,
@@ -20,12 +23,18 @@ data class Server(
     val apiKey: String,
     val deviceId: String,
     val unifiedPushEndpoint: String? = null,
+    val cfAccessClientId: String? = null,
+    val cfAccessClientSecret: String? = null,
 ) {
     /** Host portion of [baseUrl], used as a compact subtitle in lists. */
     val host: String
         get() = baseUrl
             .substringAfter("://", baseUrl)
             .substringBefore('/')
+
+    /** True when a Cloudflare Access service token is configured for this server. */
+    val hasCfAccess: Boolean
+        get() = !cfAccessClientId.isNullOrBlank() && !cfAccessClientSecret.isNullOrBlank()
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -34,6 +43,8 @@ data class Server(
         put("apiKey", apiKey)
         put("deviceId", deviceId)
         put("unifiedPushEndpoint", unifiedPushEndpoint ?: JSONObject.NULL)
+        put("cfAccessClientId", cfAccessClientId ?: JSONObject.NULL)
+        put("cfAccessClientSecret", cfAccessClientSecret ?: JSONObject.NULL)
     }
 
     companion object {
@@ -44,6 +55,10 @@ data class Server(
             apiKey = obj.getString("apiKey"),
             deviceId = obj.getString("deviceId"),
             unifiedPushEndpoint = obj.optString("unifiedPushEndpoint", "")
+                .takeIf { it.isNotBlank() },
+            cfAccessClientId = obj.optString("cfAccessClientId", "")
+                .takeIf { it.isNotBlank() },
+            cfAccessClientSecret = obj.optString("cfAccessClientSecret", "")
                 .takeIf { it.isNotBlank() },
         )
 

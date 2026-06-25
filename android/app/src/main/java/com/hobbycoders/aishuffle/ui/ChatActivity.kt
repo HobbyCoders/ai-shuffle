@@ -133,11 +133,21 @@ class ChatActivity : AppCompatActivity() {
     private fun startSession() {
         setLoading(true)
         lifecycleScope.launch {
+            // When the server is behind Cloudflare Access, exchange the service
+            // token for a CF_Authorization cookie first, so the WebView (and the
+            // chat WebSocket) are authorized; otherwise Access redirects to login.
+            if (server.hasCfAccess) {
+                ApiClient.fetchCfAuthorizationCookie(server)?.let { injectRawCookie(it) }
+            }
             when (val result = ApiClient.createWebSession(server)) {
                 is ApiResult.Success -> {
                     injectSessionCookie(result.data)
                     binding.webView.loadUrl(server.baseUrl)
                     setLoading(false)
+                }
+                is ApiResult.NeedsCfAccess -> {
+                    setLoading(false)
+                    showError(getString(R.string.cf_access_reauth))
                 }
                 is ApiResult.Failure -> {
                     setLoading(false)
@@ -150,6 +160,13 @@ class ChatActivity : AppCompatActivity() {
     private fun injectSessionCookie(token: String) {
         val cookieManager = CookieManager.getInstance()
         cookieManager.setCookie(server.baseUrl, "session=$token; Path=/")
+        cookieManager.flush()
+    }
+
+    /** Seed a raw `name=value` cookie (e.g. CF_Authorization) for the origin. */
+    private fun injectRawCookie(cookiePair: String) {
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.setCookie(server.baseUrl, "$cookiePair; Path=/")
         cookieManager.flush()
     }
 

@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -16,6 +17,12 @@ import java.util.concurrent.TimeUnit
 sealed class ApiResult<out T> {
     data class Success<T>(val data: T) : ApiResult<T>()
     data class Failure(val message: String) : ApiResult<Nothing>()
+
+    /**
+     * The server is behind Cloudflare Access and no (valid) service token was
+     * supplied. The UI should collect a CF Access service token and retry.
+     */
+    object NeedsCfAccess : ApiResult<Nothing>()
 }
 
 /** Data returned by the device-registration endpoint. */
@@ -29,6 +36,11 @@ data class RegistrationResult(
  * Thin OkHttp wrapper around the AI Shuffle mobile API. Every call is suspending
  * and runs on [Dispatchers.IO]; callers must never touch the main thread for
  * networking.
+ *
+ * Redirects are intentionally **not** followed: a server fronted by Cloudflare
+ * Access answers unauthenticated requests with a 302 to its login page, and we
+ * want to detect that (and ask for a service token) rather than silently fetch
+ * an HTML login page and fail to parse it as JSON.
  */
 object ApiClient {
 
@@ -39,17 +51,26 @@ object ApiClient {
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 
     /**
-     * POST {base}/api/v1/mobile/register — no auth header.
+     * POST {base}/api/v1/mobile/register — no app auth header.
+     *
+     * If the server is behind Cloudflare Access, pass a service token via
+     * [cfAccessClientId] / [cfAccessClientSecret]; omit them on the first attempt
+     * so a [ApiResult.NeedsCfAccess] can be surfaced when Access is detected.
+     *
      * The returned api_key is shown only once and must be persisted by the caller.
      */
     suspend fun registerDevice(
         baseUrl: String,
         deviceName: String,
         deviceId: String,
+        cfAccessClientId: String? = null,
+        cfAccessClientSecret: String? = null,
     ): ApiResult<RegistrationResult> = withContext(Dispatchers.IO) {
         val capabilities = JSONObject().apply {
             put("supports_biometric", false)
@@ -66,10 +87,11 @@ object ApiClient {
 
         val request = Request.Builder()
             .url("$baseUrl/api/v1/mobile/register")
+            .cfAccess(cfAccessClientId, cfAccessClientSecret)
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
             .build()
 
-        execute(request) { json ->
+        execute(request, hasCfCreds = hasCf(cfAccessClientId, cfAccessClientSecret)) { json ->
             RegistrationResult(
                 apiKey = json.getString("api_key"),
                 deviceId = json.optString("device_id", deviceId),
@@ -80,17 +102,21 @@ object ApiClient {
 
     /**
      * POST {base}/api/v1/mobile/web-session — returns the session token used to
-     * authenticate the WebView. Requires the aim_ key.
+     * authenticate the WebView. Requires the aim_ key (and the CF Access service
+     * token, if the server is behind Access).
      */
     suspend fun createWebSession(server: Server): ApiResult<String> =
         withContext(Dispatchers.IO) {
             val request = Request.Builder()
                 .url("${server.baseUrl}/api/v1/mobile/web-session")
                 .header("Authorization", "Bearer ${server.apiKey}")
+                .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
                 .post(ByteArray(0).toRequestBody(JSON_MEDIA.toMediaType()))
                 .build()
 
-            execute(request) { json -> json.getString("session_token") }
+            execute(request, hasCfCreds = server.hasCfAccess) { json ->
+                json.getString("session_token")
+            }
         }
 
     /**
@@ -108,21 +134,97 @@ object ApiClient {
         val request = Request.Builder()
             .url("${server.baseUrl}/api/v1/mobile/push/unifiedpush")
             .header("Authorization", "Bearer ${server.apiKey}")
+            .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
             .build()
 
-        execute(request) { }
+        execute(request, hasCfCreds = server.hasCfAccess) { }
+    }
+
+    /**
+     * Exchanges the server's Cloudflare Access service token for a
+     * `CF_Authorization` cookie so the WebView (and its WebSocket) can be
+     * authorized against Access. Returns the raw `CF_Authorization=<jwt>` cookie
+     * pair to seed into the WebView's CookieManager, or null if the server isn't
+     * behind Access or Access didn't issue a cookie.
+     */
+    suspend fun fetchCfAuthorizationCookie(server: Server): String? =
+        withContext(Dispatchers.IO) {
+            if (!server.hasCfAccess) return@withContext null
+            val request = Request.Builder()
+                .url("${server.baseUrl}/")
+                .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+                .get()
+                .build()
+            runCatching {
+                client.newCall(request).execute().use { response ->
+                    response.headers("Set-Cookie")
+                        .firstOrNull { it.startsWith("CF_Authorization=", ignoreCase = true) }
+                        ?.substringBefore(';')
+                }
+            }.getOrNull()
+        }
+
+    /** Attach Cloudflare Access service-token headers when both parts are present. */
+    private fun Request.Builder.cfAccess(clientId: String?, clientSecret: String?): Request.Builder {
+        if (hasCf(clientId, clientSecret)) {
+            header("CF-Access-Client-Id", clientId!!)
+            header("CF-Access-Client-Secret", clientSecret!!)
+        }
+        return this
+    }
+
+    private fun hasCf(clientId: String?, clientSecret: String?): Boolean =
+        !clientId.isNullOrBlank() && !clientSecret.isNullOrBlank()
+
+    /**
+     * True when [response] is a Cloudflare Access auth challenge: a redirect to
+     * the Access login, or an explicit `WWW-Authenticate: Cloudflare-Access`.
+     */
+    private fun isCfAccessChallenge(response: Response): Boolean {
+        if (response.isRedirect) {
+            val location = response.header("Location").orEmpty()
+            if (location.contains(".cloudflareaccess.com", ignoreCase = true) ||
+                location.contains("/cdn-cgi/access/", ignoreCase = true)
+            ) {
+                return true
+            }
+        }
+        return response.header("WWW-Authenticate")
+            .orEmpty()
+            .startsWith("Cloudflare-Access", ignoreCase = true)
     }
 
     private inline fun <T> execute(
         request: Request,
+        hasCfCreds: Boolean,
         parse: (JSONObject) -> T,
     ): ApiResult<T> {
         return try {
             client.newCall(request).execute().use { response ->
+                if (isCfAccessChallenge(response)) {
+                    // A token was supplied but Access still refused it → bad token.
+                    return if (hasCfCreds) {
+                        ApiResult.Failure(
+                            "Cloudflare Access rejected the service token. " +
+                                "Double-check the Client ID and Secret and that a " +
+                                "policy allows this token.",
+                        )
+                    } else {
+                        ApiResult.NeedsCfAccess
+                    }
+                }
+
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     return ApiResult.Failure(errorMessage(response.code, raw))
+                }
+                // A 200 carrying HTML means a proxy/login page slipped through.
+                if (raw.trimStart().startsWith("<")) {
+                    return ApiResult.Failure(
+                        "The server returned a web page instead of data. It may be " +
+                            "behind a login or proxy.",
+                    )
                 }
                 val json = if (raw.isBlank()) JSONObject() else JSONObject(raw)
                 ApiResult.Success(parse(json))

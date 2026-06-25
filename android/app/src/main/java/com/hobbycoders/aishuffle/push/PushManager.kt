@@ -81,6 +81,8 @@ object PushManager {
                 store.update(server.copy(unifiedPushEndpoint = endpoint))
             is ApiResult.Failure ->
                 Log.w(TAG, "Endpoint registration failed for ${server.name}: ${result.message}")
+            ApiResult.NeedsCfAccess ->
+                Log.w(TAG, "Endpoint registration needs a Cloudflare Access token for ${server.name}")
         }
     }
 
@@ -92,6 +94,8 @@ object PushManager {
                     store.update(server.copy(unifiedPushEndpoint = endpoint))
                 is ApiResult.Failure ->
                     Log.w(TAG, "Endpoint registration failed for ${server.name}: ${result.message}")
+                ApiResult.NeedsCfAccess ->
+                    Log.w(TAG, "Endpoint registration needs a Cloudflare Access token for ${server.name}")
             }
         }
     }
