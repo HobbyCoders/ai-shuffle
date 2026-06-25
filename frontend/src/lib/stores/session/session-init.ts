@@ -120,6 +120,133 @@ export function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionStat
 }
 
 /**
+ * Phase 2 of the poll merge: reconcile the live WS partial-text buffer
+ * (`wsStreamContent`) with the poller's authoritative message list.
+ *
+ * Extracted as a pure, exported function so the staleness/clear logic can be
+ * unit-tested against the REAL merge code (the "dead air after tools" bug).
+ *
+ * Three cases while the turn is streaming:
+ *  - poller already has a streaming text AND the WS buffer is ahead of it →
+ *    render the longer WS buffer into that message (the WS-ahead head-start).
+ *  - poller has NO streaming text (a post-tool think-gap, or turn start before
+ *    the first text block) → re-append the turn-start synthetic so the bubble
+ *    survives the poll. Its content comes ONLY from genuinely-live WS-ahead
+ *    text; otherwise it is an EMPTY phantom that gap-indicator.ts treats as
+ *    transparent so the bottom gap dots can show.
+ *  - poller HAS a streaming text but the WS buffer is empty/behind → nothing to
+ *    merge; drop the (now-consumed) buffer.
+ *
+ * THE BUG this guards against: `wsStreamContent` is cleared by the WS layer
+ * ONLY at turn boundaries (handleDone / stopped / the `start` event), never
+ * when a text block finalizes mid-turn into a tool call. So once any text
+ * streams in a turn, the buffer stays non-empty for the rest of the turn. In a
+ * post-tool think-gap the poller has no streaming text, so the old code
+ * re-appended the synthetic with the stale buffer as its content — a NON-EMPTY
+ * streaming assistant-text at the tail. That is not an empty phantom, so it
+ * suppressed the gap dots (and rendered nothing the user could perceive) →
+ * total dead air for many seconds. The fix drops the buffer the moment a
+ * finalized assistant text already contains it.
+ *
+ * @returns the (possibly new) message array + the (possibly cleared) buffer.
+ */
+export function mergeWsStreamBuffer(
+	finalMessages: ChatMessage[],
+	wsStreamContent: string,
+	priorMessages: ChatMessage[],
+	isStreaming: boolean
+): { messages: ChatMessage[]; wsStreamContent: string } {
+	let finalWsContent = wsStreamContent;
+
+	if (!isStreaming) {
+		return { messages: finalMessages, wsStreamContent: '' };
+	}
+
+	// wsStreamContent is cleared only at turn boundaries by the WS layer, never
+	// when a text block finalizes mid-turn into a tool call. If the MOST RECENT
+	// finalized (non-streaming) assistant text already contains the buffer, the
+	// buffer is the leftover of that just-ended block — stale — so drop it before
+	// it can leak into a think-gap synthetic and masquerade as live streaming
+	// (the "dead air after tools" bug).
+	//
+	// Match ONLY the most recent finalized text, not any historical one. The
+	// buffer always tracks the latest block (each finalize drops it here, the next
+	// block refills it from empty), so a genuine stale buffer always equals the
+	// last finalized text and is still caught — but a NEW block's live partial
+	// ("Let me", "Here's") that merely prefixes an OLDER message is no longer
+	// dropped as false-stale, which would needlessly defeat the WS-ahead
+	// head-start.
+	if (finalWsContent) {
+		let lastFinalizedText: string | null = null;
+		for (let i = finalMessages.length - 1; i >= 0; i--) {
+			const m = finalMessages[i];
+			if (m.role === 'assistant' && m.type === 'text' && !m.streaming) {
+				lastFinalizedText = m.content || '';
+				break;
+			}
+		}
+		if (lastFinalizedText !== null && lastFinalizedText.startsWith(finalWsContent)) {
+			finalWsContent = '';
+		}
+	}
+
+	let pollerStreamIdx = -1;
+	for (let i = finalMessages.length - 1; i >= 0; i--) {
+		if (
+			finalMessages[i].role === 'assistant' &&
+			finalMessages[i].type === 'text' &&
+			finalMessages[i].streaming
+		) {
+			pollerStreamIdx = i;
+			break;
+		}
+	}
+
+	if (pollerStreamIdx >= 0 && finalWsContent) {
+		// WS-ahead head-start: render the longer live buffer into the poller's
+		// still-streaming text.
+		const pollerContent = finalMessages[pollerStreamIdx].content || '';
+		if (finalWsContent.length > pollerContent.length) {
+			finalMessages = [...finalMessages];
+			finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
+		}
+	} else if (pollerStreamIdx < 0) {
+		// No streaming text in the poller data (post-tool think-gap or turn
+		// start). Re-append the turn-start synthetic so the bubble survives the
+		// poll. Source its content ONLY from finalWsContent — which now is
+		// either genuinely-live WS-ahead text or empty (stale was dropped
+		// above). Never fall back to the prior synthetic's content: that would
+		// perpetuate stale content across merges and recreate the dead-air bug.
+		const currentSynthetic = priorMessages.find(
+			(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
+		);
+		if (currentSynthetic) {
+			const appendedContent = finalWsContent;
+			// An empty synthetic that duplicates nothing still appends as a
+			// harmless empty phantom; a stale-content one is recognized as
+			// already finalized and skipped. Compare against the content we are
+			// actually about to append, not the prior synthetic's (stale) content.
+			const alreadyFinalized = finalMessages.some(
+				(m: ChatMessage) =>
+					m.role === 'assistant' &&
+					m.type === 'text' &&
+					!m.streaming &&
+					m.content === (appendedContent || currentSynthetic.content)
+			);
+			if (!alreadyFinalized) {
+				finalMessages = [...finalMessages, { ...currentSynthetic, content: appendedContent }];
+			}
+		}
+	} else {
+		// Poller has a streaming text but the WS buffer is empty/behind — nothing
+		// to merge; drop the consumed buffer.
+		finalWsContent = '';
+	}
+
+	return { messages: finalMessages, wsStreamContent: finalWsContent };
+}
+
+/**
  * Shallow structural compare of two active-task lists. Returns true when they
  * are equivalent for rendering (same length + same per-task fields that affect
  * display). Lets the poll callback keep the existing array reference when only
@@ -158,6 +285,148 @@ function sameAgentUsage(
 		existing.input_tokens === incoming.input_tokens &&
 		existing.output_tokens === incoming.output_tokens
 	);
+}
+
+/**
+ * Phase 3 of the poll merge — stabilize message identity across polls.
+ *
+ * The poller rebuilds the message array every cycle and the backend may hand a
+ * given block a different id over its lifetime (e.g. a streaming text first
+ * appears under the per-turn `message_id` synthetic, then settles to a stable
+ * `text-{uuid}`). To avoid re-rendering churn we adopt the EXISTING client id
+ * for a server message that matches an existing one — by id, or by position +
+ * content-prefix when the id changed.
+ *
+ * THE DUPLICATE-ID BUG this guards against:
+ * A streaming turn injects a synthetic placeholder seeded with the per-TURN
+ * `message_id` (one id for the whole turn). As the turn emits text → tool →
+ * text → tool …, each NEW streaming text block position-matches the PRIOR
+ * streaming text / synthetic — and because an empty synthetic has zero-length
+ * content, the prefix check (`shorter === 0`) matches ANYTHING. Without a guard
+ * every distinct server `text-{uuid}` block would be swapped onto that one
+ * synthetic id, so the whole turn's text blocks collapse to a single id.
+ * `displayItems` then dedups by id and silently drops all but the first text —
+ * the "assistant messages vanish mid-stream but reappear on refresh" bug (a
+ * cold load has no synthetic to collapse onto).
+ *
+ * The guard: an existing (client) id may be adopted by AT MOST ONE message per
+ * pass. Any later match that would reuse an already-claimed id keeps the
+ * server's own (unique) id instead. A final safety net guarantees the output
+ * never contains two messages with the same id, regardless of how the inputs
+ * arrived (e.g. a stale duplicate already present in `incoming`).
+ *
+ * Pure function (no store access) so it can be unit-tested directly.
+ *
+ * @returns the stabilized array + whether anything actually changed (when
+ *   `changed` is false the caller can keep the `incoming` reference as-is).
+ */
+export function stabilizeMessageIdentity(
+	incoming: ChatMessage[],
+	prior: ChatMessage[]
+): { messages: ChatMessage[]; changed: boolean } {
+	if (prior.length === 0 || incoming.length === 0) {
+		return { messages: incoming, changed: false };
+	}
+
+	const existingById = new Map<string, ChatMessage>();
+	for (const m of prior) {
+		if (m.id) existingById.set(m.id, m);
+	}
+
+	let needsStabilization = false;
+	// Every id already emitted in this pass. An existing client id may be
+	// adopted only once; the server's ids are globally unique so they are a
+	// safe fallback when adoption would collide.
+	const assignedIds = new Set<string>();
+
+	const stabilized = incoming.map((msg, i) => {
+		let existing = msg.id ? existingById.get(msg.id) : undefined;
+
+		if (!existing) {
+			const positional = prior[i];
+			if (positional && positional.role === msg.role && positional.type === msg.type) {
+				let positionMatchValid = true;
+				if (msg.type === 'tool_use') {
+					positionMatchValid = msg.toolName === positional.toolName;
+				} else if (msg.type === 'text' && msg.content && positional.content) {
+					const shorter = Math.min(msg.content.length, positional.content.length, 50);
+					positionMatchValid = shorter === 0 ||
+						msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
+				}
+				if (positionMatchValid) {
+					existing = positional;
+				}
+			}
+		}
+
+		// Adopting `existing.id` is only allowed if no earlier message in this
+		// pass already claimed it — otherwise the distinct server blocks would
+		// collapse onto one id (the bug above).
+		const canAdopt = (id: string | undefined): boolean =>
+			!!id && !assignedIds.has(id);
+
+		let out: ChatMessage;
+		if (!existing) {
+			out = msg;
+		} else if (msg.type === 'subagent') {
+			const existChildren = existing.agentChildren;
+			const incomChildren = msg.agentChildren;
+			const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
+			const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
+			const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
+			const sameTail =
+				existLast?.content === incomLast?.content &&
+				existLast?.toolResult === incomLast?.toolResult &&
+				existLast?.toolStatus === incomLast?.toolStatus &&
+				existLast?.streaming === incomLast?.streaming;
+			if (
+				existing.agentStatus === msg.agentStatus &&
+				existing.streaming === msg.streaming &&
+				existing.content === msg.content &&
+				sameAgentUsage(existing.agentUsage, msg.agentUsage) &&
+				sameLen &&
+				sameTail
+			) {
+				if (existing !== msg) needsStabilization = true;
+				out = existing;
+			} else if (existing.id !== msg.id && canAdopt(existing.id)) {
+				needsStabilization = true;
+				out = { ...msg, id: existing.id };
+			} else {
+				out = msg;
+			}
+		} else if (
+			existing.content === msg.content &&
+			existing.streaming === msg.streaming &&
+			existing.toolResult === msg.toolResult &&
+			existing.toolStatus === msg.toolStatus
+		) {
+			if (existing !== msg) needsStabilization = true;
+			out = existing;
+		} else if (existing.id !== msg.id && canAdopt(existing.id)) {
+			// eslint-disable-next-line no-console
+			if (STREAM_DEBUG) console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
+			needsStabilization = true;
+			out = { ...msg, id: existing.id };
+		} else {
+			out = msg;
+		}
+
+		// Final safety net: never emit two messages with the same id. If the
+		// chosen id is already taken (a stale duplicate arrived in `incoming`,
+		// or the match picked an id another message already claimed), fall back
+		// to a position-stable unique id so the id-dedup downstream can't drop a
+		// real message. `i` is stable across polls for a given turn structure,
+		// so this introduces no churn.
+		if (out.id && assignedIds.has(out.id)) {
+			needsStabilization = true;
+			out = { ...out, id: `${out.id}#${i}` };
+		}
+		if (out.id) assignedIds.add(out.id);
+		return out;
+	});
+
+	return { messages: needsStabilization ? stabilized : incoming, changed: needsStabilization };
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -395,121 +664,27 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}
 
 				// ── Phase 2: WS stream buffer merge ────────────────────────
-				if (data.isStreaming) {
-					let pollerStreamIdx = -1;
-					for (let i = finalMessages.length - 1; i >= 0; i--) {
-						if (finalMessages[i].role === 'assistant' && finalMessages[i].type === 'text' && finalMessages[i].streaming) {
-							pollerStreamIdx = i;
-							break;
-						}
-					}
-
-					if (pollerStreamIdx >= 0 && finalWsContent) {
-						const pollerContent = finalMessages[pollerStreamIdx].content || '';
-						if (finalWsContent.length > pollerContent.length) {
-							finalMessages = [...finalMessages];
-							finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
-						}
-					} else if (pollerStreamIdx < 0) {
-						const currentSynthetic = s.messages.find(
-							(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
-						);
-						if (currentSynthetic) {
-							const alreadyFinalized = finalMessages.some(
-								(m: ChatMessage) => m.role === 'assistant' && m.type === 'text' && !m.streaming &&
-									m.content === currentSynthetic.content
-							);
-							if (!alreadyFinalized) {
-								finalMessages = [...finalMessages, {
-									...currentSynthetic,
-									content: finalWsContent || currentSynthetic.content,
-								}];
-							}
-						}
-					} else {
-						finalWsContent = '';
-					}
-				} else {
-					finalWsContent = '';
+				// Reconcile the live WS partial-text buffer with the poller's
+				// authoritative messages. Pure logic lives in mergeWsStreamBuffer
+				// (exported + unit-tested) — it also drops a STALE buffer so a
+				// post-tool think-gap synthetic stays a transparent empty phantom
+				// (the "dead air after tools" bug).
+				{
+					const merged = mergeWsStreamBuffer(finalMessages, finalWsContent, s.messages, data.isStreaming);
+					finalMessages = merged.messages;
+					finalWsContent = merged.wsStreamContent;
 				}
 
 				// ── Phase 3: Stabilize message identity ────────────────────
-				if (s.messages.length > 0 && finalMessages.length > 0) {
-					const existingById = new Map<string, ChatMessage>();
-					for (const m of s.messages) {
-						if (m.id) existingById.set(m.id, m);
-					}
-
-					let needsStabilization = false;
-					const stabilized = finalMessages.map((msg, i) => {
-						let existing = existingById.get(msg.id);
-
-						if (!existing) {
-							const positional = s.messages[i];
-							if (positional && positional.role === msg.role && positional.type === msg.type) {
-								let positionMatchValid = true;
-								if (msg.type === 'tool_use') {
-									positionMatchValid = msg.toolName === positional.toolName;
-								} else if (msg.type === 'text' && msg.content && positional.content) {
-									const shorter = Math.min(msg.content.length, positional.content.length, 50);
-									positionMatchValid = shorter === 0 ||
-										msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
-								}
-								if (positionMatchValid) {
-									existing = positional;
-								}
-							}
-						}
-
-						if (!existing) return msg;
-
-						if (msg.type === 'subagent') {
-							const existChildren = existing.agentChildren;
-							const incomChildren = msg.agentChildren;
-							const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
-							const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
-							const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
-							const sameTail =
-								existLast?.content === incomLast?.content &&
-								existLast?.toolResult === incomLast?.toolResult &&
-								existLast?.toolStatus === incomLast?.toolStatus &&
-								existLast?.streaming === incomLast?.streaming;
-							if (
-								existing.agentStatus === msg.agentStatus &&
-								existing.streaming === msg.streaming &&
-								existing.content === msg.content &&
-								sameAgentUsage(existing.agentUsage, msg.agentUsage) &&
-								sameLen &&
-								sameTail
-							) {
-								if (existing !== msg) needsStabilization = true;
-								return existing;
-							}
-							if (existing.id !== msg.id) {
-								needsStabilization = true;
-								return { ...msg, id: existing.id };
-							}
-							return msg;
-						}
-
-						if (
-							existing.content === msg.content &&
-							existing.streaming === msg.streaming &&
-							existing.toolResult === msg.toolResult &&
-							existing.toolStatus === msg.toolStatus
-						) {
-							if (existing !== msg) needsStabilization = true;
-							return existing;
-						}
-						if (existing.id !== msg.id) {
-							// eslint-disable-next-line no-console
-							if (STREAM_DEBUG) console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
-							needsStabilization = true;
-							return { ...msg, id: existing.id };
-						}
-						return msg;
-					});
-					if (needsStabilization) finalMessages = stabilized;
+				// Pure logic in stabilizeMessageIdentity (exported + unit-tested).
+				// It adopts existing client ids to avoid render churn while
+				// GUARANTEEING unique output ids — otherwise a turn's text blocks
+				// collapse onto the single per-turn synthetic id and displayItems'
+				// id-dedup silently drops all but the first (messages vanish
+				// mid-stream, reappear on refresh).
+				{
+					const stab = stabilizeMessageIdentity(finalMessages, s.messages);
+					finalMessages = stab.messages;
 				}
 
 				// ── No-op detection ────────────────────────────────────────
