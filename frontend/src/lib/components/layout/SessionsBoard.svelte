@@ -150,6 +150,15 @@
 		e.stopPropagation();
 		deletingSessionId = null;
 	}
+	// Open a session from its row — but never while that row is showing its
+	// delete confirmation (or the delete is in flight). The confirm button is
+	// natively `disabled` during the request, and the browser routes a click on
+	// a disabled button to its parent (the row), which would otherwise open the
+	// just-deleted session as an empty chat.
+	function openSession(id: string) {
+		if (deletingSessionId === id) return;
+		onOpenSession(id);
+	}
 
 	function relTime(input: string | number): string {
 		const ms = typeof input === 'number' ? input : new Date(input).getTime();
@@ -276,8 +285,8 @@
 		class:deleting={deletingSessionId === session.id}
 		role="button"
 		tabindex="0"
-		onclick={() => onOpenSession(session.id)}
-		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenSession(session.id); } }}
+		onclick={() => openSession(session.id)}
+		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSession(session.id); } }}
 	>
 		<span class="row-status">
 			{#if isStreaming(session.id)}
