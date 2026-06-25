@@ -26,6 +26,7 @@ import com.hobbycoders.aishuffle.databinding.ActivityChatBinding
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.net.ApiResult
+import com.hobbycoders.aishuffle.push.NotificationHelper
 import kotlinx.coroutines.launch
 
 /**
@@ -37,6 +38,9 @@ class ChatActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityChatBinding
     private lateinit var server: Server
+
+    /** Optional session id from a notification deep-link; opens that chat. */
+    private var deepLinkSessionId: String? = null
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
@@ -52,11 +56,13 @@ class ChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityChatBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        binding.toolbar.setNavigationOnClickListener { finishOrGoBack() }
+        // No toolbar: the WebView is fullscreen. Back is handled by the
+        // OnBackPressedCallback registered in registerBackHandler().
 
         val serverId = intent.getStringExtra(EXTRA_SERVER_ID)
+        // A notification tap may target a specific session; deep-link into it.
+        deepLinkSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+            ?.takeIf { it.isNotBlank() }
         val loaded = serverId?.let { ServerStore.get(this).getById(it) }
         if (loaded == null) {
             Snackbar.make(binding.root, R.string.error_server_missing, Snackbar.LENGTH_LONG).show()
@@ -142,7 +148,7 @@ class ChatActivity : AppCompatActivity() {
             when (val result = ApiClient.createWebSession(server)) {
                 is ApiResult.Success -> {
                     injectSessionCookie(result.data)
-                    binding.webView.loadUrl(server.baseUrl)
+                    binding.webView.loadUrl(buildStartUrl())
                     setLoading(false)
                 }
                 is ApiResult.NeedsCfAccess -> {
@@ -155,6 +161,18 @@ class ChatActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * The URL to open: the server root, or — when a notification targeted a
+     * specific session — the web UI with a `?session=<id>` hint it reads on
+     * boot. Auth cookies are set on the origin with `Path=/`, so the deeper URL
+     * stays authenticated. Remote (cluster) sessions use this same URL; the
+     * hosting install relays them to the owning device.
+     */
+    private fun buildStartUrl(): String {
+        val sid = deepLinkSessionId ?: return server.baseUrl
+        return "${server.baseUrl}/?session=${Uri.encode(sid)}"
     }
 
     private fun injectSessionCookie(token: String) {
