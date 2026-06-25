@@ -8,7 +8,9 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.TaskStackBuilder
 import com.hobbycoders.aishuffle.R
+import com.hobbycoders.aishuffle.ui.ChatActivity
 import com.hobbycoders.aishuffle.ui.ServerListActivity
 import org.json.JSONObject
 
@@ -98,6 +100,9 @@ object NotificationHelper {
      * @param body      notification text
      * @param priority  "high" routes to the high-importance channel
      * @param data      the payload's `data` object, copied into the tap intent
+     * @param serverId  when known, tapping deep-links into this server's chat
+     *                  (with the server list as the Back target); null falls
+     *                  back to opening the server list.
      */
     fun show(
         context: Context,
@@ -105,30 +110,20 @@ object NotificationHelper {
         body: String?,
         priority: String?,
         data: JSONObject?,
+        serverId: String? = null,
     ) {
         ensureChannels(context)
 
         val isHigh = priority.equals("high", ignoreCase = true)
         val channelId = if (isHigh) CHANNEL_HIGH else CHANNEL_DEFAULT
 
-        val tapIntent = Intent(context, ServerListActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            data?.let { obj ->
-                obj.optString("type").takeIf { it.isNotBlank() }
-                    ?.let { putExtra(EXTRA_TYPE, it) }
-                obj.optString("session_id").takeIf { it.isNotBlank() }
-                    ?.let { putExtra(EXTRA_SESSION_ID, it) }
-                obj.optString("request_id").takeIf { it.isNotBlank() }
-                    ?.let { putExtra(EXTRA_REQUEST_ID, it) }
-            }
-        }
-
         val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
-            tapIntent,
-            pendingFlags,
+        val pendingIntent = buildTapIntent(
+            context = context,
+            serverId = serverId,
+            data = data,
+            requestCode = (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
+            pendingFlags = pendingFlags,
         )
 
         val notification = NotificationCompat.Builder(context, channelId)
@@ -147,6 +142,44 @@ object NotificationHelper {
         // silently no-ops in that case, so this is safe to call unconditionally.
         NotificationManagerCompat.from(context)
             .notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
+    }
+
+    /**
+     * Tapping a notification should open the chat for the server that produced
+     * it. When that server is known, deep-link straight into [ChatActivity] with
+     * the server list synthesised as the Back target; otherwise (e.g. the legacy
+     * UnifiedPush path, which can't attribute a server) open the server list.
+     */
+    private fun buildTapIntent(
+        context: Context,
+        serverId: String?,
+        data: JSONObject?,
+        requestCode: Int,
+        pendingFlags: Int,
+    ): PendingIntent {
+        if (serverId != null) {
+            val chatIntent = Intent(context, ChatActivity::class.java)
+                .putExtra(ChatActivity.EXTRA_SERVER_ID, serverId)
+            applyPayloadExtras(chatIntent, data)
+            // ChatActivity declares ServerListActivity as its parent, so this
+            // builds a [ServerList, Chat] back-stack in a fresh task.
+            return TaskStackBuilder.create(context)
+                .addNextIntentWithParentStack(chatIntent)
+                .getPendingIntent(requestCode, pendingFlags)!!
+        }
+        val listIntent = Intent(context, ServerListActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        applyPayloadExtras(listIntent, data)
+        return PendingIntent.getActivity(context, requestCode, listIntent, pendingFlags)
+    }
+
+    /** Copy the payload's type/session_id/request_id onto a tap intent. */
+    private fun applyPayloadExtras(intent: Intent, data: JSONObject?) {
+        val obj = data ?: return
+        obj.optString("type").takeIf { it.isNotBlank() }?.let { intent.putExtra(EXTRA_TYPE, it) }
+        obj.optString("session_id").takeIf { it.isNotBlank() }?.let { intent.putExtra(EXTRA_SESSION_ID, it) }
+        obj.optString("request_id").takeIf { it.isNotBlank() }?.let { intent.putExtra(EXTRA_REQUEST_ID, it) }
     }
 
     const val EXTRA_TYPE = "push_type"

@@ -157,6 +157,9 @@ class NotificationStreamService : Service() {
                 body = payload.optString("body").takeIf { it.isNotBlank() },
                 priority = priority,
                 data = inner,
+                // The stream is per-server, so tapping the notification can open
+                // this exact server's chat instead of the server picker.
+                serverId = conn.server.id,
             )
         }
 
