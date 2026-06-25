@@ -19,6 +19,7 @@ from app.core.models import (
     SetupRequest, LoginRequest, ChangePasswordRequest,
 )
 from app.core.auth import auth_service
+from app.core.oauth import direct_oauth
 from app.core.config import settings
 from app.core import encryption
 from app.core import audit_service
@@ -311,6 +312,10 @@ async def get_auth_status(request: Request):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
+    # Self-heal an expiring OAuth token before reporting status, so the UI doesn't
+    # flip to "unauthorized" when a valid refresh token could silently renew it.
+    await direct_oauth.ensure_fresh_credentials()
+
     return {
         "authenticated": is_admin_authenticated,
         "is_admin": is_admin_authenticated,
@@ -514,6 +519,9 @@ async def change_password(
 @router.get("/claude/status")
 async def claude_auth_status():
     """Get Claude CLI authentication status"""
+    # Renew an expiring OAuth token (using the refresh token) before reporting,
+    # so a short-lived access token doesn't surface as "expired" unnecessarily.
+    await direct_oauth.ensure_fresh_credentials()
     return auth_service.get_claude_auth_info()
 
 

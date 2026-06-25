@@ -64,6 +64,14 @@ class SessionState:
     # Options snapshot from connect() time — for reconnect detection
     connect_options: Optional[ClaudeAgentOptions] = None
 
+    # mtime of ~/.claude/.credentials.json at spawn time. When the OAuth token is
+    # rotated on disk (auto-refresh or manual re-auth), this pooled subprocess
+    # still holds the OLD token in memory and will 401 ("Invalid authentication
+    # credentials"). Detecting an mtime change lets us respawn a subprocess that
+    # reads the fresh credential. None when there is no creds file (e.g. API-key
+    # auth), in which case it never triggers a reconnect.
+    credentials_mtime: Optional[float] = None
+
     @property
     def client(self) -> Optional["ClaudeSDKClient"]:
         """Backward-compatible access to the underlying SDK client.
@@ -78,6 +86,21 @@ class SessionState:
 def is_subprocess_alive(state: SessionState) -> bool:
     """Check if the subprocess for a session state is still running."""
     return state.adapter.is_alive()
+
+
+def claude_credentials_mtime() -> Optional[float]:
+    """Modification time of the Claude OAuth credentials file, or None.
+
+    Used to detect when the on-disk OAuth token was rotated (auto-refreshed or
+    re-authenticated) so a pooled subprocess holding the now-stale token can be
+    respawned instead of returning a 401. Returns None when the file is absent
+    (e.g. API-key auth) or unreadable. Never raises.
+    """
+    try:
+        from app.core.oauth import direct_oauth
+        return (direct_oauth.config_dir / ".credentials.json").stat().st_mtime
+    except Exception:
+        return None
 
 
 def subprocess_pid(state: SessionState) -> Optional[int]:
@@ -825,6 +848,12 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if (old.tools or []) != (new_options.tools or []):
         return True
     if not _agents_equivalent(old.agents, new_options.agents):
+        return True
+
+    # Credentials rotated on disk (OAuth auto-refresh or manual re-auth) → the
+    # live subprocess still holds the OLD token in memory and would 401. Respawn
+    # so it reads the fresh credential. (No-op for API-key auth: mtime stays None.)
+    if state.credentials_mtime != claude_credentials_mtime():
         return True
 
     # These can be changed at runtime — no reconnect needed
