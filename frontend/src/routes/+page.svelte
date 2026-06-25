@@ -201,6 +201,21 @@
 			layout.openChat(restoredSessionId);
 		}
 
+		// Deep-link: the Android shell opens `/?session=<id>` when a notification
+		// is tapped. Open that session explicitly — it outranks the restored
+		// session above (it's a fresh user intent) — then strip the param so a
+		// refresh doesn't re-trigger it. Shared-DB cluster sessions appear in
+		// $sessions on every install, so handleOpenSession resolves them and (when
+		// the session is owned by another device) relays exactly like a click in
+		// the Sessions board.
+		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
+		if (deepLinkSessionId) {
+			handleOpenSession(deepLinkSessionId);
+			const url = new URL(window.location.href);
+			url.searchParams.delete('session');
+			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+		}
+
 		// Sync from server when window regains focus
 		visibilityChangeHandler = () => {
 			if (document.visibilityState === 'visible') {
