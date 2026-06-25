@@ -450,6 +450,94 @@ async def cluster_intake(
     return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# Mobile-notification fan-out
+# ---------------------------------------------------------------------------
+#
+# Session events (a question, a permission prompt, "session done") are raised on
+# the install that *owns* the running session and are otherwise in-memory there.
+# A phone is connected to a single install (the hub), so without a bridge it
+# would never learn about activity on a *different* cluster install. The owning
+# install therefore fans each notification out to every other online, reachable
+# peer, which delivers it to its own connected phones. The receiving endpoint
+# (`/api/v1/cluster/mobile-notify`) delivers locally only and never re-fans, so
+# there is no relay loop.
+
+# Notifications are latency-sensitive but optional: keep the per-peer timeout
+# short so a slow/unreachable peer never stalls the others or the hot path.
+MOBILE_NOTIFY_TIMEOUT = 8.0
+
+
+def online_peers_with_url() -> list[Dict[str, Any]]:
+    """Other installs that are online AND advertise a peer-reachable base URL.
+
+    Excludes this install (local delivery already covers it) and any view-only
+    peer (no ``base_url`` to POST to). A single-install deployment returns an
+    empty list, so fan-out is a no-op after one cheap registry read.
+    """
+    from app.core.config import settings
+
+    me = settings.effective_instance_id
+    peers: list[Dict[str, Any]] = []
+    for row in database.get_installs():
+        if row.get("id") == me:
+            continue
+        if not row.get("online"):
+            continue
+        if not (row.get("base_url") or "").strip():
+            continue
+        peers.append(row)
+    return peers
+
+
+async def _post_mobile_notify(base_url: str, payload: Dict[str, Any]) -> None:
+    """POST a single mobile notification to one peer; swallow all errors.
+
+    Best-effort by design: a notification that fails to reach one peer must not
+    affect the others or surface to the caller.
+    """
+    async with httpx.AsyncClient(timeout=MOBILE_NOTIFY_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/api/v1/cluster/mobile-notify",
+                json=payload,
+                headers=_cluster_headers(),
+            )
+            resp.raise_for_status()
+        except Exception as e:  # noqa: BLE001 — best-effort fan-out
+            logger.debug("mobile-notify to %s failed: %s", base_url, e)
+
+
+async def fanout_mobile_notify(
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Relay a mobile notification to every other online, reachable install.
+
+    Returns the number of peers contacted (0 on a single-install deployment or
+    when the registry is unavailable). Never raises — the caller is a
+    fire-and-forget hot path that must not be disrupted by notification routing.
+    """
+    import asyncio
+
+    from app.db.async_database import run_sync
+
+    try:
+        peers = await run_sync(online_peers_with_url)
+    except Exception as e:  # noqa: BLE001 — registry unavailable → no fan-out
+        logger.debug("mobile-notify fan-out skipped (registry error): %s", e)
+        return 0
+    if not peers:
+        return 0
+    payload = {"title": title, "body": body, "data": data or {}}
+    await asyncio.gather(
+        *(_post_mobile_notify(p["base_url"], payload) for p in peers),
+        return_exceptions=True,
+    )
+    return len(peers)
+
+
 async def cluster_upload_file(base_url: str, local_path: str) -> Optional[str]:
     """Upload a local attachment to a target install via the cluster endpoint.
 

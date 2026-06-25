@@ -164,6 +164,37 @@ async def cluster_live(
     )
 
 
+class ClusterMobileNotifyRequest(BaseModel):
+    """A peer install relaying a mobile notification for one of its events."""
+    title: str = ""
+    body: str = ""
+    data: Optional[Dict[str, Any]] = None
+
+
+@router.post("/mobile-notify")
+async def cluster_mobile_notify(
+    body: ClusterMobileNotifyRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Receive a mobile notification fanned out from a peer install.
+
+    A session event (question / permission / "done") fired on the *owning*
+    install, which fanned it out to every online peer. This install delivers it
+    to its OWN connected phones only — local SSE streams + registered push
+    transports — and deliberately never re-fans-out, so notifications cannot
+    loop between installs.
+    """
+    from app.services.push_notification import deliver_local_notification
+
+    await deliver_local_notification(
+        title=body.title or "AI Shuffle",
+        body=body.body or "",
+        data=body.data or {},
+    )
+    logger.debug("Delivered relayed mobile-notify from install %s", install_id or "?")
+    return {"ok": True}
+
+
 @router.post("/intake", response_model=CloudIntakeResponse)
 async def cluster_intake_endpoint(
     body: CloudIntakeRequest,

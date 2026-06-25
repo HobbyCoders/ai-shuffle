@@ -470,6 +470,44 @@ class PushNotificationService:
 push_notification_service = PushNotificationService()
 
 
+async def deliver_local_notification(
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Deliver a notification to THIS install's connected devices only.
+
+    Publishes to local SSE streams (the app's embedded foreground service —
+    push without Firebase or a UnifiedPush distributor app) and to any locally
+    registered UnifiedPush/FCM transports. All errors are swallowed.
+
+    This is the single local-delivery primitive shared by two callers:
+    ``fire_and_forget_notify`` (the originating install's local leg) and the
+    cluster ``/mobile-notify`` peer endpoint. The peer endpoint calls *only*
+    this — it must never re-fan-out, or notifications would loop between installs.
+    """
+    from app.services.mobile_push_hub import mobile_push_hub
+
+    # Deliver to connected SSE streams (the app's embedded foreground service).
+    event = {
+        "type": (data or {}).get("type", "notification"),
+        "title": title,
+        "body": body,
+        "data": data or {},
+    }
+    try:
+        await mobile_push_hub.publish(event)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"Hub publish failed: {e}")
+    # Also deliver to devices that registered a UnifiedPush/FCM transport.
+    try:
+        await push_notification_service.send_to_all_devices(
+            title=title, body=body, data=data
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"Background device notification failed: {e}")
+
+
 def fire_and_forget_notify(
     title: str,
     body: str,
@@ -481,30 +519,24 @@ def fire_and_forget_notify(
     prompts) where streaming must never block on a slow or unreachable push
     endpoint. Schedules the broadcast as a background task and swallows/logs all
     errors. No-op if called outside a running event loop.
+
+    On a cluster (multiple installs sharing one database) the event is also
+    fanned out to every other online install, so a phone connected to *any*
+    install in the cluster is notified about activity on this one. Single-install
+    deployments have no peers, so the fan-out is a no-op.
     """
     import asyncio
-    from app.services.mobile_push_hub import mobile_push_hub
 
     async def _run() -> None:
-        # Deliver to connected SSE streams (the app's embedded foreground
-        # service) — push without Firebase or a UnifiedPush distributor app.
-        event = {
-            "type": (data or {}).get("type", "notification"),
-            "title": title,
-            "body": body,
-            "data": data or {},
-        }
+        # Local devices first — the phone may be connected to this very install.
+        await deliver_local_notification(title, body, data)
+        # Then fan out to other cluster installs (no-op when there are none).
         try:
-            await mobile_push_hub.publish(event)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug(f"Hub publish failed: {e}")
-        # Also deliver to devices that registered a UnifiedPush/FCM transport.
-        try:
-            await push_notification_service.send_to_all_devices(
-                title=title, body=body, data=data
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug(f"Background device notification failed: {e}")
+            from app.core.cloud_relay import fanout_mobile_notify
+
+            await fanout_mobile_notify(title, body, data)
+        except Exception as e:  # noqa: BLE001 — fan-out must never break local
+            logger.debug(f"Cluster mobile-notify fan-out failed: {e}")
 
     try:
         loop = asyncio.get_running_loop()
