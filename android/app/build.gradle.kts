@@ -11,8 +11,8 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4.0-notif-deeplink"
+        versionCode = 5
+        versionName = "0.5.0-fullscreen-devices"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
