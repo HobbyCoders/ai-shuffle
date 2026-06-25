@@ -11,8 +11,8 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "0.3.0-cf-access"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
