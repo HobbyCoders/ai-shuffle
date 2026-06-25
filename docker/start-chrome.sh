@@ -76,18 +76,21 @@ fi
 #       large and grows in the persisted profile volume).
 #   --disable-software-rasterizer  we already --disable-gpu; this also stops the
 #       SwiftShader fallback allocating a software raster path we never display.
-#   --disable-background-networking  kill background fetchers (safe-browsing
-#       update pings, field-trial/component fetches) that wake the browser and
-#       hold buffers; the extension's own native-messaging bridge is unaffected.
 #   --disable-features=Translate,BackForwardCache  Translate loads an unused
 #       model; BackForwardCache keeps whole pages alive in memory after
 #       navigation — both pure memory cost for this single-tab use.
+#
+# DO NOT add --disable-background-networking here. It looks like a free memory
+# win, but it disables Chromium's extension installer/updater — the very
+# subsystem that processes ExtensionInstallForcelist and downloads the
+# Claude-in-Chrome CRX. With it set, the extension NEVER force-installs (no CRX
+# fetch at all), so /chrome can't connect. (Same reason Puppeteer, which ships
+# that flag by default, can't force-install extensions.)
 MEM_ARGS=(
     --js-flags=--max-old-space-size=512
     --renderer-process-limit=2
     --disk-cache-size=33554432
     --disable-software-rasterizer
-    --disable-background-networking
     --disable-features=Translate,BackForwardCache
 )
 
