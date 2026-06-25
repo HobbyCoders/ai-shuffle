@@ -81,7 +81,7 @@ describe('mergeWsStreamBuffer', () => {
 		// No non-empty trailing streaming assistant-text may leak in.
 		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
 		// And the gap dots must show during the think-gap.
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(true);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(true);
 	});
 
 	it('drops a stale buffer even when the finalized text has trailing content beyond the buffer', () => {
@@ -95,7 +95,7 @@ describe('mergeWsStreamBuffer', () => {
 
 		expect(result.wsStreamContent).toBe('');
 		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(true);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(true);
 	});
 
 	// ── Case 2: WS-ahead-of-poller head-start (must be preserved) ──────────
@@ -115,7 +115,7 @@ describe('mergeWsStreamBuffer', () => {
 		expect(last.streaming).toBe(true);
 		expect(last.content).toBe('Hel');
 		// A non-empty streaming text shows its own inline cursor → no gap dots.
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(false);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(false);
 	});
 
 	it('renders the longer WS buffer into an existing poller streaming text (head-start)', () => {
@@ -131,7 +131,7 @@ describe('mergeWsStreamBuffer', () => {
 		expect(last.streaming).toBe(true);
 		expect(result.wsStreamContent).toBe('Hello');
 		// A streaming text with real content shows its own cursor → no gap dots.
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(false);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(false);
 	});
 
 	it('preserves a live WS-ahead partial that merely prefixes an OLDER finalized text', () => {
@@ -159,7 +159,7 @@ describe('mergeWsStreamBuffer', () => {
 		expect(last.streaming).toBe(true);
 		expect(last.content).toBe('Let me');
 		// A non-empty streaming text shows its own inline cursor → no gap dots.
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(false);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(false);
 	});
 
 	// ── Case 3: tool-only think-gap (regression) ───────────────────────────
@@ -174,7 +174,7 @@ describe('mergeWsStreamBuffer', () => {
 		expect(result.wsStreamContent).toBe('');
 		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
 		// The gap dots must show.
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(true);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(true);
 	});
 
 	it('appends a harmless empty phantom for a turn-start think-gap (empty buffer + empty synthetic)', () => {
@@ -187,7 +187,7 @@ describe('mergeWsStreamBuffer', () => {
 
 		expect(result.wsStreamContent).toBe('');
 		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
-		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(true);
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(true);
 	});
 
 	// ── Case 4: multiple sequential think-gaps don't perpetuate stale content
@@ -214,7 +214,7 @@ describe('mergeWsStreamBuffer', () => {
 				(m) => m.role === 'assistant' && m.streaming && (m.content ?? '').includes('Hello world')
 			)
 		).toBe(false);
-		expect(shouldShowGapIndicator(merge2.messages, true, 0, SHOWN)).toBe(true);
+		expect(shouldShowGapIndicator(merge2.messages, true, SHOWN)).toBe(true);
 	});
 
 	// ── Turn end: buffer always cleared ─────────────────────────────────────

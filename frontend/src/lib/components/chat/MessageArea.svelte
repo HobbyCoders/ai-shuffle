@@ -193,14 +193,14 @@
 	// activity — the dead air after a completed tool call and before the next
 	// assistant message, where the model is thinking/generating the next tool_use
 	// and the chat otherwise looks frozen for many seconds. A trailing empty
-	// streaming synthetic is treated as transparent so it can't suppress this;
-	// active background tasks defer to the calm "waiting" indicator instead. See
+	// streaming synthetic is treated as transparent so it can't suppress this.
+	// Background tasks do NOT gate the dots — the main turn streams concurrently
+	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
 	const showGapIndicator = $derived(
 		shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
-			$activeSession.activeTasks?.length ?? 0,
 			chatPrefs?.showThinkingBlocks !== false
 		)
 	);
@@ -766,6 +766,34 @@
 			el.removeEventListener('load', onMediaLoad, true);
 			el.removeEventListener('loadeddata', onMediaLoad, true);
 		};
+	});
+
+	// Keep the bottom gap indicator in view when it appears.
+	//
+	// The gap dots render BELOW the last message, and they appear on transitions
+	// the content-scroll effect does NOT track as a "content change" — most often a
+	// tail tool flipping running→complete (its toolInput, the tracked signal, is
+	// unchanged; toolStatus is not tracked) or a trailing empty phantom clearing.
+	// So no scrollToBottom() fires for that transition and the freshly-shown dots
+	// land ~one indicator-height below the fold: they ARE in the DOM but sit just
+	// past the viewport bottom (captured live as ~30px short of true bottom). A
+	// page refresh re-pins to the true bottom, which is why "refresh brings the
+	// indicator back" — the dots were never missing, just off-screen.
+	//
+	// When the indicator is showing and we're still stuck to the bottom, pin across
+	// two frames (the StreamingIndicator's dots can lay out a frame late) so its
+	// full height is revealed. Gated on shouldAutoScroll so a user who scrolled up
+	// to read is not yanked back down.
+	$effect(() => {
+		if (!showGapIndicator || !containerRef || !isMounted) return;
+		if (!shouldAutoScroll) return;
+		tick().then(() => {
+			if (!shouldAutoScroll || !containerRef) return;
+			scrollToBottom();
+			requestAnimationFrame(() => {
+				if (shouldAutoScroll) scrollToBottom();
+			});
+		});
 	});
 
 	// Track previous values to detect actual content changes (not just re-renders)

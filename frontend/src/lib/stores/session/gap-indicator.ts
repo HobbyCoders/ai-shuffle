@@ -8,7 +8,7 @@
  *
  * Pure + framework-free so it can be unit-tested in isolation (mirrors
  * indicator-state.ts). The chat view derives the gap indicator from
- * `(messages, isStreaming, activeTaskCount, showThinkingBlocks)`.
+ * `(messages, isStreaming, showThinkingBlocks)`.
  *
  * THE PHANTOM PROBLEM (the recurring "indicator not showing after tools" bug):
  * the turn-start synthetic streaming message (`ws-stream-…`, empty content) is
@@ -90,9 +90,8 @@ export function findStreamingAnchorIndex(messages: ChatMessage[]): number {
 /**
  * Whether to render the bottom-of-chat gap indicator.
  *
- * Returns true ⟺ the turn is streaming, no background task is active, AND the
- * last visible-activity-bearing message does not already show its own
- * indicator:
+ * Returns true ⟺ the turn is streaming AND the last visible-activity-bearing
+ * message does not already show its own indicator:
  *   - a non-empty streaming text shows an inline cursor            → no gap dots
  *   - a streaming thinking block (when shown) shows header dots    → no gap dots
  *   - a running tool shows a spinner                               → no gap dots
@@ -104,16 +103,22 @@ export function findStreamingAnchorIndex(messages: ChatMessage[]): number {
  * gap dots, shown thinking → its own header dots), so a stale streaming text
  * tail can no longer hide an active hidden-thinking phase.
  *
- * Active background tasks take priority (mirrors deriveIndicatorState): while
- * parked on a sub-agent the SDK keeps reporting isStreaming = true, but we want
- * the calm "waiting" indicator, never the bouncing gap dots.
+ * Background tasks do NOT gate this indicator. A session streams concurrently
+ * with running background/terminal tasks (the main turn keeps thinking and
+ * calling its own tools while a task runs), so the count of active tasks says
+ * nothing about whether the main turn is mid-think. The "Running N task" panel
+ * is the SEPARATE, parallel indicator for those tasks; the gap dots track the
+ * main turn's own streaming activity. (An earlier `activeTaskCount > 0` short-
+ * circuit here assumed "task running ⇒ main turn parked", which wrongly hid the
+ * dots for the entire lifetime of any background task.) When the main turn is
+ * genuinely blocked on a tool/subagent, the running-tool / running-subagent
+ * tail checks below still suppress the dots.
  *
  * Trailing empty streaming assistant-text (the phantom) is skipped so it can't
  * masquerade as live streaming and suppress the dots.
  *
  * @param messages          The current message list.
  * @param isStreaming       Whether the turn is actively streaming.
- * @param activeTaskCount   Number of currently-running background tasks.
  * @param showThinkingBlocks Whether thinking blocks are shown (default true);
  *                          when false a streaming thinking block renders
  *                          nothing, so the gap dots are still needed.
@@ -121,12 +126,9 @@ export function findStreamingAnchorIndex(messages: ChatMessage[]): number {
 export function shouldShowGapIndicator(
 	messages: ChatMessage[],
 	isStreaming: boolean,
-	activeTaskCount: number,
 	showThinkingBlocks: boolean
 ): boolean {
 	if (!isStreaming) return false;
-	// Active tasks win: show the calm "waiting" indicator, not the gap dots.
-	if (activeTaskCount > 0) return false;
 	if (messages.length === 0) return false;
 
 	// Skip trailing phantom messages. If the tail is nothing but phantoms there
