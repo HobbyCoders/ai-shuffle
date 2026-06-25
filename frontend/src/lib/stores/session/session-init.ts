@@ -287,6 +287,148 @@ function sameAgentUsage(
 	);
 }
 
+/**
+ * Phase 3 of the poll merge — stabilize message identity across polls.
+ *
+ * The poller rebuilds the message array every cycle and the backend may hand a
+ * given block a different id over its lifetime (e.g. a streaming text first
+ * appears under the per-turn `message_id` synthetic, then settles to a stable
+ * `text-{uuid}`). To avoid re-rendering churn we adopt the EXISTING client id
+ * for a server message that matches an existing one — by id, or by position +
+ * content-prefix when the id changed.
+ *
+ * THE DUPLICATE-ID BUG this guards against:
+ * A streaming turn injects a synthetic placeholder seeded with the per-TURN
+ * `message_id` (one id for the whole turn). As the turn emits text → tool →
+ * text → tool …, each NEW streaming text block position-matches the PRIOR
+ * streaming text / synthetic — and because an empty synthetic has zero-length
+ * content, the prefix check (`shorter === 0`) matches ANYTHING. Without a guard
+ * every distinct server `text-{uuid}` block would be swapped onto that one
+ * synthetic id, so the whole turn's text blocks collapse to a single id.
+ * `displayItems` then dedups by id and silently drops all but the first text —
+ * the "assistant messages vanish mid-stream but reappear on refresh" bug (a
+ * cold load has no synthetic to collapse onto).
+ *
+ * The guard: an existing (client) id may be adopted by AT MOST ONE message per
+ * pass. Any later match that would reuse an already-claimed id keeps the
+ * server's own (unique) id instead. A final safety net guarantees the output
+ * never contains two messages with the same id, regardless of how the inputs
+ * arrived (e.g. a stale duplicate already present in `incoming`).
+ *
+ * Pure function (no store access) so it can be unit-tested directly.
+ *
+ * @returns the stabilized array + whether anything actually changed (when
+ *   `changed` is false the caller can keep the `incoming` reference as-is).
+ */
+export function stabilizeMessageIdentity(
+	incoming: ChatMessage[],
+	prior: ChatMessage[]
+): { messages: ChatMessage[]; changed: boolean } {
+	if (prior.length === 0 || incoming.length === 0) {
+		return { messages: incoming, changed: false };
+	}
+
+	const existingById = new Map<string, ChatMessage>();
+	for (const m of prior) {
+		if (m.id) existingById.set(m.id, m);
+	}
+
+	let needsStabilization = false;
+	// Every id already emitted in this pass. An existing client id may be
+	// adopted only once; the server's ids are globally unique so they are a
+	// safe fallback when adoption would collide.
+	const assignedIds = new Set<string>();
+
+	const stabilized = incoming.map((msg, i) => {
+		let existing = msg.id ? existingById.get(msg.id) : undefined;
+
+		if (!existing) {
+			const positional = prior[i];
+			if (positional && positional.role === msg.role && positional.type === msg.type) {
+				let positionMatchValid = true;
+				if (msg.type === 'tool_use') {
+					positionMatchValid = msg.toolName === positional.toolName;
+				} else if (msg.type === 'text' && msg.content && positional.content) {
+					const shorter = Math.min(msg.content.length, positional.content.length, 50);
+					positionMatchValid = shorter === 0 ||
+						msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
+				}
+				if (positionMatchValid) {
+					existing = positional;
+				}
+			}
+		}
+
+		// Adopting `existing.id` is only allowed if no earlier message in this
+		// pass already claimed it — otherwise the distinct server blocks would
+		// collapse onto one id (the bug above).
+		const canAdopt = (id: string | undefined): boolean =>
+			!!id && !assignedIds.has(id);
+
+		let out: ChatMessage;
+		if (!existing) {
+			out = msg;
+		} else if (msg.type === 'subagent') {
+			const existChildren = existing.agentChildren;
+			const incomChildren = msg.agentChildren;
+			const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
+			const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
+			const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
+			const sameTail =
+				existLast?.content === incomLast?.content &&
+				existLast?.toolResult === incomLast?.toolResult &&
+				existLast?.toolStatus === incomLast?.toolStatus &&
+				existLast?.streaming === incomLast?.streaming;
+			if (
+				existing.agentStatus === msg.agentStatus &&
+				existing.streaming === msg.streaming &&
+				existing.content === msg.content &&
+				sameAgentUsage(existing.agentUsage, msg.agentUsage) &&
+				sameLen &&
+				sameTail
+			) {
+				if (existing !== msg) needsStabilization = true;
+				out = existing;
+			} else if (existing.id !== msg.id && canAdopt(existing.id)) {
+				needsStabilization = true;
+				out = { ...msg, id: existing.id };
+			} else {
+				out = msg;
+			}
+		} else if (
+			existing.content === msg.content &&
+			existing.streaming === msg.streaming &&
+			existing.toolResult === msg.toolResult &&
+			existing.toolStatus === msg.toolStatus
+		) {
+			if (existing !== msg) needsStabilization = true;
+			out = existing;
+		} else if (existing.id !== msg.id && canAdopt(existing.id)) {
+			// eslint-disable-next-line no-console
+			if (STREAM_DEBUG) console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
+			needsStabilization = true;
+			out = { ...msg, id: existing.id };
+		} else {
+			out = msg;
+		}
+
+		// Final safety net: never emit two messages with the same id. If the
+		// chosen id is already taken (a stale duplicate arrived in `incoming`,
+		// or the match picked an id another message already claimed), fall back
+		// to a position-stable unique id so the id-dedup downstream can't drop a
+		// real message. `i` is stable across polls for a given turn structure,
+		// so this introduces no churn.
+		if (out.id && assignedIds.has(out.id)) {
+			needsStabilization = true;
+			out = { ...out, id: `${out.id}#${i}` };
+		}
+		if (out.id) assignedIds.add(out.id);
+		return out;
+	});
+
+	return { messages: needsStabilization ? stabilized : incoming, changed: needsStabilization };
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionInit(deps: SessionInitDeps) {
@@ -534,82 +676,15 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}
 
 				// ── Phase 3: Stabilize message identity ────────────────────
-				if (s.messages.length > 0 && finalMessages.length > 0) {
-					const existingById = new Map<string, ChatMessage>();
-					for (const m of s.messages) {
-						if (m.id) existingById.set(m.id, m);
-					}
-
-					let needsStabilization = false;
-					const stabilized = finalMessages.map((msg, i) => {
-						let existing = existingById.get(msg.id);
-
-						if (!existing) {
-							const positional = s.messages[i];
-							if (positional && positional.role === msg.role && positional.type === msg.type) {
-								let positionMatchValid = true;
-								if (msg.type === 'tool_use') {
-									positionMatchValid = msg.toolName === positional.toolName;
-								} else if (msg.type === 'text' && msg.content && positional.content) {
-									const shorter = Math.min(msg.content.length, positional.content.length, 50);
-									positionMatchValid = shorter === 0 ||
-										msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
-								}
-								if (positionMatchValid) {
-									existing = positional;
-								}
-							}
-						}
-
-						if (!existing) return msg;
-
-						if (msg.type === 'subagent') {
-							const existChildren = existing.agentChildren;
-							const incomChildren = msg.agentChildren;
-							const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
-							const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
-							const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
-							const sameTail =
-								existLast?.content === incomLast?.content &&
-								existLast?.toolResult === incomLast?.toolResult &&
-								existLast?.toolStatus === incomLast?.toolStatus &&
-								existLast?.streaming === incomLast?.streaming;
-							if (
-								existing.agentStatus === msg.agentStatus &&
-								existing.streaming === msg.streaming &&
-								existing.content === msg.content &&
-								sameAgentUsage(existing.agentUsage, msg.agentUsage) &&
-								sameLen &&
-								sameTail
-							) {
-								if (existing !== msg) needsStabilization = true;
-								return existing;
-							}
-							if (existing.id !== msg.id) {
-								needsStabilization = true;
-								return { ...msg, id: existing.id };
-							}
-							return msg;
-						}
-
-						if (
-							existing.content === msg.content &&
-							existing.streaming === msg.streaming &&
-							existing.toolResult === msg.toolResult &&
-							existing.toolStatus === msg.toolStatus
-						) {
-							if (existing !== msg) needsStabilization = true;
-							return existing;
-						}
-						if (existing.id !== msg.id) {
-							// eslint-disable-next-line no-console
-							if (STREAM_DEBUG) console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
-							needsStabilization = true;
-							return { ...msg, id: existing.id };
-						}
-						return msg;
-					});
-					if (needsStabilization) finalMessages = stabilized;
+				// Pure logic in stabilizeMessageIdentity (exported + unit-tested).
+				// It adopts existing client ids to avoid render churn while
+				// GUARANTEEING unique output ids — otherwise a turn's text blocks
+				// collapse onto the single per-turn synthetic id and displayItems'
+				// id-dedup silently drops all but the first (messages vanish
+				// mid-stream, reappear on refresh).
+				{
+					const stab = stabilizeMessageIdentity(finalMessages, s.messages);
+					finalMessages = stab.messages;
 				}
 
 				// ── No-op detection ────────────────────────────────────────
