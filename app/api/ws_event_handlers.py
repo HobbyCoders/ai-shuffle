@@ -764,7 +764,52 @@ async def handle_done(
                 f"| cache_create={seed_usage['cache_creation_tokens']} "
                 f"| cache_read={seed_usage['cache_read_tokens']}"
             )
-            pre_seed_parse_cache(sdk_sid, live_data["messages"], seed_usage, seed_working_dir)
+
+            # The live-store messages carry NO JSONL uuid on freshly streamed
+            # entries (LiveMessage.uuid is only set on seeded history). Seeding
+            # the parse cache with them poisons every later read — the frontend
+            # then sees uuid-less messages and rewind fails with "missing its
+            # checkpoint id". Under postgres_only the store IS the source of
+            # truth and is fully flushed by the time `done` fires, so re-parse
+            # it fresh to recover the uuid-bearing transcript and seed THAT.
+            # Keep `seed_usage` (deliberate per-turn, not cumulative — see above).
+            seed_messages = live_data["messages"]
+            if settings.session_store_mode == "postgres_only":
+                try:
+                    from app.api.sessions_helpers import (
+                        parse_session_history_via_store,
+                    )
+
+                    fresh_messages, _fresh_usage = await asyncio.to_thread(
+                        parse_session_history_via_store,
+                        sdk_sid,
+                        seed_working_dir,
+                        use_cache=False,
+                    )
+                    # Guard against a not-yet-flushed turn: only prefer the store
+                    # re-parse when it is at least as complete as the live store.
+                    # The parser groups entries into >= as many messages, so a
+                    # shorter result means the latest turn is missing — fall back
+                    # to the live messages rather than make a turn "disappear".
+                    if fresh_messages and len(fresh_messages) >= len(seed_messages):
+                        seed_messages = fresh_messages
+                    else:
+                        logger.warning(
+                            "[Rewind] store re-parse incomplete for %s "
+                            "(fresh=%d live=%d); seeding live messages",
+                            sdk_sid,
+                            len(fresh_messages) if fresh_messages else 0,
+                            len(seed_messages),
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[Rewind] store re-parse failed for %s: %s; "
+                        "seeding live messages",
+                        sdk_sid,
+                        e,
+                    )
+
+            pre_seed_parse_cache(sdk_sid, seed_messages, seed_usage, seed_working_dir)
         else:
             invalidate_parse_cache(sdk_sid)
 
