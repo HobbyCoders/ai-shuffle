@@ -10,7 +10,7 @@ AI Shuffle provides file management capabilities for browsing project directorie
 
 ## File Browser
 
-The Files page provides a visual file browser for all your projects:
+The Files page provides a visual file browser for your workspace:
 
 - **Navigate** directories with breadcrumb navigation
 - **Show/hide** hidden files (dotfiles)
@@ -23,8 +23,7 @@ The Files page provides a visual file browser for all your projects:
 ### Accessing the File Browser
 
 1. Navigate to **Files** in the sidebar
-2. Select a project from the dropdown
-3. Browse the directory tree
+2. Browse the workspace directory tree starting from the workspace root
 
 ## File Uploads
 
@@ -57,33 +56,25 @@ curl "http://localhost:8000/api/v1/projects/proj_abc/files/download?path=src/app
 
 ## Shared Files
 
-Share files across sessions with shareable links:
+The agent can make files in the workspace available for download. These appear in the chat UI as download cards and are served by filename:
 
 ```bash
-# Create a shared file link
-curl -X POST http://localhost:8000/api/v1/shared-files \
+# Download a shared file by name
+curl http://localhost:8000/api/files/report.pdf \
   -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/project/output/report.pdf"}'
-
-# Access shared file
-curl http://localhost:8000/api/v1/shared-files/{share_id}
+  -o report.pdf
 ```
 
 ## Generated Media
 
-AI Shuffle can generate images and videos using integrated AI tools. Generated media is accessible via:
-
-- **Images gallery** — View and manage AI-generated images
-- **Videos gallery** — View and manage AI-generated videos
-- Download links provided in chat messages
+AI Shuffle can generate images and videos using integrated AI tools. Generated media appears inline in chat messages as download cards rather than in a dedicated gallery. The files are served from the workspace and can also be listed via the API:
 
 ```bash
 # List generated images
-curl http://localhost:8000/api/v1/images \
+curl http://localhost:8000/api/generated-images/ \
   -H "Authorization: Bearer aih_your_key"
 
 # List generated videos
-curl http://localhost:8000/api/v1/videos \
+curl http://localhost:8000/api/generated-videos/ \
   -H "Authorization: Bearer aih_your_key"
 ```

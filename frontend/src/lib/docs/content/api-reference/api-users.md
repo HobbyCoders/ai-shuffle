@@ -35,10 +35,9 @@ curl http://localhost:8000/api/v1/api-users \
   {
     "id": "usr_abc123",
     "name": "CI/CD Pipeline",
-    "key_prefix": "aih_7x...",
     "project_id": "proj_123",
     "profile_ids": ["default"],
-    "enabled": true,
+    "is_active": true,
     "last_used_at": "2025-01-15T10:30:00Z",
     "created_at": "2025-01-01T00:00:00Z"
   }
@@ -158,8 +157,8 @@ curl http://localhost:8000/api/v1/sessions \
   -H "Authorization: Bearer aih_your_key_here"
 ```
 
-For WebSocket connections, pass the key as a query parameter:
+For WebSocket connections, pass the key as a query parameter. The session is specified in the message body, not the URL:
 
 ```
-ws://localhost:8000/api/v1/ws/chat/sess_id?token=aih_your_key_here
+ws://localhost:8000/api/v1/ws/chat?token=aih_your_key_here
 ```

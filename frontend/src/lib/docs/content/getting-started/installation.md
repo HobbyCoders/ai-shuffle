@@ -10,6 +10,7 @@ order: 2
 
 - **Python 3.11+** — Backend runtime
 - **Node.js 18+** — Frontend build tooling
+- **PostgreSQL** — Application database (required). The provided `docker-compose.yml` runs one for you; for a manual install you'll need a reachable PostgreSQL instance.
 - **GitHub CLI** — [Download](https://cli.github.com/) — Used for PR reviews, issue management, etc.
 - **Git** — For project management and worktree features
 
@@ -40,11 +41,18 @@ cd ..
 
 ### 4. Build the Frontend
 
+Build the frontend and copy the output into `app/static`, which is where the
+backend serves it from:
+
 ```bash
 cd frontend
 npm run build
 cd ..
+rm -rf app/static && cp -r frontend/build app/static
 ```
+
+> **Tip:** `python run_local.py --setup` performs the dependency install, build,
+> and copy steps for you in one command.
 
 ### 5. Start the Server
 
@@ -70,8 +78,8 @@ On first launch, you'll be directed to the setup page where you:
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
-| `CORS_ORIGINS` | `*` | Allowed CORS origins |
-| `DATABASE_URL` | `sqlite:///data/app.db` | Database path |
+| `CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed CORS origins (use `*` for development only) |
+| `DATABASE_URL` | _(required)_ | PostgreSQL connection string, e.g. `postgresql://REDACTED@localhost:5432/aishuffle`. No default — the server refuses to start without it. |
 
 ### Running in Production
 
@@ -88,6 +96,7 @@ For production deployments, consider:
 git pull
 pip install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
+rm -rf app/static && cp -r frontend/build app/static
 python -m app.main
 ```
 

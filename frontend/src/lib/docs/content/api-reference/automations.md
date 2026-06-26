@@ -201,10 +201,6 @@ Get execution history.
 
 Get details for a specific run.
 
-### POST /api/v1/automations/{automation_id}/runs/{run_id}/cancel
-
-Cancel an active run.
-
 ## Approvals
 
 For automations with `requires_approval: true`, runs are held until approved.
@@ -228,21 +224,20 @@ Deny a pending run.
 
 ## Statistics
 
-### GET /api/v1/automations/stats
+### GET /api/v1/automations/{automation_id}/stats
 
-Get automation statistics.
+Get statistics for a single automation.
 
 **Response:**
 ```json
 {
-  "total_automations": 5,
-  "active_automations": 3,
+  "automation_id": "auto_abc123",
   "total_runs": 150,
   "successful_runs": 142,
   "failed_runs": 8,
   "total_cost_usd": 3.45,
+  "avg_duration_ms": 95000,
   "today_runs": 12,
-  "today_cost_usd": 0.28,
-  "avg_duration_ms": 95000
+  "today_cost_usd": 0.28
 }
 ```

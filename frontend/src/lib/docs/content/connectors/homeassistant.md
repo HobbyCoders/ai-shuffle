@@ -76,7 +76,7 @@ curl -X POST http://localhost:8000/api/v1/connectors \
   }'
 ```
 
-To limit Claude's access to specific entities, add the optional `entity_ids` field:
+To limit which entities the connector monitors, add the optional `entity_filter` field. It is a comma-separated string of entity-id prefixes -- only entities whose ID starts with one of the prefixes are tracked. You can also tune how often states are polled with the optional `poll_interval_seconds` field (defaults to `"60"`):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors \
@@ -88,13 +88,8 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "config": {
       "url": "http://homeassistant.local:8123",
       "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOi...",
-      "entity_ids": [
-        "light.living_room",
-        "light.bedroom",
-        "climate.thermostat",
-        "lock.front_door",
-        "sensor.outdoor_temperature"
-      ]
+      "entity_filter": "light.,switch.,climate.,lock.,sensor.",
+      "poll_interval_seconds": "60"
     }
   }'
 ```
@@ -124,7 +119,8 @@ Claude will use the Home Assistant connector to query or control the appropriate
 |-------|------|----------|-------------|
 | `url` | string | Yes | The base URL of your Home Assistant instance (e.g., `http://homeassistant.local:8123` or `https://your-instance.ui.nabu.casa`) |
 | `access_token` | string | Yes | A Long-Lived Access Token generated from your Home Assistant user profile |
-| `entity_ids` | array of strings | No | An optional list of entity IDs to restrict Claude's access. When omitted, Claude can see and control all entities. |
+| `entity_filter` | string | No | A comma-separated list of entity-id prefixes to restrict which entities are tracked (e.g., `light.,switch.,climate.`). When omitted, all entities are tracked. |
+| `poll_interval_seconds` | string | No | Seconds between entity-state polls. Defaults to `"60"`. |
 
 ## Capabilities
 
@@ -132,7 +128,7 @@ The Home Assistant connector supports the following capabilities:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `rich_text` | Yes | Responses include formatted entity state information |
+| `rich_text` | No | The connector is not a messaging connector (`is_messaging=False`) |
 | `typing_indicator` | No | Not applicable for smart home control |
 | `reactions` | No | Not applicable for smart home control |
 | `file_upload` | No | Not supported |
@@ -164,7 +160,7 @@ The Home Assistant connector supports the following capabilities:
 ### Claude says it cannot find an entity
 
 - **Check entity ID.** Entity IDs in Home Assistant are case-sensitive and follow the format `domain.name` (e.g., `light.living_room`). Check the exact ID in Home Assistant under **Developer Tools > States**.
-- **Entity filtering.** If you specified `entity_ids` in the connector config, ensure the entity is in the list. Entities not in the list are invisible to Claude.
+- **Entity filtering.** If you specified an `entity_filter` in the connector config, ensure the entity's ID starts with one of the configured prefixes. Entities that do not match the filter are not tracked.
 - **Entity unavailable.** The device may be offline. Check the entity status in Home Assistant directly.
 
 ### Commands execute but nothing happens
@@ -176,4 +172,4 @@ The Home Assistant connector supports the following capabilities:
 ### High latency in responses
 
 - **Network.** If AI Shuffle and Home Assistant are on different networks, latency depends on the connection between them. For the fastest response, run them on the same local network.
-- **Large entity list.** If you have hundreds of entities and no `entity_ids` filter, Claude needs to process a large state list. Adding an `entity_ids` filter to scope down to relevant entities will improve response times.
+- **Large entity list.** If you have hundreds of entities and no `entity_filter`, the connector polls and processes a large state list. Adding an `entity_filter` to scope down to relevant entity prefixes will improve response times.

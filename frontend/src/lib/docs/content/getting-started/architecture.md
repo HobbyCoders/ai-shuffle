@@ -29,7 +29,7 @@ AI Shuffle is a three-tier application:
                        │
 ┌──────────────────────▼───────────────────────────────────┐
 │                    Storage Layer                           │
-│  SQLite (metadata) · JSONL (messages) · File System       │
+│  PostgreSQL (metadata) · JSONL (messages) · File System   │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -61,7 +61,7 @@ auth              → authentication state, admin status
 
 ### Technology Stack
 - **FastAPI** — Async Python web framework
-- **SQLite** — Embedded database via aiosqlite
+- **PostgreSQL** — Relational database via psycopg2
 - **Claude Agent SDK** — Anthropic's Python SDK for AI agents
 - **APScheduler** — Cron and interval scheduling for automations
 - **WebSocket** — Real-time bidirectional communication

@@ -10,7 +10,7 @@ order: 12
 
 The Spotify connector allows Claude to control music playback on your Spotify account through AI Shuffle. With this connector active, you can ask Claude to play songs, albums, or playlists, skip tracks, adjust volume, search for music, and manage your playback queue -- all through natural language conversation.
 
-The connector uses the [Spotify Web API](https://developer.spotify.com/documentation/web-api) with OAuth 2.0 authentication. You will need to create a Spotify Developer application to obtain client credentials, after which the connector handles the OAuth authorization flow. Note that some playback control features require a Spotify Premium subscription.
+The connector uses the [Spotify Web API](https://developer.spotify.com/documentation/web-api) with OAuth 2.0. You will need to create a Spotify Developer application to obtain client credentials and a long-lived **refresh token**, which the connector uses to mint short-lived access tokens automatically. Note that some playback control features require a Spotify Premium subscription.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ The connector uses the [Spotify Web API](https://developer.spotify.com/documenta
    - **App name:** `AI Shuffle` (or any name you prefer)
    - **App description:** `AI Shuffle Spotify Connector`
    - **Website:** Can be left blank or set to your AI Shuffle URL
-   - **Redirect URI:** `http://localhost:8000/api/v1/connectors/spotify/callback` (this must match exactly -- adjust the host/port if your AI Shuffle backend runs elsewhere)
+   - **Redirect URI:** Set any redirect URI you control (e.g. `http://localhost:8888/callback`). AI Shuffle does not expose a Spotify callback endpoint -- this URI is only used when you generate the refresh token out-of-band (see step 5), and it must match exactly during that step.
    - **APIs used:** Check **Web API**
 4. Click **Save**
 
@@ -49,7 +49,20 @@ The connector uses the [Spotify Web API](https://developer.spotify.com/documenta
 
 Keep these credentials secure. Do not share them or commit them to version control.
 
-### 4. Create the Spotify connector in AI Shuffle
+### 4. Obtain a refresh token
+
+AI Shuffle does **not** host an OAuth callback for Spotify. Instead, the connector uses a pre-obtained **refresh token** to mint short-lived access tokens on demand. You generate this refresh token once, out-of-band, and paste it into the connector config.
+
+Run the standard Spotify [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow) once to get a refresh token. You can use Spotify's own tutorial, a small local script, or a community helper. At a high level:
+
+1. Send the user to `https://accounts.spotify.com/authorize` with your `client_id`, your registered redirect URI, and the scopes you need (for full playback and library control: `user-read-playback-state`, `user-modify-playback-state`, `user-read-currently-playing`, `user-top-read`, `user-library-read`, `user-library-modify`).
+2. After you click **Agree**, Spotify redirects to your redirect URI with a `?code=...` query parameter.
+3. Exchange that authorization code at `https://accounts.spotify.com/api/token` (`grant_type=authorization_code`) using your `client_id` and `client_secret`.
+4. The token response includes a `refresh_token`. Save this value -- it is what AI Shuffle needs.
+
+The refresh token is long-lived and does not expire under normal use. The connector exchanges it for fresh access tokens automatically.
+
+### 5. Create the Spotify connector in AI Shuffle
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors \
@@ -60,22 +73,13 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "connector_type": "spotify",
     "config": {
       "client_id": "1a2b3c4d5e6f7g8h9i0j",
-      "client_secret": "AbCdEfGhIjKlMnOpQrSt"
+      "client_secret": "AbCdEfGhIjKlMnOpQrSt",
+      "refresh_token": "AQD...your_refresh_token"
     }
   }'
 ```
 
 Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Spotify**.
-
-### 5. Complete the OAuth authorization flow
-
-After creating the connector, you will need to authorize AI Shuffle to access your Spotify account:
-
-1. Activate the connector (see step 6) -- the first activation will initiate the OAuth flow
-2. You will be redirected to Spotify's authorization page (or receive a URL to open in your browser)
-3. Review the permissions requested and click **Agree**
-4. You will be redirected back to AI Shuffle with an authorization code
-5. The connector exchanges this code for access and refresh tokens automatically
 
 ### 6. Activate the connector
 
@@ -83,6 +87,8 @@ After creating the connector, you will need to authorize AI Shuffle to access yo
 curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
   -H "Authorization: Bearer aih_your_key"
 ```
+
+On activation the connector immediately exchanges your refresh token for an access token and begins polling playback.
 
 ### 7. Test playback control
 
@@ -100,6 +106,8 @@ Make sure Spotify is actively playing on one of your devices (open the Spotify a
 |-------|------|----------|-------------|
 | `client_id` | string | Yes | The Client ID from your Spotify Developer application |
 | `client_secret` | string | Yes | The Client Secret from your Spotify Developer application |
+| `refresh_token` | string | Yes | OAuth2 refresh token obtained from the authorization code flow (see step 4) |
+| `poll_interval_seconds` | string | No | Seconds between playback polling checks. Defaults to `"30"` |
 
 ## Capabilities
 
@@ -107,7 +115,7 @@ The Spotify connector supports the following capabilities:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `rich_text` | Yes | Responses include formatted track information (song name, artist, album, progress) |
+| `rich_text` | No | Spotify is a non-messaging connector; responses are plain text |
 | `typing_indicator` | No | Not applicable for music control |
 | `reactions` | No | Not applicable for music control |
 | `file_upload` | No | Not supported |
@@ -147,27 +155,26 @@ The Spotify Web API can only control playback on a device that is already active
 
 The API cannot "wake up" a device that is not running Spotify or not currently active.
 
-### OAuth authorization fails
+### Activation fails / authentication error
 
-- **Redirect URI mismatch.** The most common cause. The redirect URI in your Spotify Developer app settings must exactly match `http://localhost:8000/api/v1/connectors/spotify/callback`. Check for trailing slashes, protocol (`http` vs `https`), and port number.
 - **Client credentials wrong.** Double-check that the `client_id` and `client_secret` in your connector config match the values in the Spotify Developer Dashboard.
-- **Browser cookies.** If the authorization page shows an error, try opening the authorization URL in an incognito/private browser window.
+- **Refresh token wrong or revoked.** The `refresh_token` must come from an authorization code flow for the *same* `client_id`/`client_secret`. If you regenerated your client secret, rotated the token, or revoked AI Shuffle's access in your Spotify account settings, the refresh token will no longer work -- generate a new one (step 4) and update the connector config.
 
 ### "Insufficient client scope" error
 
-The connector needs specific OAuth scopes to control playback. If you see this error, the token may have been created with insufficient permissions. Delete the connector, recreate it, and complete the OAuth flow again to ensure all required scopes are granted.
+The refresh token must have been granted the scopes the connector uses to control playback. If you see this error, the token was generated with insufficient permissions. Re-run the authorization code flow (step 4) requesting all required scopes, then update the connector config with the new refresh token.
 
 ### Playback commands work but search does not (or vice versa)
 
-- This typically indicates a partial OAuth scope grant. Recreate the connector and re-authorize to ensure all scopes are included.
+- This typically indicates a partial scope grant on your refresh token. Re-run the authorization code flow including all required scopes, then update the connector config with the new refresh token.
 
 ### Token refresh fails
 
-The connector automatically refreshes expired access tokens using the refresh token. If this fails:
+The connector automatically exchanges your refresh token for new access tokens. If this fails:
 
 1. Check that your Spotify Developer application is still active in the Developer Dashboard
-2. Deactivate and reactivate the connector to trigger a fresh OAuth flow
-3. If the issue persists, delete the connector and create a new one
+2. Confirm the `refresh_token` in the connector config is current and was issued for this app's credentials
+3. If the issue persists, generate a fresh refresh token (step 4) and update the connector config
 
 ### Rate limiting
 
