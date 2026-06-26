@@ -455,18 +455,76 @@ class WorktreeManager:
 
         logger.debug(f"Creating worktree at: {worktree_path}")
 
-        # Create git worktree
-        success, error_msg = self.git_service.add_worktree(
-            main_dir=main_dir,
-            path=str(worktree_path),
-            branch=branch_name,
-            new_branch=create_new_branch,
-            base_branch=base_branch
-        )
+        # Track whether we adopted an existing on-disk worktree (vs. created a
+        # fresh one) so a later record-creation failure doesn't tear down a
+        # worktree we didn't make.
+        adopted_existing = False
 
-        if not success:
-            logger.error(f"Failed to create git worktree: {error_msg}")
-            raise WorktreeError(f"Git failed to create worktree: {error_msg or 'Unknown error'}")
+        # Adopt-if-already-checked-out: an existing branch may already be live in
+        # a git worktree on this device (common in a shared-Postgres cluster where
+        # the DB record was hard-deleted but the on-disk worktree survives). Git
+        # only lets one worktree hold a branch, so re-adding it would fail with
+        # "already used by worktree at X". Adopt that path instead.
+        if not create_new_branch:
+            adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
+            if adopted is not None:
+                worktree_path = Path(adopted["path"])
+                relative_worktree_path = self._get_relative_worktree_path_from_full(
+                    worktree_path, project["path"]
+                )
+                adopted_existing = True
+                logger.info(
+                    f"Adopting existing on-disk worktree for branch '{branch_name}' "
+                    f"at {worktree_path} — skipping git add"
+                )
+            else:
+                # Create git worktree
+                success, error_msg = self.git_service.add_worktree(
+                    main_dir=main_dir,
+                    path=str(worktree_path),
+                    branch=branch_name,
+                    new_branch=create_new_branch,
+                    base_branch=base_branch
+                )
+                if not success:
+                    # Belt-and-suspenders: re-scan + adopt if the branch turns out
+                    # to be already checked out (race past the scan above).
+                    if error_msg and "already used by worktree" in error_msg.lower():
+                        adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
+                        if adopted is not None:
+                            worktree_path = Path(adopted["path"])
+                            relative_worktree_path = (
+                                self._get_relative_worktree_path_from_full(
+                                    worktree_path, project["path"]
+                                )
+                            )
+                            adopted_existing = True
+                            logger.info(
+                                f"Adopting existing on-disk worktree for branch "
+                                f"'{branch_name}' at {worktree_path} after add failed"
+                            )
+                        else:
+                            logger.error(f"Failed to create git worktree: {error_msg}")
+                            raise WorktreeError(
+                                f"Git failed to create worktree: {error_msg or 'Unknown error'}"
+                            )
+                    else:
+                        logger.error(f"Failed to create git worktree: {error_msg}")
+                        raise WorktreeError(
+                            f"Git failed to create worktree: {error_msg or 'Unknown error'}"
+                        )
+        else:
+            # Create git worktree (brand-new branch — cannot already be checked out)
+            success, error_msg = self.git_service.add_worktree(
+                main_dir=main_dir,
+                path=str(worktree_path),
+                branch=branch_name,
+                new_branch=create_new_branch,
+                base_branch=base_branch
+            )
+            if not success:
+                logger.error(f"Failed to create git worktree: {error_msg}")
+                raise WorktreeError(f"Git failed to create worktree: {error_msg or 'Unknown error'}")
 
         # Create worktree record (no session_id - standalone worktree)
         worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
@@ -482,7 +540,11 @@ class WorktreeManager:
             )
         except Exception as e:
             logger.error(f"Failed to create worktree record: {e}")
-            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            # Only remove the git worktree if WE created it. An adopted worktree
+            # was already live on disk (and possibly owned by another record) —
+            # tearing it down here would destroy a healthy checkout.
+            if not adopted_existing:
+                self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
             # Check if this is a unique constraint violation (race condition - another request won)
             error_msg = str(e).lower()
             if "unique constraint" in error_msg or "unique" in error_msg:
@@ -1009,6 +1071,76 @@ class WorktreeManager:
         logger.debug(f"Cleaned up worktree {worktree_id} (marked COMPLETED)")
         return True
 
+    def _find_git_worktree_for_branch(
+        self, main_dir: str, branch_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find a live (non-main) git worktree that already has ``branch_name``
+        checked out on this device.
+
+        Git enforces that a branch can be checked out by at most one worktree,
+        so when ``git worktree add`` would fail with "already used by worktree
+        at X" the branch is in fact alive at X — we can adopt that path rather
+        than failing. This is common in a shared-Postgres cluster: another
+        device may mark the DB record ORPHANED/DELETED because the dir is
+        missing on *that* disk, but it's healthy on the device resuming here.
+
+        Returns the matching ``git_service.list_worktrees`` dict (keys: path,
+        branch, is_main, is_bare, is_detached) whose directory exists on disk
+        and contains a ``.git`` entry, or ``None`` if no adoptable match.
+        """
+        try:
+            existing = self.git_service.list_worktrees(main_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not list worktrees for {main_dir}: {e}")
+            return None
+
+        for wt in existing:
+            if wt.get("is_main") or wt.get("is_bare"):
+                continue
+            # list_worktrees returns the short branch name (refs/heads/ stripped).
+            if wt.get("branch") != branch_name:
+                continue
+            raw_path = wt.get("path")
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            # Reuse the is_worktree_valid notion: folder exists AND has .git.
+            if candidate.exists() and (candidate / ".git").exists():
+                return wt
+        return None
+
+    def _adopt_existing_worktree(
+        self,
+        worktree_id: str,
+        branch_name: str,
+        adopted: Dict[str, Any],
+        project: Dict[str, Any],
+        prior_status: Any,
+    ) -> Dict:
+        """
+        Adopt an on-disk git worktree (found via
+        ``_find_git_worktree_for_branch``) into the DB record instead of
+        re-adding it. Flips the record to ACTIVE with the adopted path and
+        returns the updated record (same shape ``recreate_worktree`` returns).
+        """
+        adopt_path = Path(adopted["path"])
+        stored_path = self._get_relative_worktree_path_from_full(
+            adopt_path, project["path"]
+        )
+        updated = database.update_worktree(
+            worktree_id,
+            status=WorktreeStatus.ACTIVE,
+            worktree_path=stored_path,
+            branch_name=branch_name,
+        )
+        logger.info(
+            f"Adopted existing on-disk worktree for branch '{branch_name}' "
+            f"(worktree_id={worktree_id}, path={adopt_path}, "
+            f"prior status was {prior_status}) — skipped git add"
+        )
+        return updated
+
     def recreate_worktree(self, worktree_id: str) -> Dict:
         """
         Recreate a worktree from its branch (last git state) so the user can
@@ -1081,6 +1213,19 @@ class WorktreeManager:
         # Prune stale worktree entries so git doesn't complain about existing refs
         self.git_service.prune_worktrees(main_dir)
 
+        # Adopt-if-already-checked-out: prune does NOT remove an entry whose
+        # directory still exists on disk, so re-adding the same branch would
+        # fail ("already used by worktree at X"). If the branch is already live
+        # in git on this device, adopt that path instead of re-adding — this
+        # makes recreate idempotent and is the common shared-DB-cluster case
+        # (the record was flipped ORPHANED/DELETED by another device, but the
+        # worktree is healthy locally).
+        adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
+        if adopted is not None:
+            return self._adopt_existing_worktree(
+                worktree_id, branch_name, adopted, project, prior_status=worktree["status"]
+            )
+
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(
             main_dir=main_dir,
@@ -1091,6 +1236,16 @@ class WorktreeManager:
         )
 
         if not success:
+            # Belt-and-suspenders: a concurrent/stale entry can race past the
+            # adopt scan above. If git reports the branch is already used by an
+            # existing worktree, re-scan and adopt it rather than dead-ending.
+            if error_msg and "already used by worktree" in error_msg.lower():
+                adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
+                if adopted is not None:
+                    return self._adopt_existing_worktree(
+                        worktree_id, branch_name, adopted, project,
+                        prior_status=worktree["status"],
+                    )
             raise WorktreeError(f"Git failed to recreate worktree: {error_msg or 'Unknown error'}")
 
         # Verify the worktree directory was actually created on disk
