@@ -4,6 +4,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -27,6 +29,7 @@ import okhttp3.sse.EventSources
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 /**
  * Foreground service that keeps one Server-Sent-Events connection open to each
@@ -49,6 +52,47 @@ class NotificationStreamService : Service() {
     // serverId -> live connection state. ConcurrentHashMap because EventSource
     // callbacks arrive on OkHttp threads while reconcile runs on the main thread.
     private val connections = ConcurrentHashMap<String, Connection>()
+
+    private val connectivityManager by lazy {
+        getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+
+    // Whether the device currently has a usable default network. When false we
+    // must NOT keep retrying: each blind reconnect wakes the cellular/Wi-Fi
+    // radio for a handshake that instantly fails, which is the dominant cause of
+    // background battery drain. We simply wait for [networkCallback] to tell us
+    // connectivity is back, then reconnect immediately.
+    @Volatile private var networkAvailable: Boolean = true
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (networkAvailable) return // already online; nothing changed
+            networkAvailable = true
+            Log.i(TAG, "Network available — reconnecting streams")
+            // Connectivity is fresh: drop any leftover backoff and reconnect
+            // everything that isn't already live, right now.
+            connections.values.forEach { conn ->
+                conn.reconnectJob?.cancel()
+                conn.attempt = 0
+                if (!conn.closed && conn.source == null) connect(conn)
+            }
+            updateForegroundNotification()
+        }
+
+        override fun onLost(network: Network) {
+            networkAvailable = false
+            Log.i(TAG, "Network lost — pausing reconnect attempts")
+            // Stop the radio thrash: cancel pending retries and drop the dead
+            // sockets. We resume from onAvailable, not from a timer.
+            connections.values.forEach { conn ->
+                conn.reconnectJob?.cancel()
+                conn.source?.cancel()
+                conn.source = null
+                conn.attempt = 0
+            }
+            updateForegroundNotification()
+        }
+    }
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -75,6 +119,11 @@ class NotificationStreamService : Service() {
     override fun onCreate() {
         super.onCreate()
         startInForeground(getString(R.string.service_connecting))
+        // Seed from the current state so a service that starts while offline
+        // doesn't thrash before the first callback arrives (registerDefault…
+        // fires onLost only for a network it has already seen).
+        networkAvailable = connectivityManager.activeNetwork != null
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -114,6 +163,8 @@ class NotificationStreamService : Service() {
 
     private fun connect(conn: Connection) {
         if (conn.closed) return
+        // Don't open a socket with no network — wait for the network callback.
+        if (!networkAvailable) return
         val server = conn.server
         val builder = Request.Builder()
             .url("${server.baseUrl}/api/v1/mobile/notifications/stream")
@@ -175,9 +226,20 @@ class NotificationStreamService : Service() {
     private fun scheduleReconnect(conn: Connection, reason: String) {
         if (conn.closed || connections[conn.server.id] !== conn) return
         conn.source = null
+        // Offline: do nothing. Looping on the radio here is what drains the
+        // battery; [networkCallback] reconnects us the instant the network
+        // returns, with no wasted wake-ups in between.
+        if (!networkAvailable) {
+            Log.w(TAG, "Offline; deferring reconnect of ${conn.server.name} ($reason)")
+            updateForegroundNotification()
+            return
+        }
         val attempt = conn.attempt.coerceAtMost(MAX_BACKOFF_STEPS)
         conn.attempt = attempt + 1
-        val delayMs = (BASE_BACKOFF_MS * (1L shl attempt)).coerceAtMost(MAX_BACKOFF_MS)
+        val base = (BASE_BACKOFF_MS * (1L shl attempt)).coerceAtMost(MAX_BACKOFF_MS)
+        // Add up to 25% jitter so several servers don't reconnect in lockstep
+        // and wake the radio all at once.
+        val delayMs = base + (base / 4 * Random.nextDouble()).toLong()
         Log.w(TAG, "Reconnecting ${conn.server.name} in ${delayMs}ms ($reason)")
         updateForegroundNotification()
         conn.reconnectJob = scope.launch {
@@ -212,6 +274,7 @@ class NotificationStreamService : Service() {
         val text = when {
             count == 0 -> getString(R.string.service_connecting)
             live == count -> resources.getQuantityString(R.plurals.service_connected, count, count)
+            !networkAvailable -> getString(R.string.service_waiting_network)
             else -> getString(R.string.service_reconnecting)
         }
         val notification = NotificationHelper.buildServiceNotification(this, text)
@@ -220,6 +283,7 @@ class NotificationStreamService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
         connections.values.forEach { teardown(it) }
         connections.clear()
         scope.cancel()

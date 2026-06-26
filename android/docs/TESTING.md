@@ -54,6 +54,9 @@ and won't receive pushes.
 - [ ] Start a long task, background the app → **Session finished** notification.
 - [ ] Trigger a permission/question prompt → matching notification arrives.
 - [ ] Add a second server; both appear and open independently.
+- [ ] Toggle airplane mode on → the connection notice reads **Waiting for
+      network…** and the log stops attempting reconnects (no per-minute radio
+      wake-ups). Toggle it off → streams reconnect within a second or two.
 
 ## Notes / limitations
 
