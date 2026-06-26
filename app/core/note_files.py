@@ -205,6 +205,32 @@ def get_attachment_storage_path(note_id: str, filename: str) -> str:
     return f"notes/attachments/{note_id}/{filename}"
 
 
+def read_attachment_bytes(relative_path: str) -> Optional[bytes]:
+    """Read an attachment's bytes from the local disk cache, or None if absent."""
+    file_path = get_absolute_file_path(relative_path)
+    try:
+        return file_path.read_bytes()
+    except OSError:
+        return None
+
+
+def materialize_attachment_file(relative_path: str, data: bytes) -> Optional[Path]:
+    """Write attachment bytes from the database to the local disk cache.
+
+    Returns the absolute path on success, or None if the cache could not be
+    written (e.g. a read-only filesystem) so callers can fall back to serving
+    the bytes from memory.
+    """
+    file_path = get_absolute_file_path(relative_path)
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(data)
+        return file_path
+    except OSError:
+        logger.warning("Could not materialize attachment cache at %s", relative_path)
+        return None
+
+
 def delete_note_attachment_file(relative_path: str) -> bool:
     """Delete an attachment file given its stored relative path."""
     file_path = get_absolute_file_path(relative_path)

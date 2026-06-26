@@ -6,9 +6,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.core.models import Note, NoteCreate, NoteUpdate, NoteTag, NoteAutocomplete, NoteAttachment
 from app.core.note_files import (
@@ -17,6 +18,7 @@ from app.core.note_files import (
     sanitize_attachment_filename, get_unique_attachment_path,
     get_attachment_storage_path, delete_note_attachment_file,
     delete_all_note_attachments, read_note_file, get_note_file_mtime,
+    materialize_attachment_file,
 )
 from app.db import database
 from app.api.auth import require_auth
@@ -319,6 +321,8 @@ async def upload_note_attachment(
 
     attachment_id = f"natt-{uuid.uuid4().hex[:12]}"
     relative_path = get_attachment_storage_path(note_id, file_path.name)
+    # Store the bytes in the shared database (source of truth) so other installs
+    # sharing it can serve this attachment; the disk write above is a local cache.
     attachment = database.create_note_attachment(
         attachment_id=attachment_id,
         note_id=note_id,
@@ -326,6 +330,7 @@ async def upload_note_attachment(
         file_path=relative_path,
         content_type=file.content_type,
         size_bytes=len(content),
+        data=content,
     )
     return attachment
 
@@ -344,17 +349,47 @@ async def download_note_attachment(
             detail="Attachment not found"
         )
 
+    media_type = attachment.get("content_type") or "application/octet-stream"
     full_path = get_absolute_file_path(attachment["file_path"])
-    if not full_path.exists() or not full_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attachment file not found on disk"
+
+    # Local cache hit (e.g. uploaded on this machine): stream it from disk.
+    if full_path.exists() and full_path.is_file():
+        return FileResponse(
+            path=full_path,
+            filename=attachment["filename"],
+            media_type=media_type,
         )
 
-    return FileResponse(
-        path=full_path,
-        filename=attachment["filename"],
-        media_type=attachment.get("content_type") or "application/octet-stream",
+    # No local file — this attachment was likely uploaded on another install
+    # that shares this database. Serve the bytes stored in the database and
+    # repopulate the local cache for next time.
+    data = database.get_note_attachment_data(attachment_id)
+    if data is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment file not found on disk or in database"
+        )
+
+    cached_path = materialize_attachment_file(attachment["file_path"], data)
+    if cached_path is not None:
+        return FileResponse(
+            path=cached_path,
+            filename=attachment["filename"],
+            media_type=media_type,
+        )
+
+    # Cache write failed (e.g. read-only filesystem); serve from memory. Build a
+    # Content-Disposition that can't be broken by quotes/newlines in the name.
+    filename = attachment["filename"]
+    ascii_name = filename.replace("\\", "_").replace('"', "_").replace("\r", "").replace("\n", "")
+    disposition = (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
     )
 
 

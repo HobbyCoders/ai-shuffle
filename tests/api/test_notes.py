@@ -141,6 +141,26 @@ class TestUploadNoteAttachment:
         assert written.exists()
         assert written.read_bytes() == b"hello"
 
+    def test_upload_stores_bytes_in_db(self, client, mock_database, sample_note):
+        # The bytes must be handed to the DB layer so installs sharing the
+        # database can serve the attachment without the local file.
+        mock_database.get_note.return_value = sample_note
+        mock_database.create_note_attachment.return_value = {
+            "id": "natt-1",
+            "note_id": sample_note["id"],
+            "filename": "data.bin",
+            "content_type": "application/octet-stream",
+            "size_bytes": 5,
+            "created_at": "2024-01-15T10:30:00",
+        }
+
+        files = {"file": ("data.bin", BytesIO(b"hello"), "application/octet-stream")}
+        response = client.post(
+            f"/api/v1/notes/{sample_note['id']}/attachments", files=files
+        )
+        assert response.status_code == 201
+        assert mock_database.create_note_attachment.call_args.kwargs["data"] == b"hello"
+
 
 # =============================================================================
 # List
@@ -219,6 +239,57 @@ class TestDownloadNoteAttachment:
         mock_database.get_note_attachment.return_value = None
         response = client.get(
             f"/api/v1/notes/{sample_note['id']}/attachments/natt-x/download"
+        )
+        assert response.status_code == 404
+
+    def test_download_materializes_from_db_when_file_missing(
+        self, client, mock_database, sample_note, temp_data_dir
+    ):
+        # Cross-machine case: the attachment row is in the shared DB but its
+        # file was never written on this machine. The bytes stored in the DB
+        # are served and the local cache is repopulated.
+        rel = f"notes/attachments/{sample_note['id']}/remote.txt"
+        disk_path = temp_data_dir / rel
+        assert not disk_path.exists()  # no local file to begin with
+
+        mock_database.get_note_attachment.return_value = {
+            "id": "natt-1",
+            "note_id": sample_note["id"],
+            "filename": "remote.txt",
+            "file_path": rel,
+            "content_type": "text/plain",
+            "size_bytes": 13,
+            "created_at": "2024-01-15T10:30:00",
+        }
+        mock_database.get_note_attachment_data.return_value = b"from other PC"
+
+        response = client.get(
+            f"/api/v1/notes/{sample_note['id']}/attachments/natt-1/download"
+        )
+        assert response.status_code == 200
+        assert response.content == b"from other PC"
+        # Local cache was repopulated from the DB bytes.
+        assert disk_path.exists()
+        assert disk_path.read_bytes() == b"from other PC"
+
+    def test_download_404_when_file_and_db_bytes_missing(
+        self, client, mock_database, sample_note
+    ):
+        # No local file and no bytes in the DB (e.g. a legacy attachment whose
+        # file only ever lived on another machine and was never backfilled).
+        mock_database.get_note_attachment.return_value = {
+            "id": "natt-1",
+            "note_id": sample_note["id"],
+            "filename": "gone.txt",
+            "file_path": f"notes/attachments/{sample_note['id']}/gone.txt",
+            "content_type": "text/plain",
+            "size_bytes": 0,
+            "created_at": "2024-01-15T10:30:00",
+        }
+        mock_database.get_note_attachment_data.return_value = None
+
+        response = client.get(
+            f"/api/v1/notes/{sample_note['id']}/attachments/natt-1/download"
         )
         assert response.status_code == 404
 

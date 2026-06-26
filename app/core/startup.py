@@ -76,6 +76,41 @@ def _auto_migrate_sqlite_to_postgres() -> None:
         logger.error(f"You can retry manually: python -m app.db.migrate_sqlite_to_postgres --sqlite-path {sqlite_path}")
 
 
+def _backfill_attachment_data() -> None:
+    """Copy local attachment files into the shared database (idempotent).
+
+    Older attachments stored their bytes only on the uploading machine's disk.
+    For any attachment whose ``data`` column is still empty, read the local
+    cache file (if present on this machine) and store its bytes so installs
+    sharing the database can serve it. Attachments whose file lives on another
+    machine are skipped here and get picked up when that machine starts.
+    """
+    from app.core.note_files import read_attachment_bytes
+
+    try:
+        missing = database.get_attachments_missing_data()
+    except Exception:
+        logger.exception("Failed to query attachments needing byte backfill")
+        return
+
+    if not missing:
+        return
+
+    backfilled = 0
+    for att in missing:
+        data = read_attachment_bytes(att["file_path"])
+        if data is None:
+            continue  # File not on this machine; another install may hold it.
+        try:
+            database.set_note_attachment_data(att["id"], data)
+            backfilled += 1
+        except Exception:
+            logger.exception("Failed to backfill attachment %s into database", att["id"])
+
+    if backfilled:
+        logger.info(f"Backfilled {backfilled} note attachment(s) into the shared database")
+
+
 def _adopt_orphaned_instance_data() -> None:
     """Re-parent projects and sessions orphaned by Docker container ID changes.
 
@@ -182,6 +217,13 @@ def init_core() -> None:
         path_updates = materialize_all_notes(unmaterialized)
         database.bulk_update_note_file_paths(path_updates)
         logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
+
+    # Backfill attachment bytes into the shared database. Attachments uploaded
+    # before bytes were stored in the DB only exist on the machine that uploaded
+    # them; this pass copies any local file into the DB so installs sharing the
+    # database can serve it. Runs on every machine — whichever holds the file
+    # wins, and missing files are simply skipped.
+    _backfill_attachment_data()
 
     # Seed built-in subagents
     from app.core.builtin_subagents import seed_builtin_subagents

@@ -178,6 +178,7 @@ def _run_column_migrations(cursor):
                 file_path TEXT NOT NULL,
                 content_type TEXT,
                 size_bytes INTEGER DEFAULT 0,
+                data BYTEA,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
             )
@@ -186,6 +187,13 @@ def _run_column_migrations(cursor):
             "CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(note_id)"
         )
         migrations_applied.append("note_attachments")
+
+    # Attachment bytes live in the shared database so installs that share it can
+    # serve attachments uploaded on another machine. Older databases have the
+    # table without the column; add it idempotently.
+    if table_exists(cursor, "note_attachments") and not column_exists(cursor, "note_attachments", "data"):
+        cursor.execute("ALTER TABLE note_attachments ADD COLUMN data BYTEA")
+        migrations_applied.append("note_attachments.data")
 
     # Add worktree_branch and worktree_path columns to sessions for persistent worktree info
     # These store worktree info directly on the session so it survives worktree deletion
@@ -840,6 +848,9 @@ from app.db.notes import (  # noqa: F401
     create_note_attachment,
     get_note_attachment,
     get_note_attachments,
+    get_note_attachment_data,
+    set_note_attachment_data,
+    get_attachments_missing_data,
     delete_note_attachment,
 )
 

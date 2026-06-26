@@ -306,6 +306,12 @@ def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
 # Note Attachments Operations
 # ============================================================================
 
+# Metadata columns, excluding the ``data`` BYTEA blob. Reads that only need
+# metadata select these explicitly so a list of attachments never drags every
+# file's bytes out of the database.
+_ATTACHMENT_META_COLS = "id, note_id, filename, file_path, content_type, size_bytes, created_at"
+
+
 def create_note_attachment(
     attachment_id: str,
     note_id: str,
@@ -313,35 +319,81 @@ def create_note_attachment(
     file_path: str,
     content_type: Optional[str] = None,
     size_bytes: int = 0,
+    data: Optional[bytes] = None,
 ) -> NoteAttachmentRow:
-    """Persist a note attachment record."""
+    """Persist a note attachment record.
+
+    ``data`` is the file's bytes, stored in the shared database so installs
+    sharing it can serve the attachment even when the uploading machine's local
+    cache file is absent.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO note_attachments
-                   (id, note_id, filename, file_path, content_type, size_bytes, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (attachment_id, note_id, filename, file_path, content_type, size_bytes, now),
+                   (id, note_id, filename, file_path, content_type, size_bytes, data, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (attachment_id, note_id, filename, file_path, content_type, size_bytes, data, now),
         )
     return get_note_attachment(attachment_id)
 
 
 def get_note_attachment(attachment_id: str) -> Optional[NoteAttachmentRow]:
-    """Get a single attachment by ID."""
+    """Get a single attachment's metadata by ID (without the file bytes)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM note_attachments WHERE id = %s", (attachment_id,))
+        cursor.execute(
+            f"SELECT {_ATTACHMENT_META_COLS} FROM note_attachments WHERE id = %s",
+            (attachment_id,),
+        )
         return row_to_dict(cursor.fetchone())
 
 
 def get_note_attachments(note_id: str) -> List[NoteAttachmentRow]:
-    """List all attachments for a note, oldest first."""
+    """List a note's attachment metadata, oldest first (without the file bytes)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM note_attachments WHERE note_id = %s ORDER BY created_at ASC",
+            f"SELECT {_ATTACHMENT_META_COLS} FROM note_attachments "
+            "WHERE note_id = %s ORDER BY created_at ASC",
             (note_id,),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_note_attachment_data(attachment_id: str) -> Optional[bytes]:
+    """Return an attachment's stored file bytes, or None if absent.
+
+    None means the row has no bytes (e.g. a legacy attachment whose file was
+    only ever on another machine's disk and never backfilled).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT data FROM note_attachments WHERE id = %s", (attachment_id,))
+        row = cursor.fetchone()
+        if not row or row["data"] is None:
+            return None
+        # psycopg2 returns BYTEA as a memoryview; normalize to bytes.
+        return bytes(row["data"])
+
+
+def set_note_attachment_data(attachment_id: str, data: bytes) -> None:
+    """Store file bytes for an existing attachment (used to backfill from disk)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE note_attachments SET data = %s, size_bytes = %s WHERE id = %s",
+            (data, len(data), attachment_id),
+        )
+
+
+def get_attachments_missing_data() -> List[Dict[str, str]]:
+    """Return {id, file_path} for attachments whose bytes are not yet in the DB."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, file_path FROM note_attachments WHERE data IS NULL"
         )
         return rows_to_list(cursor.fetchall())
 

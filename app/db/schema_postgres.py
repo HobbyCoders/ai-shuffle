@@ -545,6 +545,10 @@ def create_postgres_schema(cursor) -> None:
 
     # Note attachments — files uploaded to a note and referenceable via @ in the
     # note body. Deleting the note cascades to its attachments.
+    # ``data`` holds the file bytes so attachments live in the shared database
+    # rather than only on the uploading machine's local disk. ``file_path`` is a
+    # machine-local cache path; the bytes in ``data`` are the source of truth and
+    # let other installs sharing this database serve the attachment.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS note_attachments (
             id TEXT PRIMARY KEY,
@@ -553,6 +557,7 @@ def create_postgres_schema(cursor) -> None:
             file_path TEXT NOT NULL,
             content_type TEXT,
             size_bytes INTEGER DEFAULT 0,
+            data BYTEA,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
         )
