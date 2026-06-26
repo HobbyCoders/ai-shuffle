@@ -69,6 +69,23 @@ class TestSessionManagement:
         assert session.messages[1].content == "Hi!"
 
     @pytest.mark.asyncio
+    async def test_start_streaming_preserves_history_uuid(self, store):
+        """Seeded history keeps its JSONL uuid so the UI can rewind by uuid
+        during a streaming turn (not just on reload)."""
+        history = [
+            {"id": "msg-1", "uuid": "jsonl-uuid-1", "role": "user", "content": "Hello"},
+            {"id": "msg-2", "role": "user", "content": "No uuid here"},
+        ]
+
+        await store.start_streaming("session-1", initial_messages=history)
+
+        session = store.get_session("session-1")
+        assert session.messages[0].uuid == "jsonl-uuid-1"
+        # to_dict surfaces uuid when present, omits it otherwise.
+        assert session.messages[0].to_dict()["uuid"] == "jsonl-uuid-1"
+        assert "uuid" not in session.messages[1].to_dict()
+
+    @pytest.mark.asyncio
     async def test_end_streaming_marks_complete(self, streaming_session):
         """Should mark session as not streaming on end."""
         await streaming_session.end_streaming("session-1")

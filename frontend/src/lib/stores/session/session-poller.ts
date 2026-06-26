@@ -723,6 +723,12 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 		streaming: (m.streaming as boolean) || false,
 	};
 
+	// Raw JSONL entry uuid (when the server knows it). Kept separate from `id`
+	// — `id` is normalized for Svelte keying (e.g. `text-<uuid>`, `msg-<row>`)
+	// and is NOT a valid rewind target. jsonlUuid lets MessageActions rewind by
+	// uuid directly instead of falling back to fragile content matching.
+	if (m.uuid) msg.jsonlUuid = m.uuid as string;
+
 	if (m.toolName) msg.toolName = m.toolName as string;
 	if (m.toolId) msg.toolId = m.toolId as string;
 	if (m.toolInput) msg.toolInput = m.toolInput as Record<string, unknown>;

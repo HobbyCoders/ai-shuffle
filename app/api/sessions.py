@@ -799,6 +799,7 @@ async def get_live_session(
             if jsonl_messages:
                 # Optional fields to include when present (system, tool, subagent, metadata)
                 _OPTIONAL_LIVE_FIELDS = (
+                    "uuid",  # Raw JSONL entry uuid — lets the UI rewind by uuid directly
                     "subtype", "systemSubtype", "systemData",
                     "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
                     "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)

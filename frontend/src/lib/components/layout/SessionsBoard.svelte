@@ -536,7 +536,6 @@
 		<div class="row-main">
 			<div class="row-line1">
 				<span class="row-title">{session.title || 'Untitled'}</span>
-				<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
 			</div>
 			<div class="row-line2">
 				{#if session.is_remote && session.device_name}
@@ -578,6 +577,7 @@
 				{/if}
 			</div>
 		</div>
+		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
 		<span class="row-actions">
 			<button
 				class="row-action fav"

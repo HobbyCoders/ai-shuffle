@@ -1109,3 +1109,118 @@ class TestOAuthConstants:
     def test_scopes_include_inference(self):
         """Should include inference scope."""
         assert "user:inference" in OAUTH_SCOPES
+
+
+class TestEnsureFreshCredentials:
+    """Test proactive auto-refresh of the OAuth access token before expiry."""
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_file_is_noop(self, temp_dir):
+        """No OAuth login (e.g. API-key mode) → nothing to refresh."""
+        oauth = DirectOAuth(config_dir=temp_dir)
+        temp_dir.mkdir(exist_ok=True)
+
+        refreshed = await oauth.ensure_fresh_credentials()
+
+        assert refreshed is False
+
+    @pytest.mark.asyncio
+    async def test_no_refresh_token_is_noop(self, temp_dir):
+        """An expired token without a refresh token can't self-renew → False."""
+        temp_dir.mkdir(exist_ok=True)
+        (temp_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "access",
+                "expiresAt": int((time.time() - 10) * 1000),  # already expired
+            }
+        }))
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        refreshed = await oauth.ensure_fresh_credentials()
+
+        assert refreshed is False
+
+    @pytest.mark.asyncio
+    async def test_valid_token_is_noop_without_network(self, temp_dir):
+        """A token comfortably within validity must not hit the network."""
+        temp_dir.mkdir(exist_ok=True)
+        (temp_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "expiresAt": int((time.time() + 86400) * 1000),  # +24h
+            }
+        }))
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        with patch('httpx.AsyncClient') as mock_client:
+            refreshed = await oauth.ensure_fresh_credentials()
+            mock_client.assert_not_called()
+
+        assert refreshed is False
+
+    @pytest.mark.asyncio
+    async def test_near_expiry_triggers_refresh(self, temp_dir):
+        """A token within the expiry buffer is refreshed and rewritten."""
+        temp_dir.mkdir(exist_ok=True)
+        creds_file = temp_dir / ".credentials.json"
+        creds_file.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old_access",
+                "refreshToken": "valid_refresh",
+                "expiresAt": int((time.time() + 60) * 1000),  # +60s, inside 600s buffer
+            }
+        }))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "access_token": "new_access",
+            "refresh_token": "new_refresh",
+            "expires_in": 28800,
+        }
+
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        with patch('httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=None)
+            mock_client.return_value = mock_instance
+
+            refreshed = await oauth.ensure_fresh_credentials()
+
+        assert refreshed is True
+        # New token persisted to disk for the next subprocess spawn to read.
+        written = json.loads(creds_file.read_text())["claudeAiOauth"]
+        assert written["accessToken"] == "new_access"
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_returns_false(self, temp_dir):
+        """A failed refresh (non-200) is swallowed and reported as False."""
+        temp_dir.mkdir(exist_ok=True)
+        (temp_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old_access",
+                "refreshToken": "stale_refresh",
+                "expiresAt": int((time.time() + 60) * 1000),
+            }
+        }))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = "invalid_grant"
+
+        oauth = DirectOAuth(config_dir=temp_dir)
+
+        with patch('httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=None)
+            mock_client.return_value = mock_instance
+
+            refreshed = await oauth.ensure_fresh_credentials()
+
+        assert refreshed is False

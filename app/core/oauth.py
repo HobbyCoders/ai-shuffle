@@ -13,6 +13,7 @@ The flow:
 5. Write tokens to ~/.claude/.credentials.json in CLI-compatible format
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -82,6 +83,10 @@ class DirectOAuth:
         self._cred_cache_valid: Optional[bool] = None
         self._cred_cache_time: float = 0
         self._cred_cache_ttl: float = 60  # Cache for 60 seconds
+
+        # Serialise auto-refresh so concurrent callers don't fire duplicate
+        # token-refresh requests against the OAuth endpoint.
+        self._refresh_lock = asyncio.Lock()
 
     @staticmethod
     def generate_pkce_challenge() -> PKCEChallenge:
@@ -469,6 +474,65 @@ class DirectOAuth:
         except Exception as e:
             logger.error(f"Token refresh error: {e}", exc_info=True)
             return None, f"Refresh error: {str(e)}"
+
+    def _read_oauth_data(self) -> Optional[Dict[str, Any]]:
+        """Read the ``claudeAiOauth`` block from the credentials file, or None."""
+        credentials_file = self.config_dir / ".credentials.json"
+        if not credentials_file.exists():
+            return None
+        try:
+            data = json.loads(credentials_file.read_text())
+            return data.get("claudeAiOauth", {}) or {}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read credentials for refresh check: {e}")
+            return None
+
+    async def ensure_fresh_credentials(self, buffer_seconds: int = 600) -> bool:
+        """Proactively refresh the access token when it is at/near expiry.
+
+        The access token Anthropic issues is short-lived (well under 24h); the
+        refresh token is long-lived. Without this, an idle access token simply
+        expires and every request 401s ("Invalid authentication credentials")
+        even though the stored refresh token could silently renew it. Call this
+        before spawning/resuming an SDK subprocess (and on auth-status checks)
+        so the on-disk credential stays valid.
+
+        Returns True only if a refresh was actually performed (credentials
+        rewritten). Returns False when no refresh is needed or possible — token
+        still valid, no refresh token, or no OAuth credentials (e.g. API-key
+        mode). Never raises; failures are logged and reported as False.
+        """
+        oauth_data = self._read_oauth_data()
+        if not oauth_data or not oauth_data.get("accessToken"):
+            return False  # No OAuth login (e.g. API-key mode) — nothing to refresh.
+        if not oauth_data.get("refreshToken"):
+            return False  # Can't renew without a refresh token — needs manual reauth.
+
+        now_ms = int(time.time() * 1000)
+        expires_at = oauth_data.get("expiresAt", 0) or 0
+        if expires_at and expires_at > (now_ms + buffer_seconds * 1000):
+            return False  # Still comfortably valid — no-op, no network call.
+
+        async with self._refresh_lock:
+            # Re-check under the lock: a concurrent caller may have just refreshed.
+            oauth_data = self._read_oauth_data() or {}
+            if not oauth_data.get("refreshToken"):
+                return False
+            now_ms = int(time.time() * 1000)
+            expires_at = oauth_data.get("expiresAt", 0) or 0
+            if expires_at and expires_at > (now_ms + buffer_seconds * 1000):
+                return False
+
+            tokens, error = await self.refresh_tokens()
+            if error or not tokens:
+                logger.warning(f"OAuth token auto-refresh failed: {error}")
+                return False
+
+            # refresh_tokens() already wrote the new credentials; drop the
+            # validity cache so the next status check sees the fresh token.
+            self.invalidate_credentials_cache()
+            logger.info("Auto-refreshed Claude OAuth access token before expiry")
+            return True
 
     def clear_pending_challenges(self):
         """Clear all pending PKCE challenges (e.g., on logout)"""

@@ -29,8 +29,9 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
-    requires_reconnect,
+    requires_reconnect, claude_credentials_mtime,
 )
+from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
@@ -114,6 +115,11 @@ async def _run_background_query(
         data=user_msg
     )
 
+    # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
+    # the subprocess we're about to spawn/resume authenticates with a valid token
+    # instead of 401-ing. No-op when the token is still valid or on API-key auth.
+    await direct_oauth.ensure_fresh_credentials()
+
     # Build options with user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
@@ -189,6 +195,7 @@ async def _run_background_query(
             sdk_session_id=resume_id,
             is_connected=True,
             connect_options=options,
+            credentials_mtime=claude_credentials_mtime(),
         )
         pool.put(session_id, state)
 
