@@ -176,6 +176,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			prompt = prompt.trim();
 			const _state = getState();
 
+			// Remote (cloud) session whose owning device is currently offline: live
+			// control can't reach it, so block the send with a clear message instead
+			// of letting the relay fail opaquely. History stays readable (view-only).
+			// Only applies to an already-open remote session (sessionId committed).
+			if (_state.sessionId && _state.remoteControllable === false) {
+				update(s => ({ ...s, error: 'This session runs on a device that is offline right now. Reconnect the device to send.' }));
+				return false;
+			}
+
 			// Worktree sessions never block. When the worktree is not materialized
 			// (worktreeDeleted), best-effort reopen it before sending — but the
 			// backend auto-recreates it from the branch on the query path
@@ -285,6 +294,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					update(s => ({ ...s, error: 'Unable to interrupt the active generation. Please try again.' }));
 					return false;
 				}
+			}
+
+			// Guard against the "stray new session" bug: a chat that was already
+			// OPENED (history/messages present) but whose sessionId went missing —
+			// e.g. a WS reconnect race nulled it after a remote session loaded —
+			// must NOT fall through to new-session creation below. Doing so silently
+			// spawns a duplicate local session from the user's prompt (the reported
+			// stray "hello" session). awaitingNewSession is the legitimate
+			// mid-creation signal for a brand-new chat; if it's false yet we have
+			// messages and no id, the id was lost — refuse and ask the user to
+			// reopen. A genuinely empty new chat (messages.length === 0) is
+			// unaffected and still mints a session normally.
+			if (!_state.sessionId && !internal.awaitingNewSession
+				&& !options?.skipMessageAppend && _state.messages.length > 0) {
+				console.error('[ActiveSession] Refusing to send: session id missing but messages present (open-session id race)');
+				update(s => ({ ...s, error: 'Lost the connection to this session — please reopen it from the sidebar and try again.' }));
+				return false;
 			}
 
 			// awaitingNewSession means "we sent a prompt with no session id yet and

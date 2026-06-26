@@ -81,3 +81,16 @@ export async function getAdvertiseStatus(): Promise<AdvertiseStatus> {
 export async function setAdvertiseUrl(base_url: string): Promise<AdvertiseStatus> {
 	return api.put<AdvertiseStatus>('/cluster/advertise', { base_url });
 }
+
+export interface AdvertiseReachability {
+	ok: boolean;
+	url: string | null;
+	source: 'config' | 'guess' | 'none';
+	detail: string;
+}
+
+/** Self-test the advertised address (resolves + answers its health route).
+ *  Catches unresolvable host names / wrong ports before peers hit them. */
+export async function testAdvertiseReachability(): Promise<AdvertiseReachability> {
+	return api.post<AdvertiseReachability>('/cluster/advertise/test', {});
+}

@@ -520,6 +520,13 @@ export function createSessionInit(deps: SessionInitDeps) {
 				if (meta.execution_mode !== undefined && meta.execution_mode !== _state.executionMode) {
 					metaDelta.executionMode = meta.execution_mode as 'local' | 'worktree' | 'cloud';
 				}
+				// Cross-install control reachability: a remote session whose owner is
+				// offline is served from shared-DB history (view-only). `controllable`
+				// is absent for local sessions → default to true so they stay sendable.
+				const controllable = meta.controllable !== false;
+				if (controllable !== _state.remoteControllable) {
+					metaDelta.remoteControllable = controllable;
+				}
 			}
 			const metaHasUpdate = Object.keys(metaDelta).length > 0;
 

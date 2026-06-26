@@ -299,6 +299,53 @@ async def set_advertise_url(
     return await run_sync(cluster.set_advertise_url_override, url)
 
 
+@router.post("/advertise/test")
+async def test_advertise_reachability(token: str = Depends(require_auth)) -> Dict[str, Any]:
+    """Self-test the currently advertised address by fetching its health route.
+
+    Catches the most common misconfigurations — an unresolvable host name
+    (``[Errno -2]``), a wrong port, or a down listener — before peers hit them as
+    relay failures. This runs from *this* server's network namespace, so it can't
+    prove cross-host reachability through NAT/firewalls, only that the URL itself
+    resolves and answers. The response says as much.
+    """
+    import httpx
+
+    url, source = await run_sync(cluster.advertise_url)
+    if not url:
+        return {
+            "ok": False,
+            "url": None,
+            "source": source,
+            "detail": "No address is advertised — this install is view-only to peers.",
+        }
+
+    health = f"{url.rstrip('/')}/api/v1/health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            resp = await client.get(health)
+        if resp.status_code < 400:
+            return {
+                "ok": True,
+                "url": url,
+                "source": source,
+                "detail": "Address resolves and responds. Peers on the same network should be able to reach it.",
+            }
+        return {
+            "ok": False,
+            "url": url,
+            "source": source,
+            "detail": f"Address responded with HTTP {resp.status_code} — check the URL points at this install.",
+        }
+    except httpx.HTTPError as e:
+        return {
+            "ok": False,
+            "url": url,
+            "source": source,
+            "detail": f"Could not reach the advertised address: {e}",
+        }
+
+
 @router.get("/secret/status")
 async def cluster_secret_status(token: str = Depends(require_auth)) -> Dict[str, Any]:
     """Report how the cluster secret is sourced — never returns the secret itself."""

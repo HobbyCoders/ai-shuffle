@@ -57,6 +57,14 @@ export interface SessionMeta {
 	worktree_branch?: string | null;
 	worktree_deleted?: boolean;
 	execution_mode?: string;
+	/** Cross-install (cloud) sessions only: whether the owning device is
+	 *  currently reachable. When false, the /live response is served from
+	 *  shared-DB history and the session is view-only (see `controllable`). */
+	device_online?: boolean;
+	/** Whether live control (send / interrupt) can reach the owning device.
+	 *  false for a remote session whose owner is offline/view-only — the UI
+	 *  shows a "device offline" badge and disables sending. */
+	controllable?: boolean;
 }
 
 /** Data shape returned by the onPollApplied callback */

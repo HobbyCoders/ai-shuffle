@@ -99,13 +99,45 @@ def cluster_headers() -> dict:
     }
 
 
+def _primary_lan_ip() -> Optional[str]:
+    """The host's primary outbound LAN IP, or None.
+
+    Opens a UDP socket "connected" to a public address — no packets are actually
+    sent — and reads back the local address the OS would route through. This is
+    the interface a peer on the same LAN is most likely able to reach, and it
+    sidesteps the unresolvable-hostname trap (``getfqdn()`` can return a name
+    that fails DNS on peers with ``[Errno -2]``).
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    if not ip or ip.startswith("127.") or ip == "0.0.0.0":
+        return None
+    return ip
+
+
 def _guess_advertise_url() -> Optional[str]:
     """Best-effort peer-reachable URL when none is configured.
 
-    Uses the host's name (often resolvable on a shared LAN or Docker network).
-    A wrong guess simply surfaces later as an unreachable peer — recoverable by
-    setting ``CLUSTER_ADVERTISE_URL`` or the advertise-URL override.
+    Prefers the primary LAN IP (routable from peers on the same network) over
+    the host name, since a guessed FQDN often fails DNS on peers (``[Errno -2]``).
+    Falls back to the host name only when no usable IP is found. A wrong guess
+    simply surfaces later as an unreachable peer — recoverable by setting
+    ``CLUSTER_ADVERTISE_URL`` or the advertise-URL override.
     """
+    ip = _primary_lan_ip()
+    if ip:
+        return f"http://{ip}:{settings.port}"
     try:
         host = socket.getfqdn() or socket.gethostname()
     except OSError:

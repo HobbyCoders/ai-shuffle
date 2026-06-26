@@ -636,22 +636,37 @@ async def get_live_session(
         return data
 
     # Cross-install session: owned by another install on the shared DB. History
-    # is already local; relay only the live stream to the owning install. If that
-    # install is offline/view-only, surface 503 so the UI shows "device offline"
-    # while keeping the persisted history readable.
+    # is already in the shared DB, so there is ALWAYS something to show. When the
+    # owning install is reachable we relay its live stream (fully controllable);
+    # when it is offline/view-only we fall through to serve the persisted history
+    # flagged view-only, so the session opens with a "device offline" badge
+    # instead of an unopenable error / 503 poll spam.
     from app.core import cloud_relay
+    remote_unreachable = False
     if cloud_relay.is_remote_session(session):
         try:
             code, data = await cloud_relay.relay_live(session, since_update_id)
-        except cloud_relay.InstallOffline as e:
-            logger.debug("Cluster live unavailable for %s: %s", session_id, e)
-            return Response(status_code=503)
         except cloud_relay.CloudRelayError as e:
-            logger.warning("Cluster live relay failed for %s: %s", session_id, e)
-            return Response(status_code=503)
-        if code == 304 or data is None:
-            return Response(status_code=304)
-        return data
+            # InstallOffline subclasses CloudRelayError — both mean "can't reach
+            # the owner right now". Degrade to read-only shared-DB history rather
+            # than 503 so the chat stays openable.
+            logger.debug(
+                "Cluster live unavailable for %s: %s — serving shared-DB history",
+                session_id, e,
+            )
+            remote_unreachable = True
+        else:
+            if code == 304 or data is None:
+                return Response(status_code=304)
+            # Live relay succeeded: the device is online and controllable.
+            meta = data.get("session_meta") or {}
+            meta["execution_mode"] = "cloud"
+            meta["device_online"] = True
+            meta["controllable"] = True
+            if session.get("title"):
+                meta.setdefault("title", session.get("title"))
+            data["session_meta"] = meta
+            return data
 
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.
@@ -670,6 +685,14 @@ async def get_live_session(
         session_meta["worktree_branch"] = wt_meta["worktree_branch"]
         session_meta["worktree_deleted"] = wt_meta["worktree_deleted"]
         session_meta["execution_mode"] = wt_meta["execution_mode"]
+
+    # Cross-install session served from local history because the owner is
+    # unreachable: flag it view-only so the UI shows a "device offline" badge and
+    # disables sending instead of erroring the load.
+    if remote_unreachable:
+        session_meta["execution_mode"] = "cloud"
+        session_meta["device_online"] = False
+        session_meta["controllable"] = False
 
     # Check if session is in the live store.
     #

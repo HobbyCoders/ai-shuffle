@@ -116,6 +116,7 @@ function mockState(): ActiveSessionState {
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
+		remoteControllable: true,
 	};
 }
 

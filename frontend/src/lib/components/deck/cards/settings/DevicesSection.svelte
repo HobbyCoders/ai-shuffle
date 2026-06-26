@@ -20,9 +20,11 @@
 		regenerateClusterSecret,
 		getAdvertiseStatus,
 		setAdvertiseUrl,
+		testAdvertiseReachability,
 		type Install,
 		type ClusterSecretStatus,
-		type AdvertiseStatus
+		type AdvertiseStatus,
+		type AdvertiseReachability
 	} from '$lib/api/installs';
 
 	let installs = $state<Install[]>([]);
@@ -31,6 +33,8 @@
 	let advertise = $state<AdvertiseStatus | null>(null);
 	let advertiseInput = $state('');
 	let savingAdvertise = $state(false);
+	let testingAdvertise = $state(false);
+	let reachability = $state<AdvertiseReachability | null>(null);
 	let loading = $state(true);
 	let error = $state('');
 	let success = $state('');
@@ -84,11 +88,24 @@
 			advertiseInput = advertise.override || '';
 			// Reflect the new base_url on this install's row right away.
 			installs = installs.map((i) => (i.id === selfId ? { ...i, base_url: advertise!.url } : i));
+			reachability = null; // the address changed — any prior test result is stale
 			flash(url ? 'Address override saved' : 'Reverted to auto-detected address');
 		} catch (e: unknown) {
 			error = getErrorMessage(e, 'Failed to save address');
 		} finally {
 			savingAdvertise = false;
+		}
+	}
+
+	async function testAdvertise() {
+		testingAdvertise = true;
+		error = '';
+		try {
+			reachability = await testAdvertiseReachability();
+		} catch (e: unknown) {
+			error = getErrorMessage(e, 'Failed to test reachability');
+		} finally {
+			testingAdvertise = false;
 		}
 	}
 
@@ -230,12 +247,39 @@
 				/>
 				<button
 					type="button"
+					class="ed-btn"
+					onclick={testAdvertise}
+					disabled={testingAdvertise || !advertise?.url}
+					title={advertise?.url ? 'Check that the advertised address resolves and responds' : 'No address to test'}
+				>{testingAdvertise ? 'Testing…' : 'Test'}</button>
+				<button
+					type="button"
 					class="ed-btn primary"
 					onclick={saveAdvertise}
 					disabled={advertise?.env_pinned || savingAdvertise || advertiseInput.trim() === (advertise?.override || '')}
 				>{savingAdvertise ? 'Saving…' : 'Save'}</button>
 			</div>
 		</div>
+
+		<!-- Reachability warning + self-test result for the advertised address -->
+		{#if !advertise?.env_pinned && advertise && (advertise.source === 'guess' || !advertise.url)}
+			<div class="adv-warn" role="status">
+				{#if !advertise.url}
+					This install has no peer-reachable address, so its sessions are
+					<strong>view-only</strong> to other devices. Set a
+					<code>http://&lt;lan-ip&gt;:port</code> URL above so peers can control it.
+				{:else}
+					The address above was <strong>auto-detected</strong> and may not be
+					reachable from other devices. If peers can't open sessions here, set an
+					explicit <code>http://&lt;lan-ip&gt;:port</code> URL.
+				{/if}
+			</div>
+		{/if}
+		{#if reachability}
+			<div class="adv-result" class:ok={reachability.ok} role="status">
+				{reachability.detail}
+			</div>
+		{/if}
 
 		<!-- Device list -->
 		{#if installs.length === 0}
@@ -310,6 +354,32 @@
 	.adv-in {
 		width: 280px;
 		max-width: 100%;
+	}
+	.adv-warn,
+	.adv-result {
+		margin: 8px 12px 0;
+		padding: 8px 12px;
+		border-radius: 8px;
+		font-size: 0.8125rem;
+		line-height: 1.35;
+	}
+	.adv-warn {
+		color: var(--warning-foreground, var(--warning));
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+	.adv-warn code {
+		font-size: 0.75rem;
+	}
+	.adv-result {
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 28%, transparent);
+	}
+	.adv-result.ok {
+		color: var(--success, #16a34a);
+		background: color-mix(in oklch, var(--success, #16a34a) 12%, transparent);
+		border-color: color-mix(in oklch, var(--success, #16a34a) 30%, transparent);
 	}
 	.dev-list {
 		display: flex;

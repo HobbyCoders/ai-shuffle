@@ -58,6 +58,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
+		remoteControllable: true,
 		...overrides,
 	};
 }

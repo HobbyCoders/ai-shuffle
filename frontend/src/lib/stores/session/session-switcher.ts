@@ -334,7 +334,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
-			// Per-session runtime state — MUST be reset on every switch so the
+			// Reset to controllable; the first poll (onPollApplied) flips it false
+				// only if the target is a remote session whose owner is offline.
+				remoteControllable: true,
+				// Per-session runtime state — MUST be reset on every switch so the
 			// leaving session's values never bleed into the target. These mirror
 			// the resets in newChat()/defaultState(); omitting them caused e.g. the
 			// previous session's profile (sessionProfileId), next-query profile

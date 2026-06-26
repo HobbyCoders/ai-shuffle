@@ -1059,6 +1059,19 @@ async def chat_websocket(
 
                         # Create or get session
                         is_new_session = not session_id
+                        # Safety net for the "stray new session" regression: a query
+                        # frame with no session_id while this socket had already bound
+                        # one (current_session_id) means the frontend lost the open
+                        # session's id (reconnect race) and is about to mint a
+                        # duplicate. The frontend now guards against this; log loudly
+                        # so any recurrence is visible server-side.
+                        if not session_id and current_session_id:
+                            logger.warning(
+                                "[WS] query arrived with no session_id but socket was "
+                                "bound to %s — creating a NEW session (possible "
+                                "open-session id race / stray-session bug)",
+                                current_session_id,
+                            )
                         if not session_id:
                             # Validate worktree access if provided
                             if worktree_id:

@@ -145,6 +145,11 @@ export interface ActiveSessionState {
 	 *  If the interrupt fails/times out, ChatInput restores this to the editor
 	 *  so the user doesn't lose their message. Cleared on success or session switch. */
 	pendingInterruptPrompt: string | null;
+	/** Cross-install (cloud) sessions: whether the owning device is reachable for
+	 *  live control. Defaults true (local sessions are always controllable). Set
+	 *  false when a remote session's /live response is served from shared-DB
+	 *  history because the owner is offline — the chat is read-only then. */
+	remoteControllable: boolean;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -223,6 +228,7 @@ function defaultState(): ActiveSessionState {
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
+		remoteControllable: true,
 	};
 }
 

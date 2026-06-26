@@ -128,6 +128,15 @@
 		<!-- Active chat: Messages + input -->
 		<div class="chat-column">
 			<div class="message-area-wrapper">
+				{#if $activeSession.sessionId && $activeSession.remoteControllable === false}
+					<!-- Cross-install (cloud) session whose owning device is offline:
+					     history is still readable from the shared DB, but live control
+					     can't reach it right now. Non-blocking, view-only notice. -->
+					<div class="offline-banner" role="status">
+						<span class="offline-dot" aria-hidden="true"></span>
+						<span>Device offline — view only. You can read this chat, but can't send until the device reconnects.</span>
+					</div>
+				{/if}
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />
 				{/if}
@@ -346,6 +355,28 @@
 
 	.error-banner button:hover {
 		opacity: 1;
+	}
+
+	.offline-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.625rem;
+		margin: 0.5rem 0.75rem 0;
+		padding: 0.5rem 0.875rem;
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+		border-radius: 0.5rem;
+		color: var(--warning-foreground, var(--warning));
+		font-size: 0.8125rem;
+		line-height: 1.3;
+	}
+
+	.offline-banner .offline-dot {
+		flex-shrink: 0;
+		width: 0.5rem;
+		height: 0.5rem;
+		border-radius: 9999px;
+		background: var(--warning);
 	}
 
 	/* ========================================
