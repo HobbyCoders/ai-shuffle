@@ -8,9 +8,9 @@ order: 13
 
 ## Overview
 
-The Gmail connector integrates AI Shuffle with your Gmail account, allowing Claude to read, compose, and send emails on your behalf. With this connector, Claude can check your inbox, summarize unread messages, draft replies, send new emails, search through your mail, and handle attachments -- all through natural language conversation.
+The Gmail connector integrates AI Shuffle with your Gmail account, allowing Claude to read incoming emails and send replies on your behalf. The connector polls your mailbox for new unread messages and surfaces them as incoming events; Claude can then send new emails or threaded replies.
 
-The connector uses the official [Gmail API](https://developers.google.com/gmail/api) with OAuth 2.0 for secure authentication. Your credentials never pass through third-party servers; the OAuth flow runs directly between your browser, Google's auth servers, and your AI Shuffle instance. After the initial authorization, the connector stores a refresh token locally and automatically handles token renewal.
+The connector uses the official [Gmail API](https://developers.google.com/gmail/api) with OAuth 2.0 credentials. You supply a pre-obtained OAuth client ID, client secret, and refresh token; the connector uses these to mint short-lived access tokens directly against Google's token endpoint. There is no interactive browser authorization step inside AI Shuffle -- you obtain the refresh token yourself ahead of time and provide it as config.
 
 ## Prerequisites
 
@@ -68,27 +68,20 @@ Before creating credentials, you need to configure the OAuth consent screen:
 6. A dialog will show your Client ID and Client Secret. Click **Download JSON** to save the credentials file.
 7. The downloaded file will be named something like `client_secret_XXXX.apps.googleusercontent.com.json`
 
-### 5. Prepare the credentials JSON
+### 5. Obtain a refresh token
 
-Open the downloaded JSON file. It will look something like:
+AI Shuffle does not run an interactive OAuth flow. You must obtain a long-lived **refresh token** yourself and supply it (along with the client ID and secret) as connector config. A common way to do this is the [Google OAuth 2.0 Playground](https://developers.google.com/oauthplayground/):
 
-```json
-{
-  "installed": {
-    "client_id": "123456789-abcdefg.apps.googleusercontent.com",
-    "project_id": "ai-shuffle-gmail",
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_secret": "GOCSPX-AbCdEfGhIjKlMn",
-    "redirect_uris": ["http://localhost"]
-  }
-}
-```
+1. Open the OAuth Playground, click the gear icon, check **Use your own OAuth credentials**, and paste your Client ID and Client Secret.
+2. In the left panel, authorize the Gmail scopes you need (for example `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.send`, or `https://www.googleapis.com/auth/gmail.modify`).
+3. Click **Authorize APIs**, sign in with the target Gmail account, and grant access.
+4. Click **Exchange authorization code for tokens** and copy the **Refresh token** value.
 
-You will provide this entire JSON structure (or the file path) as the `credentials_json` config value.
+Make sure your OAuth client's authorized redirect URIs include the Playground URI (`https://developers.google.com/oauthplayground`) if you use this method.
 
 ### 6. Create the Gmail connector in AI Shuffle
+
+Provide `client_id`, `client_secret`, and `refresh_token`. Optionally set `labels`, `max_results`, and `poll_interval_seconds`.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors \
@@ -98,81 +91,81 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "name": "My Gmail",
     "connector_type": "gmail",
     "config": {
-      "credentials_json": "{\"installed\":{\"client_id\":\"123456789-abcdefg.apps.googleusercontent.com\",\"project_id\":\"ai-shuffle-gmail\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"client_secret\":\"GOCSPX-AbCdEfGhIjKlMn\",\"redirect_uris\":[\"http://localhost\"]}}"
+      "client_id": "123456789-abcdefg.apps.googleusercontent.com",
+      "client_secret": "GOCSPX-AbCdEfGhIjKlMn",
+      "refresh_token": "1//0gABCdEfGhIjKlMnOpQrStUvWxYz",
+      "labels": "INBOX",
+      "max_results": "10",
+      "poll_interval_seconds": "60"
     }
   }'
 ```
 
 Or use the AI Shuffle UI: **Settings > Connectors > Add Connector > Gmail**.
 
-### 7. Complete the OAuth authorization flow
-
-On first activation, the connector will initiate an OAuth flow:
-
-1. Activate the connector (step 8 below)
-2. A browser window will open (or a URL will be provided) pointing to Google's authorization page
-3. Sign in with the Gmail account you want to connect
-4. Review the permissions and click **Allow**
-5. If you see a warning "Google hasn't verified this app", click **Advanced** then **Go to AI Shuffle (unsafe)**. This warning appears because your app is in Testing mode.
-6. After authorization, a `token_json` will be auto-generated and stored in the connector config. You do not need to manage this manually.
-
-### 8. Activate the connector
+### 7. Activate the connector
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-### 9. Test the connector
+On activation, the connector exchanges your refresh token for an access token and starts a background poll loop that checks for new unread messages every `poll_interval_seconds`.
 
-Try these commands in an AI Shuffle chat:
+### 8. Test the connector
 
-- "Check my inbox for unread emails"
-- "Summarize the last 5 emails"
+Try these in an AI Shuffle chat:
+
 - "Send an email to alice@example.com with the subject 'Meeting Tomorrow' and let her know the meeting is at 3 PM"
-- "Search my email for messages from Bob about the project proposal"
+- Send a new email to an address you control, then watch the connector pick it up as a new incoming message on its next poll.
+- Reply to one of the incoming emails; the connector sends it as a threaded reply to the original message.
 
 ## Configuration Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `credentials_json` | string | Yes | The OAuth 2.0 client credentials JSON downloaded from Google Cloud Console. Can be the raw JSON string or a file path to the downloaded JSON file. |
-| `token_json` | string | No | The OAuth token JSON, auto-generated after the first successful authorization. Contains access and refresh tokens. You should not need to set this manually. |
+| `client_id` | string | Yes | Google OAuth 2.0 client ID from the Google Cloud Console. |
+| `client_secret` | string | Yes | Google OAuth 2.0 client secret. |
+| `refresh_token` | string | Yes | OAuth 2.0 refresh token obtained from the authorization flow. Used to mint access tokens. |
+| `labels` | string | No | Comma-separated Gmail label IDs to poll. Defaults to `INBOX`. |
+| `max_results` | string | No | Maximum number of messages to fetch per poll. Defaults to `10`. |
+| `poll_interval_seconds` | string | No | Seconds between inbox polls. Defaults to `60`. |
 
 ## Capabilities
 
-The Gmail connector supports the following capabilities:
+The Gmail connector reports the following capabilities:
 
 | Capability | Supported | Description |
 |------------|-----------|-------------|
-| `rich_text` | Yes | Email content is rendered with formatting. Responses include structured email information (subject, sender, date, body). |
-| `file_upload` | Yes | Claude can send emails with file attachments |
-| `typing_indicator` | No | Not applicable for email |
-| `reactions` | No | Not applicable for email |
-| `threads` | No | Not supported as a connector capability (though Gmail threads are handled in email display) |
-| `buttons` | No | Not supported |
+| `read_receipts` | Yes | The connector tracks which messages it has already seen. |
+| `file_upload` | Yes | File upload is advertised as a capability. |
+| `is_messaging` | No | Gmail is treated as a non-messaging (email) connector rather than a chat platform. |
+| `rich_text` | No | Outgoing emails are sent as plain text (`text/plain`). |
+| `typing_indicator` | No | Not applicable for email. |
+| `reactions` | No | Not applicable for email. |
+| `threads` | No | Not advertised as a connector capability (though replies preserve the Gmail thread). |
+| `buttons` | No | Not supported. |
+
+### How inbound email works
+
+The connector does not subscribe to push notifications. Instead, after activation it runs a background loop that **polls Gmail for unread messages** every `poll_interval_seconds` (default 60). On each poll it lists up to `max_results` unread messages across the configured `labels` (default `INBOX`), and any message it has not seen before is surfaced as a new incoming message and as an `email_received` trigger.
 
 ### What Claude can do with Gmail
 
-- **Read emails** -- Fetch and summarize messages from your inbox or specific labels
-- **Search** -- Find emails by sender, subject, date range, keywords, or Gmail search operators
-- **Compose and send** -- Write new emails with subject, body, recipients (to, cc, bcc)
-- **Reply and forward** -- Reply to existing email threads or forward messages
-- **Attachments** -- Send files as email attachments
-- **Labels** -- View, apply, and remove Gmail labels
-- **Drafts** -- Create and manage email drafts
-- **Mark as read/unread** -- Update the read status of messages
+- **Receive emails** -- New unread messages in the watched labels are picked up on each poll and delivered to Claude with the sender, subject, snippet, body, and labels.
+- **Send email** -- Compose and send a new plain-text email with a `to`, `subject`, and `body`.
+- **Reply in-thread** -- Reply to a received message; the connector sets the proper threading headers so the reply stays in the original Gmail conversation.
 
 ## Troubleshooting
 
-### OAuth flow shows "Access blocked: This app's request is invalid"
+### "Access blocked: This app's request is invalid" while obtaining the token
 
-- **Redirect URI mismatch.** Ensure the redirect URI in your Google Cloud OAuth client settings matches what the connector expects. For Desktop app credentials, the redirect URI should include `http://localhost`.
-- **Wrong credential type.** Make sure you created a "Desktop app" OAuth client, not "Web application" (unless your setup specifically requires it).
+- **Redirect URI mismatch.** When obtaining the refresh token (for example via the OAuth Playground), ensure the redirect URI used matches an authorized redirect URI on your OAuth client. For the OAuth Playground, add `https://developers.google.com/oauthplayground`.
+- **Wrong credential type.** Make sure the OAuth client type matches how you are obtaining the token.
 
 ### "Google hasn't verified this app" warning
 
-This is expected for apps in Testing mode. Click **Advanced**, then **Go to AI Shuffle (unsafe)**. This warning will only appear during the initial authorization. For production use, you would need to submit the app for Google's verification, but this is not necessary for personal use.
+This is expected for apps in Testing mode while you authorize and obtain a refresh token. Click **Advanced**, then continue to the app. This warning only appears during the authorization step you perform to get the refresh token. For production use, you would need to submit the app for Google's verification, but this is not necessary for personal use.
 
 ### "Error 403: access_denied" during authorization
 
@@ -181,8 +174,10 @@ This is expected for apps in Testing mode. Click **Advanced**, then **Go to AI S
 
 ### Token refresh fails or "invalid_grant" error
 
-- **Token revoked.** If you revoked access in your Google account settings (**myaccount.google.com > Security > Third-party apps with account access**), you need to re-authorize. Deactivate the connector, remove the `token_json` from the config, and reactivate to trigger a new OAuth flow.
-- **Credentials regenerated.** If you regenerated the client secret in Google Cloud Console, the existing token is invalidated. Update `credentials_json` with the new credentials and re-authorize.
+The connector mints access tokens from the `refresh_token` you provided. If that fails:
+
+- **Token revoked or expired.** If you revoked access in your Google account settings (**myaccount.google.com > Security > Third-party apps with account access**), or the refresh token expired (refresh tokens for apps in Testing mode expire after about 7 days), obtain a new refresh token and update the `refresh_token` config value.
+- **Credentials regenerated.** If you regenerated the client secret in Google Cloud Console, the existing refresh token is invalidated. Update `client_secret` (and obtain a fresh `refresh_token`).
 - **Clock skew.** OAuth token validation is time-sensitive. Ensure the system clock on your AI Shuffle host is accurate (within a few seconds of actual time).
 
 ### Emails send but with wrong "From" address

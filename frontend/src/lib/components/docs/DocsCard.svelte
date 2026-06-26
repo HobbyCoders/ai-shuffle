@@ -7,7 +7,7 @@
 	 * card-design-system overlay has been dropped in favour of the app theme.
 	 */
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
-	import { BookOpen } from 'lucide-svelte';
+	import { BookOpen, Menu, List, ChevronDown } from 'lucide-svelte';
 	import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
 	import { DocsSearchEngine } from '$lib/docs/search';
 	import type { DocSection } from '$lib/docs/types';
@@ -26,6 +26,9 @@
 	let activeSlug = $state('');
 	let headings = $state<DocSection[]>([]);
 	let scrollEl = $state<HTMLDivElement | null>(null);
+
+	// Mobile drop-down panel: 'nav' = doc browser, 'toc' = on-this-page, null = closed
+	let mobilePanel = $state<'nav' | 'toc' | null>(null);
 
 	// Search engine (lazy initialized)
 	const searchEngine = new DocsSearchEngine(docs);
@@ -57,12 +60,23 @@
 		activeCategory = category;
 		activeSlug = slug;
 		headings = [];
+		mobilePanel = null;
 		if (scrollEl) scrollEl.scrollTop = 0;
 	}
 
 	function handleSearchResult(fullSlug: string) {
 		const [cat, slug] = fullSlug.split('/');
 		if (cat && slug) selectDoc(cat, slug);
+	}
+
+	function togglePanel(panel: 'nav' | 'toc') {
+		mobilePanel = mobilePanel === panel ? null : panel;
+	}
+
+	function scrollToHeadingMobile(id: string) {
+		mobilePanel = null;
+		const el = document.getElementById(id);
+		if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
 </script>
 
@@ -77,6 +91,72 @@
 				</StudioPageHeader>
 				<p class="dc-sub">Guides for getting the most out of ai-shuffle.</p>
 			</header>
+
+			<!-- Mobile nav: doc browser + on-this-page, replacing the hidden sidebars -->
+			{#if mobile}
+				<div class="doc-mobbar">
+					<div class="doc-mobtabs">
+						<button
+							type="button"
+							class="doc-mobtab"
+							class:on={mobilePanel === 'nav'}
+							onclick={() => togglePanel('nav')}
+							aria-expanded={mobilePanel === 'nav'}
+						>
+							<Menu size={15} />
+							<span class="doc-mobtab-label">{currentDoc?.title || 'Browse docs'}</span>
+							<ChevronDown size={15} class="doc-mobchev" />
+						</button>
+						{#if headings.length > 0}
+							<button
+								type="button"
+								class="doc-mobtab"
+								class:on={mobilePanel === 'toc'}
+								onclick={() => togglePanel('toc')}
+								aria-expanded={mobilePanel === 'toc'}
+							>
+								<List size={15} />
+								<span class="doc-mobtab-label">On this page</span>
+								<ChevronDown size={15} class="doc-mobchev" />
+							</button>
+						{/if}
+					</div>
+
+					{#if mobilePanel === 'nav'}
+						<nav class="doc-mobpanel">
+							{#each categories as cat}
+								{#if docsByCategory[cat.id]?.length}
+									<div class="doc-navlabel">{cat.label}</div>
+									{#each docsByCategory[cat.id] as doc}
+										<button
+											type="button"
+											class="doc-navitem"
+											class:on={activeCategory === cat.id && activeSlug === doc.slug}
+											onclick={() => selectDoc(cat.id, doc.slug)}
+										>
+											{doc.title}
+										</button>
+									{/each}
+								{/if}
+							{/each}
+						</nav>
+					{:else if mobilePanel === 'toc'}
+						<nav class="doc-mobpanel">
+							<div class="doc-navlabel">On this page</div>
+							{#each headings as heading}
+								<button
+									type="button"
+									class="doc-navitem"
+									class:sub={heading.level === 3}
+									onclick={() => scrollToHeadingMobile(heading.id)}
+								>
+									{heading.title}
+								</button>
+							{/each}
+						</nav>
+					{/if}
+				</div>
+			{/if}
 
 			<div class="docs-layout" class:solo={mobile}>
 				<!-- Left navigation -->
@@ -241,6 +321,82 @@
 		border-radius: 4px;
 	}
 
+	/* ── Mobile nav + on-this-page (replaces the hidden sidebars) ── */
+	.doc-mobbar {
+		position: sticky;
+		top: 0;
+		z-index: 20;
+		margin-bottom: 18px;
+		padding-top: 4px;
+		background: var(--background);
+	}
+	.doc-mobtabs {
+		display: flex;
+		gap: 8px;
+	}
+	.doc-mobtab {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 9px 12px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		color: var(--foreground);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition:
+			border-color 0.12s,
+			background 0.12s;
+	}
+	.doc-mobtab:hover {
+		border-color: var(--muted-foreground);
+	}
+	.doc-mobtab.on {
+		border-color: var(--primary);
+	}
+	.doc-mobtab-label {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: left;
+	}
+	.doc-mobtab :global(svg) {
+		flex-shrink: 0;
+	}
+	.doc-mobtab :global(.doc-mobchev) {
+		color: var(--muted-foreground);
+		transition: transform 0.15s;
+	}
+	.doc-mobtab.on :global(.doc-mobchev) {
+		transform: rotate(180deg);
+	}
+
+	.doc-mobpanel {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		right: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		max-height: min(62vh, 460px);
+		overflow-y: auto;
+		padding: 8px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 11px;
+		box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+	}
+	.doc-navitem.sub {
+		padding-left: 22px;
+	}
+
 	/* ── Responsive (TOC hides itself at <=1200px) ── */
 	@media (max-width: 1200px) {
 		.docs-layout {
@@ -256,6 +412,14 @@
 		}
 		.doc-content {
 			padding: 26px 22px;
+		}
+	}
+	@media (max-width: 639px) {
+		.dc-wrap {
+			padding: 18px 16px 48px;
+		}
+		.doc-content {
+			padding: 22px 16px;
 		}
 	}
 </style>

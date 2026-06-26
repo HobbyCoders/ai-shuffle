@@ -8,17 +8,18 @@ order: 5
 
 ## Overview
 
-The LINE connector integrates your AI Shuffle agent with LINE, one of the most popular messaging platforms in Japan, Taiwan, Thailand, and Indonesia with over 200 million monthly active users. Through the LINE Messaging API, your agent can send and receive text messages, share images and files, and display rich content to LINE users.
+The LINE connector integrates your AI Shuffle agent with LINE, one of the most popular messaging platforms in Japan, Taiwan, Thailand, and Indonesia with over 200 million monthly active users. Through the LINE Messaging API, your agent can send text messages and quick-reply buttons, and post permission prompts as rich Flex Messages to LINE users.
 
-The connector uses LINE's webhook system to receive incoming messages and the Messaging API to send replies. Setting up requires creating a channel in the LINE Developers Console and configuring a webhook URL. The connector supports both reply messages (sent in response to user messages, which are free) and push messages (proactively sent, which may incur costs depending on your plan).
+The connector uses the LINE Messaging API to send messages. Outbound delivery uses push messages (sent proactively, which may incur costs depending on your plan). Setting up requires creating a channel in the LINE Developers Console and configuring its credentials in AI Shuffle.
+
+> **Note:** The current connector implementation handles **outbound** messages only. The inbound webhook handler exists in the code (`handle_webhook_payload`) but the AI Shuffle API does not yet expose a LINE webhook route, so incoming LINE messages are not delivered to the agent. The steps below describe configuring credentials and disabling auto-reply; the webhook section documents where inbound support is headed once a route is added.
 
 ## Prerequisites
 
 - A [LINE account](https://line.me/) (personal account is sufficient to get started)
 - Access to the [LINE Developers Console](https://developers.line.biz/console/)
 - A LINE Official Account (created automatically when you create a Messaging API channel)
-- AI Shuffle backend running with a **publicly reachable HTTPS URL** (required for webhook delivery)
-- A verified domain or tunneling service (e.g., ngrok) for development
+- AI Shuffle backend running with outbound HTTPS access to the LINE Messaging API (`api.line.me`)
 
 ## Setup Guide
 
@@ -60,15 +61,11 @@ After creating the channel, navigate to the channel settings:
    Example: eyJhbGciOiJIUzI1NiJ9.exampleTokenContent...
    ```
 
-### Step 5: Configure the Webhook
+### Step 5: Webhook (inbound) — not yet available
 
-1. On the **Messaging API** tab, find the **Webhook settings** section.
-2. Set the **Webhook URL** to your AI Shuffle endpoint:
-   ```
-   https://your-domain.com/api/connectors/line/webhook
-   ```
-3. Click **Verify** to test the connection. AI Shuffle must be running and reachable.
-4. Toggle **Use webhook** to enabled.
+AI Shuffle does not currently expose a LINE webhook route, so there is no AI Shuffle URL to register here and inbound LINE messages are not delivered to the agent yet. You can leave the **Webhook settings** section unconfigured.
+
+The connector's other API endpoints live under the `/api/v1/connectors` prefix (for example, the WhatsApp webhook is served at `/api/v1/connectors/whatsapp/webhook`). If LINE inbound support is added in a future release, the route would follow the same `/api/v1/connectors/...` scheme.
 
 ### Step 6: Disable Auto-Reply Messages
 
@@ -86,6 +83,8 @@ By default, LINE Official Accounts send automatic greeting and away messages. Th
 3. Fill in the configuration fields:
    - **Channel Access Token**: Paste the token from Step 4
    - **Channel Secret**: Paste the secret from Step 4
+   - **Allowed User IDs** (optional): A list of LINE user IDs; when set, only messages from these users are processed
+   - **Allowed Group IDs** (optional): A list of LINE group IDs; when set, only group messages from these groups are processed
 4. Click **Save** and then **Enable** the connector.
 
 ### Step 8: Add the Bot as a Friend
@@ -102,6 +101,8 @@ To test the bot:
 |-------|------|----------|-------------|
 | `channel_access_token` | string | Yes | The long-lived channel access token from the LINE Developers Console. Used to authenticate all Messaging API calls (sending messages, getting user profiles, etc.). |
 | `channel_secret` | string | Yes | The channel secret from the LINE Developers Console. Used to validate the signature of incoming webhook requests to ensure they originate from LINE's servers. |
+| `allowed_user_ids` | list | No | If set, only messages from these LINE user IDs are processed; messages from other users are ignored. |
+| `allowed_group_ids` | list | No | If set, only group messages from these LINE group IDs are processed; messages from other groups are ignored. |
 
 ## Capabilities
 
@@ -109,39 +110,34 @@ The LINE connector supports the following capabilities:
 
 | Capability | Supported | Notes |
 |------------|-----------|-------|
-| Typing indicator | Yes | Shows a loading animation in the chat while the agent processes a response (available for one-on-one chats only) |
+| Typing indicator | No | The connector does not send a loading/typing indicator while the agent processes a response |
 | Reactions | No | LINE does not support bot reactions on messages via the Messaging API |
-| Rich text | Yes | Supports LINE's Flex Messages for rich layouts, as well as basic text formatting. Standard Markdown is converted to plain text. |
-| File upload | Yes | Send images (JPEG, PNG), video (MP4), audio (M4A), and files. Images must be hosted at a public URL or uploaded through LINE's content API. |
-| Buttons | No | Template messages with buttons are supported through LINE's template message types but require additional configuration |
+| Rich text | Partial | The connector declares rich-text support and uses LINE Flex Messages for permission prompts. Regular agent replies are sent as plain text messages; Markdown is not converted to Flex layouts. |
+| File upload | No | The connector sends text and quick-reply buttons only; it does not send images, video, audio, or files. (Incoming media messages, if inbound support is added later, are surfaced to the agent as a text placeholder such as `[Image]`.) |
+| Buttons | Yes | Buttons attached to an outgoing message are rendered as LINE quick-reply items (up to 13 per message); labels are truncated to 20 characters |
 | Threads | No | LINE does not have a thread model |
 
-**Message Length Limit:** 5,000 characters per text message. Messages exceeding this limit are automatically split. LINE also limits the number of messages per reply to 5 "bubbles" (individual message objects).
+**Message Length Limit:** 5,000 characters per text message. Messages exceeding this limit are automatically split into multiple text messages. LINE also limits the number of message objects in a single API call to 5 "bubbles".
 
 ## Troubleshooting
 
 ### Bot does not respond to messages
 
-- **Webhook not enabled.** In the LINE Developers Console, verify that the webhook URL is set and **Use webhook** is toggled on.
-- **Auto-reply is intercepting messages.** If the LINE Official Account has auto-reply enabled, it may be responding instead of the AI agent. Disable auto-reply in the LINE Official Account Manager (Step 6).
-- **Webhook URL not reachable.** Click **Verify** on the webhook URL in the console to test connectivity. During development, ensure your tunnel (e.g., ngrok) is running.
+- **Inbound delivery is not yet wired up.** AI Shuffle does not currently expose a LINE webhook route, so messages a user sends to the bot are not delivered to the agent. The connector can send (push) messages but cannot receive them yet. See the note in the Overview.
+- **Auto-reply is intercepting messages.** If the LINE Official Account has auto-reply enabled, it may be responding on its own. Disable auto-reply in the LINE Official Account Manager (Step 6).
 
-### "Invalid signature" errors in logs
+### Connector fails to connect or send
 
-- The `channel_secret` in the connector configuration does not match the channel secret in the LINE Developers Console. Copy the secret again and ensure there are no trailing spaces or missing characters.
-- Webhook requests may be arriving from a different channel if you have multiple LINE channels configured.
-
-### Bot responds with an error about "reply token expired"
-
-- LINE reply tokens are valid for only 30 seconds after the user sends a message. If the agent takes longer than 30 seconds to respond, the reply token expires. The connector falls back to using a push message instead, but push messages may count toward your monthly quota depending on your LINE Official Account plan.
+- The `channel_access_token` in the connector configuration does not match (or has expired against) the token in the LINE Developers Console. Re-issue the token and ensure there are no trailing spaces or missing characters. The connector validates the token by calling LINE's bot-info endpoint when it connects.
+- Outbound HTTPS to `api.line.me` is blocked. Ensure the AI Shuffle backend can reach the LINE Messaging API.
 
 ### Messages from the bot appear as plain text (no formatting)
 
-- LINE does not support Markdown natively. Rich formatting requires LINE's Flex Message format or template messages. The connector converts basic formatting (bold, code blocks) into Flex Messages when possible, but complex Markdown may render as plain text.
+- LINE does not support Markdown natively, and the connector sends regular agent replies as plain text messages. Rich formatting on LINE requires Flex Messages, which the connector only uses for permission prompts, so Markdown in agent responses renders as plain text.
 
 ### "Exceeds the rate limit" errors
 
-- The LINE Messaging API enforces rate limits on push messages. The default limit is 100,000 push messages per month on the free plan. Reply messages (responses to user-initiated messages) are unlimited. Monitor your usage in the LINE Official Account Manager under **Statistics**.
+- The LINE Messaging API enforces rate limits on push messages, and this connector sends all outbound messages as push messages. The default free-plan quota is limited (commonly 200–500 free messages per month, depending on region and plan), with higher tiers available on paid plans. Monitor your usage in the LINE Official Account Manager under **Statistics**.
 
 ### Users cannot find the bot
 

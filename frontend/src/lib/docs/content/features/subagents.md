@@ -43,13 +43,45 @@ The `tools` field controls which tools the subagent can access:
 
 ## Built-in Subagents
 
-AI Shuffle ships with a built-in subagent:
+AI Shuffle ships with five built-in subagents:
+
+### General Purpose
+
+- **ID:** `general-purpose`
+- **Purpose:** Researches complex questions, searches for code, and executes multi-step tasks
+- **Tools:** Inherits all tools from the session
+- **Model:** Inherits from the session
+- **When used:** When Claude needs to search for a keyword or file and isn't confident it will find the match in the first few tries
+
+### Explore
+
+- **ID:** `Explore`
+- **Purpose:** Fast, read-only agent specialized for exploring codebases -- finding files by pattern, searching code, and answering questions about the codebase
+- **Tools:** `Read`, `Grep`, `Glob`, `Bash`, `Skill`
+- **Model:** `claude-haiku-4-5`
+- **When used:** When Claude needs a quick, thorough search across the codebase
+
+### Plan
+
+- **ID:** `Plan`
+- **Purpose:** Software architect agent that explores the codebase (read-only) and designs step-by-step implementation plans
+- **Tools:** `Read`, `Grep`, `Glob`, `Bash`, `Skill`
+- **Model:** Inherits from the session
+- **When used:** When Claude needs to plan an implementation strategy before writing code
+
+### Frontend Designer
+
+- **ID:** `frontend-designer`
+- **Purpose:** Handles all frontend, UI, and UX work -- creating and modifying components, layouts, responsive designs, animations, and design systems
+- **Tools:** Inherits all tools from the session
+- **When used:** When the task involves anything visual or design-related
 
 ### Chat History Summarizer
 
 - **ID:** `chat-history-summarizer`
 - **Purpose:** Reads `.jsonl` session history files and produces concise summaries
-- **Model:** Uses haiku for fast, cost-effective summarization
+- **Tools:** `Read`, `Grep`, `Glob`
+- **Model:** `claude-haiku-4-5` for fast, cost-effective summarization
 - **When used:** When Claude needs to understand the context of a previous conversation
 
 Built-in subagents can be customized (name, description, prompt, tools, model) through the UI or API. If you modify a built-in subagent, you can revert it to its original defaults at any time.
@@ -146,18 +178,19 @@ This only works for built-in subagents. Custom subagents cannot be reverted (the
 
 ## Unified Subagent Discovery
 
-When building the autocomplete or agent picker in the UI, AI Shuffle aggregates subagents from three sources with deduplication:
+When building the autocomplete or agent picker in the UI, AI Shuffle aggregates subagents from four sources with deduplication:
 
 1. **Profile-enabled subagents** (highest priority) -- from the database
 2. **Project agents** -- defined in the project's `.claude/agents/` directory
-3. **Plugin file-based agents** (lowest priority) -- from enabled plugins
+3. **User-global agents** -- defined in `~/.claude/agents/`, auto-loaded by the SDK
+4. **Plugin file-based agents** (lowest priority) -- from enabled plugins
 
 ```bash
 curl "http://localhost:8000/api/v1/profiles/{profile_id}/subagents/all?project_id={project_id}&search=review&limit=30" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-Each result includes a `source` field (`profile`, `project`, or `plugin`) and `source_name` to identify where it came from.
+Each result includes a `source` field (`profile`, `project`, `user`, or `plugin`) and `source_name` to identify where it came from. Deduplication priority is `profile > project > user > plugin`.
 
 ## API Reference
 

@@ -164,20 +164,133 @@ Stop and disable the connector.
 
 Restart the connector (deactivate then activate).
 
-## Event Logs
+## Status & Inspection
 
-### GET /api/v1/connectors/{connector_id}/events
+### GET /api/v1/connectors/{connector_id}/status
 
-Get the event log for a connector.
+Get the runtime status of a connector, including whether its instance is currently running.
+
+**Auth:** Admin only
 
 ```bash
-curl "http://localhost:8000/api/v1/connectors/conn_abc123/events?limit=50" \
+curl http://localhost:8000/api/v1/connectors/conn_abc123/status \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-### DELETE /api/v1/connectors/{connector_id}/events
+**Response:**
+```json
+{
+  "id": "conn_abc123",
+  "status": "connected",
+  "status_message": null,
+  "last_connected_at": "2025-01-15T10:00:00Z",
+  "last_event_at": "2025-01-15T10:05:00Z",
+  "failure_count": 0,
+  "is_running": true
+}
+```
 
-Clear the event log.
+### GET /api/v1/connectors/{connector_id}/logs
+
+Get the recent event logs for a connector.
+
+**Auth:** Admin only
+
+```bash
+curl http://localhost:8000/api/v1/connectors/conn_abc123/logs \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "evt_abc123",
+    "connector_id": "conn_abc123",
+    "event_type": "message_received",
+    "direction": "inbound",
+    "payload": {},
+    "status": "ok",
+    "error": null,
+    "created_at": "2025-01-15T10:05:00Z"
+  }
+]
+```
+
+### GET /api/v1/connectors/{connector_id}/triggers
+
+List the triggers exposed by the connector's type.
+
+**Auth:** Admin only
+
+### GET /api/v1/connectors/{connector_id}/actions
+
+List the actions exposed by the connector's type.
+
+**Auth:** Admin only
+
+### GET /api/v1/connectors/{connector_id}/tools
+
+List the tools exposed by the connector's type.
+
+**Auth:** Admin only
+
+### POST /api/v1/connectors/{connector_id}/actions/{action_id}/execute
+
+Execute a connector action directly against a running connector instance. The JSON request body is passed through as the action parameters. Returns `409` if the connector is not running and `400` for an unknown action.
+
+**Auth:** Admin only
+
+```bash
+curl -X POST http://localhost:8000/api/v1/connectors/conn_abc123/actions/send_message/execute \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{ "chat_id": 12345678, "text": "Hello" }'
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "action_id": "send_message",
+  "result": {}
+}
+```
+
+## Inbound Webhooks
+
+### GET /api/v1/connectors/whatsapp/webhook
+
+WhatsApp (Meta) webhook verification endpoint. Meta calls this with the
+`hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters; the
+challenge is echoed back when the verify token matches a configured WhatsApp
+connector.
+
+**Auth:** None (public — verified via the connector's verify token)
+
+### POST /api/v1/connectors/whatsapp/webhook
+
+Receive incoming WhatsApp messages. Requests are matched to a running WhatsApp
+connector by `phone_number_id` and verified via the Meta `X-Hub-Signature-256`
+header when an app secret is configured.
+
+**Auth:** None (public — verified via Meta signature)
+
+### POST /api/v1/connectors/hooks/{webhook_slug}
+
+Generic inbound webhook endpoint. External services POST JSON here to trigger AI
+processing; the `webhook_slug` must match a webhook connector's configured
+`inbound_path`. Authenticated via a Bearer token (`Authorization` header or
+`X-Webhook-Token`) or an HMAC signature (`X-Webhook-Signature` header).
+
+**Auth:** None (public — verified via the connector's token or HMAC signature)
+
+```bash
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/my-hook \
+  -H "Authorization: Bearer my_webhook_token" \
+  -H "Content-Type: application/json" \
+  -d '{ "message": "Hello from my service" }'
+```
 
 ## Connector Statuses
 

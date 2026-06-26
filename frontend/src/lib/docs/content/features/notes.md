@@ -51,6 +51,16 @@ curl -X POST http://localhost:8000/api/v1/notes \
     "title": "API Redesign Ideas",
     "content": "## Goals\n- Simplify auth flow\n- Add pagination everywhere",
     "tags": ["idea", "api"],
-    "pinned": true
+    "is_pinned": true
   }'
+
+# Update a note (PATCH; all fields optional)
+curl -X PATCH http://localhost:8000/api/v1/notes/NOTE_ID \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{ "is_pinned": false }'
+
+# Delete a note
+curl -X DELETE http://localhost:8000/api/v1/notes/NOTE_ID \
+  -H "Authorization: Bearer aih_your_key"
 ```

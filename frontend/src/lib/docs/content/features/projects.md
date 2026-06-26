@@ -16,11 +16,11 @@ A project is a reference to a directory (e.g., your code repository). When you c
 
 ### Via the UI
 
-1. Navigate to **Projects** in the sidebar
-2. Click **Create Project**
-3. Enter the path to your code directory
-4. Set a name and optional default profile
-5. Save
+1. Open the workspace picker dropdown at the top of the app
+2. Click **Add Project** to open the Add Project modal
+3. Choose a **Location** (browse a directory) or type a **Path** to your code directory
+4. Set a **Display Name** and a **Project ID** (required, lowercase letters, numbers, and hyphens)
+5. Click **Add Project**
 
 ### Via the API
 
@@ -29,9 +29,12 @@ curl -X POST http://localhost:8000/api/v1/projects \
   -H "Authorization: Bearer aih_your_key" \
   -H "Content-Type: application/json" \
   -d '{
+    "id": "my-web-app",
     "name": "My Web App",
     "path": "/home/user/projects/my-web-app",
-    "default_profile_id": "default"
+    "settings": {
+      "default_profile_id": "default"
+    }
   }'
 ```
 
@@ -62,7 +65,6 @@ With GitHub authenticated, you can also:
 - Create pull requests
 - View PR status and checks
 - Merge pull requests
-- Browse issues
 
 ## Worktrees
 

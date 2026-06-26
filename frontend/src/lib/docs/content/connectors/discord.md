@@ -105,7 +105,7 @@ The Discord connector supports the following capabilities:
 | Reactions | Yes | Can add emoji reactions to user messages |
 | Rich text | Yes | Full Discord Markdown support including bold, italic, code blocks, blockquotes, spoiler tags, and embeds |
 | File upload | Yes | Supports file attachments up to 25 MB (or higher with server boost level) |
-| Threads | Yes | Can create and reply within threads for organized conversations |
+| Threads | No | The connector does not declare thread support; it does not create or manage threads as a dedicated capability |
 | Buttons | Yes | Supports interactive message components including buttons and select menus |
 
 **Message Length Limit:** 2,000 characters per message. Messages exceeding this limit are automatically split across multiple messages. Embed descriptions have a separate limit of 4,096 characters.

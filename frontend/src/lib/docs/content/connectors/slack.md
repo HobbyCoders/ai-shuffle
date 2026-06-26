@@ -99,7 +99,8 @@ Alternatively, you can right-click a channel, select **Copy link**, and extract 
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the `xoxb-` token from Step 3
    - **App Token**: Paste the `xapp-` token from Step 2
-   - **Channel IDs** (optional): Comma-separated channel IDs to restrict the bot
+   - **Allowed Channel IDs** (optional): Channel IDs to restrict the bot to
+   - **Command Prefix** (optional): If set, the bot only responds to messages that start with this prefix
 4. Click **Save** and then **Enable** the connector.
 
 ### Step 7: Invite the Bot to Channels
@@ -119,7 +120,8 @@ The bot must be invited to channels before it can read or send messages there:
 |-------|------|----------|-------------|
 | `bot_token` | string | Yes | The Bot User OAuth Token (starts with `xoxb-`). Used for all Slack API calls including sending messages, reading channels, and uploading files. |
 | `app_token` | string | Yes | The App-Level Token (starts with `xapp-`). Used exclusively for establishing the Socket Mode WebSocket connection. Must have the `connections:write` scope. |
-| `channel_ids` | array of strings | No | List of Slack channel IDs the bot is allowed to respond in. If empty, the bot responds in all channels it has been invited to. Channel IDs start with `C` (public) or `G` (private). |
+| `allowed_channel_ids` | array of strings | No | List of Slack channel IDs the bot is allowed to respond in. If empty, the bot responds in all channels it has been invited to. Channel IDs start with `C` (public) or `G` (private). |
+| `command_prefix` | string | No | If set, only messages that start with this prefix are processed. If empty, the bot processes all messages in allowed channels. |
 
 ## Capabilities
 
@@ -127,12 +129,12 @@ The Slack connector supports the following capabilities:
 
 | Capability | Supported | Notes |
 |------------|-----------|-------|
-| Typing indicator | Yes | Shows a typing indicator in the channel while the agent processes |
+| Acknowledgement | Partial | The bot adds an `:eyes:` reaction to acknowledge receipt while processing. There is no live typing indicator. |
 | Reactions | Yes | Can add and read emoji reactions on messages |
 | Rich text | Yes | Full Slack `mrkdwn` formatting: bold, italic, strikethrough, code, code blocks, blockquotes, lists, and links |
 | File upload | Yes | Upload files up to the workspace's file size limit (default 1 GB for paid plans) |
 | Threads | Yes | Can create threaded replies and follow conversation threads |
-| Buttons | No | Slack interactive components (Block Kit buttons) require additional configuration not currently supported |
+| Buttons | Yes | Permission prompts are sent as Block Kit messages with Approve / Deny buttons |
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split. Slack has a hard limit of 40,000 characters but recommends keeping messages under 4,000 for readability.
 
@@ -150,8 +152,8 @@ The Slack connector supports the following capabilities:
 
 ### Bot responds to every message (too noisy)
 
-- Configure `channel_ids` to restrict the bot to specific channels.
-- Alternatively, configure the bot to only respond to @mentions by handling only the `app_mention` event and ignoring general `message` events in the connector settings.
+- Configure `allowed_channel_ids` to restrict the bot to specific channels.
+- Alternatively, set a `command_prefix` so the bot only processes messages that start with that prefix.
 
 ### "invalid_auth" or "token_revoked" errors
 

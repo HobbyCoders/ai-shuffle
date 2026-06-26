@@ -10,7 +10,7 @@ order: 3
 
 The WhatsApp connector integrates your AI Shuffle agent with WhatsApp through the official WhatsApp Business API, powered by Meta's Cloud API. This allows your agent to send and receive messages on WhatsApp, the world's most widely used messaging platform with over two billion users.
 
-Unlike the standard WhatsApp app, the Business API is designed for programmatic access. Messages arrive via webhooks that Meta sends to your server, and responses are sent through the Cloud API. The connector handles the full message lifecycle, including typing indicators, read receipts, rich text formatting, and media attachments. You can optionally restrict the bot to only respond to specific phone numbers.
+Unlike the standard WhatsApp app, the Business API is designed for programmatic access. Messages arrive via webhooks that Meta sends to your server, and responses are sent through the Cloud API. The connector handles the full message lifecycle, including read receipts and interactive buttons for permission prompts. You can optionally restrict the bot to only respond to specific phone numbers.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ The webhook is how Meta delivers incoming messages to your AI Shuffle instance.
 2. Under **Webhook**, click **Edit**.
 3. Set the **Callback URL** to your AI Shuffle webhook endpoint:
    ```
-   https://your-domain.com/api/connectors/whatsapp/webhook
+   https://your-domain.com/api/v1/connectors/whatsapp/webhook
    ```
 4. Set the **Verify Token** to a secret string of your choosing. You will enter this same string in the AI Shuffle connector configuration. For example:
    ```
@@ -84,6 +84,7 @@ Temporary tokens expire after 24 hours. For production use:
    - **Phone Number ID**: The phone number ID from Step 3
    - **Access Token**: The permanent System User token (or temporary token for testing)
    - **Verify Token**: The verify token string you set in Step 4
+   - **App Secret** (optional): Your Meta app secret, used to validate the `X-Hub-Signature-256` signature on incoming webhooks
    - **Allowed Phone Numbers** (optional): Phone numbers in international format (e.g., `+14155551234`)
 4. Click **Save** and then **Enable** the connector.
 
@@ -94,6 +95,7 @@ Temporary tokens expire after 24 hours. For production use:
 | `phone_number_id` | string | Yes | The WhatsApp Business phone number ID from the Meta dashboard. This identifies which phone number the bot sends messages from. |
 | `access_token` | string | Yes | A valid access token for the WhatsApp Business API. Use a System User token for production (does not expire) or a temporary token for development (expires in 24 hours). |
 | `verify_token` | string | Yes | A secret string used to verify webhook requests from Meta. Must match the value configured in the Meta app dashboard webhook settings. |
+| `app_secret` | string | No | The Meta app secret. If set, the connector validates the `X-Hub-Signature-256` header on incoming webhook requests, rejecting payloads with a missing or mismatched signature. If empty, signature verification is skipped. |
 | `allowed_phone_numbers` | array of strings | No | List of phone numbers (in international E.164 format, e.g., `+14155551234`) that the bot is allowed to communicate with. If empty, the bot responds to all incoming messages. |
 
 ## Capabilities
@@ -102,12 +104,12 @@ The WhatsApp connector supports the following capabilities:
 
 | Capability | Supported | Notes |
 |------------|-----------|-------|
-| Typing indicator | Yes | Shows a "typing..." indicator to the user while the agent processes a response |
+| Typing indicator | No | The connector does not send a "typing..." indicator |
 | Read receipts | Yes | Sends read receipts (blue check marks) when messages are received and processed |
 | Reactions | No | WhatsApp Business API has limited reaction support |
 | Rich text | Yes | Supports bold (`*text*`), italic (`_text_`), strikethrough (`~text~`), and monospace (`` ```text``` ``) formatting |
 | File upload | Yes | Send images, documents, audio, video, and stickers. File size limits: 16 MB for media, 100 MB for documents |
-| Buttons | No | Template messages with buttons are supported but require pre-approved templates |
+| Buttons | Yes | Used for interactive permission prompts, where the agent sends Approve/Deny reply buttons |
 | Threads | No | WhatsApp does not have a thread model |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.

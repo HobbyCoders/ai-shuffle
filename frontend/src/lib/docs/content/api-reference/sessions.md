@@ -159,13 +159,11 @@ Archive a session.
 
 ### PATCH /api/v1/sessions/{session_id}/favorite
 
-Toggle favorite status.
+Toggle favorite status. This endpoint takes no request body — it flips the current value and returns the updated session.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/favorite \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"is_favorite": true}'
+  -H "Authorization: Bearer aih_your_key"
 ```
 
 ## Session Sync
@@ -190,18 +188,23 @@ Export a session.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `format` | string | "markdown" or "json" (default: json) |
+| `format` | string | "markdown", "json", or "jsonl" (default: markdown) |
 
 ```bash
+# Export as Markdown (default)
+curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=markdown" \
+  -H "Authorization: Bearer aih_your_key" \
+  -o session.md
+
 # Export as JSON
 curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=json" \
   -H "Authorization: Bearer aih_your_key" \
   -o session.json
 
-# Export as Markdown
-curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=markdown" \
+# Export the raw Claude session history (JSONL)
+curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=jsonl" \
   -H "Authorization: Bearer aih_your_key" \
-  -o session.md
+  -o session.jsonl
 ```
 
 ### POST /api/v1/sessions/import

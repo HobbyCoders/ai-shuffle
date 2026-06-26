@@ -32,11 +32,11 @@ curl -X POST http://localhost:8000/api/v1/tags \
   -d '{"name": "bugfix", "color": "#ef4444"}'
 ```
 
-### POST /api/v1/sessions/{session_id}/tags/{tag_id}
+### POST /api/v1/tags/session/{session_id}/{tag_id}
 
 Add a tag to a session.
 
-### DELETE /api/v1/sessions/{session_id}/tags/{tag_id}
+### DELETE /api/v1/tags/session/{session_id}/{tag_id}
 
 Remove a tag from a session.
 
@@ -53,69 +53,100 @@ curl "http://localhost:8000/api/v1/search?q=authentication&limit=10" \
 
 ## Analytics
 
-### GET /api/v1/analytics/usage
+### GET /api/v1/analytics/summary
 
-Get usage analytics (session counts, message counts, etc.).
+Get a usage summary (session counts, message counts, etc.).
 
 **Auth:** Admin only
 
-### GET /api/v1/analytics/cost
+### GET /api/v1/analytics/costs
 
 Get cost breakdown by profile, project, and time period.
 
 **Auth:** Admin only
 
+### GET /api/v1/analytics/trends
+
+Get usage trends over time.
+
+### GET /api/v1/analytics/top-sessions
+
+List the highest-usage sessions.
+
 ## Git Integration
 
-### GET /api/v1/git/status/{project_id}
+### GET /api/v1/projects/{project_id}/git/status
 
 Get git status for a project.
 
 ```bash
-curl http://localhost:8000/api/v1/git/status/proj_abc123 \
+curl http://localhost:8000/api/v1/projects/proj_abc123/git/status \
   -H "Authorization: Bearer aih_your_key"
 ```
 
 **Response:**
 ```json
 {
+  "is_git_repo": true,
   "current_branch": "main",
   "is_clean": false,
-  "staged_files": ["src/app.py"],
-  "unstaged_files": ["README.md"],
-  "untracked_files": ["new-file.txt"]
+  "staged": [{"file": "src/app.py", "status": "modified"}],
+  "modified": ["README.md"],
+  "untracked": ["new-file.txt"],
+  "ahead": 0,
+  "behind": 0
 }
 ```
 
-### POST /api/v1/git/commit
+### POST /api/v1/projects/{project_id}/git/commit
 
 Commit changes.
 
-**Auth:** Admin only
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/commit \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Fix bug", "include_unstaged": true}'
+```
 
-### GET /api/v1/git/log/{project_id}
+### GET /api/v1/projects/{project_id}/git/graph
 
-Get commit log.
+Get the commit graph (history).
 
-### POST /api/v1/git/branch/{project_id}
+### GET /api/v1/projects/{project_id}/git/branches
 
-Create or switch branch.
+List branches.
+
+### POST /api/v1/projects/{project_id}/git/branches
+
+Create a new branch.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/branches \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "feature-x"}'
+```
 
 ## GitHub Integration
 
-### GET /api/v1/github/repos
+GitHub endpoints are scoped to a project's connected repository.
 
-List user's GitHub repositories.
+### GET /api/v1/projects/{project_id}/github/status
 
-**Auth:** Admin only (requires GitHub auth)
+Get the GitHub connection status for a project (linked repository, auth state).
 
-### GET /api/v1/github/issues/{repo}
+### GET /api/v1/projects/{project_id}/github/pulls
 
-Get issues for a repository.
+List pull requests for the project's repository.
 
-### POST /api/v1/github/issues/{repo}
+### POST /api/v1/projects/{project_id}/github/pulls
 
-Create an issue.
+Create a pull request.
+
+### GET /api/v1/projects/{project_id}/github/actions
+
+List GitHub Actions workflow runs for the project's repository.
 
 ## Settings & Integrations
 
@@ -125,64 +156,85 @@ Get integration settings (API key status for various services).
 
 **Auth:** Admin only
 
-### POST /api/v1/settings/integrations/{service}
+### POST /api/v1/settings/integrations/fal-ai
 
-Save an API key for a service (openai, gemini, etc.).
+Save the fal.ai API key (used for all AI media tools: image, video, 3D, TTS, STT).
 
 **Auth:** Admin only
 
-### DELETE /api/v1/settings/integrations/{service}
+```bash
+curl -X POST http://localhost:8000/api/v1/settings/integrations/fal-ai \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "your_fal_key"}'
+```
 
-Remove an API key.
+### DELETE /api/v1/settings/integrations/fal-ai
 
-### POST /api/v1/settings/integrations/{service}/test
+Remove the fal.ai API key.
 
-Test an integration key.
+**Auth:** Admin only
+
+### POST /api/v1/settings/integrations/anthropic
+
+Save the Anthropic API key used by Claude Code.
+
+**Auth:** Admin only
+
+### DELETE /api/v1/settings/integrations/anthropic
+
+Remove the Anthropic API key.
+
+**Auth:** Admin only
 
 ## Preferences
 
-### GET /api/v1/preferences
+User preferences are stored and accessed per key.
 
-Get user preferences.
+### GET /api/v1/preferences/all
 
-### PUT /api/v1/preferences
+Get all preferences for the current user.
 
-Update preferences.
+### GET /api/v1/preferences/{key}
+
+Get a single preference value.
+
+### PUT /api/v1/preferences/{key}
+
+Set a preference value. (`POST` is also accepted, primarily for `navigator.sendBeacon()` saves on page unload.)
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/preferences \
+curl -X PUT http://localhost:8000/api/v1/preferences/theme \
   -H "Authorization: Bearer aih_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"theme": "dark", "sidebar_collapsed": false}'
+  -d '{"value": "dark"}'
 ```
+
+### DELETE /api/v1/preferences/{key}
+
+Delete a preference.
 
 ## Generated Media
 
-### GET /api/v1/images
+### GET /api/generated-images/
 
 List AI-generated images.
 
-### DELETE /api/v1/images/{image_id}
-
-Delete a generated image.
-
-### GET /api/v1/videos
+### GET /api/generated-videos/
 
 List AI-generated videos.
 
-### DELETE /api/v1/videos/{video_id}
+## Files
 
-Delete a generated video.
+Serve files referenced by sessions (read-only).
 
-## Shared Files
+### GET /api/files/
 
-### POST /api/v1/shared-files
+List served files.
 
-Share a file (creates a shareable link).
+### GET /api/files/{filename}
 
-### GET /api/v1/shared-files/{share_id}
-
-Access a shared file.
+Retrieve a served file by name.
 
 ## Templates
 

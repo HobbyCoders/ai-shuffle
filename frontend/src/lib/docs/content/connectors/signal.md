@@ -8,151 +8,96 @@ order: 6
 
 ## Overview
 
-The Signal connector integrates your AI Shuffle agent with Signal, the privacy-focused messaging platform known for its end-to-end encryption. Unlike most other connectors that use cloud APIs, the Signal connector operates through **signal-cli**, an open-source command-line client for Signal. This means all messages are handled locally on your server with full end-to-end encryption preserved.
+The Signal connector integrates your AI Shuffle agent with Signal, the privacy-focused messaging platform known for its end-to-end encryption. Unlike most other connectors that use cloud APIs, the Signal connector operates through **signal-cli**, an open-source client for Signal. This means all messages are handled locally on your server with full end-to-end encryption preserved.
 
-Because Signal does not provide an official bot API, this connector requires a dedicated phone number registered with signal-cli. The phone number acts as the bot's identity on the Signal network. Messages are sent and received through signal-cli's daemon mode or JSON-RPC interface, giving you a fully self-hosted, privacy-preserving bot without any cloud service dependency.
+Because Signal does not provide an official bot API, this connector requires a dedicated phone number registered with signal-cli. The phone number acts as the bot's identity on the Signal network. The connector talks to a **signal-cli REST API** service over HTTP (default `http://127.0.0.1:8080`): it sends messages via the REST endpoint and receives incoming messages over a Server-Sent Events (SSE) stream. This gives you a fully self-hosted, privacy-preserving bot without any cloud service dependency.
 
 ## Prerequisites
 
 - A **dedicated phone number** for the bot (can be a VoIP number that receives SMS or voice calls for verification)
-- **signal-cli** installed on the server running AI Shuffle ([GitHub: AsamK/signal-cli](https://github.com/AsamK/signal-cli))
-- Java Runtime Environment (JRE) 17 or newer (required by signal-cli)
-- AI Shuffle backend running on the same machine as signal-cli (or with network access to the signal-cli daemon)
-- Linux, macOS, or Windows (WSL recommended on Windows)
+- A running **signal-cli REST API** service that wraps signal-cli and exposes an HTTP/SSE interface (e.g. the [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) container)
+- AI Shuffle backend with network access to the signal-cli REST API service (default `http://127.0.0.1:8080`)
+- A host capable of running the signal-cli REST API service (Docker is the simplest option)
 
 ## Setup Guide
 
-### Step 1: Install signal-cli
+### Step 1: Run the signal-cli REST API Service
 
-**Option A: Download the release archive (recommended)**
+The connector communicates with a **signal-cli REST API** service over HTTP, so you do not invoke signal-cli directly. The easiest way to run it is the [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) container, which bundles signal-cli and exposes the HTTP/SSE endpoints this connector expects.
 
-1. Go to the [signal-cli releases page](https://github.com/AsamK/signal-cli/releases) and download the latest release archive.
-2. Extract it to a directory on your server:
-   ```bash
-   # Download the latest release (check for the actual latest version)
-   wget https://github.com/AsamK/signal-cli/releases/download/v0.13.4/signal-cli-0.13.4-Linux.tar.gz
-
-   # Extract to /opt
-   sudo tar xf signal-cli-0.13.4-Linux.tar.gz -C /opt
-
-   # Create a symlink for convenience
-   sudo ln -sf /opt/signal-cli-0.13.4/bin/signal-cli /usr/local/bin/signal-cli
-   ```
-
-**Option B: Install via package manager**
-
-On Arch Linux:
 ```bash
-yay -S signal-cli
+docker run -d --name signal-api \
+  -p 8080:8080 \
+  -v signal-cli-data:/home/.local/share/signal-cli \
+  -e MODE=json-rpc \
+  bbernhard/signal-cli-rest-api
 ```
 
-On macOS with Homebrew:
+Run the service in `json-rpc` mode so that incoming messages are delivered over the Server-Sent Events stream the connector subscribes to.
+
+**Verify the service is up:**
 ```bash
-brew install signal-cli
+curl http://127.0.0.1:8080/api/v1/about
 ```
+You should get back a JSON document listing the signal-cli versions.
 
-**Verify the installation:**
+### Step 2: Register the Phone Number
+
+Register the dedicated phone number through the REST API. You may need to solve a captcha first (see [Registration with captcha](https://github.com/AsamK/signal-cli/wiki/Registration-with-captcha)).
+
+**Request an SMS verification code:**
 ```bash
-signal-cli --version
-# Output: signal-cli 0.13.4
-```
-
-### Step 2: Register a Phone Number
-
-Register the dedicated phone number with Signal. You can use SMS or voice call verification.
-
-**SMS verification:**
-```bash
-signal-cli -u +14155551234 register
-```
-
-**Voice call verification (if SMS is not available):**
-```bash
-signal-cli -u +14155551234 register --voice
+curl -X POST http://127.0.0.1:8080/api/v1/register/+14155551234 \
+  -H "Content-Type: application/json" \
+  -d '{"captcha": "signalcaptcha://..."}'
 ```
 
 Replace `+14155551234` with your actual phone number in international E.164 format.
 
 ### Step 3: Verify the Registration
 
-After receiving the verification code (via SMS or voice call), complete the registration:
+After receiving the verification code via SMS, complete the registration:
 
 ```bash
-signal-cli -u +14155551234 verify 123-456
+curl -X POST http://127.0.0.1:8080/api/v1/register/+14155551234/verify/123456 \
+  -H "Content-Type: application/json"
 ```
 
-Replace `123-456` with the actual verification code you received.
+Replace `123456` with the actual verification code you received.
 
-**Set a profile name (recommended):**
-```bash
-signal-cli -u +14155551234 updateProfile --given-name "AI" --family-name "Shuffle"
-```
+### Step 4: Send a Test Message
 
-### Step 4: Test signal-cli
-
-Verify that signal-cli is working by sending a test message:
+Confirm the service can send messages on behalf of the bot:
 
 ```bash
-signal-cli -u +14155551234 send -m "Hello from AI Shuffle!" +15551234567
+curl -X POST http://127.0.0.1:8080/api/v2/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hello from AI Shuffle!",
+    "number": "+14155551234",
+    "recipients": ["+15551234567"]
+  }'
 ```
 
 Replace `+15551234567` with your personal phone number. You should receive the message on your phone.
 
-### Step 5: Start signal-cli in Daemon Mode
-
-The connector communicates with signal-cli through its daemon mode, which runs as a background process and provides a JSON-RPC or DBus interface:
-
-**JSON-RPC over TCP (recommended):**
-```bash
-signal-cli -u +14155551234 daemon --socket --tcp localhost:7583
-```
-
-**JSON-RPC over Unix socket:**
-```bash
-signal-cli -u +14155551234 daemon --socket /var/run/signal-cli/socket
-```
-
-**Run as a systemd service (production):**
-
-Create `/etc/systemd/system/signal-cli.service`:
-```ini
-[Unit]
-Description=signal-cli daemon
-After=network.target
-
-[Service]
-Type=simple
-User=signal-cli
-ExecStart=/usr/local/bin/signal-cli -u +14155551234 daemon --socket --tcp localhost:7583
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable signal-cli
-sudo systemctl start signal-cli
-```
-
-### Step 6: Configure the Connector in AI Shuffle
+### Step 5: Configure the Connector in AI Shuffle
 
 1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
 2. Click **Add Connector** and select **Signal**.
 3. Fill in the configuration fields:
-   - **Phone Number**: The registered phone number in E.164 format (e.g., `+14155551234`)
-   - **signal-cli Path** (optional): Path to the signal-cli binary if not on the system PATH
+   - **Phone Number (E.164)**: The registered phone number in E.164 format (e.g., `+14155551234`)
+   - **API URL** (optional): Base URL of the signal-cli REST API service. Defaults to `http://127.0.0.1:8080`.
+   - **Allowed Phone Numbers** (optional): Restrict the bot to only process messages from these numbers.
 4. Click **Save** and then **Enable** the connector.
 
 ## Configuration Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `phone_number` | string | Yes | The phone number registered with signal-cli in international E.164 format (e.g., `+14155551234`). This is the identity of the bot on the Signal network. |
-| `signal_cli_path` | string | No | Absolute path to the signal-cli binary. Defaults to `signal-cli` (assumes it is on the system PATH). Set this if signal-cli is installed in a non-standard location, e.g., `/opt/signal-cli-0.13.4/bin/signal-cli`. |
+| `account` | string | Yes | The phone number registered with signal-cli in international E.164 format (e.g., `+14155551234`). This is the identity of the bot on the Signal network. |
+| `api_url` | string | No | Base URL of the signal-cli REST API service. Defaults to `http://127.0.0.1:8080`. Set this if the service runs on a different host or port. |
+| `allowed_numbers` | list | No | If set, only messages from these phone numbers (in E.164 format) are processed. Messages from any other number are ignored. |
 
 ## Capabilities
 
@@ -160,73 +105,54 @@ The Signal connector supports the following capabilities:
 
 | Capability | Supported | Notes |
 |------------|-----------|-------|
-| Typing indicator | Yes | Shows a typing indicator to the recipient while the agent processes a response |
-| Reactions | Yes | Can react to messages with any emoji (Signal supports single-emoji reactions per message per user) |
-| Rich text | No | Signal does not support text formatting in messages. All messages are sent as plain text. |
+| Read receipts | Yes | Sends read receipts back to the sender via the REST API |
 | File upload | Yes | Send images, documents, voice notes, and other files as attachments |
-| Buttons | No | Signal does not support interactive buttons |
+| Typing indicator | No | The connector does not send typing indicators |
+| Reactions | No | The connector does not send emoji reactions |
+| Rich text | No | Signal does not support text formatting in messages. All messages are sent as plain text. |
+| Buttons | No | Signal does not support interactive buttons. Permission prompts are sent as text; reply `approve` or `deny`. |
 | Threads | No | Signal does not have a thread model |
 | End-to-end encryption | Yes | All messages are end-to-end encrypted by default (this is inherent to Signal) |
 
-**Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.
+**Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split.
 
 ## Troubleshooting
 
-### signal-cli fails to start or register
+### Connector cannot reach the REST API service
 
-- **Java not installed or wrong version.** signal-cli requires JRE 17+. Check your Java version:
+- **Service not running or wrong URL.** The connector health-checks `GET /api/v1/about` on connect. Verify the service responds:
   ```bash
-  java -version
+  curl http://127.0.0.1:8080/api/v1/about
   ```
-  Install or update Java if needed:
+  If this fails, confirm the signal-cli REST API container is running and that the **API URL** in the connector config matches its address and port.
+- **Network access.** Ensure the AI Shuffle backend can reach the service host and port (e.g., `8080`). If the service runs in a separate container, check the Docker network and port mapping.
+
+### Registration fails
+
+- **Phone number already registered.** If the phone number is already registered on another device, registration will take over the number and deregister the other device. Use a dedicated phone number that is not your personal Signal account.
+- **Captcha required.** Signal may require a captcha for registration from certain IPs. Solve the captcha in a browser and include the token in the registration request body:
   ```bash
-  # Ubuntu/Debian
-  sudo apt install openjdk-17-jre
-
-  # macOS
-  brew install openjdk@17
+  curl -X POST http://127.0.0.1:8080/api/v1/register/+14155551234 \
+    -H "Content-Type: application/json" \
+    -d '{"captcha": "signalcaptcha://signal-recaptcha-v2.example..."}'
   ```
-
-- **Phone number already registered.** If the phone number is already registered on another device, signal-cli registration will take over the number and deregister the other device. Use a dedicated phone number that is not your personal Signal account.
+  Follow the instructions in the [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki/Registration-with-captcha) for solving the captcha.
 
 ### Bot does not receive messages
 
-- **signal-cli daemon not running.** Verify the daemon is running:
-  ```bash
-  systemctl status signal-cli
-  # Or check if the process is running:
-  ps aux | grep signal-cli
-  ```
-- **Firewall blocking the socket.** If using TCP mode, ensure the port (e.g., 7583) is accessible from the AI Shuffle backend process.
-- **Trust issues.** Signal requires identity key trust. If a contact has changed their safety number, you may need to trust the new key:
-  ```bash
-  signal-cli -u +14155551234 trust -a +15551234567
-  ```
+- **Service not in json-rpc mode.** The connector receives messages over the SSE stream at `GET /api/v1/receive/{account}`. Make sure the REST API service is started with `MODE=json-rpc` so the stream stays open.
+- **Messages filtered out.** If you set **Allowed Phone Numbers**, only messages from those numbers are processed; all others are silently ignored. Remove or correct the list to receive from other senders.
 
 ### "Unregistered user" error when sending messages
 
 - The recipient phone number must be registered with Signal. The bot can only communicate with active Signal users.
 - Verify the phone number format uses the E.164 international format (e.g., `+14155551234`, not `4155551234`).
 
-### Messages are delayed or slow
-
-- signal-cli is a command-line tool and can be slower than cloud-based APIs. Each message send/receive involves cryptographic operations. For better performance:
-  - Use daemon mode (Step 5) instead of invoking signal-cli per message.
-  - Ensure the server has adequate CPU resources for the encryption operations.
-  - Consider running signal-cli in its native image mode (GraalVM) for faster startup.
-
-### Registration fails with captcha requirement
-
-- Signal may require a captcha for registration from certain IPs. If you see a captcha error, you need to solve the captcha in a browser and pass the token to signal-cli:
-  ```bash
-  signal-cli -u +14155551234 register --captcha "signalcaptcha://signal-recaptcha-v2.example..."
-  ```
-  Follow the instructions in the [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki/Registration-with-captcha) for solving the captcha.
-
 ### "Untrusted identity" warnings
 
-- When a contact reinstalls Signal or changes devices, their identity key changes. By default, signal-cli may block messages to untrusted identities. To trust all identities automatically (less secure but more practical for a bot):
+- When a contact reinstalls Signal or changes devices, their identity key changes. By default, signal-cli may block messages to untrusted identities. Use the REST API to trust the contact's new identity:
   ```bash
-  signal-cli -u +14155551234 trust -a +15551234567
+  curl -X PUT http://127.0.0.1:8080/api/v1/identities/+14155551234/trust/+15551234567 \
+    -H "Content-Type: application/json" \
+    -d '{"trust_all_known_keys": true}'
   ```
-  You can also configure signal-cli to trust new identities automatically using the `--trust-new-identities always` flag in daemon mode.

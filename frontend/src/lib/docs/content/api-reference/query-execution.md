@@ -22,8 +22,8 @@ curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Explain async/await in Python",
-    "profile_id": "default",
-    "project_id": "my-project"
+    "profile": "claude-code",
+    "project": "my-project"
   }'
 ```
 
@@ -32,20 +32,34 @@ curl -X POST http://localhost:8000/api/v1/query \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The message to send to Claude |
-| `profile_id` | string | No | Profile to use (defaults to API user's profile) |
-| `project_id` | string | No | Project context |
-| `max_turns` | integer | No | Maximum conversation turns |
-| `system_prompt` | string | No | Override the profile's system prompt |
+| `profile` | string | No | Profile to use (defaults to API user's profile, else `claude-code`) |
+| `project` | string | No | Project context |
+| `overrides` | object | No | Optional per-query overrides (see below) |
+
+**Overrides object:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Model override (e.g. `claude-sonnet-4-6`) |
+| `permission_mode` | string | `default`, `auto`, `acceptEdits`, `plan`, `bypassPermissions` |
+| `system_prompt_append` | string | Text appended to the profile's system prompt |
+| `max_turns` | integer | Maximum conversation turns |
+| `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
+| `effort` | string | `low`, `medium`, `high`, `max`, `xhigh` |
 
 **Response:**
 ```json
 {
-  "session_id": "sess_abc123",
   "response": "Async/await in Python is a way to write...",
-  "cost_usd": 0.003,
-  "tokens_in": 150,
-  "tokens_out": 500,
-  "duration_ms": 2500
+  "session_id": "sess_abc123",
+  "metadata": {
+    "model": "claude-sonnet-4-6",
+    "duration_ms": 2500,
+    "total_cost_usd": 0.003,
+    "tokens_in": 150,
+    "tokens_out": 500,
+    "num_turns": 1
+  }
 }
 ```
 
@@ -59,7 +73,7 @@ curl -X POST http://localhost:8000/api/v1/query/stream \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Write a Python function to sort a list",
-    "profile_id": "default"
+    "profile": "claude-code"
   }'
 ```
 
@@ -67,29 +81,87 @@ curl -X POST http://localhost:8000/api/v1/query/stream \
 ```
 data: {"type": "text", "content": "Here's a "}
 data: {"type": "text", "content": "sorting function..."}
-data: {"type": "tool_use", "tool": "Write", "input": {...}}
+data: {"type": "tool_use", "name": "Write", "input": {...}}
 data: {"type": "tool_result", "output": "File created"}
-data: {"type": "done", "session_id": "sess_abc123", "cost_usd": 0.005}
+data: {"type": "done", "session_id": "sess_abc123"}
 ```
 
 ## Conversation Mode
 
 Stateful conversations that maintain context across multiple exchanges.
 
-### POST /api/v1/conversation/start
+### POST /api/v1/conversation
 
-Start a new conversation session.
+Send a conversation turn. If `session_id` is provided in the body, the existing
+session is continued; otherwise a new session is created. Profile and project are
+only used when creating a new session.
 
 **Auth:** API key required
+
+```bash
+# Start a new conversation (no session_id)
+curl -X POST http://localhost:8000/api/v1/conversation \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Help me build a REST API with FastAPI",
+    "profile": "claude-code",
+    "project": "my-project"
+  }'
+
+# Continue an existing conversation (pass session_id in the body)
+curl -X POST http://localhost:8000/api/v1/conversation \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Now add authentication to it",
+    "session_id": "sess_abc123"
+  }'
+```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `prompt` | string | Yes | The message to send to Claude |
+| `session_id` | string | No | If provided, continues that session |
+| `profile` | string | No | Profile for a new session (defaults to `claude-code`) |
+| `project` | string | No | Project context for a new session |
+| `overrides` | object | No | Optional per-query overrides (see One-Shot Query) |
+
+**Response:** Same shape as `POST /api/v1/query` (`response`, `session_id`, `metadata`).
+
+### POST /api/v1/conversation/stream
+
+Same as `POST /api/v1/conversation`, but streams the response via Server-Sent
+Events. Pass `session_id` in the body to continue an existing conversation.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/conversation/stream \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add input validation",
+    "session_id": "sess_abc123"
+  }'
+```
+
+### POST /api/v1/conversation/start
+
+Start a conversation that runs in the background. Returns immediately after
+launching the query; the actual response is streamed over the session WebSocket
+(`/ws/sessions/{session_id}`). Work continues even if the HTTP connection drops,
+the phone is locked, or the browser tab is backgrounded. Use the interrupt
+endpoint below to stop it.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/conversation/start \
   -H "Authorization: Bearer aih_your_key" \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Help me build a REST API with FastAPI",
-    "profile_id": "default",
-    "project_id": "my-project"
+    "prompt": "Refactor the entire auth module",
+    "profile": "claude-code",
+    "project": "my-project"
   }'
 ```
 
@@ -97,122 +169,59 @@ curl -X POST http://localhost:8000/api/v1/conversation/start \
 ```json
 {
   "session_id": "sess_abc123",
-  "response": "I'd be happy to help you build...",
-  "cost_usd": 0.004
+  "status": "started",
+  "message_id": "streaming-sess_abc123-1719400000.0"
 }
 ```
 
-### POST /api/v1/conversation/{session_id}
+### POST /api/v1/session/{session_id}/interrupt
 
-Continue an existing conversation.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/conversation/sess_abc123 \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Now add authentication to it"
-  }'
-```
-
-### POST /api/v1/conversation/{session_id}/stream
-
-Continue a conversation with SSE streaming.
+Interrupt an active (streaming) session. The session ID is a path parameter.
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/conversation/sess_abc123/stream \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Add input validation"}'
-```
-
-### POST /api/v1/conversation/{session_id}/interrupt
-
-Interrupt an active (streaming) session.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/conversation/sess_abc123/interrupt \
+curl -X POST http://localhost:8000/api/v1/session/sess_abc123/interrupt \
   -H "Authorization: Bearer aih_your_key"
-```
-
-## Background Queries
-
-For long-running queries that you don't want to block on.
-
-### POST /api/v1/query/background
-
-Start a background query. Returns immediately with a task ID.
-
-**Auth:** API key required
-
-```bash
-curl -X POST http://localhost:8000/api/v1/query/background \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Refactor the entire auth module",
-    "profile_id": "default",
-    "project_id": "my-project"
-  }'
 ```
 
 **Response:**
 ```json
 {
-  "task_id": "task_abc123",
-  "session_id": "sess_def456",
-  "status": "running"
+  "status": "interrupted",
+  "session_id": "sess_abc123"
 }
 ```
 
-### GET /api/v1/query/background/{task_id}
+### GET /api/v1/streaming/active
 
-Poll the status of a background query.
+List the sessions that are currently streaming (actively generating a response).
 
 ```bash
-curl http://localhost:8000/api/v1/query/background/task_abc123 \
+curl http://localhost:8000/api/v1/streaming/active \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-**Response (in progress):**
+**Response:**
 ```json
 {
-  "task_id": "task_abc123",
-  "status": "running",
-  "session_id": "sess_def456"
-}
-```
-
-**Response (complete):**
-```json
-{
-  "task_id": "task_abc123",
-  "status": "completed",
-  "session_id": "sess_def456",
-  "response": "I've refactored the auth module...",
-  "cost_usd": 0.025,
-  "tokens_in": 5000,
-  "tokens_out": 3000,
-  "duration_ms": 45000
+  "active_sessions": ["sess_abc123", "sess_def456"]
 }
 ```
 
 ## Usage Notes
 
 ### Profile Selection
-- If `profile_id` is not specified, the API user's default profile is used
+- If `profile` is not specified, the API user's configured profile is used (falling back to `claude-code`)
 - API users may be restricted to specific profiles
 
 ### Project Context
-- If `project_id` is specified, Claude has access to that project's files
+- If `project` is specified, Claude has access to that project's files
 - API users may be restricted to a specific project
 
 ### Cost Tracking
-- All query responses include `cost_usd` for usage tracking
-- Token counts (`tokens_in`, `tokens_out`) are also returned
+- Non-streaming responses include cost and token data under `metadata`
+- `metadata.total_cost_usd` is the query cost; `metadata.tokens_in` / `metadata.tokens_out` are the token counts
 - Use automation budget controls for automated queries
 
 ### Rate Limits
 - API queries are subject to rate limiting
 - Streaming connections count as one request
-- Background queries have a separate concurrency limit

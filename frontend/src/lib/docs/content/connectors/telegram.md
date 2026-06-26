@@ -17,7 +17,8 @@ Telegram bots are created through the official **@BotFather** bot on Telegram. T
 - A Telegram account
 - The Telegram app installed on your phone or desktop (needed to interact with @BotFather)
 - AI Shuffle backend running and accessible
-- A publicly reachable URL for webhook delivery (or use the built-in polling mode for development)
+
+The connector receives updates using Telegram long-polling (via aiogram), so no publicly reachable URL or webhook setup is required.
 
 ## Setup Guide
 
@@ -78,6 +79,7 @@ You can also temporarily set up a command handler that replies with the current 
 3. Fill in the configuration fields:
    - **Bot Token**: Paste the token from BotFather
    - **Allowed Chat IDs** (optional): Enter specific chat IDs to restrict where the bot responds
+   - **Welcome Message** (optional): A message to greet users
 4. Click **Save** and then **Enable** the connector.
 
 ### Step 5: Configure Group Chat Privacy (If Using Groups)
@@ -99,6 +101,7 @@ With privacy mode disabled, the bot receives all messages in group chats. If you
 |-------|------|----------|-------------|
 | `bot_token` | string | Yes | The bot token obtained from @BotFather. Format: `<numeric_id>:<alphanumeric_string>`. |
 | `allowed_chat_ids` | array of integers | No | List of Telegram chat IDs the bot is allowed to respond in. If empty or omitted, the bot responds in all chats. Private chats have positive IDs; groups have negative IDs. |
+| `welcome_message` | string | No | Optional message to greet users. |
 
 ## Capabilities
 
@@ -122,10 +125,7 @@ The Telegram connector supports the following capabilities:
 - **Check the bot token.** Verify that the token in AI Shuffle matches the one from BotFather exactly. Regenerate the token with `/token` in BotFather if needed.
 - **Check connector status.** In the AI Shuffle UI, verify the Telegram connector shows as "Connected" on the Connectors page.
 - **Check allowed chat IDs.** If you configured `allowed_chat_ids`, make sure the chat you are messaging from is in the list. Use the `getUpdates` method to confirm the correct chat ID.
-- **Check webhook vs polling.** If using webhook mode, ensure your server is publicly reachable and the webhook URL is correctly set. You can verify with:
-  ```
-  https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
-  ```
+- **Check the backend logs.** The connector uses Telegram long-polling, so the backend must be running and able to reach `api.telegram.org`. Look for polling errors in the logs and confirm the connector shows as "Connected".
 
 ### Bot does not see messages in group chats
 
