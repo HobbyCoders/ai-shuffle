@@ -35,6 +35,7 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { username } from '$lib/stores/auth.svelte';
+	import { activeSession } from '$lib/stores/active-session';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -98,8 +99,17 @@
 		stats: 'Stats',
 		settings: 'Settings'
 	};
+	// In a chat, the mobile bar shows the chat name (the old PageHeader title row
+	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's
+	// headerTitle derivation.
+	const chatTitle = $derived.by(() => {
+		const s = $activeSession;
+		if (s && s.messages.length > 0) return s.title || 'Untitled';
+		return 'New Chat';
+	});
 	const mobileTitle = $derived.by(() => {
-		if (sessionsActive) return 'Sessions';
+		if (currentType === 'chat') return chatTitle;
+		if (currentType === 'board') return 'Sessions';
 		if (buildActive) return 'Build';
 		return (currentType && TITLES[currentType]) || 'ai-shuffle';
 	});
@@ -144,21 +154,14 @@
 <svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
 
 {#if isMobile}
-	<!-- Mobile: decluttered bar — ☰ menu + page title + search + new session -->
+	<!-- Mobile: decluttered bar — ☰ menu + centered context/chat title + new session.
+	     Search lives in the drawer, so it's intentionally absent from the bar. -->
 	<header class="topbar topbar-mobile">
 		<button class="tb-hamburger" onclick={() => (drawerOpen = true)} aria-label="Open menu" aria-expanded={drawerOpen}>
 			<Menu size={20} strokeWidth={1.8} />
 		</button>
 
 		<span class="tb-context-title">{mobileTitle}</span>
-
-		<div class="tb-spacer"></div>
-
-		{#if onOpenSpotlight}
-			<button class="tb-icon-btn" onclick={onOpenSpotlight} aria-label="Search (Cmd/Ctrl+K)" title="Search">
-				<Search size={18} strokeWidth={1.7} />
-			</button>
-		{/if}
 
 		<button class="tb-new-icon" onclick={onNewSession} aria-label="New session (Cmd/Ctrl+N)" title="New session">
 			<Plus size={18} strokeWidth={2.2} />
@@ -477,7 +480,7 @@
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* ===================================================================
-	   Mobile bar (rendered when isMobile) — ☰ + title + search + new.
+	   Mobile bar (rendered when isMobile) — ☰ + centered title + new.
 	   isMobile is width-based (≤1080px) and owned by AppLayout, so this
 	   markup only mounts on phones / unfolded foldables / narrow desktop
 	   windows; no media query needed to gate it.
@@ -488,8 +491,7 @@
 		gap: 4px;
 	}
 
-	.tb-hamburger,
-	.tb-icon-btn {
+	.tb-hamburger {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -499,16 +501,20 @@
 		background: transparent;
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) - 2px);
-		color: var(--muted-foreground);
+		color: var(--foreground);
 		cursor: pointer;
 		transition: color 120ms ease, background-color 120ms ease;
 		-webkit-tap-highlight-color: transparent;
 	}
-	.tb-hamburger { color: var(--foreground); }
-	.tb-hamburger:hover,
-	.tb-icon-btn:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.tb-hamburger:hover { color: var(--foreground); background: var(--hover-overlay); }
 
+	/* Title fills the space between the ☰ (left) and + (right) — both 40px — so
+	   it sits visually centered, and ellipsizes for long chat names. */
 	.tb-context-title {
+		flex: 1 1 auto;
+		min-width: 0;
+		text-align: center;
+		padding: 0 4px;
 		font-family: var(--font-display, Georgia, serif);
 		font-size: 1rem;
 		font-weight: 700;
@@ -517,8 +523,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		min-width: 0;
-		padding-left: 2px;
 	}
 
 	.tb-new-icon {

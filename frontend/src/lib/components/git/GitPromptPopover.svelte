@@ -188,12 +188,14 @@
 		cursor: not-allowed;
 	}
 
-	@media (max-width: 639px) {
-		/* Header is a horizontal scroll rail on mobile; pin the popover as a fixed
-		   panel below the header so it isn't clipped by the rail's overflow. */
+	/* 1080px keeps this in sync with AppLayout's isMobile cutoff (covers unfolded
+	   foldables). The chat header's git rail is a horizontal scroll container on
+	   mobile, which would clip an absolutely-positioned popover — pin it as a
+	   fixed panel just below the app bar (52px) + chat header (44px) stack. */
+	@media (max-width: 1080px) {
 		.git-prompt-popover {
 			position: fixed;
-			top: 56px;
+			top: 100px;
 			left: 8px;
 			right: 8px;
 			bottom: auto;

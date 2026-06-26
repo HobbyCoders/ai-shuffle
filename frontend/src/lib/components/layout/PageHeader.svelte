@@ -10,11 +10,11 @@
 	 *   edge; the chat title is an in-flow flex item filling the space between the
 	 *   two clusters — it centers itself and shrinks/ellipsizes so it can never
 	 *   overlap the side clusters on narrow screens.
-	 * - Mobile: two rows. The top row is static (toggle, title, status, download);
-	 *   the bottom row is a horizontal scroll rail (profile selector + git actions
-	 *   + diff stats). The two <div class="hdr-row*"> wrappers use `display:contents`
-	 *   on desktop so all items share one flex row, and become real flex rows on
-	 *   mobile.
+	 * - Mobile: a single row. The chat name moves to the global app bar
+	 *   (AppTopBar), so the title is hidden here; the row carries Claude status +
+	 *   download pinned at the start with the git actions in a horizontal scroll
+	 *   rail filling the rest. Both <div class="hdr-row*"> wrappers use
+	 *   `display:contents` so all items share one flex row on every width.
 	 *
 	 * The project/worktree context badge that used to render here now lives in the
 	 * ContextPillBar above the chat input, alongside the profile + branch pills.
@@ -220,79 +220,69 @@
 	}
 
 	/* ===================================================================
-	   Mobile: two stacked rows.
-	   Row 1 (static): toggle, title, status, download.
-	   Row 2 (scroll rail): profile selector + git actions + diff stats.
+	   Mobile: a single row. The chat name now lives in the global app bar
+	   (AppTopBar), so the title is hidden here and the row carries the
+	   original actions — Claude status + download pinned at the start, with
+	   the git actions in a horizontal touch-scroll rail filling the rest.
 	   =================================================================== */
 	/* Mobile breakpoint: 1080px covers phones AND unfolded foldables (Z Fold 6/7
 	   inner ~1028–1040px). Kept in sync with AppLayout's isMobile width cutoff. */
 	@media (max-width: 1080px) {
 		.page-header {
-			flex-direction: column;
-			align-items: stretch;
-			min-height: 0;
-			padding: 0;
-			gap: 0;
-			/* Header overflow stays visible so status/branch popovers aren't clipped;
-			   only the bottom rail scrolls (see .hdr-row2). */
+			flex-direction: row;
+			align-items: center;
+			min-height: 44px;
+			padding: 0 8px;
+			gap: 8px;
+			/* Header overflow stays visible so the Claude status popover isn't
+			   clipped; only the git rail (.hdr-right) scrolls. */
 			overflow: visible;
 		}
 
-		/* Both wrappers become real flex rows again. */
+		/* Flatten both wrappers so every item shares the single row (as on desktop). */
 		.hdr-row1,
 		.hdr-row2 {
-			display: flex;
-			align-items: center;
-			height: 44px;
-			padding: 0 8px;
-			gap: 8px;
+			display: contents;
 		}
 
-		/* Top row: static, never scrolls. */
-		.hdr-row1 {
+		/* Chat name is shown in the global app bar on mobile. */
+		.header-title {
+			display: none;
+		}
+
+		/* Pinned, non-scrolling: Claude status + download. */
+		.hdr-meta {
+			order: 1;
 			flex-shrink: 0;
-			border-bottom: 1px solid var(--border);
+			margin: 0;
 		}
 
-		/* Bottom row: horizontal touch-scroll rail. */
-		.hdr-row2 {
+		.hdr-profile {
+			order: 2;
+			flex-shrink: 0;
+			margin: 0;
+		}
+
+		/* Git actions: horizontal touch-scroll rail filling the remaining width.
+		   Editable-prompt popovers inside it switch to position:fixed on mobile,
+		   so this overflow doesn't clip them. */
+		.hdr-right {
+			order: 3;
+			flex: 1 1 auto;
+			min-width: 0;
+			flex-wrap: nowrap;
+			margin: 0;
 			overflow-x: auto;
 			overflow-y: hidden;
 			-webkit-overflow-scrolling: touch;
 			scrollbar-width: none; /* Firefox */
 		}
 
-		.hdr-row2::-webkit-scrollbar {
+		.hdr-right::-webkit-scrollbar {
 			display: none;
 		}
 
-		/* Reset desktop ordering / absolute centering. */
-		.hdr-meta,
-		.hdr-profile,
-		.hdr-right {
-			order: 0;
-			margin: 0;
-		}
-
-		.header-title {
-			order: 0;
-			flex: 1 1 auto;
-			min-width: 0;
-			text-align: left;
-			pointer-events: auto;
-		}
-
-		.hdr-meta {
-			margin-left: auto; /* push status/download to the right edge of row 1 */
-		}
-
-		/* Rail items keep their natural size and scroll instead of squashing. */
-		.hdr-right {
-			flex-wrap: nowrap;
-			flex-shrink: 0;
-		}
-
-		.hdr-row2 > :global(*) {
+		.hdr-right > :global(*) {
 			flex-shrink: 0;
 		}
 
