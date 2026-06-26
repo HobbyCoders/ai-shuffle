@@ -277,7 +277,30 @@ def get_worktrees_with_sessions(repository_id: str) -> List[WorktreeWithSessions
                 if row["session_status"] == "active" and not worktrees_map[wt_id]["active_session"]:
                     worktrees_map[wt_id]["active_session"] = session
 
-        return list(worktrees_map.values())
+        # Collapse rows that point to the SAME on-disk worktree. The worktrees
+        # table has no uniqueness constraint, so repeated registration/sync of a
+        # branch can leave several rows with distinct ids but an identical
+        # worktree_path. Without this, every duplicate renders as its own entry
+        # in the worktree picker. Keep one representative per path (newest first,
+        # matching the ORDER BY) and union the sessions across the group.
+        by_path: Dict[str, Dict] = {}
+        for wt in worktrees_map.values():
+            key = wt["worktree_path"] or wt["id"]
+            rep = by_path.get(key)
+            if rep is None:
+                by_path[key] = wt
+                continue
+            seen_ids = {s["id"] for s in rep["sessions"]}
+            for session in wt["sessions"]:
+                if session["id"] in seen_ids:
+                    continue
+                rep["sessions"].append(session)
+                seen_ids.add(session["id"])
+                if session["status"] == "active" and not rep["active_session"]:
+                    rep["active_session"] = session
+            rep["session_count"] = len(rep["sessions"])
+
+        return list(by_path.values())
 
 
 def get_worktree_by_branch(repository_id: str, branch_name: str) -> Optional[WorktreeRow]:
@@ -322,10 +345,25 @@ def create_worktree(
     base_branch: Optional[str] = None,
     status: str = "active"
 ) -> Optional[WorktreeRow]:
-    """Create a new worktree record"""
+    """Create a worktree record, or return the existing one for this path.
+
+    The worktrees table has no uniqueness constraint, and several flows
+    (session start, sync, recreate) can ask to register the same on-disk
+    worktree. A physical worktree is uniquely identified by its path within a
+    repository, so reuse an existing row instead of inserting a duplicate —
+    otherwise the table accumulates redundant rows that each surface as a
+    separate entry in the worktree picker.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM worktrees WHERE repository_id = %s AND worktree_path = %s LIMIT 1",
+            (repository_id, worktree_path),
+        )
+        existing = row_to_dict(cursor.fetchone())
+        if existing:
+            return existing
         cursor.execute(
             """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
