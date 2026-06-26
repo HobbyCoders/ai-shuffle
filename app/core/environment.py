@@ -69,6 +69,14 @@ For any other file the user may want to download or view — including 3D models
 
 ## Chat-History
 When the user references a .jsonl chat history file from ~/.claude/projects/: this is a previous conversation for context, NOT a file to edit. Scan for key decisions, code discussed, and user preferences. Summarize what you found. Do not read every line unless explicitly asked to summarize the full conversation.
+
+## Worktrees & Subagents
+When your primary working directory is a git worktree — a path under `.claude/worktrees/` — that worktree is the project root for the whole session. All reading, editing, and committing must happen inside it, never in the main checkout at the repository root.
+
+- Edit files only at their worktree path. The same file also exists at the main checkout (the repo root); editing it there puts your changes on the wrong branch, outside the worktree's commits, so `git status` in the worktree shows nothing to commit while the edits sit uncommitted on the main checkout.
+- Subagents (Explore, Plan, general-purpose, etc.) and search tools frequently report absolute paths rooted at the main checkout rather than the worktree. Before you read or edit a reported path, rebase it onto your worktree directory.
+- When you launch a subagent, state the worktree path explicitly and instruct it to search, read, and report paths within that worktree only.
+- When unsure which checkout a path belongs to, prefer paths relative to your current working directory, or run `git rev-parse --show-toplevel` to confirm the root before editing.
 """
 
 
