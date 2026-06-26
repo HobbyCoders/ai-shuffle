@@ -262,17 +262,11 @@
 		</div>
 
 		<!-- Reachability warning + self-test result for the advertised address -->
-		{#if !advertise?.env_pinned && advertise && (advertise.source === 'guess' || !advertise.url)}
+		{#if !advertise?.env_pinned && advertise && !advertise.url}
 			<div class="adv-warn" role="status">
-				{#if !advertise.url}
-					This install has no peer-reachable address, so its sessions are
-					<strong>view-only</strong> to other devices. Set a
-					<code>http://&lt;lan-ip&gt;:port</code> URL above so peers can control it.
-				{:else}
-					The address above was <strong>auto-detected</strong> and may not be
-					reachable from other devices. If peers can't open sessions here, set an
-					explicit <code>http://&lt;lan-ip&gt;:port</code> URL.
-				{/if}
+				This install has no peer-reachable address, so its sessions are
+				<strong>view-only</strong> to other devices. Set a
+				<code>http://&lt;lan-ip&gt;:port</code> URL above so peers can control it.
 			</div>
 		{/if}
 		{#if reachability}
