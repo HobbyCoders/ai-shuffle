@@ -1,8 +1,5 @@
 <script lang="ts">
-	import { Gauge, Users, FileText } from 'lucide-svelte';
-	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
-	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
-	import DevicesSection from './DevicesSection.svelte';
+	import { FileText } from 'lucide-svelte';
 
 	interface Props {
 		// Security Instructions
@@ -33,28 +30,9 @@
 	}: Props = $props();
 </script>
 
-<!-- Rate limits -->
-<div class="set-group">
-	<div class="set-grouphead">
-		<h3><Gauge />Rate limits</h3>
-		<p>Throttle how often sessions can call the model.</p>
-	</div>
-	<div class="sg-body"><RateLimitManager /></div>
-</div>
-
-<!-- Devices (cluster registry) — the primary cross-install / offload UI -->
-<DevicesSection />
-
-<!-- API users -->
-<div class="set-group">
-	<div class="set-grouphead">
-		<h3><Users />API users</h3>
-		<p>Create and revoke API keys for programmatic access.</p>
-	</div>
-	<div class="sg-body"><ApiUserManager /></div>
-</div>
-
 <!-- System prompt -->
+<!-- Rate limits + API users now live in the API tab; Devices lives in the
+     Connections tab. This tab is the global system prompt only. -->
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><FileText />System prompt</h3>

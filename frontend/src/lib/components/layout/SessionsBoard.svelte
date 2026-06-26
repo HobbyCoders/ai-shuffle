@@ -147,6 +147,26 @@
 		lastActivity: number;
 		running: number;
 		latest: Session | null;
+		devices: DeviceOpt[]; // Distinct devices this (possibly linked) project spans
+	}
+
+	// Distinct devices represented by a list of sessions — same bucketing as
+	// deviceOptions, used to label which device(s) a project card belongs to.
+	function devicesOf(list: Session[]): DeviceOpt[] {
+		const map = new Map<string, DeviceOpt>();
+		for (const s of list) {
+			const id = sessionDeviceId(s);
+			if (map.has(id)) {
+				if (s.device_online) map.get(id)!.online = true;
+				continue;
+			}
+			map.set(id, {
+				id,
+				name: id === '__local__' ? 'This device' : s.device_name || 'Unknown device',
+				online: id === '__local__' ? true : !!s.device_online
+			});
+		}
+		return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	const projectGroups = $derived.by((): Group[] => {
@@ -178,7 +198,8 @@
 				sessions: list,
 				lastActivity: list.reduce((m, s) => Math.max(m, tsOf(s)), 0),
 				running: list.filter((s) => isStreaming(s.id)).length,
-				latest: sorted[0] ?? null
+				latest: sorted[0] ?? null,
+				devices: devicesOf(list)
 			};
 		});
 		arr.sort((a, b) => b.lastActivity - a.lastActivity);
@@ -450,6 +471,24 @@
 										<span>{g.sessions.length === 1 ? 'session' : 'sessions'}</span>
 										<span class="sep">·</span>
 										<span>{relTime(g.lastActivity)}</span>
+										{#if deviceOptions.length > 1 && g.devices.length}
+											<span class="sep">·</span>
+											{#if g.devices.length > 1}
+												<span class="proj-device" title={'Spans: ' + g.devices.map((d) => d.name).join(', ')}>
+													<Monitor size={11} strokeWidth={1.6} />
+													{g.devices.length} devices
+												</span>
+											{:else}
+												<span
+													class="proj-device"
+													class:offline={!g.devices[0].online}
+													title={g.devices[0].online ? `On ${g.devices[0].name}` : `On ${g.devices[0].name} (offline)`}
+												>
+													<Monitor size={11} strokeWidth={1.6} />
+													<span class="proj-device-name">{g.devices[0].name}</span>
+												</span>
+											{/if}
+										{/if}
 										<ChevronRight size={14} strokeWidth={1.6} class="proj-chevron" />
 									</div>
 								</button>
@@ -511,6 +550,13 @@
 						<Monitor size={11} strokeWidth={1.6} />
 						<span class="row-device-name">{session.device_name}</span>
 						<span class="device-dot" class:online={session.device_online}></span>
+					</span>
+				{:else if deviceOptions.length > 1}
+					<!-- Multi-device board: label local rows too so a linked group's
+					     sessions are clearly attributed to "this device". -->
+					<span class="row-device" title={`On ${session.device_name || 'this device'}`}>
+						<Monitor size={11} strokeWidth={1.6} />
+						<span class="row-device-name">{session.device_name || 'This device'}</span>
 					</span>
 				{/if}
 				{#if showProject}
@@ -815,6 +861,21 @@
 	.proj-count-pill {
 		font-weight: 600;
 		color: var(--foreground);
+	}
+	.proj-device {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		min-width: 0;
+		color: var(--muted-foreground);
+	}
+	.proj-device.offline { opacity: 0.6; }
+	.proj-device :global(svg) { flex-shrink: 0; }
+	.proj-device-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 120px;
 	}
 	.proj-card :global(.proj-chevron) { margin-left: auto; color: var(--muted-foreground); opacity: 0.5; }
 

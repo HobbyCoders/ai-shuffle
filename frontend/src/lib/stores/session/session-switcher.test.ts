@@ -44,6 +44,8 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		streamStartTime: 123456,
 		executionMode: 'local',
 		cloudTargetInstanceId: null,
+		cloudWorktree: false,
+		cloudBranch: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: true,

@@ -759,6 +759,20 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (_state.permissionModeOverride) overridesPayload.permission_mode = _state.permissionModeOverride;
 			if (_state.effortLevelOverride) overridesPayload.effort = _state.effortLevelOverride;
 
+			// Branch targeting for the remote worktree (H): mirror the local branch
+			// selection onto the cloud device. The remote always runs in a worktree;
+			// which branch it checks out is decided by how we fill these two fields:
+			//   • Worktree OFF → run directly on the chosen existing branch
+			//     (branch_name set, remote checks it out, no new branch).
+			//   • Worktree ON  → spin up a fresh isolated branch based off the chosen
+			//     one (base_branch set, remote derives the new branch name).
+			//   • No branch chosen ('Auto') → remote auto-derives from the prompt.
+			// Same GitHub repo means the local clone's branch names match the
+			// remote's, so the picked name resolves there too.
+			const cloudBranch = _state.cloudBranch || undefined;
+			const branchName = _state.cloudWorktree ? undefined : cloudBranch;
+			const baseBranch = _state.cloudWorktree ? cloudBranch : undefined;
+
 			// Optimistically show the prompt + a creating/streaming state.
 			update(s => ({
 				...s,
@@ -783,6 +797,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					project_id: projectId,
 					prompt,
 					profile_id: queryProfileId,
+					branch_name: branchName,
+					base_branch: baseBranch,
 					// Registry-targeted offload: when the device picker chose an install,
 					// the session runs there and is owned by it (no local proxy row).
 					target_instance_id: _state.cloudTargetInstanceId || undefined,

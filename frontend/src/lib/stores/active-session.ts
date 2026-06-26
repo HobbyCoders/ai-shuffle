@@ -126,6 +126,16 @@ export interface ActiveSessionState {
 	/** When executionMode === 'cloud': the registered install to offload onto.
 	 *  Required for cloud sessions — the device picker selects it. */
 	cloudTargetInstanceId: string | null;
+	/** When executionMode === 'cloud': whether to spin up an isolated worktree on
+	 *  the remote device (vs. running directly on the chosen branch). Orthogonal
+	 *  modifier surfaced as the "Worktree" checkbox, mirroring local worktree mode
+	 *  for cloud sessions. */
+	cloudWorktree: boolean;
+	/** When executionMode === 'cloud': the existing project branch to run on the
+	 *  remote device (null = let the remote auto-derive a fresh branch). Sourced
+	 *  from the local clone's branch list — same GitHub repo, so the names match,
+	 *  which is what makes cloud branch selection feel seamless. */
+	cloudBranch: string | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -214,6 +224,8 @@ function defaultState(): ActiveSessionState {
 		streamStartTime: null,
 		executionMode: getPersistedExecutionMode(),
 		cloudTargetInstanceId: null,
+		cloudWorktree: false,
+		cloudBranch: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -582,6 +594,9 @@ export const activeSession = {
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			executionMode: getPersistedExecutionMode(),
+			// The chosen cloud branch is project-specific; drop it on project switch
+			// (the worktree preference itself is kept, like executionMode).
+			cloudBranch: null,
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -632,12 +647,23 @@ export const activeSession = {
 	setExecutionMode(mode: ExecutionMode) {
 		// Remember the toggle so new sessions reopen in the same mode
 		setPersistedExecutionMode(mode);
-		// Leaving cloud mode clears any chosen offload target so it can't leak
-		// into a later cloud session for a different device set.
-		_update(s => ({ ...s, executionMode: mode, cloudTargetInstanceId: mode === 'cloud' ? s.cloudTargetInstanceId : null }));
+		// Leaving cloud mode clears any chosen offload target + branch so they
+		// can't leak into a later cloud session for a different device set.
+		_update(s => ({
+			...s,
+			executionMode: mode,
+			cloudTargetInstanceId: mode === 'cloud' ? s.cloudTargetInstanceId : null,
+			cloudBranch: mode === 'cloud' ? s.cloudBranch : null,
+		}));
 	},
 	setCloudTarget(instanceId: string | null) {
 		_update(s => ({ ...s, cloudTargetInstanceId: instanceId }));
+	},
+	setCloudWorktree(val: boolean) {
+		_update(s => ({ ...s, cloudWorktree: val }));
+	},
+	setCloudBranch(branch: string | null) {
+		_update(s => ({ ...s, cloudBranch: branch }));
 	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },

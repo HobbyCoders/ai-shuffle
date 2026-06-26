@@ -344,6 +344,11 @@ class Session(SessionBase):
     is_remote: bool = False  # Owned by another install (not this one)
     controllable: bool = True  # Live send/interrupt reachable (owner online + has base_url)
     project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
+    # Folds same-repo project clones across installs into ONE sessions-board card.
+    # Derived from the git remote so every install agrees; without it on the
+    # response model FastAPI strips it and the board falls back to project_id,
+    # rendering the same repo as a separate card per install.
+    link_group_id: Optional[str] = None
 
 
 class SessionWithMessages(Session):

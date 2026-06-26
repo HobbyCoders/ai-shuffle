@@ -637,6 +637,16 @@ async def get_live_session(
                 session_id, e,
             )
             remote_unreachable = True
+        except Exception as e:  # noqa: BLE001
+            # Belt-and-suspenders: any UNEXPECTED relay failure (bad JSON, DB
+            # hiccup reading the registry/secret, etc.) must NOT 500 the load.
+            # Cross-install history lives in the shared DB, so we can always fall
+            # back to read-only rather than leave the chat unopenable.
+            logger.warning(
+                "Unexpected cluster live error for %s: %s — serving shared-DB history",
+                session_id, e,
+            )
+            remote_unreachable = True
         else:
             if code == 304 or data is None:
                 return Response(status_code=304)

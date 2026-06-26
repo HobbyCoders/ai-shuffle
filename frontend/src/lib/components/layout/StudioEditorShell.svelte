@@ -379,6 +379,14 @@
 		font-weight: 600;
 		margin: 0 0 3px;
 		color: var(--foreground);
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		flex-wrap: wrap;
+	}
+	.ed-content :global(.set-row .lab h4 svg) {
+		flex-shrink: 0;
+		color: var(--muted-foreground);
 	}
 	.ed-content :global(.set-row .lab p) {
 		margin: 0;

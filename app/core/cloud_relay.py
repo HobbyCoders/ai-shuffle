@@ -194,7 +194,17 @@ async def relay_live(
     if resp.status_code == 304:
         return 304, None
     _raise_for_status(resp, "cluster live")
-    return resp.status_code, resp.json()
+    # A reachable owner can still hand back a non-JSON 200 — e.g. an HTML login
+    # page or error from a reverse proxy / auth gateway sitting in front of the
+    # peer. Treat that as "can't get live state" (a CloudRelayError) so the
+    # caller degrades to read-only shared-DB history instead of 500-ing.
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise CloudRelayError(f"Peer install cluster live returned non-JSON body: {e}") from e
+    if not isinstance(body, dict):
+        raise CloudRelayError("Peer install cluster live returned a non-object body")
+    return resp.status_code, body
 
 
 def resolve_install_base_url(target_instance_id: str) -> str:

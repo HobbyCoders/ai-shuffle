@@ -15,7 +15,7 @@
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
-	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server } from 'lucide-svelte';
+	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -46,6 +46,13 @@
 	// Device-picker dropdown (shown next to the mode pill when Cloud is active).
 	let showDeviceDropdown = $state(false);
 	let deviceDropdownRef = $state<HTMLDivElement | null>(null);
+
+	// Cloud branch-picker dropdown (shown next to the device picker when Cloud is
+	// active). Lets the user pick which branch the remote device runs on — sourced
+	// from the local clone's branches since it's the same GitHub repo (H).
+	let showCloudBranchDropdown = $state(false);
+	let cloudBranchRef = $state<HTMLDivElement | null>(null);
+	let loadingCloudBranches = $state(false);
 
 	const offloadTargets = $derived(installs ? computeOffloadTargets(installs) : []);
 	const cloudAvailable = $derived(offloadTargets.length > 0);
@@ -182,49 +189,97 @@
 	}
 
 	// --- Execution-mode dropdown ---
+	//
+	// `executionMode` stays the canonical 3-value enum (local/worktree/cloud) that
+	// the rest of the app dispatches on, but the dropdown now presents it as a base
+	// mode (Local or Cloud) plus an orthogonal Worktree checkbox at the bottom (G).
+	// The four UI states map onto the enum like so:
+	//   Local,  no worktree → 'local'
+	//   Local + worktree    → 'worktree'
+	//   Cloud,  no worktree → 'cloud'  (cloudWorktree = false)
+	//   Cloud + worktree    → 'cloud'  (cloudWorktree = true)
+	const baseMode = $derived($activeSession.executionMode === 'cloud' ? 'cloud' : 'local');
+	const worktreeOn = $derived(
+		$activeSession.executionMode === 'worktree' ||
+		($activeSession.executionMode === 'cloud' && $activeSession.cloudWorktree)
+	);
 
-	type ModeOption = {
-		mode: ExecutionMode;
-		label: string;
-		icon: typeof Monitor;
-		title?: string;
-	};
-
-	// All mode options keyed by mode, so the trigger can render the current one and
-	// the menu can render the available subset from a single source of truth.
-	const MODE_OPTIONS: Record<ExecutionMode, ModeOption> = {
-		local: { mode: 'local', label: 'Local', icon: Monitor },
-		worktree: { mode: 'worktree', label: 'Worktree', icon: GitFork },
-		cloud: {
-			mode: 'cloud',
-			label: 'Cloud',
-			icon: Cloud,
-			title: 'Offload this session to another registered AI Shuffle device (GitHub repos only)'
-		}
-	};
-
-	// The currently-active mode option (drives the trigger pill's icon + label).
-	const currentMode = $derived(MODE_OPTIONS[$activeSession.executionMode] ?? MODE_OPTIONS.local);
-
-	// The modes offered in the menu, gated the same way the old segmented toggle was:
-	// Local is always available; Worktree only for a git repo; Cloud only when a
-	// second install is configured.
-	const availableModes = $derived.by(() => {
-		const modes: ModeOption[] = [MODE_OPTIONS.local];
-		if (isGitRepo) {
-			modes.push(MODE_OPTIONS.worktree);
-			if (cloudAvailable) modes.push(MODE_OPTIONS.cloud);
-		}
-		return modes;
-	});
+	// Trigger pill reflects the effective state: base-mode icon/label, plus a small
+	// worktree marker when the checkbox is on.
+	const BaseModeIcon = $derived(baseMode === 'cloud' ? Cloud : Monitor);
+	const baseModeLabel = $derived(baseMode === 'cloud' ? 'Cloud' : 'Local');
 
 	function toggleModeDropdown() {
 		showModeDropdown = !showModeDropdown;
 	}
 
-	function selectMode(mode: ExecutionMode) {
-		setMode(mode);
+	function selectBaseMode(mode: 'local' | 'cloud') {
+		if (mode !== baseMode) {
+			// Preserve the worktree checkbox across a base switch so the modifier
+			// behaves as orthogonal state rather than getting reset each time.
+			const keepWorktree = worktreeOn;
+			if (mode === 'cloud') {
+				activeSession.setExecutionMode('cloud');
+				activeSession.setCloudWorktree(keepWorktree);
+			} else {
+				// Local base encodes worktree directly in the enum.
+				activeSession.setExecutionMode(keepWorktree ? 'worktree' : 'local');
+			}
+		}
 		showModeDropdown = false;
+	}
+
+	function toggleWorktree() {
+		const next = !worktreeOn;
+		if (baseMode === 'cloud') {
+			activeSession.setCloudWorktree(next);
+		} else {
+			activeSession.setExecutionMode(next ? 'worktree' : 'local');
+		}
+		// Leave the menu open so the user sees the checkbox flip and can keep going.
+	}
+
+	// --- Cloud branch picker (H) ---
+	// All unique branches from the local clone (deduped by effective name, main
+	// included). The cloud device is the same GitHub repo, so these names resolve
+	// there too — picking one sends it as the branch to run on the remote.
+	const cloudBranches = $derived.by(() => {
+		const seen = new Set<string>();
+		const out: { name: string; remote: boolean }[] = [];
+		for (const b of $branchStore) {
+			const name = b.remote ? b.name.replace(/^[^\/]+\//, '') : b.name;
+			if (seen.has(name)) continue;
+			seen.add(name);
+			out.push({ name, remote: b.remote });
+		}
+		return out;
+	});
+
+	const cloudBranchTitle = $derived(
+		$activeSession.cloudBranch
+			? (worktreeOn
+				? `New worktree based on '${$activeSession.cloudBranch}' on the cloud device`
+				: `Run branch '${$activeSession.cloudBranch}' on the cloud device`)
+			: 'A branch will be chosen automatically on the cloud device. Click to pick one.'
+	);
+
+	async function toggleCloudBranchDropdown() {
+		showCloudBranchDropdown = !showCloudBranchDropdown;
+		if (showCloudBranchDropdown && $activeSession.project) {
+			loadingCloudBranches = true;
+			try {
+				await git.loadBranches();
+			} catch (e) {
+				console.warn('[ExecutionModeBar] Failed to load branches for cloud:', e);
+			} finally {
+				loadingCloudBranches = false;
+			}
+		}
+	}
+
+	function selectCloudBranch(name: string | null) {
+		activeSession.setCloudBranch(name);
+		showCloudBranchDropdown = false;
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -358,6 +413,9 @@
 		if (showDeviceDropdown && deviceDropdownRef && !deviceDropdownRef.contains(e.target as Node)) {
 			showDeviceDropdown = false;
 		}
+		if (showCloudBranchDropdown && cloudBranchRef && !cloudBranchRef.contains(e.target as Node)) {
+			showCloudBranchDropdown = false;
+		}
 	}
 
 	// --- New Branch modal ---
@@ -383,41 +441,80 @@
 
 <div class="execution-mode-bar">
 	<div class="mode-bar-row">
-		<!-- Mode dropdown pill: shows the current mode and, on click, opens an
-		     upward menu of the available modes (Worktree/Cloud are gated to a git
-		     repo / configured second install; for a non-git project only Local is
-		     offered and the mode is forced to Local above). -->
+		<!-- Mode dropdown pill: shows the base mode (Local/Cloud) plus a worktree
+		     marker, and on click opens an upward menu with the base modes as radios
+		     and a Worktree checkbox at the bottom (combinable with either base mode).
+		     Cloud is gated to a git repo with a configured second install; Worktree
+		     to any git repo. For a non-git project only Local is offered and the
+		     mode is forced to Local above. -->
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
 				class="mode-trigger"
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
-				title={currentMode.title}
+				title={baseMode === 'cloud' ? 'Offload this session to another registered AI Shuffle device (GitHub repos only)' : 'Run this session on this device'}
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
-				<currentMode.icon size={13} strokeWidth={1.5} />
-				<span class="mode-trigger-label">{currentMode.label}</span>
+				<BaseModeIcon size={13} strokeWidth={1.5} />
+				<span class="mode-trigger-label">{baseModeLabel}</span>
+				{#if worktreeOn}
+					<GitFork size={12} strokeWidth={1.5} class="wt-marker" />
+				{/if}
 				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showModeDropdown}
 				<div class="mode-dropdown branch-dropdown" role="menu">
-					{#each availableModes as opt (opt.mode)}
+					<!-- Base mode: Local -->
+					<button
+						type="button"
+						class="branch-item"
+						class:active={baseMode === 'local'}
+						onclick={() => selectBaseMode('local')}
+						role="menuitemradio"
+						aria-checked={baseMode === 'local'}
+					>
+						<Monitor size={13} strokeWidth={1.5} />
+						<span class="branch-item-name">Local</span>
+					</button>
+
+					<!-- Base mode: Cloud (git repo + a reachable second install) -->
+					{#if isGitRepo && cloudAvailable}
 						<button
 							type="button"
 							class="branch-item"
-							class:active={$activeSession.executionMode === opt.mode}
-							onclick={() => selectMode(opt.mode)}
-							title={opt.title}
+							class:active={baseMode === 'cloud'}
+							onclick={() => selectBaseMode('cloud')}
+							title="Offload this session to another registered AI Shuffle device (GitHub repos only)"
 							role="menuitemradio"
-							aria-checked={$activeSession.executionMode === opt.mode}
+							aria-checked={baseMode === 'cloud'}
 						>
-							<opt.icon size={13} strokeWidth={1.5} />
-							<span class="branch-item-name">{opt.label}</span>
+							<Cloud size={13} strokeWidth={1.5} />
+							<span class="branch-item-name">Cloud</span>
 						</button>
-					{/each}
+					{/if}
+
+					<!-- Worktree modifier: orthogonal checkbox at the bottom, combinable
+					     with either base mode (G). -->
+					{#if isGitRepo}
+						<div class="branch-divider"></div>
+						<button
+							type="button"
+							class="branch-item wt-check-item"
+							onclick={toggleWorktree}
+							title="Run in an isolated git worktree. Combine with Local or Cloud."
+							role="menuitemcheckbox"
+							aria-checked={worktreeOn}
+						>
+							<span class="wt-checkbox" class:checked={worktreeOn}>
+								{#if worktreeOn}<Check size={11} strokeWidth={3} />{/if}
+							</span>
+							<GitFork size={13} strokeWidth={1.5} />
+							<span class="branch-item-name">Worktree</span>
+						</button>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -517,6 +614,82 @@
 				</div>
 			{/if}
 		</div>
+		{/if}
+
+		<!-- Cloud branch selector (shown when cloud mode active) — pick which branch
+		     the remote device runs on (H). Lists the local clone's branches (same
+		     GitHub repo → same names). "Auto" lets the remote choose. With the
+		     worktree checkbox on, the pick becomes the base for a fresh remote
+		     worktree branch instead of a direct checkout. -->
+		{#if baseMode === 'cloud'}
+			<div class="branch-selector" bind:this={cloudBranchRef}>
+				<button
+					type="button"
+					class="branch-trigger"
+					class:auto-mode={!$activeSession.cloudBranch}
+					onclick={toggleCloudBranchDropdown}
+					title={cloudBranchTitle}
+					aria-haspopup="menu"
+					aria-expanded={showCloudBranchDropdown}
+				>
+					{#if worktreeOn}
+						<GitFork size={12} strokeWidth={1.5} />
+					{:else}
+						<GitBranch size={12} strokeWidth={1.5} />
+					{/if}
+					<span class="branch-name">{$activeSession.cloudBranch || 'Auto'}</span>
+					<ChevronDown size={12} strokeWidth={1.5} />
+				</button>
+
+				{#if showCloudBranchDropdown}
+					<div class="branch-dropdown" role="menu">
+						{#if loadingCloudBranches}
+							<div class="branch-loading">
+								<Loader2 size={14} class="animate-spin" />
+								<span>Loading...</span>
+							</div>
+						{:else}
+							<!-- Auto: let the remote pick (worktree on → fresh branch from
+							     the prompt; worktree off → remote default). -->
+							<button
+								type="button"
+								class="branch-item auto-item"
+								class:active={!$activeSession.cloudBranch}
+								onclick={() => selectCloudBranch(null)}
+								role="menuitemradio"
+								aria-checked={!$activeSession.cloudBranch}
+							>
+								<GitFork size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">Auto</span>
+								<span class="auto-hint">{worktreeOn ? 'from message' : 'remote default'}</span>
+							</button>
+
+							{#if cloudBranches.length > 0}
+								<div class="branch-divider"></div>
+								<div class="branch-section-label">Branches</div>
+								{#each cloudBranches as b (b.name)}
+									<button
+										type="button"
+										class="branch-item"
+										class:active={$activeSession.cloudBranch === b.name}
+										onclick={() => selectCloudBranch(b.name)}
+										role="menuitemradio"
+										aria-checked={$activeSession.cloudBranch === b.name}
+									>
+										<GitBranch size={13} strokeWidth={1.5} />
+										<span class="branch-item-name">{b.name}</span>
+										<span class="branch-location-badge" class:remote={b.remote}>
+											{b.remote ? 'remote' : 'local'}
+										</span>
+									</button>
+								{/each}
+							{:else}
+								<p class="branch-empty">No branches available</p>
+							{/if}
+						{/if}
+					</div>
+				{/if}
+			</div>
 		{/if}
 
 		<!-- Device picker (shown when cloud mode active) — choose which registered
@@ -643,6 +816,35 @@
 
 	.mode-trigger :global(svg) {
 		flex-shrink: 0;
+	}
+
+	/* Small worktree marker on the trigger pill when the checkbox is on. */
+	.mode-trigger :global(svg.wt-marker) {
+		color: var(--primary);
+	}
+
+	/* Worktree checkbox row in the mode menu. */
+	.wt-checkbox {
+		width: 15px;
+		height: 15px;
+		border: 1.5px solid var(--border);
+		border-radius: 4px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		transition: background-color 120ms ease, border-color 120ms ease;
+	}
+
+	.wt-checkbox.checked {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	/* Wins over the generic `.branch-item :global(svg)` muted color so the tick
+	   reads as white on the filled primary box. */
+	.wt-checkbox :global(svg) {
+		color: var(--primary-foreground) !important;
 	}
 
 	.mode-trigger-label {
