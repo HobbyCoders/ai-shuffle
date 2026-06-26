@@ -253,6 +253,54 @@ export async function getBranches(projectId: string, includeRemote: boolean = fa
     return deduplicateBranches(response.branches.map(transformBranch));
 }
 
+// ============================================================================
+// Cloud (cross-install) git state
+// ============================================================================
+
+interface RawCloudGitState {
+    present: boolean;
+    default_branch: string;
+    branches: RawBranch[];
+    current_branch: string | null;
+}
+
+export interface CloudGitState {
+    /** Whether the repo is already cloned on the target device. When false the
+     *  worker will clone it on first send, so the picker offers just the default. */
+    present: boolean;
+    /** The repo's default branch (used when the target has no clone yet). */
+    defaultBranch: string;
+    /** The branches the target device offers (mirrors its own selector). */
+    branches: Branch[];
+    /** The branch the target currently has checked out (picker default). */
+    currentBranch: string | null;
+}
+
+/**
+ * Preview a target install's git state for the cloud branch picker.
+ *
+ * Resolves the project's GitHub remote and asks the chosen device (via the
+ * cluster relay) which branches it has and what it currently has checked out, so
+ * the picker can mirror the remote's selector and default to its current branch.
+ */
+export async function getCloudGitState(
+    projectId: string,
+    targetInstanceId: string,
+    options?: RequestOptions
+): Promise<CloudGitState> {
+    const qs = new URLSearchParams({
+        project_id: projectId,
+        target_instance_id: targetInstanceId
+    }).toString();
+    const raw = await api.get<RawCloudGitState>(`/sessions/cloud/git-state?${qs}`, options);
+    return {
+        present: raw.present,
+        defaultBranch: raw.default_branch,
+        branches: deduplicateBranches((raw.branches || []).map(transformBranch)),
+        currentBranch: raw.current_branch
+    };
+}
+
 /**
  * Create a new branch
  */

@@ -8,7 +8,8 @@
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
-import { api } from '$lib/api/client';
+import { api, isApiError } from '$lib/api/client';
+import { toast } from '$lib/stores/toast';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree, reopenWorktree } from '$lib/api/git';
 
@@ -114,7 +115,7 @@ export interface MessageSenderDeps {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
 		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<void>;
 		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
-		startCloudSession: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
+		startCloudSession: (prompt: string, pendingUploadPaths?: string[], autoStash?: boolean) => Promise<void>;
 	};
 }
 
@@ -747,7 +748,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		// ── Cloud offload (run on a second install) ─────────────────────
 
-		async startCloudSession(prompt: string, pendingUploadPaths?: string[]) {
+		async startCloudSession(prompt: string, pendingUploadPaths?: string[], autoStash = false) {
 			prompt = prompt.trim();
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
@@ -763,19 +764,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (_state.permissionModeOverride) overridesPayload.permission_mode = _state.permissionModeOverride;
 			if (_state.effortLevelOverride) overridesPayload.effort = _state.effortLevelOverride;
 
-			// Branch targeting for the remote worktree (H): mirror the local branch
-			// selection onto the cloud device. The remote always runs in a worktree;
-			// which branch it checks out is decided by how we fill these two fields:
-			//   • Worktree OFF → run directly on the chosen existing branch
-			//     (branch_name set, remote checks it out, no new branch).
-			//   • Worktree ON  → spin up a fresh isolated branch based off the chosen
-			//     one (base_branch set, remote derives the new branch name).
-			//   • No branch chosen ('Auto') → remote auto-derives from the prompt.
-			// Same GitHub repo means the local clone's branch names match the
-			// remote's, so the picked name resolves there too.
-			const cloudBranch = _state.cloudBranch || undefined;
-			const branchName = _state.cloudWorktree ? undefined : cloudBranch;
-			const baseBranch = _state.cloudWorktree ? cloudBranch : undefined;
+			// Branch targeting — "Cloud = Local on another device". We send explicit
+			// flags so the worker never has to guess intent from an empty field:
+			//   • use_worktree=false → run a normal session in the remote's MAIN
+			//     checkout. `branch_name` is the branch to be on there: the remote's
+			//     currently-checked-out one (no-op), another existing branch (checkout,
+			//     stash-retry on dirty), or a brand-new branch (create_new_branch).
+			//   • use_worktree=true → spin up an isolated worktree, exactly like local
+			//     worktree mode: check out the selected existing branch, create the
+			//     staged new branch, or (no branch chosen) auto-name one from the prompt.
+			// Same GitHub repo means the picked branch names resolve on the remote.
+			const useWorktree = _state.cloudWorktree;
+			const branchName = _state.cloudBranch || undefined;
+			const createNewBranch = _state.cloudCreateNewBranch;
 
 			// Optimistically show the prompt + a creating/streaming state.
 			update(s => ({
@@ -801,8 +802,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					project_id: projectId,
 					prompt,
 					profile_id: queryProfileId,
+					use_worktree: useWorktree,
 					branch_name: branchName,
-					base_branch: baseBranch,
+					create_new_branch: createNewBranch,
+					auto_stash: autoStash,
 					// Registry-targeted offload: when the device picker chose an install,
 					// the session runs there and is owned by it (no local proxy row).
 					target_instance_id: _state.cloudTargetInstanceId || undefined,
@@ -842,14 +845,34 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 			} catch (error) {
 				if (creationGen !== internal.worktreeCreationGeneration) return;
-				const err = error as { detail?: string; message?: string; status?: number };
-				const rawError = err.detail || err.message || 'Failed to start cloud session.';
+
+				// Dirty tree on the remote main checkout (409): the worker refused to
+				// switch branches over uncommitted changes. Mirror the local
+				// branch-switch flow (gitCheckoutAction.ts) — surface the worker's
+				// message in a toast with a "Stash & switch" action that retries the
+				// whole offload with auto_stash=true. Only the first attempt offers it.
+				const isDirtyConflict = !autoStash && isApiError(error) && error.status === 409;
+				const rawError = isApiError(error)
+					? error.detail
+					: ((error as { message?: string }).message || 'Failed to start cloud session.');
 				update(s => ({
 					...s,
 					isCreatingWorktree: false,
-					error: rawError,
+					error: isDirtyConflict ? null : rawError,
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
+
+				if (isDirtyConflict) {
+					toast.push(rawError, {
+						tone: 'error',
+						action: {
+							label: 'Stash & switch',
+							onClick: () => {
+								void getActiveSession().startCloudSession(prompt, pendingUploadPaths, true);
+							},
+						},
+					});
+				}
 			}
 		},
 

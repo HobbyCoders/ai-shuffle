@@ -12,11 +12,15 @@
 		open: boolean;
 		projectId: string;
 		defaultName?: string;
+		/** When true, the modal does NOT create the branch itself — it just
+		 *  validates the name and hands it back via `onCreated`. Used by cloud
+		 *  mode, where the remote worker creates the branch on send. */
+		stageOnly?: boolean;
 		onClose: () => void;
 		onCreated?: (branchName: string) => void;
 	}
 
-	let { open, projectId, defaultName = '', onClose, onCreated }: Props = $props();
+	let { open, projectId, defaultName = '', stageOnly = false, onClose, onCreated }: Props = $props();
 
 	let branchName = $state('');
 	let showPrefix = $state(false);
@@ -81,6 +85,14 @@
 	async function handleCreate() {
 		const name = branchName.trim();
 		if (!name) return;
+
+		// Staging mode (cloud): don't create here — hand the name back so the
+		// caller can defer creation to the remote worker on send.
+		if (stageOnly) {
+			onCreated?.(name);
+			onClose();
+			return;
+		}
 
 		loading = true;
 		error = null;

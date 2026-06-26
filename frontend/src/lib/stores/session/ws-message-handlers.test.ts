@@ -104,6 +104,7 @@ function mockState(): ActiveSessionState {
 		cloudTargetInstanceId: null,
 		cloudWorktree: false,
 		cloudBranch: null,
+		cloudCreateNewBranch: false,
 		worktreeBranch: '',
 		worktreeBaseBranch: '',
 		worktreeCreateNewBranch: true,

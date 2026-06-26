@@ -27,6 +27,48 @@ logger = logging.getLogger(__name__)
 worktree_router = APIRouter(tags=["Sessions"])
 
 
+def _migrate_uploads_to_dir(
+    project_id: str,
+    target_dir: Path,
+    file_paths: List[str],
+) -> List[str]:
+    """Copy uploaded files from the project dir into ``target_dir``.
+
+    Shared core of the upload-migration flow: ``target_dir`` is a worktree dir
+    for the worktree flow, or the project's own main checkout for the
+    non-worktree (cloud "run in main checkout") flow. Returns a list of
+    human-readable error messages; a missing or mis-rooted file does not abort
+    the whole migration.
+    """
+    from app.core.project_utils import get_project_working_dir
+
+    errors: List[str] = []
+    if not target_dir.exists():
+        return [f"Target directory does not exist: {target_dir}"]
+
+    project_dir = Path(get_project_working_dir(project_id))
+    # When the target IS the project dir, the files are already in place.
+    if target_dir.resolve() == project_dir.resolve():
+        return errors
+    for file_path in file_paths:
+        try:
+            src = Path(file_path)
+            if not src.exists():
+                errors.append(f"File not found: {file_path}")
+                continue
+            try:
+                rel = src.relative_to(project_dir)
+            except ValueError:
+                errors.append(f"File not in project directory: {file_path}")
+                continue
+            dest = target_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dest))
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"Failed to copy {file_path}: {e}")
+    return errors
+
+
 def _migrate_uploads_sync(
     project_id: str,
     worktree: dict,
@@ -39,31 +81,12 @@ def _migrate_uploads_sync(
     round-trip. Returns a list of human-readable error messages; a missing
     or mis-rooted file does not abort the whole migration.
     """
-    from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+    from app.core.project_utils import get_worktree_working_dir
 
-    errors: List[str] = []
     worktree_dir = Path(get_worktree_working_dir(worktree))
     if not worktree_dir.exists():
         return [f"Worktree directory does not exist: {worktree_dir}"]
-
-    project_dir = Path(get_project_working_dir(project_id))
-    for file_path in file_paths:
-        try:
-            src = Path(file_path)
-            if not src.exists():
-                errors.append(f"File not found: {file_path}")
-                continue
-            try:
-                rel = src.relative_to(project_dir)
-            except ValueError:
-                errors.append(f"File not in project directory: {file_path}")
-                continue
-            dest = worktree_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"Failed to copy {file_path}: {e}")
-    return errors
+    return _migrate_uploads_to_dir(project_id, worktree_dir, file_paths)
 
 
 def _detect_command_meta(prompt: str) -> Tuple[str, Optional[dict]]:

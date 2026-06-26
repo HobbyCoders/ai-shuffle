@@ -46,6 +46,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		cloudTargetInstanceId: null,
 		cloudWorktree: false,
 		cloudBranch: null,
+		cloudCreateNewBranch: false,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: true,
