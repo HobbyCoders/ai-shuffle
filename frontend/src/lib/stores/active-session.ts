@@ -124,7 +124,7 @@ export interface ActiveSessionState {
 	streamStartTime: number | null;
 	executionMode: ExecutionMode;
 	/** When executionMode === 'cloud': the registered install to offload onto.
-	 *  null lets the backend fall back to the legacy single-install config. */
+	 *  Required for cloud sessions — the device picker selects it. */
 	cloudTargetInstanceId: string | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;

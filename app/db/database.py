@@ -81,7 +81,9 @@ def _safe_json(value):
 # v45: Add cloud_remote_url + cloud_remote_session_id to sessions (cloud offload mode)
 # v46: Add session_id-only partial indexes on session_store_entries for the
 #      postgres_only read cutover (idx_sse_session, idx_sse_session_sub)
-SCHEMA_VERSION = 47
+# v48: Drop cloud_remote_url + cloud_remote_session_id from sessions — the legacy
+#      per-session offload proxy is replaced by the cluster intake/relay model
+SCHEMA_VERSION = 48
 
 
 def _run_column_migrations(cursor):
@@ -194,15 +196,16 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "worktree_path"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
             migrations_applied.append("sessions.worktree_path")
-        # Cloud offload linkage (v45): a "cloud" session is a local proxy whose
-        # real work runs on a second AI Shuffle install. These columns record
-        # which install (base URL) and which remote session id it maps to.
-        if not column_exists(cursor, "sessions", "cloud_remote_url"):
-            cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_remote_url TEXT")
-            migrations_applied.append("sessions.cloud_remote_url")
-        if not column_exists(cursor, "sessions", "cloud_remote_session_id"):
-            cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_remote_session_id TEXT")
-            migrations_applied.append("sessions.cloud_remote_session_id")
+        # Legacy cloud offload removal (v48): the per-session proxy model
+        # (cloud_remote_url / cloud_remote_session_id) is superseded by the
+        # cluster intake/relay, which shares one session id across installs via
+        # the instance_id owner field. Drop the now-dead columns idempotently.
+        if column_exists(cursor, "sessions", "cloud_remote_url"):
+            cursor.execute("ALTER TABLE sessions DROP COLUMN cloud_remote_url")
+            migrations_applied.append("drop sessions.cloud_remote_url")
+        if column_exists(cursor, "sessions", "cloud_remote_session_id"):
+            cursor.execute("ALTER TABLE sessions DROP COLUMN cloud_remote_session_id")
+            migrations_applied.append("drop sessions.cloud_remote_session_id")
         # Backfill for existing sessions with active worktrees
         if "sessions.worktree_branch" in migrations_applied:
             try:

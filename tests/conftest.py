@@ -153,8 +153,6 @@ def create_test_schema(cursor: sqlite3.Cursor):
             worktree_id TEXT,
             worktree_branch TEXT,
             worktree_path TEXT,
-            cloud_remote_url TEXT,
-            cloud_remote_session_id TEXT,
             parent_session_id TEXT,
             fork_point_message_index INTEGER,
             title TEXT,

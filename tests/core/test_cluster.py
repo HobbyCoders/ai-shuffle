@@ -100,9 +100,25 @@ def test_advertise_url_uses_db_override_when_no_env():
     assert source == "config"
 
 
-def test_advertise_url_falls_back_to_host_guess():
+def test_advertise_url_prefers_primary_lan_ip():
+    # The LAN IP is routable from peers and sidesteps the unresolvable-hostname
+    # trap, so it wins over the host-name guess when available.
     with patch.object(cluster, "settings") as mock_settings, \
          patch.object(cluster.database, "get_system_setting", return_value=None), \
+         patch.object(cluster, "_primary_lan_ip", return_value="10.0.0.135"), \
+         patch.object(cluster.socket, "getfqdn", return_value="worker.lan"):
+        mock_settings.cluster_advertise_url = ""
+        mock_settings.port = 1455
+        url, source = cluster.advertise_url()
+    assert url == "http://10.0.0.135:1455"
+    assert source == "guess"
+
+
+def test_advertise_url_falls_back_to_host_guess():
+    # When no usable LAN IP is found, fall back to the host name.
+    with patch.object(cluster, "settings") as mock_settings, \
+         patch.object(cluster.database, "get_system_setting", return_value=None), \
+         patch.object(cluster, "_primary_lan_ip", return_value=None), \
          patch.object(cluster.socket, "getfqdn", return_value="worker.lan"):
         mock_settings.cluster_advertise_url = ""
         mock_settings.port = 1455
@@ -114,6 +130,7 @@ def test_advertise_url_falls_back_to_host_guess():
 def test_advertise_url_none_when_host_is_localhost():
     with patch.object(cluster, "settings") as mock_settings, \
          patch.object(cluster.database, "get_system_setting", return_value=None), \
+         patch.object(cluster, "_primary_lan_ip", return_value=None), \
          patch.object(cluster.socket, "getfqdn", return_value="localhost"):
         mock_settings.cluster_advertise_url = ""
         url, source = cluster.advertise_url()

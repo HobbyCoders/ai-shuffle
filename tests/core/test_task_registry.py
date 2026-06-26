@@ -490,7 +490,7 @@ class TestLiveActiveTasks:
         # Seed a streaming live session so the in-memory path is taken.
         await live_session_store.start_streaming(session_id, initial_messages=[])
 
-        fake_session = {"id": session_id, "title": "T", "cloud_remote_url": None}
+        fake_session = {"id": session_id, "title": "T"}
 
         with patch.object(
             sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
@@ -519,7 +519,7 @@ class TestLiveActiveTasks:
         session_id = "live-sess-empty"
         tr.reset_all()
         await live_session_store.start_streaming(session_id, initial_messages=[])
-        fake_session = {"id": session_id, "title": "T", "cloud_remote_url": None}
+        fake_session = {"id": session_id, "title": "T"}
 
         with patch.object(
             sessions_api, "require_session", new=AsyncMock(return_value=fake_session)

@@ -1003,35 +1003,11 @@ async def chat_websocket(
                             await send_json({"type": "error", "message": "Empty prompt"})
                             continue
 
-                        # Cloud sessions execute on a second install. Forward the
-                        # follow-up prompt there instead of running locally; the
-                        # live-proxy (/sessions/{id}/live) streams the result back.
+                        # Cross-install (cluster) session: owned by another install
+                        # on the shared DB. Forward the follow-up prompt there; its
+                        # /live stream is mirrored back via the poller.
                         if session_id:
                             cloud_sess = await run_sync(database.get_session, session_id)
-                            if cloud_sess and cloud_sess.get("cloud_remote_url"):
-                                # Keep this device attached so its poller follows the stream.
-                                if session_id != current_session_id:
-                                    if current_session_id:
-                                        await sync_engine.unregister_device(device_id, current_session_id)
-                                    await sync_engine.register_device(device_id, session_id, websocket)
-                                    current_session_id = session_id
-                                from app.core import cloud_relay
-                                try:
-                                    await cloud_relay.forward_message(
-                                        cloud_sess, prompt, profile_id, overrides
-                                    )
-                                    await send_json({"type": "cloud_forwarded", "session_id": session_id})
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"Cloud forward_message failed for {session_id}: {e}")
-                                    await send_json({
-                                        "type": "error",
-                                        "message": f"Could not reach cloud install: {e}",
-                                    })
-                                continue
-
-                            # Cross-install (cluster) session: owned by another
-                            # install on the shared DB. Relay the follow-up there;
-                            # its /live stream is mirrored back via the poller.
                             from app.core import cloud_relay
                             if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                                 if session_id != current_session_id:
@@ -1200,19 +1176,10 @@ async def chat_websocket(
                         # Stop current query - use interrupt_session for proper SDK-level cancellation
                         session_id = data.get("session_id") or current_session_id
                         if session_id:
-                            # Cloud session: forward the interrupt to the worker.
-                            cloud_sess = await run_sync(database.get_session, session_id)
-                            if cloud_sess and cloud_sess.get("cloud_remote_url"):
-                                from app.core import cloud_relay
-                                try:
-                                    await cloud_relay.forward_interrupt(cloud_sess)
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"Cloud forward_interrupt failed for {session_id}: {e}")
-                                continue
-
                             # Cross-install (cluster) session: relay the interrupt
                             # to the owning install. A silent skip when offline is
                             # fine — there is nothing running here to stop.
+                            cloud_sess = await run_sync(database.get_session, session_id)
                             from app.core import cloud_relay
                             if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                                 try:
@@ -1269,27 +1236,10 @@ async def chat_websocket(
                             })
                             continue
 
-                        # Cloud session: forward the interrupt to the worker, then
-                        # confirm so the frontend can send the replacement query
-                        # (which we also forward).
-                        cloud_sess = await run_sync(database.get_session, session_id)
-                        if cloud_sess and cloud_sess.get("cloud_remote_url"):
-                            from app.core import cloud_relay
-                            try:
-                                await cloud_relay.forward_interrupt(cloud_sess)
-                                await send_json({"type": "interrupt_confirmed", "session_id": session_id})
-                            except Exception as e:  # noqa: BLE001
-                                logger.warning(f"Cloud interrupt_for_query failed for {session_id}: {e}")
-                                await send_json({
-                                    "type": "interrupt_failed",
-                                    "session_id": session_id,
-                                    "message": f"Could not reach cloud install: {e}",
-                                })
-                            continue
-
                         # Cross-install (cluster) session: relay the interrupt to
                         # the owner, then confirm so the frontend sends the
                         # replacement query (also relayed).
+                        cloud_sess = await run_sync(database.get_session, session_id)
                         from app.core import cloud_relay
                         if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                             try:
