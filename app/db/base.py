@@ -188,14 +188,84 @@ def get_connection():
 
 
 def _close_connection(conn) -> None:
-    """Return a connection to the pool."""
+    """Return a connection to the pool.
+
+    psycopg2's ThreadedConnectionPool.putconn() rolls back / closes the
+    connection *before* it removes the slot from its internal bookkeeping
+    (``_used`` / ``_rused``). If that rollback/close raises — which happens
+    when the underlying server connection has already been dropped (idle
+    timeout, network blip, DB restart, shared-DB failover) — the slot is
+    never released and is leaked for the lifetime of the process. Enough
+    leaks and the pool raises "connection pool exhausted" even though no
+    caller is actually holding a connection.
+
+    The old implementation swallowed the putconn error with a bare
+    ``except: pass``, which both leaked the slot and hid the leak entirely.
+    Here we log it and force the slot free.
+    """
     if _pg_pool is None:
         return
     raw_conn = conn._conn if isinstance(conn, _PgDictConnection) else conn
     try:
         _pg_pool.putconn(raw_conn)
+        return
+    except Exception:
+        logger.warning(
+            "putconn failed; forcing connection discard to avoid leaking a "
+            "pool slot",
+            exc_info=True,
+        )
+    # Retry with close=True — this skips the rollback path that just failed
+    # and goes straight to conn.close(), so the _used slot is reclaimed.
+    try:
+        _pg_pool.putconn(raw_conn, close=True)
+        return
     except Exception:
         pass
+    # Last resort: drop the leaked bookkeeping directly so the slot frees,
+    # then close the (already broken) connection. These are psycopg2 pool
+    # internals (no public API to force-reclaim a slot), so access them
+    # defensively in case a future version renames them.
+    try:
+        lock = getattr(_pg_pool, "_lock", None)
+        rused = getattr(_pg_pool, "_rused", None)
+        used = getattr(_pg_pool, "_used", None)
+        if lock is not None and rused is not None and used is not None:
+            with lock:
+                key = rused.pop(id(raw_conn), None)
+                if key is not None:
+                    used.pop(key, None)
+    except Exception:
+        pass
+    try:
+        raw_conn.close()
+    except Exception:
+        pass
+
+
+def pool_stats() -> Optional[Dict[str, int]]:
+    """Return current connection-pool usage, or None if not initialized.
+
+    ``in_use`` is the key exhaustion/leak indicator: when it reaches ``max``
+    the pool raises "connection pool exhausted". A steadily climbing
+    ``in_use`` that never drops back to baseline points at a slot leak.
+    Reads psycopg2 pool internals defensively (no public introspection API).
+    """
+    if _pg_pool is None:
+        return None
+    try:
+        used = getattr(_pg_pool, "_used", None)
+        idle = getattr(_pg_pool, "_pool", None)
+        if used is None or idle is None:
+            return None
+        return {
+            "in_use": len(used),
+            "idle": len(idle),
+            "min": getattr(_pg_pool, "minconn", 0),
+            "max": getattr(_pg_pool, "maxconn", 0),
+        }
+    except Exception:
+        return None
 
 
 @contextmanager

@@ -85,7 +85,12 @@ class Settings(BaseSettings):
     # Database (required — PostgreSQL connection string)
     database_url: Optional[str] = None
     db_pool_min: int = 2  # Min connections in PostgreSQL pool
-    db_pool_max: int = 10  # Max connections in PostgreSQL pool
+    db_pool_max: int = 20  # Max connections in PostgreSQL pool
+    # Headroom note: the rate-limit middleware does a synchronous DB auth
+    # lookup on every HTTP request, and multiple devices poll /live, so a
+    # burst of concurrent requests can need many slots at once. 20 is well
+    # within a default Postgres max_connections=100 even with a second
+    # install sharing the same database.
 
     # Instance identity — isolates projects, sessions, and workspace path
     # when multiple deployments share the same database.

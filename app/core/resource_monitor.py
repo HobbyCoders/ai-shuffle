@@ -97,6 +97,20 @@ async def _collect_metrics() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect session pool metrics: {e}")
 
+    # --- Database connection pool (PostgreSQL) ---
+    # Distinct from the SDK "session pool" above. db_pool_in_use is the
+    # exhaustion/leak indicator: if it sits at db_pool_max the next DB call
+    # raises "connection pool exhausted".
+    try:
+        from app.db.base import pool_stats
+        db_stats = pool_stats()
+        if db_stats is not None:
+            metrics["db_pool_in_use"] = db_stats["in_use"]
+            metrics["db_pool_idle"] = db_stats["idle"]
+            metrics["db_pool_max"] = db_stats["max"]
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to collect DB pool metrics: {e}")
+
     # --- Sync Engine ---
     try:
         from app.core.sync_engine import sync_engine
@@ -310,6 +324,16 @@ def _check_warnings(metrics: dict) -> list[str]:
     pool_max = metrics.get("pool_max_size", 3)
     if pool_size >= pool_max:
         warnings.append(f"Session pool at capacity ({pool_size}/{pool_max})")
+
+    # DB connection pool near/at exhaustion. Warn early (>=80%) so a slow
+    # slot leak is visible before it surfaces as "connection pool exhausted".
+    db_in_use = metrics.get("db_pool_in_use")
+    db_max = metrics.get("db_pool_max", 0)
+    if db_in_use is not None and db_max and db_in_use >= 0.8 * db_max:
+        warnings.append(
+            f"DB connection pool near capacity ({db_in_use}/{db_max}) - "
+            f"possible slot leak or insufficient db_pool_max"
+        )
 
     # Large message accumulation in live sessions
     total_msgs = metrics.get("live_total_messages", 0)
