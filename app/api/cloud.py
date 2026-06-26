@@ -1,5 +1,5 @@
 """
-Cloud intake — the *worker* side of cloud offload.
+Cloud intake worker — clone/link a project and run an offloaded session.
 
 When another AI Shuffle install (the originating device) runs a session in
 "cloud" execution mode, the owning install does the real work here:
@@ -340,5 +340,3 @@ async def run_cloud_intake(
         project_created=project_created,
         upload_migration_errors=upload_errors,
     )
-
-

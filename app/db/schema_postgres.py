@@ -96,10 +96,12 @@ def create_postgres_schema(cursor) -> None:
             path TEXT NOT NULL,
             settings JSONB DEFAULT '{}',
             instance_id TEXT,
+            link_group_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
 
     # ------------------------------------------------------------------
     # 6. API users (for programmatic access with isolated workspaces)

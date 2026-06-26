@@ -125,6 +125,7 @@ export interface Project {
 	path: string;
 	settings: Record<string, unknown>;
 	session_count?: number;  // Number of sessions in this project
+	link_group_id?: string | null;  // Groups same-repo clones across installs
 	created_at: string;
 	updated_at: string;
 }

@@ -195,6 +195,44 @@ async def cluster_mobile_notify(
     return {"ok": True}
 
 
+class ClusterStreamingRequest(BaseModel):
+    """A peer install announcing a streaming-state transition for a session it owns.
+
+    The owning install fans these out on every local stream start/end so peer
+    installs can update their own connected devices' streaming indicators.
+    """
+    user_id: str
+    session_id: str
+    is_streaming: bool
+    instance_id: Optional[str] = None  # owning install id (for offline cleanup)
+    project_id: Optional[str] = None
+    worktree_id: Optional[str] = None
+
+
+@router.post("/streaming")
+async def cluster_streaming(
+    body: ClusterStreamingRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+) -> Dict[str, Any]:
+    """Apply a peer install's streaming transition to this install's devices.
+
+    Records the remote session's streaming state locally and re-broadcasts
+    ``user_streaming_changed`` to this install's connected devices. Never
+    re-fans-out, so a transition cannot loop between installs.
+    """
+    from app.core.sync_engine import sync_engine
+
+    await sync_engine.apply_remote_streaming_change(
+        user_id=body.user_id,
+        session_id=body.session_id,
+        is_streaming=body.is_streaming,
+        owner_instance_id=body.instance_id or install_id or None,
+        project_id=body.project_id,
+        worktree_id=body.worktree_id,
+    )
+    return {"ok": True}
+
+
 @router.post("/intake", response_model=CloudIntakeResponse)
 async def cluster_intake_endpoint(
     body: CloudIntakeRequest,

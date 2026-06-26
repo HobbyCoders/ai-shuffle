@@ -328,9 +328,12 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         logger.debug("Failed to load installs registry for enrichment", exc_info=True)
         installs_map = {}
 
-    # Batch: resolve project names via the NON-instance-filtered get_project so
-    # projects owned by another install still resolve.
+    # Batch: resolve project names + link groups via the NON-instance-filtered
+    # get_project so projects owned by another install still resolve. The link
+    # group lets the board fold same-repo clones from every install into one
+    # logical project.
     project_names: dict[str, str] = {}
+    project_link_groups: dict[str, Optional[str]] = {}
     for pid in {s.get("project_id") for s in sessions if s.get("project_id")}:
         try:
             proj = database.get_project(pid)
@@ -338,6 +341,7 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             proj = None
         if proj:
             project_names[pid] = proj.get("name") or proj.get("path") or pid
+            project_link_groups[pid] = proj.get("link_group_id")
 
     my_install = installs_map.get(me)
     for session in sessions:
@@ -362,6 +366,8 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         pid = session.get("project_id")
         if pid and pid in project_names:
             session["project_name"] = project_names[pid]
+        if pid and project_link_groups.get(pid):
+            session["link_group_id"] = project_link_groups[pid]
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:

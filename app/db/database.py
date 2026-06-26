@@ -442,6 +442,38 @@ def _run_column_migrations(cursor):
         migrations_applied.append("installs")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)")
 
+    # projects.link_group_id (Phase D). Groups same-repo project rows across
+    # installs into one logical project on the shared-DB sessions board. The id
+    # is derived deterministically from the git remote (identical on every
+    # install), so existing clones can be backfilled immediately.
+    if table_exists(cursor, "projects") and not column_exists(cursor, "projects", "link_group_id"):
+        cursor.execute("ALTER TABLE projects ADD COLUMN link_group_id TEXT")
+        migrations_applied.append("projects.link_group_id")
+        # Backfill from each project's git remote. Compute in Python to reuse the
+        # canonical normalizer; best-effort so a startup never fails on it.
+        if table_exists(cursor, "git_repositories"):
+            try:
+                from app.core.project_links import auto_link_group_id
+                cursor.execute(
+                    """
+                    SELECT p.id AS project_id, r.remote_url AS remote_url
+                    FROM projects p
+                    JOIN git_repositories r ON r.project_id = p.id
+                    WHERE r.remote_url IS NOT NULL AND r.remote_url <> ''
+                    """
+                )
+                backfill = [(row["project_id"], row["remote_url"]) for row in cursor.fetchall()]
+                for pid, remote_url in backfill:
+                    gid = auto_link_group_id(remote_url)
+                    if gid:
+                        cursor.execute(
+                            "UPDATE projects SET link_group_id = %s WHERE id = %s AND link_group_id IS NULL",
+                            (gid, pid),
+                        )
+            except Exception:  # noqa: BLE001 — backfill is best-effort
+                logger.warning("link_group_id backfill skipped", exc_info=True)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -607,6 +639,7 @@ from app.db.projects import (  # noqa: F401
     get_all_projects,
     create_project,
     update_project,
+    set_project_link_group,
     get_project_session_count,
     get_all_project_session_counts,
     delete_project,

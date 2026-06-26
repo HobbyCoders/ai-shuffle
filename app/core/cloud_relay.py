@@ -231,9 +231,9 @@ async def cluster_intake(
 ) -> Dict[str, Any]:
     """Offload to a registered install via the cluster-secret intake endpoint.
 
-    Same worker behavior as legacy ``intake`` (clone/link project, worktree,
-    start query) but targeted by registry-resolved ``base_url`` and authenticated
-    with the shared cluster secret instead of a per-install API key. The returned
+    The worker (``run_cloud_intake``) clones/links the project, spins up a
+    worktree session and starts the query. Targeted by registry-resolved
+    ``base_url`` and authenticated with the shared cluster secret. The returned
     ``session_id`` is shared cluster-wide, so the primary needs no proxy row.
     """
     payload = _intake_payload(

@@ -50,6 +50,7 @@ export interface Session {
 	is_remote?: boolean;  // Owned by another install (not this one)
 	controllable?: boolean;  // Live send/interrupt reachable right now
 	project_name?: string | null;  // Resolved server-side (cross-install projects)
+	link_group_id?: string | null;  // Folds same-repo clones into one board group
 }
 
 export interface SessionMessage {

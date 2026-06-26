@@ -1,5 +1,5 @@
 """
-Cloud session creation — the *primary* side of cloud offload.
+Cloud session creation — offload a new session onto a registered install.
 
 ``POST /api/v1/sessions/cloud`` offloads a new session onto a registered install
 chosen from the device picker (``target_instance_id``). On a shared database the
@@ -106,10 +106,10 @@ async def _create_offload_via_registry(
 ) -> CloudSessionResponse:
     """Offload onto a registered install resolved from the registry.
 
-    Unlike the legacy path this creates NO local proxy row: on a shared database
-    the worker's session is already visible everywhere, and its ``instance_id``
-    marks the owning device so the cross-install relay (live/send/interrupt) can
-    reach it. We just kick off the work on the target and return its session id.
+    Creates NO local proxy row: on a shared database the worker's session is
+    already visible everywhere, and its ``instance_id`` marks the owning device
+    so the cross-install relay (live/send/interrupt) can reach it. We just kick
+    off the work on the target and return its session id.
     """
     from app.core import cloud_relay
 
@@ -169,7 +169,7 @@ async def _create_offload_via_registry(
         raise HTTPException(status_code=502, detail="Target device did not return a session id")
 
     # The session id is shared across the cluster — the frontend opens it like
-    # any other (remote) session. No proxy row, no cloud_remote_* written.
+    # any other (remote) session. No proxy row written.
     return CloudSessionResponse(
         session_id=remote_session_id,
         remote_session_id=remote_session_id,

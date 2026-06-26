@@ -22,6 +22,7 @@ class ProjectRow(TypedDict):
     description: Optional[str]
     path: str
     settings: Dict[str, Any]
+    link_group_id: Optional[str]
     created_at: str
     updated_at: str
 
@@ -112,6 +113,21 @@ def update_project(
                 values
             )
 
+    return get_project(project_id)
+
+
+def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Optional[ProjectRow]:
+    """Set (or clear, with ``None``) a project's link group id.
+
+    Unlike ``update_project`` this writes the value directly so it can be
+    cleared back to NULL. Touches ``updated_at`` so peers notice the change.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE projects SET link_group_id = %s, updated_at = %s WHERE id = %s",
+            (link_group_id, datetime.now(timezone.utc).isoformat(), project_id),
+        )
     return get_project(project_id)
 
 

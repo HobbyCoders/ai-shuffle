@@ -145,6 +145,19 @@ _repo_record_cache: Dict[str, Tuple[Optional[dict], float]] = {}
 _REPO_RECORD_TTL = 60.0  # seconds
 
 
+def _auto_link_from_repo(project_id: str, repo: Optional[dict]) -> None:
+    """Best-effort: keep the project's link_group_id derived from its git remote.
+
+    Called whenever the git_repositories record is touched so same-repo clones on
+    other installs group together on the board. Never raises into the caller.
+    """
+    try:
+        from app.core.project_links import maybe_auto_link_project
+        maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
+    except Exception:  # noqa: BLE001
+        logger.debug("auto-link from repo failed for %s", project_id, exc_info=True)
+
+
 def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[dict]:
     """
     Ensure a git_repositories record exists for this project if it's a git repo.
@@ -162,6 +175,7 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
 
     repo = database.get_git_repository_by_project(project_id)
     if repo:
+        _auto_link_from_repo(project_id, repo)
         _repo_record_cache[project_id] = (repo, now)
         return repo
 
@@ -196,5 +210,6 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         github_repo_name=github_repo_name
     )
     logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
+    _auto_link_from_repo(project_id, repo)
     _repo_record_cache[project_id] = (repo, time.monotonic())
     return repo
