@@ -220,16 +220,24 @@ async def chat_websocket(
         window_seconds=settings.ws_rate_limit_window_seconds,
     )
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None, is_queued_drain: bool = False):
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None, deferred_delivery: bool = False):
         """Execute query and stream results directly to WebSocket.
 
-        ``is_queued_drain`` marks a query started by draining the server-side
-        message queue (a "Send later" message). For these, a failure to send the
-        opening ``start`` frame means THIS handler's socket has gone away (e.g.
-        the user reloaded or reconnected mid-stream), but the message was queued
-        on purpose and a fresh socket is typically registered for the session.
-        So instead of aborting (which dropped the message — the original "Send
-        later" bug) we fall through and stream anyway: the live store +
+        ``deferred_delivery`` marks a turn whose delivery does NOT depend on this
+        handler's own socket. Three cases use it:
+          * draining the server-side message queue (a "Send later" message),
+          * a background sub-agent's "unpark" follow-up turn (the parent responds
+            to a ``<task-notification>`` after its turn already ended), and
+          * the replacement query of a "Send now" interrupt-and-send (the regular
+            ``query`` the frontend fires after ``interrupt_confirmed``; the origin
+            socket routinely drops during the up-to-8s interrupt drain).
+        For all of these, a failure to send the opening ``start`` frame means THIS
+        handler's socket has gone away (e.g. the user reloaded, navigated away, or
+        reconnected mid-stream while the turn was queued/parked/sent on purpose) —
+        yet a fresh socket is typically registered for the session, or the client
+        is polling. So instead of aborting (which dropped the message/turn — the
+        original "Send later" bug, and the same dead-socket abort stranded parked
+        unpark turns) we fall through and stream anyway: the live store +
         ``sync_engine`` broadcasts + polling deliver it to the reconnected /
         polling client regardless of this socket's state.
         """
@@ -462,21 +470,28 @@ async def chat_websocket(
             ctx.info(logger, f"Query start profile={profile_id} project={project_id}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 ctx.warning(logger, "Connection lost before query could start")
-                if is_queued_drain:
-                    # The originating socket is gone — the client reloaded or
-                    # reconnected mid-stream, so THIS handler's websocket is dead
-                    # while a fresh one is registered for the same session. The
-                    # message was queued on purpose, and the streaming loop below
-                    # carries every event to the live store + ``sync_engine``
-                    # broadcasts + polling, which reach the reconnected/polling
-                    # client regardless of this socket. So DON'T abort and DON'T
-                    # re-queue: aborting dropped the message entirely (the original
-                    # "Send later" bug), and re-queuing here made the post-query
-                    # teardown re-pop it forever in a tight loop. Fall through and
-                    # stream exactly as the loop does on any failed send.
+                if deferred_delivery:
+                    # The originating socket is gone — the client reloaded,
+                    # navigated away, or reconnected mid-stream, so THIS handler's
+                    # websocket is dead while a fresh one is typically registered
+                    # for the same session (or the client is polling). The turn was
+                    # started on purpose (a queued "Send later" message, a background
+                    # sub-agent's unpark follow-up, OR a "Send now" interrupt-and-send
+                    # replacement query whose origin socket dropped during the
+                    # interrupt drain), and the streaming loop below carries every
+                    # event to the live store + ``sync_engine`` broadcasts + polling,
+                    # which reach the reconnected/polling client regardless of this
+                    # socket. So DON'T abort and DON'T re-queue: aborting dropped the
+                    # message/turn entirely (the original "Send later"/"Send now" bug,
+                    # and the same dead-socket abort stranded parked-session unpark
+                    # turns — the parent's response never surfaced until a full
+                    # reload), and
+                    # re-queuing made the post-query teardown re-pop it forever in a
+                    # tight loop. Fall through and stream exactly as the loop does on
+                    # any failed send.
                     ctx.info(logger, "start frame undeliverable on origin socket — streaming via sync_engine + polling")
                 else:
-                    # An explicit (non-queued) query whose own socket died before
+                    # An explicit (non-deferred) query whose own socket died before
                     # it could even start: there is no other client to stream to,
                     # so tear down rather than stream into the void.
                     await live_session_store.cleanup_session(session_id)
@@ -933,7 +948,7 @@ async def chat_websocket(
                     preempted = True
                 else:
                     q_task = asyncio.create_task(
-                        run_query(q_content, sid, q_profile, q_project, None, q_worktree, is_queued_drain=True)
+                        run_query(q_content, sid, q_profile, q_project, None, q_worktree, deferred_delivery=True)
                     )
                     _active_chat_sessions[sid] = q_task
             if preempted:
@@ -998,6 +1013,11 @@ async def chat_websocket(
                         project_id = data.get("project")
                         overrides = data.get("overrides")  # Optional: {model, permission_mode}
                         worktree_id = data.get("worktree_id")  # Optional: link session to existing worktree
+                        # "Send now": the frontend sets this on the replacement query it
+                        # fires after an interrupt_for_query is confirmed. The origin
+                        # socket may have dropped during the interrupt drain, so a failed
+                        # start frame must NOT drop the message (see run_query).
+                        is_interrupt_followup = bool(data.get("interrupt_followup"))
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -1167,7 +1187,7 @@ async def chat_websocket(
                         # Note: broadcast_stream_start is called inside run_query when actual
                         # streaming begins. This prevents stuck streaming state if query fails early.
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
+                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id, deferred_delivery=is_interrupt_followup)
                         )
                         async with _active_sessions_lock:
                             _active_chat_sessions[session_id] = query_task

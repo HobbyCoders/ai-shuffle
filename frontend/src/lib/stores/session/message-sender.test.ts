@@ -156,6 +156,70 @@ describe('message-sender worktree send backstop', () => {
 });
 
 /**
+ * "Send now" (interrupt-and-send): when the user submits while a stream is live,
+ * the sender runs the two-phase interrupt_for_query handshake and then fires the
+ * replacement query. That query MUST carry interrupt_followup so the backend
+ * treats a start-frame send that fails on a socket dropped during the interrupt
+ * drain as non-fatal (stream via sync_engine + polling) instead of dropping the
+ * message — the same class of bug fixed for "Send later".
+ */
+describe('message-sender "Send now" flags the interrupt follow-up query', () => {
+	function streamingState() {
+		return baseState({
+			executionMode: 'local',
+			sessionId: 'ses-1',
+			isStreaming: true,
+			title: 'Existing chat',
+			messages: [{ id: 'u0', role: 'user', content: 'earlier' } as any],
+		});
+	}
+
+	it('sets interrupt_followup on the query after the interrupt is confirmed', async () => {
+		const { deps, wsConn } = makeDeps(streamingState());
+		// Confirm the interrupt as soon as the handshake message goes out, exactly
+		// like the real interrupt_confirmed handler resolving the pending promise.
+		wsConn.send.mockImplementation((data: Record<string, unknown>) => {
+			if (data?.type === 'interrupt_for_query') {
+				deps.internal.interruptConfirmResolve?.(true);
+			}
+			return true;
+		});
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('answer this now');
+
+		expect(result).toBe(true);
+		// The two-phase handshake ran...
+		const interruptSends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'interrupt_for_query');
+		expect(interruptSends).toHaveLength(1);
+		// ...and the replacement query is flagged as the interrupt follow-up.
+		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+		expect(querySends).toHaveLength(1);
+		expect((querySends[0][0] as any).interrupt_followup).toBe(true);
+	});
+
+	it('does not flag a normal (non-interrupting) send', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			executionMode: 'local',
+			sessionId: 'ses-1',
+			isStreaming: false,
+			title: 'Existing chat',
+			messages: [{ id: 'u0', role: 'user', content: 'earlier' } as any],
+		}));
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('no rush');
+
+		expect(result).toBe(true);
+		const interruptSends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'interrupt_for_query');
+		expect(interruptSends).toHaveLength(0);
+		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+		expect(querySends).toHaveLength(1);
+		expect((querySends[0][0] as any).interrupt_followup).toBeUndefined();
+	});
+});
+
+/**
  * Worktree sessions are never a dead end. A session whose worktree folder was
  * cleaned up (worktreeDeleted) must NOT block the send or surface a permanent
  * "worktree deleted" error — it best-effort reopens, clears the flag, and sends
