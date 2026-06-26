@@ -33,6 +33,11 @@ from app.db import database
 logger = logging.getLogger(__name__)
 
 CLUSTER_SECRET_SETTING = "cluster_secret"
+# Legacy *global* advertise-URL key. Before per-install scoping, every install
+# read/wrote this one key in the shared DB, so an override set on one install
+# leaked onto all of them. Kept only for one-time migration (see
+# ``_get_advertise_override``); new values are stored per-install under
+# ``cluster_advertise_url:<instance_id>``.
 CLUSTER_ADVERTISE_URL_SETTING = "cluster_advertise_url"
 
 
@@ -147,6 +152,48 @@ def _guess_advertise_url() -> Optional[str]:
     return f"http://{host}:{settings.port}"
 
 
+def _advertise_override_key(instance_id: Optional[str] = None) -> str:
+    """DB key for *this* install's advertise-URL override.
+
+    Scoped by ``instance_id`` so each install on the shared DB keeps its own
+    override instead of clobbering a single global key (the old bug: an address
+    entered on one install showed up as every install's address).
+    """
+    return f"{CLUSTER_ADVERTISE_URL_SETTING}:{instance_id or settings.effective_instance_id}"
+
+
+def _get_advertise_override() -> Optional[str]:
+    """Return this install's stored advertise-URL override (None when unset).
+
+    Reads the per-install key. The first time a freshly-upgraded install finds
+    no per-install value, it performs a one-time migration of the legacy global
+    key — but *only* if this install is the one that originally published it
+    (its registry ``base_url`` matches the legacy value). The owner claims the
+    value into its per-install key and deletes the global key so it stops
+    leaking onto peers; every other install simply ignores the stale global key.
+    """
+    key = _advertise_override_key()
+    stored = database.get_system_setting(key)
+    if stored is not None:
+        # Explicitly set (possibly to "" meaning "cleared"); honour it verbatim.
+        return stored.strip() or None
+
+    legacy = (database.get_system_setting(CLUSTER_ADVERTISE_URL_SETTING) or "").strip()
+    if not legacy:
+        return None
+    # Claim the legacy value only for the install that actually published it.
+    try:
+        me = database.get_install(settings.effective_instance_id)
+    except Exception:  # noqa: BLE001 — never let migration block resolution
+        me = None
+    owner = me is not None and (me.get("base_url") or "").rstrip("/") == legacy.rstrip("/")
+    if not owner:
+        return None
+    database.set_system_setting(key, legacy)
+    database.delete_system_setting(CLUSTER_ADVERTISE_URL_SETTING)
+    return legacy
+
+
 def advertise_url() -> tuple[Optional[str], str]:
     """Resolve this install's peer-reachable base URL and where it came from.
 
@@ -157,7 +204,7 @@ def advertise_url() -> tuple[Optional[str], str]:
     """
     explicit = (settings.cluster_advertise_url or "").strip()
     if not explicit:
-        explicit = (database.get_system_setting(CLUSTER_ADVERTISE_URL_SETTING) or "").strip()
+        explicit = (_get_advertise_override() or "").strip()
     if explicit:
         return explicit.rstrip("/"), "config"
     guess = _guess_advertise_url()
@@ -174,7 +221,7 @@ def advertise_status() -> dict:
     """
     url, source = advertise_url()
     env_pinned = bool((settings.cluster_advertise_url or "").strip())
-    override = (database.get_system_setting(CLUSTER_ADVERTISE_URL_SETTING) or "").strip() or None
+    override = _get_advertise_override()
     return {
         "url": url,
         "source": source,
@@ -192,7 +239,7 @@ def set_advertise_url_override(value: Optional[str]) -> dict:
     the override is still stored but ``advertise_url()`` keeps preferring the env.
     """
     cleaned = (value or "").strip().rstrip("/")
-    database.set_system_setting(CLUSTER_ADVERTISE_URL_SETTING, cleaned)
+    database.set_system_setting(_advertise_override_key(), cleaned)
     register_self()
     return advertise_status()
 
