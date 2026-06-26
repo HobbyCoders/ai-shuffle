@@ -81,7 +81,7 @@ def _safe_json(value):
 # v45: Add cloud_remote_url + cloud_remote_session_id to sessions (cloud offload mode)
 # v46: Add session_id-only partial indexes on session_store_entries for the
 #      postgres_only read cutover (idx_sse_session, idx_sse_session_sub)
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 
 def _run_column_migrations(cursor):
@@ -408,6 +408,28 @@ def _run_column_migrations(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_session ON error_log(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_fingerprint ON error_log(fingerprint)")
 
+    # installs (v47). Cross-install registry: each install self-registers a row
+    # keyed by its instance_id so peers can see every install and relay control
+    # to the owning device. Idempotent so upgrades from any older version land
+    # the table without needing the SCHEMA_VERSION bump to fire the bootstrap
+    # path (same defensive pattern as the SessionStore / error_log blocks above).
+    if not table_exists(cursor, "installs"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS installs (
+                id TEXT PRIMARY KEY,
+                device_name TEXT NOT NULL,
+                base_url TEXT,
+                platform TEXT,
+                version TEXT,
+                capabilities JSONB DEFAULT '{}',
+                last_seen TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("installs")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -652,6 +674,7 @@ from app.db.settings import (  # noqa: F401
     get_system_setting,
     set_system_setting,
     delete_system_setting,
+    get_or_create_system_setting,
     get_all_system_settings,
 )
 
@@ -816,6 +839,18 @@ from app.db.mobile import (  # noqa: F401
     delete_mobile_action,
     get_mobile_devices,
     save_mobile_device,
+)
+
+from app.db.installs import (  # noqa: F401
+    register_install,
+    touch_install_last_seen,
+    set_install_name,
+    set_install_base_url,
+    get_install,
+    get_installs,
+    get_installs_map,
+    delete_install,
+    ONLINE_WINDOW_SECONDS,
 )
 
 from app.db.automations import (  # noqa: F401

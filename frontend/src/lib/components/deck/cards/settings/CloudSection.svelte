@@ -99,10 +99,10 @@
 
 <div class="set-group">
 	<div class="set-grouphead">
-		<h3><Cloud />Cloud offload
+		<h3><Cloud />Legacy cloud offload
 			{#if configured}<span class="b b-on">Configured</span>{:else}<span class="b b-muted">Not configured</span>{/if}
 		</h3>
-		<p>Hand sessions started in <strong>Cloud</strong> mode to a second AI&nbsp;Shuffle install, which clones the GitHub repo, runs the work in a fresh worktree, and streams the result back here. GitHub-backed projects only.</p>
+		<p>Fallback for offloading to a single install by URL + API key. On a shared database, prefer the auto-registered <strong>Devices</strong> above and the in-chat device picker; this manual config still works as a fallback when no device is picked. GitHub-backed projects only.</p>
 	</div>
 
 	{#if loading}

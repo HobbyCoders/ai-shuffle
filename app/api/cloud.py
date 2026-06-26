@@ -228,6 +228,21 @@ async def cloud_intake(
     token: str = Depends(require_auth),
 ):
     """Link/create a project, create a worktree session and start the query."""
+    api_user = get_api_user_from_request(request)
+    api_user_id: Optional[str] = api_user["id"] if api_user else None
+    return await run_cloud_intake(body, api_user_id)
+
+
+async def run_cloud_intake(
+    body: CloudIntakeRequest,
+    api_user_id: Optional[str],
+) -> CloudIntakeResponse:
+    """Shared intake worker: clone/link a project, spin up a worktree session
+    and start the first query. Reused by both the API-key intake endpoint
+    (``/api/v1/cloud/intake``) and the cluster-secret intake
+    (``/api/v1/cluster/intake``); the only difference is how the caller was
+    authenticated, hence ``api_user_id`` is passed in rather than read here.
+    """
     from app.core.worktree_manager import worktree_manager, WorktreeError
     from app.api.sessions_worktree import _migrate_uploads_sync, _detect_command_meta
     from app.core.headless_query_runner import launch_headless_query
@@ -236,9 +251,6 @@ async def cloud_intake(
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
-
-    api_user = get_api_user_from_request(request)
-    api_user_id: Optional[str] = api_user["id"] if api_user else None
 
     # 1. Ensure a project exists for the repo (clone on first use).
     try:

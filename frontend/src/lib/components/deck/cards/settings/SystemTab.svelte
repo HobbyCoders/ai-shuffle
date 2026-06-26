@@ -2,6 +2,7 @@
 	import { Gauge, Users, FileText } from 'lucide-svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
+	import DevicesSection from './DevicesSection.svelte';
 	import CloudSection from './CloudSection.svelte';
 
 	interface Props {
@@ -42,7 +43,11 @@
 	<div class="sg-body"><RateLimitManager /></div>
 </div>
 
-<!-- Cloud offload -->
+<!-- Devices (cluster registry) — the primary cross-install / offload UI -->
+<DevicesSection />
+
+<!-- Legacy single-install cloud offload (kept for backward compatibility; the
+     device picker above supersedes it for shared-DB setups) -->
 <CloudSection />
 
 <!-- API users -->

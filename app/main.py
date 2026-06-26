@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cloud
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cloud, cluster
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -93,6 +93,25 @@ class _UvicornWebSocketFilter(logging.Filter):
 logging.getLogger("uvicorn.error").addFilter(_UvicornWebSocketFilter())
 
 
+# How often this install bumps its registry last_seen. Online window in the
+# registry (app/db/installs.py) is ~3x this so a single missed beat won't flap.
+CLUSTER_HEARTBEAT_INTERVAL_SECONDS = 30
+
+
+async def _cluster_heartbeat_loop():
+    """Periodically refresh this install's last_seen in the shared registry."""
+    from app.core import cluster
+    from app.db.async_database import run_sync
+    while True:
+        try:
+            await asyncio.sleep(CLUSTER_HEARTBEAT_INTERVAL_SECONDS)
+            await run_sync(cluster.heartbeat_self)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed beat must not kill the loop
+            logger.debug("Cluster heartbeat tick failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle manager"""
@@ -130,6 +149,16 @@ async def lifespan(app: FastAPI):
     from app.core.resource_monitor import reconcile_orphans_once
     orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
 
+    # Cross-install cluster: register this install in the shared registry and
+    # heartbeat its last_seen so peers can see it's online and relay control.
+    from app.core import cluster
+    from app.db.async_database import run_sync
+    try:
+        await run_sync(cluster.register_self)
+    except Exception:
+        logger.exception("Cluster self-registration failed (non-fatal)")
+    cluster_heartbeat_task = asyncio.create_task(_cluster_heartbeat_loop())
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
@@ -140,6 +169,11 @@ async def lifespan(app: FastAPI):
         orphan_backfill_task.cancel()
     try:
         await orphan_backfill_task
+    except asyncio.CancelledError:
+        pass
+    cluster_heartbeat_task.cancel()
+    try:
+        await cluster_heartbeat_task
     except asyncio.CancelledError:
         pass
     for task in bg_tasks:
@@ -367,6 +401,7 @@ app.include_router(logs.router)
 app.include_router(model_registry.router)
 app.include_router(computer_use.router)
 app.include_router(cloud.router)
+app.include_router(cluster.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

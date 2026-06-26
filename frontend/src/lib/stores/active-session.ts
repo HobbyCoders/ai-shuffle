@@ -123,6 +123,9 @@ export interface ActiveSessionState {
 	scrollTop: number;
 	streamStartTime: number | null;
 	executionMode: ExecutionMode;
+	/** When executionMode === 'cloud': the registered install to offload onto.
+	 *  null lets the backend fall back to the legacy single-install config. */
+	cloudTargetInstanceId: string | null;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -205,6 +208,7 @@ function defaultState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		executionMode: getPersistedExecutionMode(),
+		cloudTargetInstanceId: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -622,7 +626,12 @@ export const activeSession = {
 	setExecutionMode(mode: ExecutionMode) {
 		// Remember the toggle so new sessions reopen in the same mode
 		setPersistedExecutionMode(mode);
-		_update(s => ({ ...s, executionMode: mode }));
+		// Leaving cloud mode clears any chosen offload target so it can't leak
+		// into a later cloud session for a different device set.
+		_update(s => ({ ...s, executionMode: mode, cloudTargetInstanceId: mode === 'cloud' ? s.cloudTargetInstanceId : null }));
+	},
+	setCloudTarget(instanceId: string | null) {
+		_update(s => ({ ...s, cloudTargetInstanceId: instanceId }));
 	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },

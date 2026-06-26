@@ -335,6 +335,14 @@ class Session(SessionBase):
     worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
     created_at: datetime
     updated_at: datetime
+    # Cross-install (cluster) annotation — populated by the API enrichment layer
+    # when sessions are shared across installs on a shared database.
+    instance_id: Optional[str] = None  # Owning install (NULL = legacy/this install)
+    device_name: Optional[str] = None  # Human-friendly owning-device name
+    device_online: bool = True  # Owning install seen recently (heartbeat)
+    is_remote: bool = False  # Owned by another install (not this one)
+    controllable: bool = True  # Live send/interrupt reachable (owner online + has base_url)
+    project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
 
 
 class SessionWithMessages(Session):

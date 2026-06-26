@@ -12,6 +12,42 @@ from app.db.compat import ph, sql_ilike
 
 
 # ============================================================================
+# Cross-install session sharing
+# ============================================================================
+
+def _share_sessions_across_installs() -> bool:
+    """True when sessions are shared across every install on a shared database.
+
+    Default ON: a shared-database fleet sees every install's sessions in one
+    place. Set the ``cluster_share_sessions`` system setting to a falsey value
+    ("off"/"false"/"0") to restore the old per-install isolation.
+    """
+    from app.db import database
+    val = database.get_system_setting("cluster_share_sessions")
+    if val is None:
+        return True
+    return val.strip().lower() not in ("0", "false", "off", "no")
+
+
+def _instance_filter(_ph: str, col_prefix: str = "") -> tuple[str, list]:
+    """SQL fragment + params restricting session rows to this install.
+
+    Returns ``("", [])`` when sessions are shared cluster-wide (the default), so
+    the caller's query returns every install's sessions. Otherwise returns an
+    " AND (<col>instance_id = ? OR <col>instance_id IS NULL)" fragment plus the
+    bound instance id. The fragment is written to slot in after an existing
+    WHERE clause (callers use ``WHERE 1=1`` or ``WHERE st.tag_id = ?``).
+    """
+    if _share_sessions_across_installs():
+        return "", []
+    from app.core.config import settings
+    return (
+        f" AND ({col_prefix}instance_id = {_ph} OR {col_prefix}instance_id IS NULL)",
+        [settings.effective_instance_id],
+    )
+
+
+# ============================================================================
 # TypedDict definitions
 # ============================================================================
 
@@ -148,20 +184,18 @@ def get_sessions(
     offset: int = 0
 ) -> List[SessionRow]:
     """Get sessions with optional filters"""
-    from app.core.config import settings
     _ph = ph()
-    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
-    instance_id = settings.effective_instance_id
     if tag_id:
         # Join with session_tags when filtering by tag
+        inst_sql, inst_params = _instance_filter(_ph, "s.")
         query = f"""SELECT DISTINCT s.* FROM sessions s
                    INNER JOIN session_tags st ON s.id = st.session_id
-                   WHERE st.tag_id = {_ph}
-                     AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
-        params = [tag_id, instance_id]
+                   WHERE st.tag_id = {_ph}{inst_sql}"""
+        params = [tag_id, *inst_params]
     else:
-        query = f"SELECT * FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
-        params = [instance_id]
+        inst_sql, inst_params = _instance_filter(_ph, "")
+        query = f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
+        params = [*inst_params]
 
     if project_id:
         query += f" AND s.project_id = {_ph}" if tag_id else f" AND project_id = {_ph}"
@@ -210,20 +244,18 @@ def get_sessions_paginated(
         Tuple of (sessions list, total count)
     """
     # Build the WHERE clause (shared between count and data queries)
-    from app.core.config import settings
     _ph = ph()
-    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
-    instance_id = settings.effective_instance_id
     if tag_id:
+        inst_sql, inst_params = _instance_filter(_ph, "s.")
         base_query = f"""FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = {_ph}
-                         AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
-        params: List[Any] = [tag_id, instance_id]
+                       WHERE st.tag_id = {_ph}{inst_sql}"""
+        params: List[Any] = [tag_id, *inst_params]
         col_prefix = "s."
     else:
-        base_query = f"FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
-        params = [instance_id]
+        inst_sql, inst_params = _instance_filter(_ph, "")
+        base_query = f"FROM sessions WHERE 1=1{inst_sql}"
+        params = [*inst_params]
         col_prefix = ""
 
     if project_id:
@@ -288,20 +320,18 @@ def get_sessions_cursor(
     Returns:
         Tuple of (sessions, next_cursor, next_cursor_id, has_more)
     """
-    from app.core.config import settings
     _ph = ph()
-    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
-    instance_id = settings.effective_instance_id
     if tag_id:
+        inst_sql, inst_params = _instance_filter(_ph, "s.")
         base_query = f"""FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = {_ph}
-                         AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
-        params: List[Any] = [tag_id, instance_id]
+                       WHERE st.tag_id = {_ph}{inst_sql}"""
+        params: List[Any] = [tag_id, *inst_params]
         col_prefix = "s."
     else:
-        base_query = f"FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
-        params = [instance_id]
+        inst_sql, inst_params = _instance_filter(_ph, "")
+        base_query = f"FROM sessions WHERE 1=1{inst_sql}"
+        params = [*inst_params]
         col_prefix = ""
 
     if project_id:
@@ -1158,12 +1188,12 @@ def search_sessions(
     if not query or not query.strip():
         return []
 
-    from app.core.config import settings
-    instance_id = settings.effective_instance_id
-
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
     _ph = ph()
+    # Cross-install sharing (default): no per-install clause. Isolation mode:
+    # restrict both CTEs to this install (legacy NULL rows visible everywhere).
+    inst_sql, inst_params = _instance_filter(_ph, "s.")
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -1171,8 +1201,6 @@ def search_sessions(
         # Search titles with ILIKE, content with tsvector FTS.
         # Use DISTINCT ON (id) to deduplicate sessions that match in both
         # title and content, keeping the best match (title > content).
-        # Sessions are instance-scoped; legacy rows with NULL instance_id
-        # remain visible everywhere.
         sql = f"""
         WITH title_matches AS (
             SELECT
@@ -1184,8 +1212,7 @@ def search_sessions(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status != 'archived'
-            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
+            AND s.status != 'archived'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -1200,8 +1227,7 @@ def search_sessions(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'
-            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
+            AND s.status != 'archived'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
@@ -1213,9 +1239,9 @@ def search_sessions(
         FROM all_matches
         WHERE 1=1
         """
-        # title ILIKE needs search_term + instance_id, ts_headline needs
-        # fts_query, WHERE @@ needs fts_query + instance_id.
-        params: List[Any] = [search_term, instance_id, fts_query, fts_query, instance_id]
+        # title ILIKE needs search_term (+ instance_id when isolated), ts_headline
+        # needs fts_query, WHERE @@ needs fts_query (+ instance_id when isolated).
+        params: List[Any] = [search_term, *inst_params, fts_query, fts_query, *inst_params]
 
         # Add filters
         if project_id:
@@ -1263,20 +1289,19 @@ def search_sessions_paginated(
     if not query or not query.strip():
         return [], 0
 
-    from app.core.config import settings
-    instance_id = settings.effective_instance_id
-
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
     _ph = ph()
+    # Cross-install sharing (default): no per-install clause. Isolation mode:
+    # restrict both CTEs to this install (legacy NULL rows visible everywhere).
+    inst_sql, inst_params = _instance_filter(_ph, "s.")
 
     with get_db() as conn:
         cursor = get_cursor(conn)
 
         # Build the base CTE using Postgres tsvector FTS.
         # Uses DISTINCT ON (id) to deduplicate sessions, preferring title
-        # matches over content matches. Sessions are instance-scoped; NULL
-        # instance_id is treated as shared/legacy.
+        # matches over content matches.
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -1286,8 +1311,7 @@ def search_sessions_paginated(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status != 'archived'
-            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
+            AND s.status != 'archived'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -1300,8 +1324,7 @@ def search_sessions_paginated(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'
-            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
+            AND s.status != 'archived'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
@@ -1314,9 +1337,9 @@ def search_sessions_paginated(
             FROM all_matches
             WHERE 1=1
         """
-        # title ILIKE needs search_term + instance_id, ts_headline needs
-        # fts_query, WHERE @@ needs fts_query + instance_id.
-        base_params: List[Any] = [search_term, instance_id, fts_query, fts_query, instance_id]
+        # title ILIKE needs search_term (+ instance_id when isolated), ts_headline
+        # needs fts_query, WHERE @@ needs fts_query (+ instance_id when isolated).
+        base_params: List[Any] = [search_term, *inst_params, fts_query, fts_query, *inst_params]
 
         # Build filter conditions
         filter_sql = ""

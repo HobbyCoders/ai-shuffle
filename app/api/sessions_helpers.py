@@ -301,6 +301,69 @@ async def require_session(request: Request, session_id: str) -> dict:
 # Enrichment helpers
 # ---------------------------------------------------------------------------
 
+def _annotate_cluster_fields(sessions: List[dict]) -> None:
+    """Annotate each session (in place) with owning-device + project info.
+
+    On a shared database every install's sessions are now visible together, so
+    each row needs to say *which* device owns it, whether that device is online,
+    and whether it can be controlled from here. We also resolve project names
+    server-side: the frontend ``$projects`` map is instance-filtered, so a
+    cross-install session's project would otherwise render as unknown.
+
+    Cheap and batched: one registry read (``get_installs_map``) plus one
+    ``get_project`` per distinct project id (the non-instance-filtered lookup,
+    so cross-install projects resolve too).
+    """
+    if not sessions:
+        return
+
+    from app.core.config import settings
+    me = settings.effective_instance_id
+
+    # Batch: installs registry (id -> row, each carrying an in-DB ``online`` flag
+    # and the peer-reachable base_url that gates control).
+    try:
+        installs_map = database.get_installs_map()
+    except Exception:  # noqa: BLE001 — annotation must never break the listing
+        logger.debug("Failed to load installs registry for enrichment", exc_info=True)
+        installs_map = {}
+
+    # Batch: resolve project names via the NON-instance-filtered get_project so
+    # projects owned by another install still resolve.
+    project_names: dict[str, str] = {}
+    for pid in {s.get("project_id") for s in sessions if s.get("project_id")}:
+        try:
+            proj = database.get_project(pid)
+        except Exception:  # noqa: BLE001
+            proj = None
+        if proj:
+            project_names[pid] = proj.get("name") or proj.get("path") or pid
+
+    my_install = installs_map.get(me)
+    for session in sessions:
+        inst = session.get("instance_id")
+        is_remote = bool(inst) and inst != me
+        session["is_remote"] = is_remote
+
+        if is_remote:
+            install = installs_map.get(inst)
+            online = bool(install.get("online")) if install else False
+            session["device_name"] = install.get("device_name") if install else None
+            session["device_online"] = online
+            # Controllable only when the owner is online AND advertises a URL we
+            # can relay to; otherwise history stays readable but read-only.
+            session["controllable"] = bool(online and install and install.get("base_url"))
+        else:
+            # Local or legacy (NULL instance_id): always controllable from here.
+            session["device_name"] = my_install.get("device_name") if my_install else None
+            session["device_online"] = True
+            session["controllable"] = True
+
+        pid = session.get("project_id")
+        if pid and pid in project_names:
+            session["project_name"] = project_names[pid]
+
+
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     """Add tags array, has_forks field, and api_user_name to each session.
 
@@ -333,6 +396,9 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
             session["api_user_name"] = api_user_names.get(session["api_user_id"])
+
+    # Annotate owning device + project (cross-install sharing).
+    _annotate_cluster_fields(sessions)
     return sessions
 
 
@@ -358,6 +424,9 @@ def enrich_search_results_with_tags(results: list) -> list:
         result["tags"] = tags_by_session.get(sid, [])
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False
+
+    # Annotate owning device + project (cross-install sharing).
+    _annotate_cluster_fields(results)
     return results
 
 
