@@ -424,6 +424,11 @@
 	.top-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 	.top-row :global(.top-arrow) { color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease; }
 	.top-row:hover :global(.top-arrow) { opacity: 1; }
+	/* Touch / mobile-width: the drill-in arrow can't be hover-revealed — show it so
+	   the row reads as tappable. (hover: none) covers foldables; 1080px = app cutoff. */
+	@media (hover: none), (max-width: 1080px) {
+		.top-row :global(.top-arrow) { opacity: 1; }
+	}
 
 	/* Tablet: 2-col grid */
 	@media (max-width: 860px) {

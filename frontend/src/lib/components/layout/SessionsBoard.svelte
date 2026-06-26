@@ -1165,7 +1165,10 @@
 		.board-head-right { width: 100%; margin-left: 0; justify-content: center; }
 	}
 
-	@media (hover: none), (max-width: 639px) {
+	/* Touch / mobile-width: row actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
 		.row-action { opacity: 0.7; }
 	}
 	@media (max-width: 639px) {

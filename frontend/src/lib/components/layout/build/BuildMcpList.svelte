@@ -239,6 +239,12 @@
 	   keep their meta column aligned with custom rows. */
 	.bml-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 28px; opacity: 0; transition: opacity 120ms ease; }
 	.bml-row:hover .bml-actions, .bml-row:focus-within .bml-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.bml-actions { opacity: 1; }
+	}
 	.bml-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
 		background: transparent; border: 1px solid transparent; border-radius: 7px;
