@@ -11,8 +11,8 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5.0-fullscreen-devices"
+        versionCode = 6
+        versionName = "0.5.1-battery"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
