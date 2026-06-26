@@ -1,18 +1,17 @@
 """
-Cloud intake — the *worker* side of cloud offload.
+Cloud intake worker — clone/link a project and run an offloaded session.
 
-When another AI Shuffle install (the *primary*) runs a session in "cloud"
-execution mode, it calls these endpoints on this install to do the real work:
+When another AI Shuffle install offloads a *new* session here, it calls the
+cluster intake endpoint (``POST /api/v1/cluster/intake`` in ``app.api.cluster``),
+which delegates the real work to ``run_cloud_intake`` below: link or create a
+project for a GitHub repo (cloning it into ``/workspace`` if needed), spin up a
+git worktree session and start the first query.
 
-- ``POST /api/v1/cloud/intake`` — link or create a project for a GitHub repo
-  (cloning it into ``/workspace`` if needed), spin up a git worktree session and
-  start the first query.
-- ``POST /api/v1/cloud/intake/{session_id}/message`` — run a follow-up prompt.
-- ``POST /api/v1/cloud/intake/{session_id}/interrupt`` — interrupt a running query.
-
-All endpoints authenticate via ``require_auth`` so the primary can reach them
-with an API key. The resulting sessions/worktrees are ordinary local sessions on
-this install — the primary just mirrors their live state back to the user.
+The resulting session/worktree is an ordinary local session on this install —
+the offloading install just relays its live state back to the user over the
+cluster control plane (send / interrupt / live). This module holds only the
+worker logic and its request/response models; the authenticated HTTP surface
+lives in ``app.api.cluster``.
 """
 
 from __future__ import annotations
@@ -20,16 +19,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import HTTPException, status
 from pydantic import BaseModel
 
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth, get_api_user_from_request
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/api/v1/cloud", tags=["Cloud"])
 
 
 class CloudIntakeRequest(BaseModel):
@@ -57,12 +53,6 @@ class CloudIntakeResponse(BaseModel):
     query_started: bool = False
     project_created: bool = False
     upload_migration_errors: Optional[List[str]] = None
-
-
-class CloudMessageRequest(BaseModel):
-    prompt: str
-    profile_id: Optional[str] = None
-    overrides: Optional[Dict[str, Any]] = None
 
 
 def _normalize_remote_url(url: Optional[str]) -> str:
@@ -221,18 +211,6 @@ def _ensure_project_for_repo(
     return project, created
 
 
-@router.post("/intake", response_model=CloudIntakeResponse)
-async def cloud_intake(
-    request: Request,
-    body: CloudIntakeRequest,
-    token: str = Depends(require_auth),
-):
-    """Link/create a project, create a worktree session and start the query."""
-    api_user = get_api_user_from_request(request)
-    api_user_id: Optional[str] = api_user["id"] if api_user else None
-    return await run_cloud_intake(body, api_user_id)
-
-
 async def run_cloud_intake(
     body: CloudIntakeRequest,
     api_user_id: Optional[str],
@@ -362,95 +340,3 @@ async def run_cloud_intake(
         project_created=project_created,
         upload_migration_errors=upload_errors,
     )
-
-
-@router.post("/intake/{session_id}/message")
-async def cloud_intake_message(
-    request: Request,
-    session_id: str,
-    body: CloudMessageRequest,
-    token: str = Depends(require_auth),
-):
-    """Run a follow-up prompt on an existing cloud-worker session."""
-    from app.api.sessions_worktree import _detect_command_meta
-    from app.core.headless_query_runner import launch_headless_query
-    from app.core.sync_engine import sync_engine
-
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Empty prompt")
-
-    session = await run_sync(database.get_session, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    api_user = get_api_user_from_request(request)
-    api_user_id: Optional[str] = api_user["id"] if api_user else None
-
-    profile_id = body.profile_id or session.get("profile_id") or "claude-code"
-    msg_role, msg_meta = _detect_command_meta(prompt)
-
-    await run_sync(
-        database.add_session_message,
-        session_id=session_id,
-        role=msg_role,
-        content=prompt,
-        profile_id=profile_id,
-    )
-    try:
-        await sync_engine.broadcast_message_added(
-            session_id=session_id,
-            message={"role": "user", "content": prompt, "profile_id": profile_id},
-            source_device_id=None,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Cloud message broadcast failed: %s", e)
-
-    try:
-        await launch_headless_query(
-            prompt=prompt,
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=session.get("project_id"),
-            user_id="admin",
-            api_user_id=api_user_id,
-            worktree_id=session.get("worktree_id"),
-            overrides=body.overrides,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Cloud follow-up query failed: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to start query")
-
-    return {"ok": True, "session_id": session_id}
-
-
-@router.post("/intake/{session_id}/interrupt")
-async def cloud_intake_interrupt(
-    session_id: str,
-    token: str = Depends(require_auth),
-):
-    """Interrupt a running query on a cloud-worker session."""
-    from app.core.query_engine import interrupt_session
-    from app.api.websocket import _active_chat_sessions, _active_sessions_lock, _stopped_sessions
-
-    session = await run_sync(database.get_session, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    _stopped_sessions.add(session_id)
-    interrupted = await interrupt_session(session_id)
-
-    # Force-cancel the task if the SDK doesn't stop quickly.
-    async with _active_sessions_lock:
-        task = _active_chat_sessions.get(session_id)
-    if task and not task.done():
-        import asyncio
-
-        async def _safety_cancel(t, timeout=10.0):
-            await asyncio.sleep(timeout)
-            if not t.done():
-                t.cancel()
-
-        asyncio.ensure_future(_safety_cancel(task))
-
-    return {"ok": True, "interrupted": interrupted}

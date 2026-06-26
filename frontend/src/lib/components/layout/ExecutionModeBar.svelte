@@ -17,7 +17,6 @@
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
 	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server } from 'lucide-svelte';
 	import { untrack } from 'svelte';
-	import { api } from '$lib/api/client';
 	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 
@@ -37,13 +36,11 @@
 	let localWorktreeError = $state<string | null>(null);
 
 	// --- Cloud offload targets (registered installs) ---
-	// `installs` is null while loading. Cloud offload now targets a *registered*
-	// install picked from a device dropdown (auto-registered on the shared DB);
-	// the legacy single-install config is still honored as a fallback so existing
-	// setups keep working. The Cloud pill stays hidden until at least one valid
-	// target (online + reachable base_url) or the legacy config resolves.
+	// `installs` is null while loading. Cloud offload targets a *registered*
+	// install picked from a device dropdown (auto-registered on the shared DB).
+	// The Cloud pill stays hidden until at least one valid target (online +
+	// reachable base_url) resolves.
 	let installs = $state<Install[] | null>(null);
-	let legacyCloudConfigured = $state(false);
 	let cloudLoaded = $state(false);
 
 	// Device-picker dropdown (shown next to the mode pill when Cloud is active).
@@ -51,24 +48,17 @@
 	let deviceDropdownRef = $state<HTMLDivElement | null>(null);
 
 	const offloadTargets = $derived(installs ? computeOffloadTargets(installs) : []);
-	const cloudAvailable = $derived(offloadTargets.length > 0 || legacyCloudConfigured);
+	const cloudAvailable = $derived(offloadTargets.length > 0);
 
 	async function loadCloudConfig() {
 		if (cloudLoaded) return;
 		cloudLoaded = true;
-		// Registered offload targets (preferred) and the legacy config (fallback)
-		// are independent — load both so either can enable Cloud mode.
+		// Load the registered offload targets so we know whether to show Cloud mode.
 		try {
 			const resp = await listInstalls();
 			installs = resp.installs;
 		} catch {
 			installs = [];
-		}
-		try {
-			const cfg = await api.get<{ configured: boolean }>('/settings/cloud');
-			legacyCloudConfigured = !!cfg.configured;
-		} catch {
-			legacyCloudConfigured = false;
 		}
 	}
 
@@ -92,18 +82,15 @@
 		if (targets.length === 0) return;
 		const current = untrack(() => $activeSession.cloudTargetInstanceId);
 		if (current && targets.some((t) => t.id === current)) return;
-		// No valid selection yet: default to the first device (null only stays
-		// valid when there are no registered targets but legacy cloud is configured).
+		// No valid selection yet: default to the first device.
 		activeSession.setCloudTarget(targets[0].id);
 	});
 
-	// The device whose name shows on the picker pill (null → legacy default).
+	// The device whose name shows on the picker pill.
 	const selectedTarget = $derived(
 		offloadTargets.find((t) => t.id === $activeSession.cloudTargetInstanceId) ?? null
 	);
-	const deviceLabel = $derived(
-		selectedTarget ? selectedTarget.device_name : legacyCloudConfigured ? 'Default install' : 'Pick device'
-	);
+	const deviceLabel = $derived(selectedTarget ? selectedTarget.device_name : 'Pick device');
 
 	function selectDevice(install: Install | null) {
 		activeSession.setCloudTarget(install ? install.id : null);
@@ -536,7 +523,6 @@
 				<button
 					type="button"
 					class="branch-trigger"
-					class:auto-mode={!selectedTarget && legacyCloudConfigured}
 					onclick={() => (showDeviceDropdown = !showDeviceDropdown)}
 					title={selectedTarget ? `Offload to ${selectedTarget.device_name}` : 'Choose the device to offload to'}
 					aria-haspopup="menu"
@@ -565,21 +551,6 @@
 								<span class="device-online-dot"></span>
 							</button>
 						{/each}
-						{#if legacyCloudConfigured}
-							<div class="branch-divider"></div>
-							<button
-								type="button"
-								class="branch-item"
-								class:active={!$activeSession.cloudTargetInstanceId}
-								onclick={() => selectDevice(null)}
-								role="menuitemradio"
-								aria-checked={!$activeSession.cloudTargetInstanceId}
-							>
-								<Cloud size={13} strokeWidth={1.5} />
-								<span class="branch-item-name">Default install</span>
-								<span class="auto-hint">legacy</span>
-							</button>
-						{/if}
 					</div>
 				{/if}
 			</div>

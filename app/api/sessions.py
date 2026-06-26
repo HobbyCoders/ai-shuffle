@@ -617,24 +617,6 @@ async def get_live_session(
     # a task finishing is reflected on the very next poll. [] when none.
     active_tasks = task_registry.get_active(session_id)
 
-    # Cloud sessions run on a second install — proxy the worker's live state so
-    # the user sees the remote stream (and history) exactly like a local one.
-    if session.get("cloud_remote_url"):
-        from app.core import cloud_relay
-        try:
-            code, data = await cloud_relay.get_live(session, since_update_id)
-        except cloud_relay.CloudRelayError as e:
-            logger.warning("Cloud live proxy failed for %s: %s", session_id, e)
-            return Response(status_code=503)
-        if code == 304 or data is None:
-            return Response(status_code=304)
-        meta = data.get("session_meta") or {}
-        meta["execution_mode"] = "cloud"
-        if session.get("title"):
-            meta.setdefault("title", session.get("title"))
-        data["session_meta"] = meta
-        return data
-
     # Cross-install session: owned by another install on the shared DB. History
     # is already local; relay only the live stream to the owning install. If that
     # install is offline/view-only, surface 503 so the UI shows "device offline"

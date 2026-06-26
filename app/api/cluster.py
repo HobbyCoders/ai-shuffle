@@ -55,8 +55,8 @@ async def cluster_message(
 ):
     """Run a follow-up prompt on a session this install owns (peer relay).
 
-    Mirrors ``cloud_intake_message`` but is keyed by the *shared* session id and
-    runs as admin (the originating install already authenticated its own user).
+    Keyed by the *shared* session id and runs as admin (the originating install
+    already authenticated its own user).
     """
     from app.api.sessions_worktree import _detect_command_meta
     from app.core.headless_query_runner import launch_headless_query
@@ -209,9 +209,9 @@ async def cluster_intake_endpoint(
 ):
     """Offload a new session onto this install (registry-targeted offload).
 
-    Same worker logic as the legacy ``/api/v1/cloud/intake`` but authenticated by
-    the shared cluster secret instead of an API key. Runs as admin; the resulting
-    session is owned by this install and visible/controllable cluster-wide.
+    Runs the shared ``run_cloud_intake`` worker, authenticated by the shared
+    cluster secret. Runs as admin; the resulting session is owned by this install
+    and visible/controllable cluster-wide.
     """
     return await run_cloud_intake(body, api_user_id=None)
 

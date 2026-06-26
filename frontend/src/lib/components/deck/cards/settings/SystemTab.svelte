@@ -3,7 +3,6 @@
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
 	import DevicesSection from './DevicesSection.svelte';
-	import CloudSection from './CloudSection.svelte';
 
 	interface Props {
 		// Security Instructions
@@ -43,12 +42,8 @@
 	<div class="sg-body"><RateLimitManager /></div>
 </div>
 
-<!-- Devices (cluster registry) — the primary cross-install / offload UI -->
+<!-- Devices (cluster registry) — the cross-install / offload UI -->
 <DevicesSection />
-
-<!-- Legacy single-install cloud offload (kept for backward compatibility; the
-     device picker above supersedes it for shared-DB setups) -->
-<CloudSection />
 
 <!-- API users -->
 <div class="set-group">
