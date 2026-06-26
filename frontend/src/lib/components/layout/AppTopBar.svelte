@@ -529,8 +529,11 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 40px;
-		height: 40px;
+		/* Slightly smaller than the 40px ☰ hamburger: the filled primary
+		   background reads heavier than the borderless menu icon, so 36px gives
+		   the two buttons matching visual weight. */
+		width: 36px;
+		height: 36px;
 		flex-shrink: 0;
 		background: var(--primary);
 		color: var(--primary-foreground);

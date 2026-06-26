@@ -271,6 +271,12 @@
 			flex: 1 1 auto;
 			min-width: 0;
 			flex-wrap: nowrap;
+			/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
+			   overflows past the START (left) edge, which is unreachable by scroll —
+			   so the git actions slide under the pinned status/download cluster
+			   instead of scrolling. flex-start sends the overflow to the END so the
+			   rail scrolls left→right and never overlaps the meta cluster. */
+			justify-content: flex-start;
 			margin: 0;
 			overflow-x: auto;
 			overflow-y: hidden;
