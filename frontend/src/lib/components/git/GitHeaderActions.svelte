@@ -11,7 +11,7 @@
 	 * Branch selector is locked during streaming.
 	 */
 	import { onDestroy } from 'svelte';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, MoreHorizontal, Eye } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -21,6 +21,9 @@
 
 	interface Props {
 		projectId: string;
+		/** Mobile (width ≤ 1080px): collapse the action rail into a status pill +
+		 *  one contextual primary action + a bottom sheet holding every action. */
+		isMobile?: boolean;
 		isStreaming?: boolean;
 		isGitRepo?: boolean;
 		/** Show the branch checkout selector. Disabled when the branch pill is
@@ -54,7 +57,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onSendPrompt, commitPrompt, createPRPrompt, finishPrompt, pullPrompt, onOpenDiffReview }: Props = $props();
+	let { projectId, isMobile = false, isStreaming = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onSendPrompt, commitPrompt, createPRPrompt, finishPrompt, pullPrompt, onOpenDiffReview }: Props = $props();
 
 	// --- Editable-prompt popover state (opened by split-button chevrons) ---
 	// Only one popover is open at a time, keyed by action.
@@ -136,6 +139,83 @@
 		needsPull,
 		hasShipItHandler: !!onClickShipIt
 	}));
+
+	// --- Mobile layout -------------------------------------------------------
+	// On phones / foldables the horizontal action rail is replaced by a compact
+	// status pill + a single contextual primary action, with every applicable
+	// action available in a bottom sheet. (No branch picker — the chat header
+	// passes showBranchSelector={false}; the branch pill lives in the context
+	// pill bar above the input.)
+	let sheetOpen = $state(false);
+
+	type MobileTone = 'primary' | 'warning' | 'ship' | 'plain';
+	interface MobileAction {
+		key: string;
+		label: string;
+		sublabel?: string;
+		icon: typeof GitCommitHorizontal;
+		tone: MobileTone;
+		badge?: number;
+		mutating: boolean;
+		run: () => void;
+	}
+
+	// All available actions, richest-first. The first *mutating* entry doubles as
+	// the bar's single primary button; the full list populates the sheet.
+	const mobileActions = $derived.by<MobileAction[]>(() => {
+		const list: MobileAction[] = [];
+		if (hasChanges) {
+			list.push({ key: 'commit', label: 'Commit', sublabel: 'Send a commit request to chat', icon: GitCommitHorizontal, tone: 'primary', mutating: true, run: onClickCommit });
+		}
+		if (needsPull) {
+			list.push({
+				key: 'pull',
+				label: isDiverged ? 'Sync' : 'Pull',
+				sublabel: isDiverged ? `${commitsAheadUpstream} ahead · ${commitsBehindUpstream} behind` : `${commitsBehindUpstream} behind upstream`,
+				icon: ArrowDownToLine,
+				tone: 'warning',
+				badge: commitsBehindUpstream,
+				mutating: true,
+				run: onClickPull
+			});
+		}
+		if (canPush) {
+			list.push({ key: 'push', label: 'Push', sublabel: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`, icon: ArrowUpFromLine, tone: 'primary', badge: commitsAheadUpstream, mutating: true, run: onClickPush });
+		}
+		if (openPR) {
+			list.push({ key: 'finish', label: 'Finish', sublabel: `Merge PR #${openPR.number}`, icon: CheckCircle2, tone: 'primary', mutating: true, run: onClickFinish });
+		} else if (canCreatePR) {
+			list.push({ key: 'pr', label: 'Create PR', sublabel: `${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead`, icon: GitPullRequest, tone: 'primary', mutating: true, run: onClickCreatePR });
+		}
+		if (showShipIt && onClickShipIt) {
+			list.push({ key: 'ship', label: 'Ship It', sublabel: 'Commit → push → PR → merge → cleanup', icon: Rocket, tone: 'ship', mutating: true, run: onClickShipIt });
+		}
+		if (hasChanges && onOpenDiffReview) {
+			list.push({ key: 'review', label: 'Review changes', sublabel: `${filesChanged} file${filesChanged === 1 ? '' : 's'} changed`, icon: Eye, tone: 'plain', mutating: false, run: onOpenDiffReview });
+		}
+		return list;
+	});
+
+	const primaryAction = $derived(mobileActions.find((a) => a.mutating) ?? null);
+
+	// Concise status word for the pill / sheet header when there are no diff stats.
+	const syncSummary = $derived.by(() => {
+		if (needsPull) return `${commitsBehindUpstream} behind`;
+		if (commitsAheadUpstream > 0) return `${commitsAheadUpstream} ahead`;
+		if (commitsAhead > 0 && !isOnDefaultBranch) return `${commitsAhead} ahead`;
+		return 'Up to date';
+	});
+
+	function openSheet() {
+		sheetOpen = true;
+	}
+	function closeSheet() {
+		sheetOpen = false;
+	}
+	function runMobileAction(action: MobileAction) {
+		sheetOpen = false;
+		action.run();
+	}
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -230,6 +310,7 @@
 		if (e.key === 'Escape') {
 			if (showDropdown) closeDropdown('branch');
 			if (openPromptPopover) openPromptPopover = null;
+			if (sheetOpen) sheetOpen = false;
 		}
 	}
 
@@ -239,6 +320,100 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
+{#if isMobile}
+	<!-- =====================================================================
+	     Mobile: compact status pill + one contextual primary action.
+	     Every applicable action lives in the bottom sheet (opened by the pill).
+	     ===================================================================== -->
+	<div class="git-mobile">
+		{#if isGitRepo}
+			<button
+				class="git-status-pill"
+				onclick={openSheet}
+				aria-haspopup="dialog"
+				aria-expanded={sheetOpen}
+				title="Git status & actions"
+			>
+				{#if hasChanges}
+					{#if additions > 0}<span class="stat additions">+{additions}</span>{/if}
+					{#if deletions > 0}<span class="stat deletions">-{deletions}</span>{/if}
+					<span class="stat files-count">{filesChanged} file{filesChanged === 1 ? '' : 's'}</span>
+				{:else}
+					<GitBranch size={12} strokeWidth={1.6} />
+					<span class="pill-sync">{syncSummary}</span>
+				{/if}
+				<MoreHorizontal size={15} strokeWidth={1.6} />
+			</button>
+
+			{#if primaryAction}
+				<button
+					class="git-btn primary-mobile tone-{primaryAction.tone}"
+					onclick={primaryAction.run}
+					disabled={isStreaming}
+					title={isStreaming ? 'Unavailable during streaming' : primaryAction.sublabel ?? primaryAction.label}
+				>
+					<primaryAction.icon size={15} strokeWidth={1.6} />
+					<span class="btn-label">{primaryAction.label}</span>
+					{#if primaryAction.badge}<span class="count-badge">{primaryAction.badge}</span>{/if}
+				</button>
+			{/if}
+		{:else}
+			{#if projectName}
+				<span class="git-status-pill static" title="Project: {projectName}">
+					<FolderClosed size={13} strokeWidth={1.5} />
+					<span class="project-name">{projectName}</span>
+				</span>
+			{/if}
+			<button class="git-btn primary-mobile tone-primary init-mobile" onclick={onClickInitRepo} title="Initialize a git repository for this project">
+				<FolderGit2 size={15} strokeWidth={1.5} />
+				<span class="btn-label">Init Repo</span>
+			</button>
+		{/if}
+	</div>
+
+	{#if sheetOpen}
+		<div class="sheet-scrim" role="button" tabindex="-1" aria-label="Close git actions" onclick={closeSheet} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeSheet(); }}></div>
+		<div class="git-sheet" role="dialog" aria-label="Git actions">
+			<div class="sheet-grip"></div>
+			<div class="sheet-head">
+				<span class="sheet-title">Git actions</span>
+				{#if currentBranch}
+					<span class="sheet-branch"><GitBranch size={12} strokeWidth={1.6} />{currentBranch}</span>
+				{/if}
+			</div>
+			<div class="sheet-status">
+				{#if hasChanges}
+					{#if additions > 0}<span class="stat additions">+{additions}</span>{/if}
+					{#if deletions > 0}<span class="stat deletions">-{deletions}</span>{/if}
+					<span class="stat files-count">{filesChanged} file{filesChanged === 1 ? '' : 's'} changed</span>
+				{:else}
+					<span class="sheet-sync">{syncSummary}</span>
+				{/if}
+			</div>
+
+			{#if mobileActions.length}
+				<div class="sheet-actions">
+					{#each mobileActions as a (a.key)}
+						<button
+							class="sheet-item tone-{a.tone}"
+							disabled={isStreaming && a.mutating}
+							onclick={() => runMobileAction(a)}
+						>
+							<span class="sheet-ico"><a.icon size={18} strokeWidth={1.6} /></span>
+							<span class="sheet-text">
+								<span class="sheet-label">{a.label}</span>
+								{#if a.sublabel}<span class="sheet-sub">{a.sublabel}</span>{/if}
+							</span>
+							{#if a.badge}<span class="count-badge">{a.badge}</span>{/if}
+						</button>
+					{/each}
+				</div>
+			{:else}
+				<p class="sheet-empty">Working tree clean — nothing to do.</p>
+			{/if}
+		</div>
+	{/if}
+{:else}
 <div class="git-actions" bind:this={gitActionsRef}>
 	{#if isGitRepo}
 	<!-- Branch selector (hidden when hosted in the context pill bar) -->
@@ -538,6 +713,7 @@
 		</button>
 	{/if}
 </div>
+{/if}
 
 <style>
 	.git-actions {
@@ -881,61 +1057,222 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile touch targets — single horizontal rail (no wrapping) */
-	@media (max-width: 639px) {
-		.git-actions {
-			/* Stay on one line so the header reads as a single touch-scrollable rail.
-			   Items keep their intrinsic size and overflow-scroll with the header. */
-			flex-wrap: nowrap;
-			flex-shrink: 0;
-		}
+	/* ===================================================================
+	   Mobile (isMobile, width ≤ 1080px): status pill + one primary action,
+	   with the full action set in a bottom sheet. Rendered via the isMobile
+	   prop (owned by AppLayout), so no media query gates it.
+	   =================================================================== */
+	.git-mobile {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-shrink: 0;
+	}
 
-		/* Don't let rail items shrink — they should keep their size and scroll. */
-		.git-btn,
-		.split-btn-group,
-		.diff-stats {
-			flex-shrink: 0;
-		}
+	/* Tappable status pill — diff stats or sync state; opens the bottom sheet. */
+	.git-status-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 34px;
+		padding: 0 10px;
+		background: color-mix(in oklch, var(--muted) 35%, transparent);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		color: var(--muted-foreground);
+		font-size: 0.75rem;
+		font-weight: 500;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.git-status-pill:hover:not(.static) {
+		color: var(--foreground);
+		border-color: var(--input-border-hover, var(--primary));
+	}
+	.git-status-pill.static { cursor: default; }
+	.git-status-pill :global(svg) { flex-shrink: 0; opacity: 0.9; }
+	.git-status-pill .pill-sync { color: var(--muted-foreground); }
+	.git-status-pill .project-name { max-width: 130px; }
 
-		.git-btn {
-			height: 36px;
-			padding: 0 12px;
-			font-size: 0.75rem;
-		}
+	/* Single contextual primary action on the bar. */
+	.primary-mobile {
+		height: 34px;
+		padding: 0 12px;
+		font-size: 0.78rem;
+		font-weight: 600;
+		border-radius: calc(var(--radius, 0.75rem) - 2px);
+	}
+	.primary-mobile.tone-primary {
+		background: var(--primary);
+		border-color: var(--primary);
+		color: var(--primary-foreground);
+	}
+	.primary-mobile.tone-primary:hover:not(:disabled) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		filter: brightness(1.08);
+	}
+	.primary-mobile.tone-primary .count-badge {
+		background: color-mix(in oklch, var(--primary-foreground) 22%, transparent);
+		color: var(--primary-foreground);
+	}
+	.primary-mobile.tone-warning {
+		border-color: var(--warning, #e8a735);
+		color: var(--warning, #e8a735);
+	}
+	.primary-mobile.tone-warning:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--warning, #e8a735) 12%, transparent);
+		color: var(--warning, #e8a735);
+	}
+	.primary-mobile.tone-warning .count-badge {
+		background: color-mix(in oklch, var(--warning, #e8a735) 18%, transparent);
+		color: var(--warning, #e8a735);
+	}
+	.primary-mobile.tone-ship {
+		border-color: var(--secondary-foreground);
+		color: var(--secondary-foreground);
+	}
 
-		.split-btn-group .split-chevron {
-			padding: 0 8px;
-			min-width: 36px;
-			justify-content: center;
-		}
+	/* Bottom sheet */
+	.sheet-scrim {
+		position: fixed;
+		inset: 0;
+		background: color-mix(in oklch, var(--background) 55%, transparent);
+		backdrop-filter: blur(2px);
+		-webkit-backdrop-filter: blur(2px);
+		z-index: 200;
+		animation: sheet-fade 160ms ease;
+	}
 
-		.branch-name {
-			max-width: 80px;
-		}
+	.git-sheet {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 201;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		max-height: 80vh;
+		overflow-y: auto;
+		padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0px));
+		background: var(--card, var(--popover));
+		border-top: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem) var(--radius, 0.75rem) 0 0;
+		box-shadow: var(--shadow-l);
+		animation: sheet-rise 220ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
 
-		.project-name {
-			max-width: 80px;
-		}
+	.sheet-grip {
+		width: 36px;
+		height: 4px;
+		margin: 4px auto 6px;
+		border-radius: 999px;
+		background: var(--border);
+		flex-shrink: 0;
+	}
 
-		/* The header is a horizontal scroll container on mobile, which would clip an
-		   absolutely-positioned dropdown. Pin it as a fixed panel just below the
-		   header so it escapes the rail's overflow while staying in the DOM tree
-		   (so outside-click detection keeps working). */
-		.branch-dropdown {
-			position: fixed;
-			top: 92px;
-			left: 8px;
-			right: 8px;
-			bottom: auto;
-			min-width: 0;
-			max-width: none;
-			max-height: 60vh;
-			z-index: 200;
-		}
+	.sheet-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 0 4px 2px;
+	}
+	.sheet-title {
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: var(--foreground);
+	}
+	.sheet-branch {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		max-width: 55%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.72rem;
+		color: var(--muted-foreground);
+	}
+	.sheet-branch :global(svg) { flex-shrink: 0; opacity: 0.8; }
+
+	.sheet-status {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 2px 4px 8px;
+		border-bottom: 1px solid var(--border);
+		margin-bottom: 4px;
+	}
+	.sheet-sync { font-size: 0.78rem; color: var(--muted-foreground); }
+
+	.sheet-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.sheet-item {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		padding: 12px 10px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) - 3px);
+		color: var(--foreground);
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 120ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.sheet-item:hover:not(:disabled) { background: var(--hover-overlay); }
+	.sheet-item:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	.sheet-ico {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 34px;
+		height: 34px;
+		flex-shrink: 0;
+		border-radius: calc(var(--radius, 0.75rem) - 4px);
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		color: var(--muted-foreground);
+	}
+	.sheet-item.tone-primary .sheet-ico { background: color-mix(in oklch, var(--primary) 16%, transparent); color: var(--primary); }
+	.sheet-item.tone-warning .sheet-ico { background: color-mix(in oklch, var(--warning, #e8a735) 16%, transparent); color: var(--warning, #e8a735); }
+	.sheet-item.tone-ship .sheet-ico { background: color-mix(in oklch, var(--secondary, var(--muted)) 60%, transparent); color: var(--secondary-foreground); }
+
+	.sheet-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+	.sheet-label { font-size: 0.9rem; font-weight: 600; color: var(--foreground); }
+	.sheet-sub { font-size: 0.74rem; color: var(--muted-foreground); }
+
+	.sheet-empty {
+		padding: 18px 8px 22px;
+		text-align: center;
+		color: var(--muted-foreground);
+		font-size: 0.82rem;
+		margin: 0;
+	}
+
+	@keyframes sheet-fade {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+	@keyframes sheet-rise {
+		from { transform: translateY(100%); }
+		to { transform: translateY(0); }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.branch-dropdown {
+		.branch-dropdown,
+		.sheet-scrim,
+		.git-sheet {
 			animation: none;
 		}
 	}

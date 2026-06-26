@@ -561,6 +561,7 @@
 					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated && !activeTab?.worktreeDeleted}
 						<GitHeaderActions
 							projectId={activeTab.project}
+							{isMobile}
 							isStreaming={$gitControlsStreaming}
 							isGitRepo={$gitStatus?.is_git_repo !== false}
 							showBranchSelector={false}

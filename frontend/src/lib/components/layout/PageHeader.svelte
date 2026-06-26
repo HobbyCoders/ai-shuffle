@@ -224,7 +224,9 @@
 	   Row 1 (static): toggle, title, status, download.
 	   Row 2 (scroll rail): profile selector + git actions + diff stats.
 	   =================================================================== */
-	@media (max-width: 639px) {
+	/* Mobile breakpoint: 1080px covers phones AND unfolded foldables (Z Fold 6/7
+	   inner ~1028–1040px). Kept in sync with AppLayout's isMobile width cutoff. */
+	@media (max-width: 1080px) {
 		.page-header {
 			flex-direction: column;
 			align-items: stretch;
