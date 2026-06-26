@@ -8,3 +8,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Signing keys — never commit; the release keystore lives in GitHub Secrets.
+*.jks
+*.jks.b64
+*.keystore
