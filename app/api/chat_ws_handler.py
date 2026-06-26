@@ -345,8 +345,17 @@ async def _deliver_unpark_impl(
     )
 
     try:
+        # ``deferred_delivery=True``: this follow-up turn is started server-side
+        # by the drain pump (or in-stream stash), often AFTER the user navigated
+        # away or reconnected — so this handler's origin socket may already be
+        # dead. Marking it deferred makes ``run_query`` fall through a failed
+        # ``start`` frame and stream via the live store + ``sync_engine``
+        # broadcasts + polling instead of aborting. Without this, a parked
+        # session's unpark turn silently tore itself down on the dead socket and
+        # the parent's response never surfaced until a full reload (same
+        # dead-socket failure mode as the "Send later" queue-drain bug).
         task = asyncio.create_task(
-            run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id)
+            run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id, deferred_delivery=True)
         )
         async with _active_sessions_lock:
             _active_chat_sessions[session_id] = task
@@ -1967,8 +1976,17 @@ class ChatWebSocketHandler:
         project_id: Optional[str],
         overrides: Optional[Dict[str, Any]] = None,
         worktree_id: Optional[str] = None,
+        deferred_delivery: bool = False,
     ) -> None:
-        """Execute query and stream results directly to WebSocket."""
+        """Execute query and stream results directly to WebSocket.
+
+        ``deferred_delivery`` marks a server-initiated turn (a queued "Send later"
+        drain or a background sub-agent's unpark follow-up) whose delivery does not
+        depend on this handler's own socket. When set, a failed ``start`` frame is
+        non-fatal: the turn streams via the live store + ``sync_engine`` broadcasts
+        + polling instead of tearing itself down (see the live ``/ws/chat`` route's
+        ``run_query`` for the matching contract).
+        """
         from app.api.websocket import (
             _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
         )
@@ -2084,8 +2102,15 @@ class ChatWebSocketHandler:
             ctx.debug(logger, f"Starting query profile={profile_id}, project={project_id}, overrides={overrides}")
             if not await self.send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 ctx.warning(logger, "Connection lost before query could start")
-                await live_session_store.cleanup_session(session_id)
-                return  # Exit early - connection is dead
+                if deferred_delivery:
+                    # Server-initiated turn (queue drain / unpark follow-up) on a
+                    # dead origin socket: fall through and stream via the live
+                    # store + sync_engine + polling rather than aborting (which
+                    # stranded parked-session unpark turns until a full reload).
+                    ctx.info(logger, "start frame undeliverable on origin socket — streaming via sync_engine + polling")
+                else:
+                    await live_session_store.cleanup_session(session_id)
+                    return  # Exit early - connection is dead
 
             # NOTE: Don't call start_assistant_message here!
             # Creating an empty text message before content arrives causes the "Claude [time]"

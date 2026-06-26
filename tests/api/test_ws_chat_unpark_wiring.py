@@ -116,7 +116,7 @@ class _RecordingRunQuery:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, prompt, session_id, profile_id, project_id, overrides=None, worktree_id=None):
+    def __call__(self, prompt, session_id, profile_id, project_id, overrides=None, worktree_id=None, deferred_delivery=False):
         self.calls.append({
             "prompt": prompt,
             "session_id": session_id,
@@ -124,6 +124,7 @@ class _RecordingRunQuery:
             "project_id": project_id,
             "overrides": overrides,
             "worktree_id": worktree_id,
+            "deferred_delivery": deferred_delivery,
         })
 
         async def _noop():
@@ -240,6 +241,11 @@ async def test_fast_path_stash_then_unpark_spawns_followup(tmp_path):
             assert "FULL SUBAGENT RESULT TEXT" in synth  # full result off disk
             assert "task-1" in synth and "tu-1" in synth
             assert run_query.calls[0]["session_id"] == sid
+            # The unpark follow-up MUST be marked deferred_delivery so a dead
+            # origin socket (parked / reconnected client) falls through to
+            # sync_engine + polling delivery instead of aborting — the parked-
+            # session UI-update bug. (Mirrors the "Send later" queue-drain fix.)
+            assert run_query.calls[0]["deferred_delivery"] is True
             # Follow-up registered in the (isolated) active-sessions registry.
             assert sid in fresh_sessions
             # set_query_task was called with the follow-up task.
