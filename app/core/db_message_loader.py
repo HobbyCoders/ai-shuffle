@@ -81,6 +81,14 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "metadata": {"timestamp": created_at},
     }
 
+    # Surface the persisted JSONL entry uuid (when present) so the UI can rewind
+    # by uuid directly instead of falling back to fragile text matching. User
+    # rows are backfilled lazily during a rewind, so this is usually only set on
+    # assistant rows and previously-rewound sessions — harmless when absent.
+    jsonl_uuid = row.get("jsonl_uuid")
+    if jsonl_uuid:
+        base["uuid"] = jsonl_uuid
+
     if role == "user":
         return {
             **base,

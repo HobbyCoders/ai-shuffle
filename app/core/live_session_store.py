@@ -79,6 +79,12 @@ class LiveMessage:
     content: str = ""
     streaming: bool = False
 
+    # Raw JSONL entry uuid (when seeded from history). Distinct from `id`, which
+    # is normalized for keying. Lets the UI rewind by uuid directly instead of
+    # falling back to fragile content matching — kept on seeded history messages
+    # so rewind works the same during a streaming turn as it does on reload.
+    uuid: Optional[str] = None
+
     # For tool_use messages
     tool_name: Optional[str] = None
     tool_id: Optional[str] = None
@@ -126,6 +132,10 @@ class LiveMessage:
             "content": self.content,
             "streaming": self.streaming,
         }
+
+        # Raw JSONL uuid for uuid-based rewind (only on seeded history messages)
+        if self.uuid:
+            result["uuid"] = self.uuid
 
         # Tool fields
         if self.tool_name:
@@ -398,6 +408,7 @@ class LiveSessionStore:
                         type=m.get("type", "text"),
                         content=m.get("content", ""),
                         streaming=False,
+                        uuid=m.get("uuid"),
                         tool_name=m.get("toolName") or m.get("tool_name"),
                         tool_id=m.get("toolId") or m.get("tool_id"),
                         tool_input=m.get("toolInput") or m.get("tool_input"),

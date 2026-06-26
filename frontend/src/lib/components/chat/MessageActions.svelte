@@ -5,7 +5,7 @@
 	 * Provides Copy, Read (for assistant messages), and Rewind functionality.
 	 * All buttons are only visible when hovering over the parent message container.
 	 */
-	import { getRewindCheckpoints, executeRewind, type RewindCheckpoint } from '$lib/api/client';
+	import { executeRewind } from '$lib/api/client';
 
 	interface Props {
 		sessionId?: string | null;
@@ -117,84 +117,29 @@
 	async function handleRewindConfirm() {
 		if (!sessionId) return;
 
+		// Rewind is strictly uuid-based. messageUuid is the message's JSONL entry
+		// uuid — the exact, unambiguous truncation target. We deliberately do NOT
+		// fall back to matching the checkpoint by message text: a content match can
+		// silently pick the WRONG message and truncate there, which is unrecoverable.
+		// A persisted message should always carry its uuid, so a missing one means a
+		// bug upstream (or a not-yet-flushed streaming message) — surface it instead
+		// of guessing.
+		if (!messageUuid) {
+			console.error('[Rewind] Refusing to rewind: message has no JSONL uuid.', { messageRole });
+			rewindError = 'Cannot rewind: this message is missing its checkpoint id. Try reloading the conversation.';
+			return;
+		}
+
 		isRewinding = true;
 		rewindError = null;
 
 		const restoreFiles = rewindMode === 'chat_and_files';
 
 		try {
-			// If we have a direct UUID, use it (preferred - no text matching needed)
-			if (messageUuid) {
-				const includeResponse = messageRole === 'assistant';
-				const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
-
-				if (result.success || result.chat_rewound) {
-					showRewindDialog = false;
-					// Pass warning to parent to show as system message (for partial success)
-					onRewindComplete?.(result.warning ?? undefined);
-				} else {
-					rewindError = result.error || 'Rewind failed';
-				}
-				return;
-			}
-
-			// Fallback: text-based matching (for streaming messages without UUID)
-
-			// Get all checkpoints
-			const checkpointsResponse = await getRewindCheckpoints(sessionId);
-
-			if (!checkpointsResponse.success || checkpointsResponse.checkpoints.length === 0) {
-				rewindError = checkpointsResponse.error || 'No checkpoints available';
-				isRewinding = false;
-				return;
-			}
-
-			// Find the checkpoint that matches this message content and role
-			let targetCheckpoint: RewindCheckpoint | null = null;
-
-			// Normalize text for comparison (collapse whitespace, trim)
-			const normalize = (text: string) => text.trim().replace(/\s+/g, ' ');
-			const normalizedContent = normalize(messageContent);
-			const contentFirst100 = normalizedContent.substring(0, 100);
-
-			// Find checkpoint matching this message (either user or assistant)
-			// The checkpoint full_message may contain multiple text blocks joined together,
-			// while the UI message content may be just one of those blocks.
-			for (const cp of checkpointsResponse.checkpoints) {
-				if (cp.role !== messageRole) continue;
-
-				const normalizedCp = normalize(cp.full_message);
-				const cpFirst100 = normalizedCp.substring(0, 100);
-
-				// Try multiple matching strategies:
-				// 1. Exact match after normalization
-				const exactMatch = normalizedCp === normalizedContent;
-				// 2. UI content starts with checkpoint content (checkpoint is substring of UI)
-				const uiStartsWithCp = normalizedContent.startsWith(cpFirst100);
-				// 3. Checkpoint contains UI content (UI is substring of checkpoint)
-				const cpContainsUi = normalizedCp.includes(contentFirst100);
-				// 4. Checkpoint starts with UI content
-				const cpStartsWithUi = normalizedCp.startsWith(contentFirst100);
-
-				if (exactMatch || uiStartsWithCp || cpContainsUi || cpStartsWithUi) {
-					targetCheckpoint = cp;
-					break;
-				}
-			}
-
-			if (!targetCheckpoint) {
-				console.warn('[Rewind] No matching checkpoint found for', messageRole, 'message. Available checkpoints:',
-					checkpointsResponse.checkpoints.map(cp => cp.role));
-				rewindError = 'Could not find matching checkpoint for this message';
-				isRewinding = false;
-				return;
-			}
-
-			// Execute the rewind
-			// For user messages: include_response=false removes this message and everything after
-			// For assistant messages: keeps this message, removes everything after
+			// For user messages: include_response=false removes this message and everything after.
+			// For assistant messages: keeps this message, removes everything after.
 			const includeResponse = messageRole === 'assistant';
-			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole, restoreFiles);
+			const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
 
 			if (result.success || result.chat_rewound) {
 				showRewindDialog = false;
