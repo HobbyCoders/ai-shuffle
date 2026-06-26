@@ -122,7 +122,7 @@ class WorktreeSessionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def parse_session_history_via_store(
-    sdk_session_id: str, working_dir: str
+    sdk_session_id: str, working_dir: str, *, use_cache: bool = True
 ) -> tuple[list, dict]:
     """Parse a session transcript from the Postgres session store (postgres_only).
 
@@ -134,6 +134,11 @@ def parse_session_history_via_store(
     :func:`app.core.jsonl_parser.parse_session_history_from_store`, which runs
     the entries through the SAME transform as the JSONL path. Returns the same
     ``(messages, usage_data)`` shape as ``parse_session_history``.
+
+    ``use_cache=False`` forces a fresh parse straight from the store entries,
+    bypassing ``_store_parse_cache``. Used by the post-turn reseed to obtain an
+    authoritative, ``uuid``-bearing transcript (the in-memory live-store
+    messages carry no JSONL uuid, which breaks rewind anchoring).
     """
     from app.core.pg_session_store import (
         _load_entries_by_session_id_sync,
@@ -144,7 +149,7 @@ def parse_session_history_via_store(
         return _load_entries_by_session_id_sync(session_id, subpath)
 
     return parse_session_history_from_store(
-        sdk_session_id, working_dir, _store_loader
+        sdk_session_id, working_dir, _store_loader, use_cache=use_cache
     )
 
 

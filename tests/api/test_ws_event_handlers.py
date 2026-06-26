@@ -500,6 +500,117 @@ class TestHandleDone:
             mock_sync.broadcast_stream_end.assert_not_awaited()
 
 
+class TestHandleDoneRewindReseed:
+    """Regression: the post-turn parse-cache reseed must carry JSONL uuids.
+
+    The live session store's freshly streamed messages have NO ``uuid`` (only
+    seeded history messages do). Seeding the parse cache with them poisons every
+    later ``/live`` read, so the frontend sees uuid-less messages and rewind
+    fails with "missing its checkpoint id". Under postgres_only, ``handle_done``
+    must re-parse the authoritative store (uuid-bearing) and seed THAT instead.
+    """
+
+    LIVE_MSGS = [
+        {"role": "user", "content": "hi"},          # no uuid (streamed)
+        {"role": "assistant", "content": "yo"},      # no uuid (streamed)
+    ]
+    FRESH_MSGS = [
+        {"role": "user", "content": "hi", "uuid": "u0"},
+        {"role": "assistant", "content": "yo", "uuid": "a0"},
+    ]
+
+    def _live_data(self):
+        return {"messages": list(self.LIVE_MSGS), "usage": {"input_tokens": 10}}
+
+    @pytest.mark.asyncio
+    async def test_postgres_only_reseeds_with_uuid_bearing_store_parse(self):
+        ectx = make_ctx()
+        state = make_state(stream_started=True)
+        event = {"type": "done", "metadata": {"model": "claude-x"}}
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
+             patch("app.api.ws_event_handlers.database") as mock_db, \
+             patch("app.api.ws_event_handlers.settings") as mock_settings, \
+             patch("app.api.sessions_helpers.parse_session_history_via_store") as mock_parse, \
+             patch("app.core.jsonl_parser.pre_seed_parse_cache") as mock_seed, \
+             patch("app.core.jsonl_parser.invalidate_parse_cache") as mock_inval:
+            mock_store.end_streaming = AsyncMock()
+            mock_store.get_session_dict = MagicMock(return_value=self._live_data())
+            mock_db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
+            mock_sync.broadcast_stream_end = AsyncMock()
+            mock_settings.session_store_mode = "postgres_only"
+            mock_settings.workspace_dir = "/workspace"
+            mock_parse.return_value = (list(self.FRESH_MSGS), {})
+
+            await handle_done(event, ectx, state)
+
+            # Re-parsed the store, bypassing the (potentially poisoned) cache.
+            mock_parse.assert_called_once()
+            assert mock_parse.call_args.kwargs.get("use_cache") is False
+            # Seeded the cache with the uuid-bearing store parse, NOT live msgs.
+            mock_seed.assert_called_once()
+            seeded_msgs = mock_seed.call_args.args[1]
+            assert seeded_msgs == self.FRESH_MSGS
+            assert all(m.get("uuid") for m in seeded_msgs)
+            mock_inval.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_live_when_store_reparse_incomplete(self):
+        """If the store re-parse is shorter than live (turn not flushed), keep
+        the live messages so the just-finished turn does not disappear."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True)
+        event = {"type": "done", "metadata": {}}
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
+             patch("app.api.ws_event_handlers.database") as mock_db, \
+             patch("app.api.ws_event_handlers.settings") as mock_settings, \
+             patch("app.api.sessions_helpers.parse_session_history_via_store") as mock_parse, \
+             patch("app.core.jsonl_parser.pre_seed_parse_cache") as mock_seed:
+            mock_store.end_streaming = AsyncMock()
+            mock_store.get_session_dict = MagicMock(return_value=self._live_data())
+            mock_db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
+            mock_sync.broadcast_stream_end = AsyncMock()
+            mock_settings.session_store_mode = "postgres_only"
+            mock_settings.workspace_dir = "/workspace"
+            # Only 1 message back — shorter than the 2 live messages.
+            mock_parse.return_value = ([{"role": "user", "content": "hi", "uuid": "u0"}], {})
+
+            await handle_done(event, ectx, state)
+
+            mock_seed.assert_called_once()
+            assert mock_seed.call_args.args[1] == self.LIVE_MSGS
+
+    @pytest.mark.asyncio
+    async def test_non_postgres_mode_skips_store_reparse(self):
+        """Outside postgres_only the store is not authoritative — keep the
+        existing live-message seed and never re-parse the store."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True)
+        event = {"type": "done", "metadata": {}}
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
+             patch("app.api.ws_event_handlers.database") as mock_db, \
+             patch("app.api.ws_event_handlers.settings") as mock_settings, \
+             patch("app.api.sessions_helpers.parse_session_history_via_store") as mock_parse, \
+             patch("app.core.jsonl_parser.pre_seed_parse_cache") as mock_seed:
+            mock_store.end_streaming = AsyncMock()
+            mock_store.get_session_dict = MagicMock(return_value=self._live_data())
+            mock_db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
+            mock_sync.broadcast_stream_end = AsyncMock()
+            mock_settings.session_store_mode = "mirror"
+            mock_settings.workspace_dir = "/workspace"
+
+            await handle_done(event, ectx, state)
+
+            mock_parse.assert_not_called()
+            mock_seed.assert_called_once()
+            assert mock_seed.call_args.args[1] == self.LIVE_MSGS
+
+
 # ---------------------------------------------------------------------------
 # handle_chunk (legacy)
 # ---------------------------------------------------------------------------
