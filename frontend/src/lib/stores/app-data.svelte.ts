@@ -53,7 +53,11 @@ interface AppDataState {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SESSIONS_PAGE_SIZE = 50;
+// Per-request page size when paging through sessions. The sessions list itself
+// is uncapped — loadSessionsInternal keeps fetching pages until the backend
+// reports no more. 100 is the max the /sessions/cursor endpoint allows per call,
+// so it minimises round-trips when loading everything.
+const SESSIONS_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 20;
 
 // ─── Reactive State ──────────────────────────────────────────────────────────
@@ -93,26 +97,68 @@ const { subscribe, update: _update, createDerived } =
 
 // ─── Internal Data Loading ───────────────────────────────────────────────────
 
+// Monotonic token so that if a newer load (tag change, manual reload) starts
+// while an earlier one is still paging, the stale loop bails out instead of
+// clobbering the newer results.
+let _loadSessionsRequestId = 0;
+
 async function loadSessionsInternal(tagId?: string | null) {
+	const requestId = ++_loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
-		let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
-		if (tagId) {
-			url += `&tag_id=${encodeURIComponent(tagId)}`;
+		const all: Session[] = [];
+		let cursor: string | null = null;
+		let cursorId: string | null = null;
+		let hasMore = true;
+
+		// Page through every session via cursor pagination. The list is
+		// intentionally uncapped, so we keep fetching until the backend reports
+		// there is nothing left. Each page is committed as it arrives so the UI
+		// renders incrementally instead of waiting for the full set.
+		while (hasMore) {
+			let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
+			if (tagId) {
+				url += `&tag_id=${encodeURIComponent(tagId)}`;
+			}
+			if (cursor) {
+				url += `&cursor=${encodeURIComponent(cursor)}`;
+			}
+			if (cursorId) {
+				url += `&cursor_id=${encodeURIComponent(cursorId)}`;
+			}
+
+			const result = await api.get<CursorPaginatedSessions>(url);
+
+			// A newer load superseded this one while we were fetching — discard.
+			if (requestId !== _loadSessionsRequestId) return;
+
+			all.push(...result.items);
+			hasMore = result.has_more;
+			cursor = result.next_cursor;
+			cursorId = result.next_cursor_id;
+
+			// Defend against a backend that reports has_more without advancing
+			// the cursor, which would otherwise loop forever.
+			if (hasMore && !cursor && !cursorId) {
+				hasMore = false;
+			}
+
+			_update(s => ({
+				...s,
+				sessions: [...all],
+				sessionsTotal: all.length,
+				sessionsOffset: all.length,
+				sessionsHasMore: hasMore,
+				sessionsTagFilter: tagId ?? null,
+				sessionsCursor: cursor,
+				sessionsCursorId: cursorId,
+			}));
 		}
-		const result = await api.get<CursorPaginatedSessions>(url);
-		_update(s => ({
-			...s,
-			sessions: result.items,
-			sessionsTotal: result.items.length,
-			sessionsOffset: 0,
-			sessionsHasMore: result.has_more,
-			sessionsLoading: false,
-			sessionsTagFilter: tagId ?? null,
-			sessionsCursor: result.next_cursor,
-			sessionsCursorId: result.next_cursor_id,
-		}));
+
+		_update(s => ({ ...s, sessionsLoading: false }));
 	} catch (e) {
+		// Don't surface a stale error over a newer in-flight load.
+		if (requestId !== _loadSessionsRequestId) return;
 		console.error('Failed to load sessions:', e);
 		_update(s => ({ ...s, sessionsLoading: false }));
 	}
