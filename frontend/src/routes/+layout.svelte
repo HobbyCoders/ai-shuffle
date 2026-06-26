@@ -7,7 +7,7 @@
 	import { page } from '$app/stores';
 	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
-	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa.svelte';
+	import { pwa } from '$lib/stores/pwa.svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { files } from '$lib/stores/files.svelte';
@@ -17,8 +17,6 @@
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
-	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
-	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
@@ -163,12 +161,6 @@
 	</div>
 {:else}
 	<!-- PWA Components -->
-	{#if !$isOnline}
-		<OfflineBanner />
-	{/if}
-	{#if $hasUpdate}
-		<UpdatePrompt />
-	{/if}
 	<InstallPrompt />
 	<ToastViewport />
 

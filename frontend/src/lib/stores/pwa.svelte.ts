@@ -13,8 +13,6 @@ interface PWAState {
 	isInstalled: boolean;
 	isInstallable: boolean;
 	isOnline: boolean;
-	hasUpdate: boolean;
-	isUpdating: boolean;
 	installPromptEvent: BeforeInstallPromptEvent | null;
 	serviceWorkerRegistration: ServiceWorkerRegistration | null;
 }
@@ -32,8 +30,6 @@ let _state = $state<PWAState>({
 	isInstalled: false,
 	isInstallable: false,
 	isOnline: browser ? navigator.onLine : true,
-	hasUpdate: false,
-	isUpdating: false,
 	installPromptEvent: null,
 	serviceWorkerRegistration: null
 });
@@ -70,17 +66,9 @@ async function registerServiceWorker() {
 
 		_update((s) => ({ ...s, serviceWorkerRegistration: registration }));
 
-		registration.addEventListener('updatefound', () => {
-			const newWorker = registration.installing;
-			if (newWorker) {
-				newWorker.addEventListener('statechange', () => {
-					if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-						_update((s) => ({ ...s, hasUpdate: true }));
-					}
-				});
-			}
-		});
-
+		// A new service worker calls skipWaiting() on install, so it activates
+		// immediately and fires `controllerchange`; we reload silently there.
+		// No banner — manual refresh is available via the app's pull-to-refresh.
 		let refreshing = false;
 		navigator.serviceWorker.addEventListener('controllerchange', () => {
 			if (!refreshing) {
@@ -253,24 +241,6 @@ export const pwa = {
 		}
 	},
 
-	async applyUpdate() {
-		_update((s) => ({ ...s, isUpdating: true }));
-		_notifySubscribers();
-
-		if (_state.serviceWorkerRegistration?.waiting) {
-			_state.serviceWorkerRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
-
-			setTimeout(() => {
-				window.location.reload();
-			}, 500);
-		}
-	},
-
-	dismissUpdate() {
-		_update((s) => ({ ...s, hasUpdate: false }));
-		_notifySubscribers();
-	},
-
 	async clearCache() {
 		if (_state.serviceWorkerRegistration?.active) {
 			_state.serviceWorkerRegistration.active.postMessage({ type: 'CLEAR_CACHE' });
@@ -298,5 +268,4 @@ export const pwa = {
 
 export const isOnline = createDerived(() => _state.isOnline);
 export const isInstallable = createDerived(() => _state.isInstallable && !_state.isInstalled);
-export const hasUpdate = createDerived(() => _state.hasUpdate);
 export const isInstalled = createDerived(() => _state.isInstalled);
