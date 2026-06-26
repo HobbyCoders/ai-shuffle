@@ -11,13 +11,14 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor, Link2, Unlink } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
-	import { toggleSessionFavorite } from '$lib/api/client';
+	import { toggleSessionFavorite, api } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { toast } from '$lib/stores/toast';
 
 	interface Props {
@@ -151,21 +152,29 @@
 	const projectGroups = $derived.by((): Group[] => {
 		const groups = new Map<string, Session[]>();
 		for (const s of visibleSessions) {
-			const key = s.project_id || UNGROUPED;
+			// Fold same-repo clones from every install into one logical project
+			// via the server-resolved link group; fall back to the raw project id.
+			const key = s.link_group_id || s.project_id || UNGROUPED;
 			if (!groups.has(key)) groups.set(key, []);
 			groups.get(key)!.push(s);
 		}
 		const arr: Group[] = [...groups.entries()].map(([key, list]) => {
 			const sorted = sortSessions(list);
-			// Resolve the display name: $projects is instance-filtered, so cross-install
-			// projects fall back to the server-provided project_name on a session.
+			// A concrete project id from this group, for project-scoped actions
+			// (a link group folds several, so just take a representative one).
+			const projectId = key === UNGROUPED ? null : (list.find((s) => s.project_id)?.project_id ?? null);
+			// Resolve the display name: prefer a locally-known project, then the
+			// server-provided project_name (set for cross-install projects too).
 			const name = key === UNGROUPED
 				? 'Ungrouped'
-				: projectsById.get(key)?.name || list.find((s) => s.project_name)?.project_name || 'Ungrouped';
+				: (projectId && projectsById.get(projectId)?.name)
+					|| list.find((s) => s.project_name)?.project_name
+					|| projectsById.get(key)?.name
+					|| 'Ungrouped';
 			return {
 				key,
 				name,
-				projectId: key === UNGROUPED ? null : key,
+				projectId,
 				sessions: list,
 				lastActivity: list.reduce((m, s) => Math.max(m, tsOf(s)), 0),
 				running: list.filter((s) => isStreaming(s.id)).length,
@@ -198,6 +207,67 @@
 	}
 	function backToOverview() {
 		selectedKey = null;
+	}
+
+	// --- Manual project linking (admin) ---
+	// A representative *local* project for the open group ($projects is
+	// instance-filtered, so only this install's rows appear). We manage links on
+	// the local row; the lock flag lives in its settings.
+	const selectedLocalProject = $derived.by(() => {
+		if (!selectedGroup) return null;
+		for (const s of selectedGroup.sessions) {
+			if (s.project_id && projectsById.has(s.project_id)) return projectsById.get(s.project_id)!;
+		}
+		return null;
+	});
+	const linkLocked = $derived(
+		!!(selectedLocalProject?.settings as Record<string, unknown> | undefined)?.link_group_locked
+	);
+	// Other groups whose representative project is local here — valid manual-link targets.
+	const linkTargets = $derived(
+		selectedGroup
+			? projectGroups.filter(
+					(g) => g.key !== selectedGroup.key && g.projectId && projectsById.has(g.projectId)
+				)
+			: []
+	);
+	let linkBusy = $state(false);
+	let linkPick = $state('');
+
+	async function onPickLink() {
+		const v = linkPick;
+		linkPick = '';
+		if (v) await linkTo(v);
+	}
+
+	async function linkTo(targetProjectId: string) {
+		if (!selectedLocalProject || !targetProjectId || linkBusy) return;
+		linkBusy = true;
+		try {
+			await api.post(`/projects/${selectedLocalProject.id}/link`, { target_project_id: targetProjectId });
+			await appData.loadProjects();
+			await appData.loadSessions();
+			toast.push('Projects linked', { tone: 'success' });
+		} catch {
+			toast.push('Failed to link projects', { tone: 'error' });
+		} finally {
+			linkBusy = false;
+		}
+	}
+
+	async function unlink() {
+		if (!selectedLocalProject || linkBusy) return;
+		linkBusy = true;
+		try {
+			await api.delete(`/projects/${selectedLocalProject.id}/link`);
+			await appData.loadProjects();
+			await appData.loadSessions();
+			toast.push('Project unlinked', { tone: 'success' });
+		} catch {
+			toast.push('Failed to unlink project', { tone: 'error' });
+		} finally {
+			linkBusy = false;
+		}
 	}
 
 	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, s: Session) {
@@ -295,6 +365,25 @@
 					</select>
 					<ChevronRight size={13} strokeWidth={1.6} class="device-filter-chevron" />
 				</div>
+			</div>
+		{:else if mode === 'project' && selectedGroup && $isAdmin && selectedLocalProject}
+			<div class="board-head-right">
+				{#if linkLocked}
+					<button class="link-btn" onclick={unlink} disabled={linkBusy} title="Remove manual link; regroup by git remote">
+						<Unlink size={13} strokeWidth={1.6} /> Unlink
+					</button>
+				{:else if linkTargets.length}
+					<div class="device-filter" title="Link this project with another so their sessions share one group">
+						<Link2 size={13} strokeWidth={1.6} />
+						<select class="device-filter-select" bind:value={linkPick} onchange={onPickLink} disabled={linkBusy} aria-label="Link with project">
+							<option value="" disabled>Link with…</option>
+							{#each linkTargets as t (t.key)}
+								<option value={t.projectId}>{t.name}</option>
+							{/each}
+						</select>
+						<ChevronRight size={13} strokeWidth={1.6} class="device-filter-chevron" />
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</header>
@@ -520,6 +609,24 @@
 		outline: none;
 	}
 	.device-filter-select option { color: var(--foreground); background: var(--card); }
+	.device-filter-select:disabled { cursor: default; opacity: 0.6; }
+	.link-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		padding: 3px 10px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 35%, transparent);
+		cursor: pointer;
+		transition: border-color 120ms ease, color 120ms ease;
+	}
+	.link-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--foreground); }
+	.link-btn:disabled { opacity: 0.6; cursor: default; }
+	.link-btn :global(svg) { flex-shrink: 0; }
 	.board-title {
 		font-family: var(--font-display, Georgia, serif);
 		font-size: 1.35rem;

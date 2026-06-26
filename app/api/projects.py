@@ -4,6 +4,7 @@ Project management API routes
 
 import logging
 import shutil
+import uuid
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
@@ -30,6 +31,10 @@ class CreateFolderRequest(BaseModel):
 
 class RenameRequest(BaseModel):
     new_name: str
+
+
+class ProjectLinkRequest(BaseModel):
+    target_project_id: str
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -260,6 +265,94 @@ async def delete_project(project_id: str, token: str = Depends(require_admin)):
         )
 
     database.delete_project(project_id)
+
+
+def _project_with_meta(project_id: str) -> dict:
+    """Re-read a project and decorate it for a Project response."""
+    project = database.get_project(project_id)
+    project["session_count"] = database.get_project_session_count(project_id)
+    if not is_absolute_project_path(project["path"]):
+        project["path"] = get_project_working_dir(project)
+    return project
+
+
+@router.post("/{project_id}/link", response_model=Project)
+async def link_project(
+    project_id: str,
+    request: ProjectLinkRequest,
+    token: str = Depends(require_admin),
+):
+    """Manually link two project rows into one logical project - Admin only.
+
+    Both rows join the same ``link_group_id`` and are marked locked so the
+    auto-by-git-remote path stops overwriting the manual choice. The sessions
+    board then folds their sessions into a single group. Useful for clones whose
+    remotes differ (forks, mirrors) that the user nonetheless treats as one
+    project.
+    """
+    from app.core.project_links import LINK_LOCKED_KEY
+
+    source = database.get_project(project_id)
+    if not source:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+    target = database.get_project(request.target_project_id)
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {request.target_project_id}",
+        )
+    if source["id"] == target["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot link a project to itself",
+        )
+
+    # Prefer an existing group so linking into a group of 3+ keeps everyone
+    # together; otherwise mint a fresh manual group id.
+    group_id = target.get("link_group_id") or source.get("link_group_id") or f"manual:{uuid.uuid4().hex[:16]}"
+
+    for proj in (source, target):
+        merged = dict(proj.get("settings") or {})
+        merged[LINK_LOCKED_KEY] = True
+        database.update_project(proj["id"], settings_dict=merged)
+        database.set_project_link_group(proj["id"], group_id)
+
+    return _project_with_meta(project_id)
+
+
+@router.delete("/{project_id}/link", response_model=Project)
+async def unlink_project(project_id: str, token: str = Depends(require_admin)):
+    """Remove a project's manual link, then re-derive its auto group - Admin only.
+
+    Clears the lock and link group, then recomputes the deterministic
+    auto-group from the project's git remote (so a still-shared repo regroups
+    with its peers).
+    """
+    from app.core.project_links import LINK_LOCKED_KEY, maybe_auto_link_project
+
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+
+    merged = dict(project.get("settings") or {})
+    merged.pop(LINK_LOCKED_KEY, None)
+    database.update_project(project_id, settings_dict=merged)
+    database.set_project_link_group(project_id, None)
+
+    # Re-derive the deterministic auto group from the git remote, if any.
+    try:
+        repo = database.get_git_repository_by_project(project_id)
+        maybe_auto_link_project(project_id, (repo or {}).get("remote_url"))
+    except Exception:  # noqa: BLE001
+        logger.debug("re-auto-link after unlink failed for %s", project_id, exc_info=True)
+
+    return _project_with_meta(project_id)
 
 
 def get_file_extension(name: str) -> str:

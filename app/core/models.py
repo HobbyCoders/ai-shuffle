@@ -240,6 +240,7 @@ class Project(ProjectBase):
     path: str
     settings: ProjectSettings
     session_count: Optional[int] = None  # Number of sessions in this project
+    link_group_id: Optional[str] = None  # Groups same-repo clones across installs
     created_at: datetime
     updated_at: datetime
 
