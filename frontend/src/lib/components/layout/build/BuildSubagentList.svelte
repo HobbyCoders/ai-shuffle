@@ -257,6 +257,12 @@
 	   so the meta column stays aligned across rows regardless of which buttons a row shows. */
 	.bsl-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 58px; opacity: 0; transition: opacity 120ms ease; }
 	.bsl-row:hover .bsl-actions, .bsl-row:focus-within .bsl-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.bsl-actions { opacity: 1; }
+	}
 	.bsl-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
 		background: transparent; border: 1px solid transparent; border-radius: 7px;

@@ -35,10 +35,17 @@
 
 	let isMobile = $state(false);
 
+	// Mobile is width-based (not pointer-gated) so the mobile UI is reachable by
+	// simply narrowing a desktop window — important for testing on desktop. The
+	// 1080px cutoff also covers unfolded foldables whose inner screens report
+	// ~1028px (Galaxy Z Fold 6) / ~1040px (Z Fold 7) CSS width in their wide
+	// orientation; a pointer:coarse gate at 1024 would have missed those.
+	// Keep this in sync with the `max-width: 1080px` media queries in the headers
+	// (AppTopBar / PageHeader / GitHeaderActions).
+	const MOBILE_MAX_WIDTH = 1080;
+
 	function checkMobile() {
-		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
-		const isReasonableMobileSize = window.innerWidth < 1024;
-		isMobile = window.innerWidth < 640 || (isTouchDevice && isReasonableMobileSize);
+		isMobile = window.innerWidth <= MOBILE_MAX_WIDTH;
 	}
 
 	onMount(() => {
@@ -56,6 +63,7 @@
 <div class="app-shell">
 	<AppTopBar
 		{isAdmin}
+		{isMobile}
 		{onNewSession}
 		{onOpenSessions}
 		{onOpenFeature}

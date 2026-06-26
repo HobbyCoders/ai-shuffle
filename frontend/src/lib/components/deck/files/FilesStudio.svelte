@@ -491,6 +491,12 @@
 
 	.fs-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity 110ms ease; }
 	.fs-row:hover .fs-actions, .fs-row:focus-within .fs-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.fs-actions { opacity: 1; }
+	}
 	.fs-icon-btn {
 		display: grid; place-items: center; width: 26px; height: 26px;
 		background: transparent; border: none; border-radius: 6px;

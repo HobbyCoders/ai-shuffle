@@ -881,8 +881,10 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile touch targets — single horizontal rail (no wrapping) */
-	@media (max-width: 639px) {
+	/* Mobile touch targets — single horizontal rail (no wrapping).
+	   1080px keeps this in sync with AppLayout's isMobile width cutoff so it also
+	   covers unfolded foldables (Z Fold 6/7 inner ~1028–1040px). */
+	@media (max-width: 1080px) {
 		.git-actions {
 			/* Stay on one line so the header reads as a single touch-scrollable rail.
 			   Items keep their intrinsic size and overflow-scroll with the header. */
@@ -923,7 +925,7 @@
 		   (so outside-click detection keeps working). */
 		.branch-dropdown {
 			position: fixed;
-			top: 92px;
+			top: 100px;
 			left: 8px;
 			right: 8px;
 			bottom: auto;

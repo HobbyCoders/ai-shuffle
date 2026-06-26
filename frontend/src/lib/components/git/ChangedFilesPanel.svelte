@@ -1405,11 +1405,10 @@
 
 	.file-row:hover .file-actions { display: flex; }
 
-	@media (max-width: 639px) {
-		.file-actions { display: flex; }
-	}
-
-	@media (pointer: coarse) {
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
 		.file-actions { display: flex; }
 	}
 

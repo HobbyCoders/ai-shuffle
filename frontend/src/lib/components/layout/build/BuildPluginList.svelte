@@ -521,6 +521,12 @@
 	.bpl-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
 	.bpl-actions--static { opacity: 1; }
 	.bpl-row:hover .bpl-actions, .bpl-row:focus-within .bpl-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.bpl-actions { opacity: 1; }
+	}
 	.bpl-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.bpl-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.bpl-act:disabled { opacity: 0.5; cursor: not-allowed; }

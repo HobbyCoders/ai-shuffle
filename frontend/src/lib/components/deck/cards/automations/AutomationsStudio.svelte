@@ -354,6 +354,12 @@
 
 	.as-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
 	.as-row:hover .as-actions, .as-row:focus-within .as-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.as-actions { opacity: 1; }
+	}
 	.as-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.as-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.as-act:disabled { opacity: 0.5; cursor: not-allowed; }

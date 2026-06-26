@@ -495,6 +495,12 @@
 
 	.pc-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
 	.pc-row:hover .pc-actions, .pc-row:focus-within .pc-actions { opacity: 1; }
+	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
+		.pc-actions { opacity: 1; }
+	}
 	.pc-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.pc-act--danger:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 	.pc-chev { display: grid; place-items: center; color: var(--muted-foreground); flex-shrink: 0; }

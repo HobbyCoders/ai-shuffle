@@ -11,7 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor, Link2, Unlink } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor, Link2, Unlink, Check } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -253,13 +253,6 @@
 			: []
 	);
 	let linkBusy = $state(false);
-	let linkPick = $state('');
-
-	async function onPickLink() {
-		const v = linkPick;
-		linkPick = '';
-		if (v) await linkTo(v);
-	}
 
 	async function linkTo(targetProjectId: string) {
 		if (!selectedLocalProject || !targetProjectId || linkBusy) return;
@@ -288,6 +281,40 @@
 			toast.push('Failed to unlink project', { tone: 'error' });
 		} finally {
 			linkBusy = false;
+		}
+	}
+
+	// --- Header filter dropdowns -------------------------------------------
+	// Custom dropdowns (not native <select>) so they match the app's other
+	// dropdowns — themed menu, hover states, active checkmark, fade animation.
+	let deviceMenuOpen = $state(false);
+	let deviceMenuRef = $state<HTMLDivElement | null>(null);
+	let linkMenuOpen = $state(false);
+	let linkMenuRef = $state<HTMLDivElement | null>(null);
+
+	const deviceFilterLabel = $derived(
+		deviceFilter ? (deviceOptions.find((d) => d.id === deviceFilter)?.name ?? 'All devices') : 'All devices'
+	);
+
+	function selectDevice(id: string | null) {
+		deviceFilter = id;
+		deviceMenuOpen = false;
+	}
+
+	function chooseLink(targetProjectId: string | null) {
+		linkMenuOpen = false;
+		if (targetProjectId) linkTo(targetProjectId);
+	}
+
+	function handleFilterWindowClick(e: MouseEvent) {
+		const t = e.target as Node;
+		if (deviceMenuOpen && deviceMenuRef && !deviceMenuRef.contains(t)) deviceMenuOpen = false;
+		if (linkMenuOpen && linkMenuRef && !linkMenuRef.contains(t)) linkMenuOpen = false;
+	}
+	function handleFilterWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			deviceMenuOpen = false;
+			linkMenuOpen = false;
 		}
 	}
 
@@ -360,6 +387,8 @@
 	}
 </script>
 
+<svelte:window onclick={handleFilterWindowClick} onkeydown={handleFilterWindowKeydown} />
+
 <div class="board card-system">
 	<!-- Header -->
 	<header class="board-header">
@@ -376,15 +405,46 @@
 		</div>
 		{#if mode === 'overview' && deviceOptions.length > 1}
 			<div class="board-head-right">
-				<div class="device-filter" title="Filter sessions by device">
-					<Monitor size={13} strokeWidth={1.6} />
-					<select class="device-filter-select" bind:value={deviceFilter} aria-label="Filter by device">
-						<option value={null}>All devices</option>
-						{#each deviceOptions as d (d.id)}
-							<option value={d.id}>{d.name}{d.online ? '' : ' · offline'}</option>
-						{/each}
-					</select>
-					<ChevronRight size={13} strokeWidth={1.6} class="device-filter-chevron" />
+				<div class="board-filter" bind:this={deviceMenuRef}>
+					<button
+						type="button"
+						class="filter-btn"
+						onclick={(e) => { e.stopPropagation(); deviceMenuOpen = !deviceMenuOpen; }}
+						aria-haspopup="menu"
+						aria-expanded={deviceMenuOpen}
+						title="Filter sessions by device"
+					>
+						<Monitor size={13} strokeWidth={1.6} />
+						<span class="filter-label">{deviceFilterLabel}</span>
+						<ChevronDown size={12} strokeWidth={1.8} class="filter-caret {deviceMenuOpen ? 'open' : ''}" />
+					</button>
+					{#if deviceMenuOpen}
+						<div class="filter-menu" role="menu" aria-label="Filter by device">
+							<button
+								class="filter-item"
+								class:active={deviceFilter === null}
+								role="menuitemradio"
+								aria-checked={deviceFilter === null}
+								onclick={() => selectDevice(null)}
+							>
+								<span class="filter-item-name">All devices</span>
+								{#if deviceFilter === null}<Check size={14} strokeWidth={2} />{/if}
+							</button>
+							{#each deviceOptions as d (d.id)}
+								<button
+									class="filter-item"
+									class:active={deviceFilter === d.id}
+									role="menuitemradio"
+									aria-checked={deviceFilter === d.id}
+									onclick={() => selectDevice(d.id)}
+								>
+									<span class="filter-item-name">{d.name}</span>
+									{#if !d.online}<span class="filter-tag">offline</span>{/if}
+									{#if deviceFilter === d.id}<Check size={14} strokeWidth={2} />{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
 				</div>
 			</div>
 		{:else if mode === 'project' && selectedGroup && $isAdmin && selectedLocalProject}
@@ -394,15 +454,30 @@
 						<Unlink size={13} strokeWidth={1.6} /> Unlink
 					</button>
 				{:else if linkTargets.length}
-					<div class="device-filter" title="Link this project with another so their sessions share one group">
-						<Link2 size={13} strokeWidth={1.6} />
-						<select class="device-filter-select" bind:value={linkPick} onchange={onPickLink} disabled={linkBusy} aria-label="Link with project">
-							<option value="" disabled>Link with…</option>
-							{#each linkTargets as t (t.key)}
-								<option value={t.projectId}>{t.name}</option>
-							{/each}
-						</select>
-						<ChevronRight size={13} strokeWidth={1.6} class="device-filter-chevron" />
+					<div class="board-filter" bind:this={linkMenuRef}>
+						<button
+							type="button"
+							class="filter-btn"
+							onclick={(e) => { e.stopPropagation(); if (!linkBusy) linkMenuOpen = !linkMenuOpen; }}
+							disabled={linkBusy}
+							aria-haspopup="menu"
+							aria-expanded={linkMenuOpen}
+							title="Link this project with another so their sessions share one group"
+						>
+							<Link2 size={13} strokeWidth={1.6} />
+							<span class="filter-label">Link with…</span>
+							<ChevronDown size={12} strokeWidth={1.8} class="filter-caret {linkMenuOpen ? 'open' : ''}" />
+						</button>
+						{#if linkMenuOpen}
+							<div class="filter-menu" role="menu" aria-label="Link with project">
+								{#each linkTargets as t (t.key)}
+									<button class="filter-item" role="menuitem" onclick={() => chooseLink(t.projectId)}>
+										<Link2 size={13} strokeWidth={1.6} />
+										<span class="filter-item-name">{t.name}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
@@ -625,37 +700,86 @@
 	}
 	.board-head-left { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
 	.board-head-right { margin-left: auto; display: flex; align-items: center; flex-shrink: 0; }
-	.device-filter {
-		position: relative;
+	/* Custom dropdown — matches the app's other dropdowns (ProfileSelector /
+	   BranchSelector): pill trigger + themed menu, instead of a native <select>. */
+	.board-filter { position: relative; flex-shrink: 0; }
+	.filter-btn {
 		display: inline-flex;
 		align-items: center;
-		gap: 5px;
-		padding: 3px 8px;
+		gap: 6px;
+		height: 30px;
+		padding: 0 10px;
+		background: color-mix(in oklch, var(--foreground) 6%, var(--background));
 		border: 1px solid var(--border);
-		border-radius: 999px;
+		border-radius: var(--radius, 0.75rem);
 		color: var(--muted-foreground);
-		background: color-mix(in oklch, var(--muted) 35%, transparent);
-		transition: border-color 120ms ease, color 120ms ease;
-	}
-	.device-filter:hover { border-color: var(--primary); color: var(--foreground); }
-	.device-filter :global(svg) { flex-shrink: 0; }
-	.device-filter :global(.device-filter-chevron) { transform: rotate(90deg); opacity: 0.6; pointer-events: none; }
-	.device-filter-select {
-		appearance: none;
-		-webkit-appearance: none;
-		border: none;
-		background: transparent;
-		color: inherit;
 		font-size: 0.75rem;
 		font-weight: 500;
-		padding: 0;
-		padding-right: 2px;
 		cursor: pointer;
-		max-width: 160px;
-		outline: none;
+		white-space: nowrap;
+		transition: border-color 120ms ease, color 120ms ease;
 	}
-	.device-filter-select option { color: var(--foreground); background: var(--card); }
-	.device-filter-select:disabled { cursor: default; opacity: 0.6; }
+	.filter-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--foreground); }
+	.filter-btn:disabled { opacity: 0.6; cursor: default; }
+	.filter-btn :global(svg) { flex-shrink: 0; }
+	.filter-label { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+	.filter-btn :global(.filter-caret) { opacity: 0.6; transition: transform 150ms ease; }
+	.filter-btn :global(.filter-caret.open) { transform: rotate(180deg); }
+
+	.filter-menu {
+		position: absolute;
+		top: calc(100% + 4px);
+		right: 0;
+		min-width: 200px;
+		max-width: min(280px, calc(100vw - 24px));
+		max-height: 60vh;
+		overflow-y: auto;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		box-shadow: var(--shadow-l);
+		padding: 6px;
+		z-index: 50;
+		animation: filter-menu-in 0.15s ease;
+	}
+
+	@keyframes filter-menu-in {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.filter-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 7px 10px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) - 4px);
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 120ms ease;
+	}
+	.filter-item:hover { background: var(--hover-overlay); }
+	.filter-item.active { color: var(--primary); }
+	.filter-item :global(svg) { flex-shrink: 0; color: var(--muted-foreground); }
+	.filter-item.active :global(svg) { color: var(--primary); }
+	.filter-item-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.filter-tag {
+		font-size: 0.625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
+		padding: 1px 6px;
+		border-radius: 999px;
+		flex-shrink: 0;
+	}
 	.link-btn {
 		display: inline-flex;
 		align-items: center;
@@ -1033,7 +1157,18 @@
 	.board-empty-title { font-size: 0.9rem; }
 
 	/* Touch / mobile */
-	@media (hover: none), (max-width: 639px) {
+	/* Mobile: drop the header's right cluster (device filter / link-project
+	   dropdown) onto its own row so it never crowds the title or the project
+	   breadcrumb. 1080px matches the app-wide mobile cutoff (foldables included). */
+	@media (max-width: 1080px) {
+		.board-header { flex-wrap: wrap; row-gap: 10px; }
+		.board-head-right { width: 100%; margin-left: 0; justify-content: center; }
+	}
+
+	/* Touch / mobile-width: row actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
+	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	@media (hover: none), (max-width: 1080px) {
 		.row-action { opacity: 0.7; }
 	}
 	@media (max-width: 639px) {
