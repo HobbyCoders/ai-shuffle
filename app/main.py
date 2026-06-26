@@ -106,6 +106,11 @@ async def _cluster_heartbeat_loop():
         try:
             await asyncio.sleep(CLUSTER_HEARTBEAT_INTERVAL_SECONDS)
             await run_sync(cluster.heartbeat_self)
+            # Reconcile cross-install streaming: clear any remote-owned streaming
+            # spinner whose owning install went offline mid-stream (its stream_end
+            # fan-out never arrived).
+            from app.core.sync_engine import sync_engine
+            await sync_engine.sweep_offline_remote_streaming()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a failed beat must not kill the loop

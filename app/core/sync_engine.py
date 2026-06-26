@@ -110,6 +110,11 @@ class SyncEngine:
         self._session_project_map: Dict[str, Optional[str]] = {}
         # Map streaming session_id -> worktree_id for worktree-aware streaming locks
         self._session_worktree_map: Dict[str, Optional[str]] = {}
+        # Cross-install: streaming session_id -> owning install's instance_id, for
+        # sessions whose stream originates on a PEER install (applied via
+        # apply_remote_streaming_change). Lets the heartbeat sweep clear a stale
+        # spinner if that owner goes offline mid-stream.
+        self._remote_streaming_owner: Dict[str, str] = {}
 
     async def register_device(
         self,
@@ -434,6 +439,15 @@ class SyncEngine:
                 },
                 source_device_id=source_device_id
             )
+            # Cross-install: tell peer installs so a user driving this session from
+            # a device on another install sees the same streaming indicator.
+            self._schedule_streaming_fanout(
+                user_id=stored_user_id,
+                session_id=session_id,
+                is_streaming=True,
+                project_id=self._session_project_map.get(session_id),
+                worktree_id=self._session_worktree_map.get(session_id),
+            )
 
     async def broadcast_usage_update(
         self,
@@ -524,6 +538,15 @@ class SyncEngine:
                     "worktree_id": stored_worktree_id,
                 },
                 source_device_id=source_device_id
+            )
+            # Cross-install: tell peer installs the stream ended so their devices
+            # clear the indicator too.
+            self._schedule_streaming_fanout(
+                user_id=stored_user_id,
+                session_id=session_id,
+                is_streaming=False,
+                project_id=stored_project_id,
+                worktree_id=stored_worktree_id,
             )
 
     async def broadcast_message_added(
@@ -821,6 +844,137 @@ class SyncEngine:
                 "branch_name": branch_name,
             }
         )
+
+    def _schedule_streaming_fanout(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        is_streaming: bool,
+        project_id: Optional[str],
+        worktree_id: Optional[str],
+    ) -> None:
+        """Fire-and-forget: notify peer installs of a LOCAL streaming transition.
+
+        Best-effort and non-blocking — a slow or offline peer must never affect
+        the local stream. Only called from broadcast_stream_start/end (local
+        origins); the peer receive path (apply_remote_streaming_change) does NOT
+        call this, so streaming changes never loop between installs.
+        """
+        try:
+            from app.core import cluster_streaming
+        except Exception:  # noqa: BLE001 — defensive; never break local streaming
+            return
+        cluster_streaming.schedule_fanout(
+            user_id=user_id,
+            session_id=session_id,
+            is_streaming=is_streaming,
+            project_id=project_id,
+            worktree_id=worktree_id,
+        )
+
+    async def apply_remote_streaming_change(
+        self,
+        user_id: str,
+        session_id: str,
+        is_streaming: bool,
+        owner_instance_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        worktree_id: Optional[str] = None,
+    ) -> None:
+        """Apply a streaming transition that originated on a PEER install.
+
+        Records the remote session's streaming state in this install's maps (so
+        the connect-time snapshot from get_user_streaming_sessions includes it)
+        and notifies this install's connected devices via the same
+        ``user_streaming_changed`` message a local stream uses — WITHOUT fanning
+        the change back out to peers (avoids cross-install loops).
+        """
+        async with self._lock:
+            if is_streaming:
+                self._streaming_sessions.add(session_id)
+                self._session_user_map[session_id] = user_id
+                if project_id is not None:
+                    self._session_project_map[session_id] = project_id
+                if worktree_id is not None:
+                    self._session_worktree_map[session_id] = worktree_id
+                if owner_instance_id:
+                    self._remote_streaming_owner[session_id] = owner_instance_id
+            else:
+                self._streaming_sessions.discard(session_id)
+                self._session_user_map.pop(session_id, None)
+                stored_project_id = self._session_project_map.pop(session_id, None)
+                stored_worktree_id = self._session_worktree_map.pop(session_id, None)
+                self._remote_streaming_owner.pop(session_id, None)
+                if project_id is None:
+                    project_id = stored_project_id
+                if worktree_id is None:
+                    worktree_id = stored_worktree_id
+
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={
+                "type": "user_streaming_changed",
+                "session_id": session_id,
+                "is_streaming": is_streaming,
+                "project_id": project_id,
+                "worktree_id": worktree_id,
+            },
+        )
+
+    async def sweep_offline_remote_streaming(self) -> int:
+        """Clear remote streaming entries whose owning install went offline.
+
+        A peer that crashes mid-stream never sends its stream_end fan-out, which
+        would leave a stale spinner on the board forever. The heartbeat loop calls
+        this periodically to reconcile: any remote-owned streaming session whose
+        owner is no longer online is cleared and a stream-end is broadcast locally.
+
+        Returns the number of stale sessions cleared.
+        """
+        async with self._lock:
+            owners = dict(self._remote_streaming_owner)
+        if not owners:
+            return 0
+
+        from app.db import database  # lazy import to avoid cycles
+        stale_ids = []
+        for sid, owner in owners.items():
+            install = database.get_install(owner)
+            if not install or not install.get("online"):
+                stale_ids.append(sid)
+
+        if not stale_ids:
+            return 0
+
+        cleared = []
+        async with self._lock:
+            for sid in stale_ids:
+                self._streaming_sessions.discard(sid)
+                user_id = self._session_user_map.pop(sid, None)
+                project_id = self._session_project_map.pop(sid, None)
+                worktree_id = self._session_worktree_map.pop(sid, None)
+                self._remote_streaming_owner.pop(sid, None)
+                if user_id:
+                    cleared.append((sid, user_id, project_id, worktree_id))
+
+        for sid, user_id, project_id, worktree_id in cleared:
+            await self._broadcast_user_message(
+                user_id=user_id,
+                message={
+                    "type": "user_streaming_changed",
+                    "session_id": sid,
+                    "is_streaming": False,
+                    "project_id": project_id,
+                    "worktree_id": worktree_id,
+                },
+            )
+        if cleared:
+            logger.info(
+                "Swept %d stale remote streaming session(s) from offline peers",
+                len(cleared),
+            )
+        return len(cleared)
 
     def get_user_streaming_sessions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all currently streaming sessions for a user with their project/worktree IDs.
