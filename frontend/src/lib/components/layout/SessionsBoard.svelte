@@ -11,8 +11,9 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch, Monitor } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
+	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
@@ -32,6 +33,34 @@
 
 	const UNGROUPED = '__ungrouped__';
 	const RECENT_LIMIT = 6;
+
+	// --- Collapsible board sections ---
+	// Users with many sessions can fold away the Pinned / Recent / Projects
+	// sections they don't need. State persists across reloads (per browser).
+	const COLLAPSE_KEY = 'ai-shuffle-board-collapsed-sections';
+	function loadCollapsed(): string[] {
+		if (!browser) return [];
+		try {
+			const raw = localStorage.getItem(COLLAPSE_KEY);
+			const parsed = raw ? JSON.parse(raw) : [];
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	}
+	let collapsedSections = $state<Set<string>>(new Set(loadCollapsed()));
+	function isCollapsed(key: string): boolean {
+		return collapsedSections.has(key);
+	}
+	function toggleSection(key: string) {
+		const next = new Set(collapsedSections);
+		if (next.has(key)) next.delete(key);
+		else next.add(key);
+		collapsedSections = next;
+		if (browser) {
+			try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next])); } catch { /* ignore */ }
+		}
+	}
 
 	let selectedKey = $state<string | null>(null);
 	let deletingSessionId = $state<string | null>(null);
@@ -285,25 +314,37 @@
 				{:else}
 					{#if pinned.length}
 						<section class="board-section">
-							<h2 class="section-label">
+							<button class="section-label section-toggle" onclick={() => toggleSection('pinned')} aria-expanded={!isCollapsed('pinned')}>
+								<ChevronDown size={13} strokeWidth={2.2} class="section-caret {isCollapsed('pinned') ? 'collapsed' : ''}" />
 								<Star size={12} strokeWidth={2} fill="currentColor" class="section-icon" />
 								Pinned <span class="section-count">{pinned.length}</span>
-							</h2>
-							<div class="row-list">
-								{#each pinned as s (s.id)}{@render sessionRow(s, true)}{/each}
-							</div>
+							</button>
+							{#if !isCollapsed('pinned')}
+								<div class="row-list">
+									{#each pinned as s (s.id)}{@render sessionRow(s, true)}{/each}
+								</div>
+							{/if}
 						</section>
 					{/if}
 					{#if recent.length}
 						<section class="board-section">
-							<h2 class="section-label">Recent</h2>
-							<div class="row-list">
-								{#each recent as s (s.id)}{@render sessionRow(s, true)}{/each}
-							</div>
+							<button class="section-label section-toggle" onclick={() => toggleSection('recent')} aria-expanded={!isCollapsed('recent')}>
+								<ChevronDown size={13} strokeWidth={2.2} class="section-caret {isCollapsed('recent') ? 'collapsed' : ''}" />
+								Recent
+							</button>
+							{#if !isCollapsed('recent')}
+								<div class="row-list">
+									{#each recent as s (s.id)}{@render sessionRow(s, true)}{/each}
+								</div>
+							{/if}
 						</section>
 					{/if}
 					<section class="board-section">
-						<h2 class="section-label">Projects <span class="section-count">{projectGroups.length}</span></h2>
+						<button class="section-label section-toggle" onclick={() => toggleSection('projects')} aria-expanded={!isCollapsed('projects')}>
+							<ChevronDown size={13} strokeWidth={2.2} class="section-caret {isCollapsed('projects') ? 'collapsed' : ''}" />
+							Projects <span class="section-count">{projectGroups.length}</span>
+						</button>
+						{#if !isCollapsed('projects')}
 						<div class="proj-grid">
 							{#each projectGroups as g (g.key)}
 								<button class="proj-card" onclick={() => openProject(g.key)}>
@@ -325,6 +366,7 @@
 								</button>
 							{/each}
 						</div>
+						{/if}
 					</section>
 				{/if}
 			{:else}
@@ -579,6 +621,25 @@
 	}
 	.section-label :global(.section-icon) { color: var(--warning); }
 
+	/* Collapsible section headers — click to fold the section away. */
+	.section-toggle {
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		padding: 2px 0;
+		margin: 0;
+		width: fit-content;
+		transition: color 120ms ease;
+	}
+	.section-toggle:hover { color: var(--foreground); }
+	.section-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+	.section-toggle :global(.section-caret) {
+		color: var(--muted-foreground);
+		opacity: 0.7;
+		transition: transform 140ms ease;
+	}
+	.section-toggle :global(.section-caret.collapsed) { transform: rotate(-90deg); }
+
 	/* Project grid */
 	.proj-grid {
 		display: grid;
@@ -819,6 +880,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.proj-card { transition: none; }
+		.section-toggle :global(.section-caret) { transition: none; }
 		.dot-streaming, .dot-attention { animation: none; }
 	}
 </style>
