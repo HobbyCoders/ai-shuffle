@@ -4,8 +4,10 @@
 	 *
 	 * Streamlined categories:
 	 * - Account: General, Security, Connections (merged)
+	 * - Connections: Claude/GitHub auth + Devices (cluster registry)
 	 * - AI: API Keys & Model Selection (merged, compact)
-	 * - System: Users, Webhooks, Cleanup (merged)
+	 * - API: Rate limits + API users (admin)
+	 * - System: System prompt (admin)
 	 */
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
@@ -20,16 +22,18 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe, Code2 } from 'lucide-svelte';
 	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
 	import SecuritySection from './settings/SecuritySection.svelte';
 	import ConnectionsSection from './settings/ConnectionsSection.svelte';
+	import DevicesSection from './settings/DevicesSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
 	import BrowserSection from './settings/BrowserSection.svelte';
+	import ApiTab from './settings/ApiTab.svelte';
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
@@ -42,7 +46,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -63,6 +67,7 @@
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
 					{ id: 'connectors', label: 'Connectors', icon: Plug },
 					{ id: 'browser', label: 'Browser', icon: Globe },
+					{ id: 'api', label: 'API', icon: Code2 },
 					{ id: 'system', label: 'System', icon: SlidersHorizontal },
 					{ id: 'logs', label: 'Logs', icon: ScrollText }
 				]
@@ -475,6 +480,12 @@
 							onConnectGithub={connectGithub}
 							onDisconnectGithub={disconnectGithub}
 						/>
+
+						<!-- Devices (cluster registry) — cross-install / cloud-offload UI.
+						     Admin-gated: it surfaces and rotates the shared cluster secret. -->
+						{#if $isAdmin}
+							<DevicesSection />
+						{/if}
 					</div>
 				{/if}
 
@@ -496,6 +507,13 @@
 				{#if activeTab === 'browser' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<BrowserSection />
+					</div>
+				{/if}
+
+				<!-- API -->
+				{#if activeTab === 'api' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<ApiTab />
 					</div>
 				{/if}
 
