@@ -367,6 +367,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				project: _state.project || undefined,
 				worktree_id: _state.worktreeId || undefined,
 				overrides: buildOverrides(),
+				// "Send now": flag the replacement query so a start-frame send that
+				// fails on a socket dropped during the interrupt drain doesn't drop
+				// the message server-side (it streams via sync_engine + polling).
+				interrupt_followup: mustInterrupt || undefined,
 			});
 			// interruptPending cleared by 'start' handler (ws-message-handlers.ts:395)
 			// once the new query's stream_start event arrives.

@@ -36,6 +36,13 @@ export interface WsClientQuery {
 		effort?: string;
 	};
 	worktree_id?: string | null;
+	/**
+	 * "Send now": set when this query is the replacement fired right after an
+	 * `interrupt_for_query` was confirmed. Tells the server the origin socket may
+	 * have dropped during the interrupt drain, so a failed `start` frame must not
+	 * drop the message — it should stream via sync_engine + polling instead.
+	 */
+	interrupt_followup?: boolean;
 }
 
 /** Stop/interrupt the currently running query. */
