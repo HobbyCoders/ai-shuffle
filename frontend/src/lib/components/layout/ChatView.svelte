@@ -109,7 +109,9 @@
 		<!-- Empty state: Workspace selector + centered input -->
 		<div class="empty-state">
 			{#if $activeSession.error}
-				<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
+				<div class="empty-error-overlay">
+					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
+				</div>
 			{/if}
 
 			<div class="empty-state-content">
@@ -313,6 +315,15 @@
 		gap: 0.5rem;
 		width: 100%;
 		max-width: 640px;
+	}
+
+	/* Overlay the error so it doesn't shift the vertically-centered content. */
+	.empty-error-overlay {
+		position: absolute;
+		top: 1rem;
+		left: 1rem;
+		right: 1rem;
+		z-index: 5;
 	}
 
 	.empty-input-wrapper {

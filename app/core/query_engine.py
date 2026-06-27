@@ -574,6 +574,10 @@ async def execute_query(
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
+                    # Funnel through the unified notification system so the
+                    # non-streaming /query and /conversation paths reach the
+                    # bell + every device, matching the streaming paths.
+                    await _emit_api_error_notification(api_user_id, session_id, api_err)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

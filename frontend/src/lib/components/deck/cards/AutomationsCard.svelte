@@ -522,7 +522,7 @@
 
 	<!-- Error display -->
 	{#if error}
-		<div transition:slide={{ duration: 200 }}>
+		<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
 			<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 		</div>
 	{/if}
@@ -702,7 +702,7 @@
 		<!-- Detail (run history) — full canvas; AutomationDetail renders its own header/back. -->
 		<div class="automations-card card-system" style="position: relative;">
 			{#if error}
-				<div transition:slide={{ duration: 200 }}>
+				<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
 					<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 				</div>
 			{/if}
@@ -971,6 +971,10 @@
 	/* ═══════════════════ Toast / Error ═══════════════════ */
 	.auto-banner {
 		margin: 0 16px;
+	}
+
+	.auto-error-banner {
+		margin: 12px 16px 0;
 	}
 
 	/* ═══════════════════ Content ═══════════════════ */

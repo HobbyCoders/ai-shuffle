@@ -130,20 +130,15 @@
 				{:else}
 					{#each history as n (n.id)}
 						{@const Icon = ICONS[n.severity]}
-						<div
-							class="notif-item sev-{n.severity}"
-							class:unread={!n.read}
-							role="button"
-							tabindex="0"
-							onclick={() => onItemClick(n)}
-							onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onItemClick(n)}
-						>
-							<span class="item-icon" aria-hidden="true"><Icon size={15} strokeWidth={1.75} /></span>
-							<div class="item-body">
-								{#if n.title}<span class="item-title">{n.title}</span>{/if}
-								<span class="item-message">{n.message}</span>
-								<span class="item-time">{relativeTime(n.created_at)}</span>
-							</div>
+						<div class="notif-item sev-{n.severity}" class:unread={!n.read}>
+							<button type="button" class="item-main" onclick={() => onItemClick(n)}>
+								<span class="item-icon" aria-hidden="true"><Icon size={15} strokeWidth={1.75} /></span>
+								<span class="item-body">
+									{#if n.title}<span class="item-title">{n.title}</span>{/if}
+									<span class="item-message">{n.message}</span>
+									<span class="item-time">{relativeTime(n.created_at)}</span>
+								</span>
+							</button>
 							{#if n.action}
 								<button
 									class="item-action"
@@ -325,8 +320,30 @@
 		gap: 9px;
 		padding: 10px 12px;
 		border-bottom: 1px solid var(--border);
-		cursor: pointer;
 		transition: background-color 120ms ease;
+	}
+
+	/* The row's main click target (mark-read / open) — a real button so the
+	   action/dismiss buttons aren't nested inside an interactive element. */
+	.item-main {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: flex-start;
+		gap: 9px;
+		padding: 0;
+		background: none;
+		border: none;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.item-main:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: 6px;
 	}
 
 	.notif-item:last-child {

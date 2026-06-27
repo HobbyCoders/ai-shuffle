@@ -832,7 +832,7 @@ async def handle_done(
         # Notify watching mobile devices that the session finished (best-effort,
         # non-blocking). Skip user-initiated interrupts — the user is present.
         if not is_interrupted:
-            session_name = (session_row or {}).get("name") or "Your session"
+            session_name = (session_row or {}).get("title") or "Your session"
 
             # OS/mobile push adapter (unchanged) — reaches devices not on this page.
             try:

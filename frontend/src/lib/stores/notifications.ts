@@ -148,6 +148,8 @@ function _emit(
 		source?: NotificationSource;
 		id?: string;
 		read?: boolean;
+		/** Server-supplied timestamp; falls back to now for client-originated. */
+		created_at?: number;
 	}
 ): string {
 	const severity = opts.severity ?? 'info';
@@ -170,7 +172,7 @@ function _emit(
 		persist,
 		read: opts.read ?? false,
 		dismissed: false,
-		created_at: Date.now(),
+		created_at: opts.created_at ?? Date.now(),
 		duration_ms,
 		session_id: opts.session_id,
 	};
@@ -397,6 +399,11 @@ export const toast = {
 		dismissLive(`c${id}`);
 	},
 	dismissAll(): void {
-		_store.update((s) => ({ ...s, live: s.live.filter((n) => n.surface !== 'toast') }));
+		_store.update((s) => {
+			for (const n of s.live) {
+				if (n.surface === 'toast') _clearTimer(n.id);
+			}
+			return { ...s, live: s.live.filter((n) => n.surface !== 'toast') };
+		});
 	},
 };

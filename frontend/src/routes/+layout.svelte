@@ -18,6 +18,7 @@
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import ToastViewport from '$lib/components/ToastViewport.svelte';
+	import BannerHost from '$lib/components/BannerHost.svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
@@ -166,6 +167,7 @@
 	<!-- PWA Components -->
 	<InstallPrompt />
 	<ToastViewport />
+	<BannerHost />
 
 	{@render children?.()}
 {/if}
