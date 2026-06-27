@@ -170,6 +170,28 @@ class TestRequestAnswers(TestUserQuestionHandler):
         assert timeout_call["session_id"] == "session-1"
 
     @pytest.mark.asyncio
+    async def test_request_answers_honors_configured_timeout(self, handler, sample_questions, mock_broadcast):
+        """The backstop passed to wait_for comes from user_question_timeout_seconds."""
+        captured = {}
+
+        async def fake_wait_for(awaitable, timeout):
+            captured["timeout"] = timeout
+            awaitable.close()  # avoid "coroutine was never awaited"
+            raise asyncio.TimeoutError()
+
+        with patch("app.core.user_question_handler.settings.user_question_timeout_seconds", 1234), \
+             patch.object(asyncio, "wait_for", side_effect=fake_wait_for):
+            await handler.request_answers(
+                request_id="req-123",
+                tool_use_id="tool-456",
+                session_id="session-1",
+                questions=sample_questions,
+                broadcast_func=mock_broadcast,
+            )
+
+        assert captured["timeout"] == 1234.0
+
+    @pytest.mark.asyncio
     async def test_request_answers_timeout_cleans_up_pending(self, handler, sample_questions, mock_broadcast):
         """request_answers should remove pending request on timeout."""
         with patch.object(asyncio, 'wait_for', side_effect=asyncio.TimeoutError()):

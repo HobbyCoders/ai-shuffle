@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # Each idle subprocess uses ~100MB RAM, so 3 sessions ≈ 300MB worst case.
     sdk_session_pool_size: int = 3
 
+    # AskUserQuestion backstop (seconds). A parked question keeps its SDK
+    # subprocess alive AND pinned in the pool — while awaiting an answer the
+    # session still counts as "streaming", so idle/LRU eviction skips it. The
+    # backstop has to be long enough that a question survives you stepping away
+    # across many sessions, but short enough that a truly-abandoned session
+    # reaps its hot subprocess instead of holding ~100MB for hours. 1h is the
+    # default; raise it toward Claude-Desktop-style persistence if you have the
+    # headroom, or lower it on a tight box. Override via
+    # USER_QUESTION_TIMEOUT_SECONDS.
+    user_question_timeout_seconds: int = 3600  # 1 hour
+
     # Admission backpressure for the subagent fan-out. A single orchestrator
     # session can spawn dozens of subagent node subprocesses; rather than letting
     # a destructive watchdog reap in-flight work, we refuse to admit NEW top-level

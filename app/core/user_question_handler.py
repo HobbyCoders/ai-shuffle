@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,14 +113,16 @@ class UserQuestionHandler:
         except Exception:
             pass
 
-        # Wait for response. The backstop is intentionally long (24h) so a
-        # question behaves like Claude Desktop — it persists until the user
-        # answers or the session is closed, rather than vanishing after a few
-        # minutes when the user is busy across many sessions. The timeout still
-        # exists only to reap truly-abandoned sessions (and the held SDK
-        # subprocess) instead of leaking them forever.
+        # Wait for response. The backstop persists the question while the user
+        # is busy across many sessions (rather than vanishing after a few
+        # minutes), but stays short enough to reap a truly-abandoned session and
+        # its held SDK subprocess instead of pinning ~100MB for hours. A parked
+        # question counts as "streaming", so idle eviction can't reclaim it — the
+        # timeout is the only reaper. Tunable via user_question_timeout_seconds
+        # (default 1h); see app/core/config.py.
+        timeout_seconds = float(getattr(settings, "user_question_timeout_seconds", 3600))
         try:
-            await asyncio.wait_for(request.response_event.wait(), timeout=86400.0)  # 24h backstop
+            await asyncio.wait_for(request.response_event.wait(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             async with self._lock:
                 if session_id in self._pending_questions:
