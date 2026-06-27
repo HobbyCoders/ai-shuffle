@@ -122,7 +122,9 @@ async def get_cloud_git_state(
             },
         )
     except cloud_relay.InstallOffline as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        # Device unreachable -> 503, kept distinct from the worker's dirty-tree
+        # 409 so the frontend never mistakes "offline" for "stash & switch".
+        raise HTTPException(status_code=503, detail=str(e))
     except cloud_relay.CloudRelayError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -183,7 +185,8 @@ async def _create_offload_via_registry(
             cloud_relay.resolve_install_base_url, body.target_instance_id
         )
     except cloud_relay.InstallOffline as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        # Device unreachable -> 503 (see note on the cluster_intake handler below).
+        raise HTTPException(status_code=503, detail=str(e))
 
     clone_url, github_repo_name, default_branch = await run_sync(
         _resolve_github_repo, body.project_id
@@ -219,7 +222,11 @@ async def _create_offload_via_registry(
             auto_stash=body.auto_stash,
         )
     except cloud_relay.InstallOffline as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        # The device went offline during handoff -> 503, NOT 409. The frontend
+        # treats a 409 on this path as a dirty-tree conflict and offers a
+        # "Stash & switch" retry; an unreachable device must never trigger that
+        # (stashing can't fix offline, and the retry would just fail again).
+        raise HTTPException(status_code=503, detail=str(e))
     except cloud_relay.CloudRelayError as e:
         # Preserve a worker 409 (dirty checkout on the remote) with its detail so
         # the frontend can offer "Stash & switch" (retry with auto_stash=true).

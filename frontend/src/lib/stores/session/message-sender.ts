@@ -851,6 +851,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// branch-switch flow (gitCheckoutAction.ts) — surface the worker's
 				// message in a toast with a "Stash & switch" action that retries the
 				// whole offload with auto_stash=true. Only the first attempt offers it.
+				// A 409 here is ONLY a dirty-tree conflict: an unreachable device
+				// comes back as 503, so this never offers stash for an offline peer.
 				const isDirtyConflict = !autoStash && isApiError(error) && error.status === 409;
 				const rawError = isApiError(error)
 					? error.detail
