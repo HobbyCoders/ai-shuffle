@@ -36,6 +36,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { username } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -163,6 +164,8 @@
 
 		<span class="tb-context-title">{mobileTitle}</span>
 
+		<NotificationCenter />
+
 		<button class="tb-new-icon" onclick={onNewSession} aria-label="New session (Cmd/Ctrl+N)" title="New session">
 			<Plus size={18} strokeWidth={2.2} />
 		</button>
@@ -271,6 +274,8 @@
 			<button class="tb-new" onclick={onNewSession} title="New session (Cmd/Ctrl+N)">
 				<Plus size={16} strokeWidth={2} /><span class="tb-new-label">New session</span>
 			</button>
+
+			<NotificationCenter />
 
 			<div class="tb-dropdown" bind:this={overflowDropdownEl}>
 				<button

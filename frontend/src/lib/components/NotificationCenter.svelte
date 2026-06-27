@@ -1,14 +1,17 @@
 <script lang="ts">
 	/**
 	 * NotificationCenter — the bell + history panel for the unified notification
-	 * system. Lives in the PageHeader left-meta cluster next to the Claude status
-	 * indicator and reads the persisted `history` slice of the notification store.
+	 * system. Lives in the AppTopBar right cluster (always visible, independent of
+	 * the chat view) and reads the persisted `history` slice of the notification
+	 * store.
 	 *
 	 * - Bell button with an unread-count badge.
 	 * - Dropdown panel listing persisted notifications (newest first) with
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile / branch / claude-status popovers (single-open-at-a-time).
+	 * - Desktop: the panel is right-anchored under the button (the bell sits in the
+	 *   top-bar right cluster) so it expands leftward and can't clip off-screen.
 	 * - Outside-click + Escape to close. On mobile (≤1080px — the foldable-aware
 	 *   header breakpoint) the panel is `position: fixed` so the right-edge anchor
 	 *   can't clip it, mirroring ClaudeStatusIndicator.
@@ -97,7 +100,7 @@
 		aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
 		title="Notifications"
 	>
-		<Bell size={15} strokeWidth={1.5} />
+		<Bell size={18} strokeWidth={1.5} />
 		{#if unread > 0}
 			<span class="notif-badge" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>
 		{/if}
@@ -179,12 +182,13 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
+		/* Match the 34px top-bar buttons (account / search / new session). */
+		width: 34px;
+		height: 34px;
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: 50%;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		opacity: 0.65;
@@ -228,11 +232,11 @@
 		pointer-events: none;
 	}
 
-	/* Desktop: left-anchored under the button (left cluster), expands right. */
+	/* Desktop: right-anchored under the button (top-bar right cluster), expands left. */
 	.notif-panel {
 		position: absolute;
 		top: calc(100% + 6px);
-		left: 0;
+		right: 0;
 		z-index: 100;
 		width: min(360px, calc(100vw - 24px));
 		max-height: min(440px, calc(100vh - 120px));
@@ -474,7 +478,7 @@
 
 		.notif-panel {
 			position: fixed;
-			top: 92px;
+			top: 58px;
 			left: 8px;
 			right: 8px;
 			width: auto;
