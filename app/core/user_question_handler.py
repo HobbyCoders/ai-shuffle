@@ -70,8 +70,14 @@ class UserQuestionHandler:
                 self._pending_questions[session_id] = {}
             self._pending_questions[session_id][request_id] = request
 
-        # Broadcast question request to frontend
-        await broadcast_func({
+        # Broadcast question request to frontend. broadcast_func (send_json)
+        # returns False when the origin socket is already dead — in that case the
+        # modal never reaches the client. We keep the request pending anyway: the
+        # frontend recovers it on reconnect via get_pending_questions and the
+        # streaming heartbeat advertises the pending count. But log it loudly,
+        # because a silently-undelivered question used to look identical to a
+        # working one while the user waited.
+        delivered = await broadcast_func({
             "type": "user_question",
             "session_id": session_id,
             "request_id": request_id,
@@ -79,7 +85,13 @@ class UserQuestionHandler:
             "questions": questions
         })
 
-        logger.debug(f"User question request sent: {request_id} with {len(questions)} questions")
+        if delivered is False:
+            logger.warning(
+                f"User question {request_id} could not be delivered to the origin "
+                f"socket (connection dead); awaiting reconnect resync for session {session_id}"
+            )
+        else:
+            logger.debug(f"User question request sent: {request_id} with {len(questions)} questions")
 
         # Notify watching mobile devices that input is needed (best-effort,
         # non-blocking — must never delay or break the question flow).
@@ -99,9 +111,14 @@ class UserQuestionHandler:
         except Exception:
             pass
 
-        # Wait for response (with timeout)
+        # Wait for response. The backstop is intentionally long (24h) so a
+        # question behaves like Claude Desktop — it persists until the user
+        # answers or the session is closed, rather than vanishing after a few
+        # minutes when the user is busy across many sessions. The timeout still
+        # exists only to reap truly-abandoned sessions (and the held SDK
+        # subprocess) instead of leaking them forever.
         try:
-            await asyncio.wait_for(request.response_event.wait(), timeout=600.0)  # 10 min timeout
+            await asyncio.wait_for(request.response_event.wait(), timeout=86400.0)  # 24h backstop
         except asyncio.TimeoutError:
             async with self._lock:
                 if session_id in self._pending_questions:

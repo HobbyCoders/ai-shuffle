@@ -1020,7 +1020,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('question', { questionCount: request.questions.length });
-				update(s => ({ ...s, pendingQuestions: [...s.pendingQuestions, request] }));
+				// Dedup by request_id: a reconnect resync (get_pending_questions ->
+				// pending_questions) can race with this live event, and without this
+				// guard the same question would render twice.
+				update(s => s.pendingQuestions.some(q => q.request_id === request.request_id)
+					? s
+					: { ...s, pendingQuestions: [...s.pendingQuestions, request] });
 				break;
 			}
 
@@ -1054,6 +1059,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (same) return s;
 					return { ...s, pendingQuestions: questions };
 				});
+				break;
+			}
+
+			case 'session_attention': {
+				// User-level broadcast: a (possibly background) session is awaiting
+				// the user's input. Reaches every one of the user's devices, so the
+				// sessions board lights up regardless of which tab owns the query.
+				const attnSessionId = data.session_id as string | undefined;
+				const count = (data.count as number | undefined) ?? 0;
+				// The active session surfaces the prompt through its own modal, not a
+				// background dot — don't double-signal it. Clears (count 0) still apply.
+				if (count > 0 && attnSessionId === getState().sessionId) break;
+				setNeedsAttention(attnSessionId, count);
 				break;
 			}
 

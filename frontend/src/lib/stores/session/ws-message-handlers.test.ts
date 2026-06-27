@@ -557,6 +557,75 @@ describe('ws-message-handlers', () => {
 			expect(deps.update).not.toHaveBeenCalled();
 			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
 		});
+
+		it('should not duplicate a question already in the active queue (resync race)', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingQuestions = [
+				{ request_id: 'question-1', tool_use_id: 'tool-1', questions: [] },
+			] as unknown as ActiveSessionState['pendingQuestions'];
+
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question',
+				session_id: 'session-1',
+				request_id: 'question-1',
+				tool_use_id: 'tool-1',
+				questions: [{ question: 'Proceed?', header: 'Confirm' }],
+			});
+
+			expect(applied?.pendingQuestions).toHaveLength(1);
+		});
+	});
+
+	describe('session_attention handler', () => {
+		// Applies the function passed to backgroundPermissions.update against a
+		// starting Map so we can assert the resulting attention state.
+		function applyAttention(start: Map<string, number>): Map<string, number> {
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			return fn(start);
+		}
+
+		it('sets attention for a background session', () => {
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_attention', session_id: 'session-bg', count: 2 });
+
+			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
+			expect(applyAttention(new Map()).get('session-bg')).toBe(2);
+		});
+
+		it('does not raise a background dot for the active session (modal handles it)', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_attention', session_id: 'session-1', count: 1 });
+
+			expect(deps.backgroundPermissions.update).not.toHaveBeenCalled();
+		});
+
+		it('clears attention on count 0 even for the active session', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_attention', session_id: 'session-1', count: 0 });
+
+			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
+			expect(applyAttention(new Map([['session-1', 1]])).has('session-1')).toBe(false);
+		});
 	});
 
 	describe('heartbeat handler', () => {

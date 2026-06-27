@@ -2140,7 +2140,8 @@ class ChatWebSocketHandler:
                 project_id=project_id,
                 overrides=overrides,
                 broadcast_func=self.send_json,  # Pass send_json for permission requests
-                api_user_id=self.api_user_id  # Pass for user-scoped credential resolution
+                api_user_id=self.api_user_id,  # Pass for user-scoped credential resolution
+                user_id=self.user_id  # Pass for user-level broadcasts (awaiting-input indicator)
             ):
                 if (
                     not stop_interrupt_reissued

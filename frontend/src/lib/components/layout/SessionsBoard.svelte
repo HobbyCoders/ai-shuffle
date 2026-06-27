@@ -121,6 +121,13 @@
 	function needsAttention(id: string): boolean {
 		return $backgroundPermissions.has(id);
 	}
+	// Aggregate "needs you" signal so a user juggling many sessions never has to
+	// click through each one to find the one parked on a question.
+	const awaitingCount = $derived($backgroundPermissions.size);
+	function openFirstAwaiting(): void {
+		const first = $backgroundPermissions.keys().next().value as string | undefined;
+		if (first) onOpenSession(first);
+	}
 	function tsOf(s: Session): number {
 		return new Date(s.updated_at || s.created_at).getTime();
 	}
@@ -402,6 +409,17 @@
 				<h1 class="board-title">Sessions</h1>
 				<span class="board-count">{totalCount}</span>
 			{/if}
+			{#if awaitingCount > 0}
+				<button
+					type="button"
+					class="awaiting-pill"
+					onclick={openFirstAwaiting}
+					title="Jump to a session awaiting your input"
+				>
+					<MessageSquare size={12} strokeWidth={2} />
+					{awaitingCount} awaiting input
+				</button>
+			{/if}
 		</div>
 		{#if mode === 'overview' && deviceOptions.length > 1}
 			<div class="board-head-right">
@@ -600,10 +618,13 @@
 		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSession(session.id); } }}
 	>
 		<span class="row-status">
-			{#if isStreaming(session.id)}
+			{#if needsAttention(session.id)}
+				<!-- Awaiting input takes precedence over "running": a session parked
+				     on a question is still technically streaming, but what the user
+				     needs to see is that it's waiting on them. -->
+				<span class="dot dot-attention" title="Awaiting your input"></span>
+			{:else if isStreaming(session.id)}
 				<span class="dot dot-streaming" title="Running"></span>
-			{:else if needsAttention(session.id)}
-				<span class="dot dot-attention" title="Needs attention"></span>
 			{:else}
 				<span class="dot dot-idle"></span>
 			{/if}
@@ -1035,6 +1056,25 @@
 	.dot-attention { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
 	.dot-idle { background: color-mix(in oklch, var(--muted-foreground) 45%, transparent); }
 	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+	.awaiting-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		margin-left: 8px;
+		padding: 3px 9px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent);
+		background: color-mix(in oklch, var(--warning) 14%, transparent);
+		color: var(--warning);
+		font-size: 0.72rem;
+		font-weight: 600;
+		line-height: 1;
+		cursor: pointer;
+		animation: pulse 1.8s ease-in-out infinite;
+	}
+	.awaiting-pill:hover { background: color-mix(in oklch, var(--warning) 24%, transparent); }
+	@media (prefers-reduced-motion: reduce) { .awaiting-pill { animation: none; } }
 
 	.row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 	.row-line1 { display: flex; align-items: center; gap: 8px; }
