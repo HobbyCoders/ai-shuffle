@@ -622,6 +622,36 @@ class TestLiveActiveTasks:
         await live_session_store.cleanup_session(session_id)
         tr.reset_all()
 
+    @pytest.mark.asyncio
+    async def test_end_streaming_clears_latch_even_when_session_absent(self):
+        """end_streaming clears the unpark latch ABOVE its not-found guard.
+
+        Backstop hardening: if a follow-up unpark turn dies/cancels before its
+        start_streaming (the primary clear) AND its session buffer was already
+        evicted, the error-path end_streaming finds no session. The clear must
+        still fire (it sits above the `if not session: return None` guard) so the
+        latch can't strand a polling client until the ~30s reaper.
+        """
+        from app.core.live_session_store import live_session_store
+        from app.core.task_registry import task_registry as tr
+
+        session_id = "live-unpark-evicted"
+        tr.reset_all()
+
+        # Latch set, but the session is NOT in the live store (already reaped).
+        tr.mark_unpark_pending(session_id)
+        assert live_session_store.get_session(session_id) is None
+        assert tr.is_unpark_pending(session_id) is True
+
+        # end_streaming returns None (session not found) yet still clears the latch.
+        result = await live_session_store.end_streaming(
+            session_id=session_id, metadata={}, interrupted=True
+        )
+        assert result is None
+        assert tr.is_unpark_pending(session_id) is False
+
+        tr.reset_all()
+
 
 # =============================================================================
 # get_task accessor
