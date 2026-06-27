@@ -18,6 +18,7 @@ import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     TaskNotificationMessage,
+    TaskStartedMessage,
     TaskUpdatedMessage,
     ToolResultBlock,
     ToolUseBlock,
@@ -253,3 +254,69 @@ class TestRecordTaskMessageUpdate:
         # complete_task no-ops on an unknown task — defensive, never raises.
         _record_task_message("sess-1", _updated("ghost", status="killed"))
         assert task_registry.get_active("sess-1") == []
+
+
+# ---------------------------------------------------------------------------
+# TaskStarted → registry kind discrimination (the agent-vs-shell badge fix)
+# ---------------------------------------------------------------------------
+#
+# The SDK emits the same TaskStartedMessage for every flavour of background work
+# and discriminates them only via ``task_type``: "local_bash" is a backgrounded
+# shell command (Bash/PowerShell run_in_background), while "local_agent" /
+# "remote_agent" / "local_workflow" are sub-agents / workflows. The registry kind
+# must follow suit so the task bar renders the SHELL badge for shell commands (not
+# the agent badge) and so a backgrounded shell command does not pin a parked
+# session in the pool (``has_active_background_agent`` counts kind=="agent" only).
+
+def _started(task_id, *, task_type=None, uuid="s-1", tool_use_id="tu-1"):
+    """Build a real SDK TaskStartedMessage (so isinstance checks match)."""
+    return TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id=task_id,
+        description="bg work",
+        uuid=uuid,
+        session_id="sess-1",
+        tool_use_id=tool_use_id,
+        task_type=task_type,
+    )
+
+
+class TestRecordTaskStartedKind:
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        task_registry.reset_all()
+        yield
+        task_registry.reset_all()
+
+    def test_local_bash_records_shell_kind(self):
+        # A backgrounded Bash/PowerShell command → "shell" badge, no pool pin.
+        _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
+        rec = task_registry.get_task("sess-1", "t-bash")
+        assert rec["kind"] == "shell"
+        assert task_registry.has_active_background_agent("sess-1") is False
+
+    def test_local_agent_records_agent_kind(self):
+        _record_task_message("sess-1", _started("t-agent", task_type="local_agent"))
+        rec = task_registry.get_task("sess-1", "t-agent")
+        assert rec["kind"] == "agent"
+        assert task_registry.has_active_background_agent("sess-1") is True
+
+    def test_remote_agent_and_workflow_record_agent_kind(self):
+        _record_task_message("sess-1", _started("t-remote", task_type="remote_agent"))
+        _record_task_message("sess-1", _started("t-wf", task_type="local_workflow"))
+        assert task_registry.get_task("sess-1", "t-remote")["kind"] == "agent"
+        assert task_registry.get_task("sess-1", "t-wf")["kind"] == "agent"
+
+    def test_missing_task_type_defaults_to_agent(self):
+        # Older CLI with no task_type field → historical behaviour (sub-agent).
+        _record_task_message("sess-1", _started("t-none", task_type=None))
+        assert task_registry.get_task("sess-1", "t-none")["kind"] == "agent"
+
+    def test_started_this_turn_marked_for_shell_too(self):
+        # The in-stream unpark stash is gated separately by was_background_launch
+        # (False for shell, since only Task/Agent launches are recorded), so marking
+        # started-this-turn for a shell task is harmless — assert it still happens
+        # so the recording side-effect stays uniform across kinds.
+        _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
+        assert task_registry.was_started_this_turn("sess-1", "t-bash") is True

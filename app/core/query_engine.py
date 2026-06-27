@@ -210,8 +210,22 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
         return
     try:
         if isinstance(message, TaskStartedMessage):
+            # The SDK emits the SAME TaskStartedMessage for every flavour of
+            # background work and discriminates them only via ``task_type``:
+            #   "local_bash"                      → a backgrounded shell command
+            #                                       (Bash/PowerShell run_in_background)
+            #   "local_agent"/"remote_agent"/
+            #   "local_workflow"                  → a sub-agent / workflow
+            # Map "local_bash" onto the registry's "shell" kind so it renders the
+            # SHELL badge (not the agent badge) and — correctly — does NOT pin a
+            # parked session in the pool nor spin up an unpark drain pump (a
+            # backgrounded shell command has no parent turn to unpark). Anything
+            # else, including a missing task_type from an older CLI, stays "agent"
+            # — the historical behaviour, right for sub-agents.
+            task_type = getattr(message, "task_type", None)
+            kind = "shell" if task_type == "local_bash" else "agent"
             task_registry.start_task(
-                session_id, message.task_id, "agent", getattr(message, "description", None)
+                session_id, message.task_id, kind, getattr(message, "description", None)
             )
             # Scope the in-stream unpark stash to THIS turn: record that this
             # background agent's TaskStartedMessage arrived during the turn now
