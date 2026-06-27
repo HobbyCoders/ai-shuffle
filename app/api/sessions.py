@@ -617,6 +617,15 @@ async def get_live_session(
     # a task finishing is reflected on the very next poll. [] when none.
     active_tasks = task_registry.get_active(session_id)
 
+    # "Unpark pending": a background sub-agent completed (so it has already dropped
+    # out of ``active_tasks``) and the parent's unpark follow-up turn is committed
+    # but has NOT yet flipped ``is_streaming`` true. Surfaced on every response body
+    # so a polling client keeps its park-poll alive across that gap instead of
+    # seeing a transient (is_streaming=false, activeTasks=[]) and STOPPING — which
+    # stranded the parked UI until a full reload. Clears the instant the follow-up
+    # streams. See task_registry / the session poller.
+    unpark_pending = task_registry.is_unpark_pending(session_id)
+
     # Cross-install session: owned by another install on the shared DB. History
     # is already in the shared DB, so there is ALWAYS something to show. When the
     # owning install is reachable we relay its live stream (fully controllable);
@@ -713,10 +722,11 @@ async def get_live_session(
             live_data = live_session_store.get_session_since(session_id, since_update_id)
             if live_data is None:
                 # No MESSAGE updates since last check. Tasks live outside the
-                # live store's update-id delta, so if any are running we still
-                # return a lightweight body carrying the fresh activeTasks rather
-                # than a 304 that would hide a task change from the poller.
-                if active_tasks:
+                # live store's update-id delta, so if any are running — OR an
+                # unpark follow-up is mid-handoff — we still return a lightweight
+                # body carrying the fresh activeTasks + unpark_pending rather than a
+                # 304 that would hide the state from the poller.
+                if active_tasks or unpark_pending:
                     body = {
                         "session_id": session_id,
                         "is_streaming": live_session_store.is_streaming(session_id),
@@ -724,12 +734,14 @@ async def get_live_session(
                         "messages": [],
                         "initial_message_count": since_update_id,
                         "activeTasks": active_tasks,
+                        "unpark_pending": unpark_pending,
                     }
                     if session_meta:
                         body["session_meta"] = session_meta
                     return body
                 return Response(status_code=304)
             live_data["activeTasks"] = active_tasks
+            live_data["unpark_pending"] = unpark_pending
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
@@ -738,6 +750,7 @@ async def get_live_session(
             live_data = live_session_store.get_session_dict(session_id)
             if live_data:
                 live_data["activeTasks"] = active_tasks
+                live_data["unpark_pending"] = unpark_pending
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
@@ -862,6 +875,7 @@ async def get_live_session(
                 f"({len(live_msgs)} msgs > store {len(messages)} msgs)"
             )
             pending_live_full["activeTasks"] = active_tasks
+            pending_live_full["unpark_pending"] = unpark_pending
             if session_meta:
                 pending_live_full["session_meta"] = session_meta
             return pending_live_full
@@ -910,6 +924,7 @@ async def get_live_session(
             "cache_read_tokens": cache_read,
         },
         "activeTasks": active_tasks,
+        "unpark_pending": unpark_pending,
     }
     if session_meta:
         result["session_meta"] = session_meta

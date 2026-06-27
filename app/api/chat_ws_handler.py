@@ -303,6 +303,7 @@ async def _deliver_unpark_impl(
     Returns ``True`` if a follow-up turn was handed off (caller must return).
     """
     from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+    from app.core.task_registry import task_registry
 
     if not pending:
         return False
@@ -344,6 +345,17 @@ async def _deliver_unpark_impl(
         interrupted=False,
     )
 
+    # Latch "unpark pending" BEFORE handing off, so a polling client never sees a
+    # transient (is_streaming=false, activeTasks=[]) and STOPS in the gap between
+    # the background task completing (already dropped from ``get_active`` above via
+    # ``complete_task``) and the follow-up turn flipping ``is_streaming`` true. The
+    # follow-up's ``live_session_store.start_streaming`` clears it (it flips with
+    # ``is_streaming``); ``end_streaming`` / ``clear_session`` clear it as
+    # backstops; the ``except`` below clears it if the hand-off never happens. Set
+    # AFTER the ``end_streaming`` above (which also clears the latch) so it isn't
+    # immediately wiped. See ``/live`` (``unpark_pending``) and the session poller.
+    task_registry.mark_unpark_pending(session_id)
+
     try:
         # ``deferred_delivery=True``: this follow-up turn is started server-side
         # by the drain pump (or in-stream stash), often AFTER the user navigated
@@ -365,7 +377,10 @@ async def _deliver_unpark_impl(
     except Exception as exc:
         # Best-effort: if the follow-up couldn't start, fall through to normal
         # completion (the notification was already deduped, so it won't
-        # retrigger — the parent simply won't unpark this time).
+        # retrigger — the parent simply won't unpark this time). Drop the latch we
+        # set above so a polling client doesn't park-poll forever waiting on a
+        # follow-up that will never stream.
+        task_registry.clear_unpark_pending(session_id)
         ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
         return False
 

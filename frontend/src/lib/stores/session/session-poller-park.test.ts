@@ -25,6 +25,7 @@ type LiveOpts = {
 	lastUpdateId: number;
 	isStreaming: boolean;
 	activeTasks?: Array<Record<string, unknown>>;
+	unparkPending?: boolean;
 };
 
 function makeLive(opts: LiveOpts): Response {
@@ -41,6 +42,7 @@ function makeLive(opts: LiveOpts): Response {
 			initial_message_count: 0,
 			usage: {},
 			activeTasks: opts.activeTasks ?? [],
+			unpark_pending: opts.unparkPending ?? false,
 		}),
 	} as unknown as Response;
 }
@@ -126,6 +128,52 @@ describe('session-poller · park-poll lifecycle', () => {
 		await vi.advanceTimersByTimeAsync(STREAMING_MS);
 		expect(fetchMock.mock.calls.length).toBe(1); // fast-rate tick confirmed
 		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false); // fully stopped — idle
+	});
+
+	it('keeps park-polling across the unpark hand-off gap (no tasks, unpark_pending) instead of stopping', async () => {
+		// 1) STREAMING — startStreaming fires an immediate poll, then a fast timer.
+		fetchMock.mockResolvedValue(makeLive({ lastUpdateId: 1, isStreaming: true }));
+		sessionPoller.startStreaming(SESSION_ID);
+		await flush();
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// 2) PARKED + a background task → downshift to the park rate.
+		fetchMock.mockResolvedValue(
+			makeLive({ lastUpdateId: 2, isStreaming: false, activeTasks: [TASK] })
+		);
+		await vi.advanceTimersByTimeAsync(STREAMING_MS);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// 3) THE GAP — the sub-agent completed (dropped from activeTasks) but the
+		//    unpark follow-up hasn't flipped is_streaming yet. Backend latches
+		//    unpark_pending. Without honoring it, this (false, []) poll would STOP
+		//    the poller and the follow-up would stream unseen. It must NOT stop.
+		fetchMock.mockResolvedValue(
+			makeLive({ lastUpdateId: 3, isStreaming: false, activeTasks: [], unparkPending: true })
+		);
+		await vi.advanceTimersByTimeAsync(PARK_MS);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true); // bridged the gap
+
+		// Still at the SLOW park rate: 9 × 150ms (1350ms < 1500ms) fires no poll.
+		fetchMock.mockClear();
+		await vi.advanceTimersByTimeAsync(9 * STREAMING_MS);
+		expect(fetchMock.mock.calls.length).toBe(0);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// 4) WAKE — the follow-up turn starts streaming (latch cleared). Upshift.
+		fetchMock.mockClear();
+		fetchMock.mockResolvedValue(makeLive({ lastUpdateId: 4, isStreaming: true }));
+		await vi.advanceTimersByTimeAsync(PARK_MS);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// Back at the FAST rate, and the follow-up finally goes fully idle → STOP.
+		fetchMock.mockClear();
+		fetchMock.mockResolvedValue(
+			makeLive({ lastUpdateId: 5, isStreaming: false, activeTasks: [], unparkPending: false })
+		);
+		await vi.advanceTimersByTimeAsync(STREAMING_MS);
+		expect(fetchMock.mock.calls.length).toBe(1); // fast-rate tick confirmed (we upshifted)
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false); // now genuinely idle
 	});
 
 	it('stops immediately on streaming→ended when there are no active tasks', async () => {

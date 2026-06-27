@@ -464,7 +464,18 @@ class LiveSessionStore:
             if session_id not in self._session_locks:
                 self._session_locks[session_id] = asyncio.Lock()
             logger.debug(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
-            return session
+
+        # Clear any "unpark pending" latch: this turn is now streaming, so a
+        # polling client will see is_streaming=true and upshift on its own. This is
+        # the primary clear for the unpark follow-up (it flips together with
+        # is_streaming). Outside the lock — task_registry runs on the same loop and
+        # imports nothing from here (no circular dependency). See task_registry.
+        try:
+            from app.core.task_registry import task_registry
+            task_registry.clear_unpark_pending(session_id)
+        except Exception:
+            logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)
+        return session
 
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
         """Add a user message to the session."""
@@ -1445,6 +1456,21 @@ class LiveSessionStore:
             The final messages as a list of dicts, or None if session not found
         """
         async with self._get_session_lock(session_id):
+            # Backstop clear of the "unpark pending" latch, ABOVE the not-found
+            # guard so it fires even when the session was already evicted: a turn
+            # ending means no follow-up is mid-handoff for this session. If a
+            # follow-up unpark turn dies or is cancelled before its start_streaming
+            # (the primary clear) AND its session buffer was concurrently reaped,
+            # the only end_streaming reaching here finds no session — so clearing
+            # after the guard would leak the latch until cleanup_ended_session.
+            # Safe for the unpark path: _deliver_unpark_impl sets the latch AFTER
+            # its own end_streaming call, so this never wipes a just-set latch.
+            try:
+                from app.core.task_registry import task_registry
+                task_registry.clear_unpark_pending(session_id)
+            except Exception:
+                logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)
+
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"Cannot end streaming: session {session_id} not found")
@@ -1494,6 +1520,8 @@ class LiveSessionStore:
             )
             logger.info(f"Ended streaming for session {session_id}: {len(session.messages)} messages kept in memory (interrupted={interrupted}). Total in store: sessions={len(self._sessions)} locks={len(self._session_locks)}")
 
+            # (The "unpark pending" latch was already cleared above the not-found
+            # guard, so it fires even when the session was already evicted.)
             return [m.to_dict() for m in session.messages]
 
     async def discard_empty_user_turn(self, session_id: str) -> Optional[str]:

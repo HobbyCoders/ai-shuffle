@@ -360,6 +360,48 @@ class TestBackgroundLaunch:
         assert reg.was_background_launch("s1", "tool-1") is False
 
 
+class TestUnparkPending:
+    """The latch bridging the unpark hand-off gap.
+
+    Set the instant a parked session's background sub-agent completion is handed
+    off to a follow-up turn (the task has already dropped out of get_active), and
+    cleared the moment that turn starts streaming (or it fails). /live surfaces it
+    so a polling client keeps its park-poll alive across the gap instead of seeing
+    a transient (is_streaming=false, activeTasks=[]) and STOPPING.
+    """
+
+    def test_default_false(self, reg):
+        assert reg.is_unpark_pending("s1") is False
+
+    def test_mark_then_clear(self, reg):
+        reg.mark_unpark_pending("s1")
+        assert reg.is_unpark_pending("s1") is True
+        reg.clear_unpark_pending("s1")
+        assert reg.is_unpark_pending("s1") is False
+
+    def test_independent_per_session(self, reg):
+        reg.mark_unpark_pending("s1")
+        assert reg.is_unpark_pending("s1") is True
+        assert reg.is_unpark_pending("s2") is False
+
+    def test_blank_id_is_noop(self, reg):
+        reg.mark_unpark_pending("")
+        assert reg.is_unpark_pending("") is False
+        reg.clear_unpark_pending("")  # must not raise
+
+    def test_cleared_by_clear_session(self, reg):
+        reg.mark_unpark_pending("s1")
+        reg.mark_unpark_pending("s2")
+        reg.clear_session("s1")
+        assert reg.is_unpark_pending("s1") is False
+        assert reg.is_unpark_pending("s2") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.mark_unpark_pending("s1")
+        reg.reset_all()
+        assert reg.is_unpark_pending("s1") is False
+
+
 class TestClearAndNoOps:
     def test_clear_session(self, reg):
         reg.start_task("s1", "t1", "agent", "x")
@@ -532,7 +574,82 @@ class TestLiveActiveTasks:
             )
 
         assert result["activeTasks"] == []
+        # unpark_pending defaults to False and is always present.
+        assert result["unpark_pending"] is False
         await live_session_store.cleanup_session(session_id)
+        tr.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_live_surfaces_then_clears_unpark_pending(self):
+        """/live carries the unpark-pending latch; start_streaming clears it.
+
+        Reproduces the hand-off gap: a parked session's sub-agent completed (so it
+        has no activeTasks) but the follow-up turn hasn't flipped is_streaming yet.
+        The latch must surface on /live so the poller keeps park-polling, and must
+        clear the instant the follow-up turn starts streaming (the wake).
+        """
+        from app.api import sessions as sessions_api
+        from app.core.live_session_store import live_session_store
+        from app.core.task_registry import task_registry as tr
+
+        session_id = "live-unpark"
+        tr.reset_all()
+        await live_session_store.start_streaming(session_id, initial_messages=[])
+
+        # The unpark hand-off latches "pending" after the parked turn, before the
+        # follow-up streams. (No active tasks — the sub-agent already completed.)
+        tr.mark_unpark_pending(session_id)
+        assert tr.is_unpark_pending(session_id) is True
+
+        fake_session = {"id": session_id, "title": "T"}
+        with patch.object(
+            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
+        ):
+            result = await sessions_api.get_live_session(
+                request=object(),
+                session_id=session_id,
+                since_update_id=0,
+                token="tok",
+            )
+        assert result["unpark_pending"] is True
+        assert result["activeTasks"] == []
+
+        # The follow-up turn starting to stream is the wake — it clears the latch
+        # (it flips together with is_streaming, so the poller upshifts on its own).
+        await live_session_store.start_streaming(session_id, initial_messages=[])
+        assert tr.is_unpark_pending(session_id) is False
+
+        await live_session_store.cleanup_session(session_id)
+        tr.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_end_streaming_clears_latch_even_when_session_absent(self):
+        """end_streaming clears the unpark latch ABOVE its not-found guard.
+
+        Backstop hardening: if a follow-up unpark turn dies/cancels before its
+        start_streaming (the primary clear) AND its session buffer was already
+        evicted, the error-path end_streaming finds no session. The clear must
+        still fire (it sits above the `if not session: return None` guard) so the
+        latch can't strand a polling client until the ~30s reaper.
+        """
+        from app.core.live_session_store import live_session_store
+        from app.core.task_registry import task_registry as tr
+
+        session_id = "live-unpark-evicted"
+        tr.reset_all()
+
+        # Latch set, but the session is NOT in the live store (already reaped).
+        tr.mark_unpark_pending(session_id)
+        assert live_session_store.get_session(session_id) is None
+        assert tr.is_unpark_pending(session_id) is True
+
+        # end_streaming returns None (session not found) yet still clears the latch.
+        result = await live_session_store.end_streaming(
+            session_id=session_id, metadata={}, interrupted=True
+        )
+        assert result is None
+        assert tr.is_unpark_pending(session_id) is False
+
         tr.reset_all()
 
 
