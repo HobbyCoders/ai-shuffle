@@ -1303,6 +1303,11 @@ async def stream_to_websocket(
                 "profile_id": profile_id,
                 "config": config,
                 "session_id": session_id,
+                "user_id": user_id,
+                # Reset the outstanding-prompt counter at the start of each turn so a
+                # prior turn that was hard-cancelled mid-prompt (its finally clear
+                # interrupted) can't leave a leaked count that pins the indicator on.
+                "attention_count": 0,
             })
 
             # Handle runtime-changeable options via SDK methods
@@ -1343,6 +1348,9 @@ async def stream_to_websocket(
             "config": config,
             "session_id": session_id,
             "user_id": user_id,
+            # Reference count of prompts (questions + permissions) this session is
+            # currently blocked on. Drives the user-level "awaiting input" indicator.
+            "attention_count": 0,
         }
 
         # Create canUseTool callback that reads from callback_refs (mutable dict)
@@ -1388,12 +1396,25 @@ async def stream_to_websocket(
                 # a session_attention event out to every one of the user's devices
                 # lets the sessions board show which session is blocked on a prompt,
                 # no matter which tab the user is looking at.
-                async def _signal_attention(count: int, kind: str):
+                async def _bump_attention(delta: int, kind: str):
+                    """Adjust this session's outstanding-prompt count and fan the new
+                    total out to every one of the user's devices. Reference-counted
+                    (not absolute) because a session can be blocked on several prompts
+                    at once — the SDK issues parallel tool calls, so two permission
+                    prompts (or a question + a permission) can be open simultaneously.
+                    If each prompt independently broadcast 0 on resolve, the first to
+                    finish would clear the indicator while its siblings were still
+                    pending. Counting up on enter and down on exit keeps the dot lit
+                    until the LAST prompt resolves. The read-modify-write is safe
+                    without a lock: it runs to completion before the first await, and
+                    the event loop is single-threaded."""
                     if not _user_id:
                         return
+                    n = max(0, (callback_refs.get("attention_count") or 0) + delta)
+                    callback_refs["attention_count"] = n
                     try:
                         await sync_engine.broadcast_session_attention(
-                            _user_id, _sid, count, kind=kind
+                            _user_id, _sid, n, kind=kind
                         )
                     except Exception:
                         logger.debug("[WS] session_attention broadcast failed", exc_info=True)
@@ -1404,11 +1425,11 @@ async def stream_to_websocket(
                     as discoverable as one blocked on a question. Clears the
                     indicator whether the prompt is answered, deferred, or the query
                     is cancelled (session closed)."""
-                    await _signal_attention(1, "permission")
+                    await _bump_attention(1, "permission")
                     try:
                         return await permission_handler.request_permission(**kwargs)
                     finally:
-                        await _signal_attention(0, "permission")
+                        await _bump_attention(-1, "permission")
 
                 # Handle AskUserQuestion specially
                 if tool_name == "AskUserQuestion":
@@ -1419,7 +1440,7 @@ async def stream_to_websocket(
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
-                    await _signal_attention(len(questions), "question")
+                    await _bump_attention(1, "question")
                     try:
                         answers = await user_question_handler.request_answers(
                             request_id=request_id,
@@ -1429,9 +1450,10 @@ async def stream_to_websocket(
                             broadcast_func=_broadcast
                         )
                     finally:
-                        # Clear the indicator whether the question was answered,
-                        # timed out, or the query was cancelled (session closed).
-                        await _signal_attention(0, "question")
+                        # Decrement whether the question was answered, timed out, or
+                        # the query was cancelled (session closed). The indicator only
+                        # clears once every outstanding prompt in this session resolves.
+                        await _bump_attention(-1, "question")
 
                     logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
                     return PermissionResultAllow(updated_input={**tool_input, "answers": answers})

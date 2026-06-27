@@ -156,7 +156,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}));
 	}
 
-	function setNeedsAttention(sessionId: string | undefined, count: number): void {
+	function setNeedsAttention(sessionId: string | null | undefined, count: number): void {
 		if (!sessionId) return;
 		backgroundPermissions.update(map => {
 			const next = new Map(map);
@@ -249,6 +249,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			});
 		}
 
+		// A finished session can't be awaiting input. Clear any attention dot here
+		// too, in case the backend's count=0 broadcast was missed (dead socket).
+		// Without this the dot is sticky until the user opens the session, and the
+		// attention dot now takes precedence over the streaming dot in the board.
+		setNeedsAttention(doneSessionId, 0);
+
 		appLoadSessions();
 	}
 
@@ -277,6 +283,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				return newMap;
 			});
 		}
+
+		// A stopped/interrupted session can't be awaiting input — clear any stale
+		// attention dot (mirrors handleDone; guards against a missed count=0).
+		setNeedsAttention(stoppedSessionId, 0);
 	}
 
 	// ── Main dispatch ────────────────────────────────────────────────

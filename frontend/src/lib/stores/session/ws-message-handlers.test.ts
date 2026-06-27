@@ -200,6 +200,23 @@ describe('ws-message-handlers', () => {
 			);
 		});
 
+		it('clears any stale attention dot for the finished session', () => {
+			const state = mockState();
+			state.sessionId = 'session-active'; // a different session is active here
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'done', session_id: 'session-bg' });
+
+			// A finished session can't be awaiting input. The done handler clears
+			// its attention dot defensively, in case the backend count=0 broadcast
+			// was missed — otherwise the dot (which now outranks the streaming dot)
+			// stays lit until the user opens the session.
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			expect(fn(new Map([['session-bg', 1]])).has('session-bg')).toBe(false);
+		});
+
 		// Queue processing is now handled server-side — no frontend trigger to test
 	});
 
@@ -237,6 +254,22 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
+		});
+
+		it('clears any stale attention dot for the stopped session', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = false;
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'stopped', session_id: 'session-1' });
+
+			// Mirrors the done handler: a stopped/interrupted session can't be
+			// awaiting input, so any leftover attention dot is cleared.
+			const fn = (deps.backgroundPermissions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			expect(fn(new Map([['session-1', 1]])).has('session-1')).toBe(false);
 		});
 	});
 
