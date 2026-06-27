@@ -234,7 +234,16 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
     # completion is still recorded upstream in _record_task_message, so the
     # indicator never strands. Sits alongside the orphan guard above as a second,
     # independent reason to suppress the in-stream unpark.
-    if not task_registry.was_background_launch(session_id, event.get("tool_use_id")):
+    #
+    # Fallback for backgrounded local_bash shells: the SDK does not reliably set
+    # tool_use_id on a shell's notification, so accept a task recorded in
+    # _sdk_background_tasks (keyed by the always-present task_id). Such a task is by
+    # construction a genuine background launch, so this can't reintroduce a spurious
+    # unpark — only rescue a shell whose tool_use_id linkage is missing.
+    if not (
+        task_registry.was_background_launch(session_id, event.get("tool_use_id"))
+        or task_registry.is_sdk_background_task(session_id, task_id)
+    ):
         _log_unpark_decision(
             path="in-stream",
             session_id=session_id,
@@ -637,7 +646,16 @@ async def _drain_notifications_impl(
             # above via _record_task_message, and the subagent node was already
             # completed via the dispatch above, so suppressing here only drops the
             # spurious follow-up turn — nothing strands.
-            if not task_registry.was_background_launch(session_id, frame.get("tool_use_id")):
+            #
+            # Fallback for backgrounded local_bash shells (the actual slow-path bug):
+            # the SDK does not reliably set tool_use_id on a shell's terminal
+            # notification, so also accept a task recorded in _sdk_background_tasks
+            # (keyed by the always-present task_id). This is the path that wakes a
+            # session parked on a backgrounded Bash/PowerShell command.
+            if not (
+                task_registry.was_background_launch(session_id, frame.get("tool_use_id"))
+                or task_registry.is_sdk_background_task(session_id, frame.get("task_id"))
+            ):
                 _log_unpark_decision(
                     path="pump",
                     session_id=session_id,
@@ -725,8 +743,10 @@ def _start_drain_pump_impl(
     """Start a between-turns drain pump for a session (replacing any existing).
 
     Caller MUST ensure no turn owns the client (``is_streaming`` False) and that
-    there is in-flight ``kind=="agent"`` work to wait for. ``drain_coro_factory``
-    returns a fresh ``_drain_notifications`` coroutine bound to the right handler.
+    there is in-flight background work to wait for — a sub-agent (``kind=="agent"``)
+    OR an SDK-backgrounded ``local_bash`` shell (see ``get_active_background_work``).
+    ``drain_coro_factory`` returns a fresh ``_drain_notifications`` coroutine bound
+    to the right handler.
     """
     from app.api.websocket import _drain_pumps
 
@@ -2319,30 +2339,28 @@ class ChatWebSocketHandler:
                         await sync_engine.broadcast_queue_updated(session_id, queue)
                         # Fall through to normal completion
 
-            # --- Background-agent "unpark" drain pump (SLOW sub-agent path) ---
+            # --- Background "unpark" drain pump (SLOW path) ---
             # This turn is genuinely ending: no in-stream notification handed off
             # above and there was no queued successor. If there is still in-flight
-            # background AGENT work, its terminal TaskNotificationMessage will
-            # arrive LATER on the pooled, still-alive SDK client (after this turn's
-            # receive_response() already returned at the parent ResultMessage).
-            # Start a between-turns drain pump to catch it and unpark the parent.
-            # By here stream_to_websocket's finally has set state.is_streaming
-            # False and handle_done has called live_session_store.end_streaming,
-            # so the pump sees the client idle and not owned by a turn.
+            # background work — a sub-agent OR an SDK-backgrounded local_bash shell —
+            # its terminal TaskNotificationMessage will arrive LATER on the pooled,
+            # still-alive SDK client (after this turn's receive_response() already
+            # returned at the parent ResultMessage). Start a between-turns drain pump
+            # to catch it and unpark the parent. By here stream_to_websocket's finally
+            # has set state.is_streaming False and handle_done has called
+            # live_session_store.end_streaming, so the pump sees the client idle and
+            # not owned by a turn.
             if (
                 session_id not in _stopped_sessions
                 and session_id not in _interrupt_pending_sessions
                 and not handed_off_to_queued
             ):
-                _active_agent_tasks = [
-                    t for t in task_registry.get_active(session_id)
-                    if t.get("kind") == "agent"
-                ]
-                if _active_agent_tasks:
+                _active_bg_work = task_registry.get_active_background_work(session_id)
+                if _active_bg_work:
                     ctx.debug(
                         logger,
-                        f"Unpark: {len(_active_agent_tasks)} background agent task(s) still "
-                        f"in flight — starting between-turns drain pump",
+                        f"Unpark: {len(_active_bg_work)} background task(s) (agent/shell) "
+                        f"still in flight — starting between-turns drain pump",
                     )
                     self._start_drain_pump(session_id, profile_id, project_id, worktree_id)
 

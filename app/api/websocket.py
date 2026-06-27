@@ -576,27 +576,25 @@ async def chat_websocket(
             ):
                 return  # follow-up task continues streaming for this session
 
-            # --- Background-agent "unpark" between-turns drain pump (SLOW path) ---
-            # If a sub-agent is STILL in flight, its terminal notification will land
-            # on the pooled, still-alive SDK client AFTER this turn's
-            # receive_response() already returned at the parent's ResultMessage —
-            # with nothing reading it. Start a between-turns pump to catch it and
-            # unpark the parent. (state.is_streaming is False by here, so the pump
-            # sees the client idle and not owned by a turn.)
+            # --- Background "unpark" between-turns drain pump (SLOW path) ---
+            # If background work (a sub-agent OR an SDK-backgrounded local_bash
+            # shell) is STILL in flight, its terminal notification will land on the
+            # pooled, still-alive SDK client AFTER this turn's receive_response()
+            # already returned at the parent's ResultMessage — with nothing reading
+            # it. Start a between-turns pump to catch it and unpark the parent.
+            # (state.is_streaming is False by here, so the pump sees the client idle
+            # and not owned by a turn.)
             if (
                 session_id not in _stopped_sessions
                 and session_id not in _interrupt_pending_sessions
             ):
                 from app.core.task_registry import task_registry
-                _active_agent_tasks = [
-                    t for t in task_registry.get_active(session_id)
-                    if t.get("kind") == "agent"
-                ]
-                if _active_agent_tasks:
+                _active_bg_work = task_registry.get_active_background_work(session_id)
+                if _active_bg_work:
                     ctx.debug(
                         logger,
-                        f"Unpark: {len(_active_agent_tasks)} background agent task(s) still "
-                        f"in flight — starting between-turns drain pump",
+                        f"Unpark: {len(_active_bg_work)} background task(s) (agent/shell) "
+                        f"still in flight — starting between-turns drain pump",
                     )
                     _start_drain_pump_impl(
                         session_id,

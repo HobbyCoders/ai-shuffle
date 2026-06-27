@@ -213,22 +213,47 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             # The SDK emits the SAME TaskStartedMessage for every flavour of
             # background work and discriminates them only via ``task_type``:
             #   "local_bash"                      → a backgrounded shell command
-            #                                       (Bash/PowerShell run_in_background)
+            #                                       (Bash/PowerShell run_in_background,
+            #                                       and Monitor watches)
             #   "local_agent"/"remote_agent"/
             #   "local_workflow"                  → a sub-agent / workflow
             # Map "local_bash" onto the registry's "shell" kind so it renders the
-            # SHELL badge (not the agent badge) and — correctly — does NOT pin a
-            # parked session in the pool nor spin up an unpark drain pump (a
-            # backgrounded shell command has no parent turn to unpark). Anything
-            # else, including a missing task_type from an older CLI, stays "agent"
-            # — the historical behaviour, right for sub-agents.
+            # SHELL badge (not the agent badge). Anything else — including a missing
+            # task_type from an older CLI — stays "agent", the historical behaviour,
+            # right for sub-agents.
+            #
+            # A backgrounded shell DOES park its parent turn: the parent's
+            # receive_response() returns at the parent ResultMessage while the shell
+            # keeps running, and the shell's completion arrives LATER as a terminal
+            # TaskNotificationMessage on the SAME pooled SDK client — exactly like a
+            # background sub-agent. So it must pin the parked session in the pool
+            # (else idle eviction kills the pooled client and drops the completion
+            # the parent is awaiting → frontend never unparks) AND drive an unpark
+            # follow-up turn. Earlier code wrongly assumed shells never park; that
+            # left a session parked on a backgrounded Bash/PowerShell command stuck
+            # forever (see the ~1h-parked screenshot). We arm both here:
+            #   - mark_sdk_background_task → pool busy signal + pump-start guard
+            #     (via get_active_background_work) keep the session alive & start the
+            #     between-turns drain pump. SDK shells are tracked here SEPARATELY
+            #     from the app's own Monitor-tool shells (mcp/builtin_tools.py), which
+            #     are app-managed, independent of the pooled client, and must NOT pin.
+            #   - mark_background_launch → the unpark gate (was_background_launch)
+            #     lets the shell's terminal notification through as a real unpark
+            #     instead of suppressing it as a foreground result. The terminal
+            #     notification carries the SAME tool_use_id as this TaskStarted (the
+            #     parent's launch block id), so recording it here is the linkage.
             task_type = getattr(message, "task_type", None)
             kind = "shell" if task_type == "local_bash" else "agent"
             task_registry.start_task(
                 session_id, message.task_id, kind, getattr(message, "description", None)
             )
+            if kind == "shell":
+                task_registry.mark_sdk_background_task(session_id, message.task_id)
+                tuid = getattr(message, "tool_use_id", None)
+                if tuid:
+                    task_registry.mark_background_launch(session_id, tuid)
             # Scope the in-stream unpark stash to THIS turn: record that this
-            # background agent's TaskStartedMessage arrived during the turn now
+            # background task's TaskStartedMessage arrived during the turn now
             # streaming. Only a task in this set may fire an in-stream unpark when
             # its terminal notification lands (the genuine FAST path). A terminal
             # notification for a task NOT started this turn is a prior-turn orphan

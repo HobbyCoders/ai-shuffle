@@ -381,20 +381,26 @@ class SessionPool:
         self._eviction_callback = callback
 
     def _has_background_work(self, session_id: str) -> bool:
-        """True iff a backgrounded sub-agent is still running for this session.
+        """True iff in-flight background work is still running for this session.
+
+        Covers BOTH a backgrounded sub-agent (``kind=="agent"``) AND an
+        SDK-backgrounded shell command (``local_bash`` run_in_background, tracked
+        in the registry's ``_sdk_background_tasks``) — both park the parent turn and
+        deliver their completion LATER on the pooled SDK client.
 
         Lazy-imports the task registry (a leaf module that imports nothing back)
         to avoid an import cycle while keeping ONE source of truth for the busy
-        signal. A session that is parked on an in-flight background sub-agent looks
-        idle to ``is_streaming`` (its parent turn already returned), so without this
-        check LRU/idle eviction would disconnect the pooled SDK client out from
-        under the running sub-agent — killing it mid-run and stranding the parent.
-        Defensive: any failure resolves to ``False`` (never block eviction on a
-        registry hiccup; the hard-cap force path remains the ultimate bound).
+        signal. A session parked on such work looks idle to ``is_streaming`` (its
+        parent turn already returned), so without this check LRU/idle eviction would
+        disconnect the pooled SDK client out from under the running work — killing it
+        mid-run, dropping the completion notification, and stranding the parent so the
+        frontend never unparks. Defensive: any failure resolves to ``False`` (never
+        block eviction on a registry hiccup; the hard-cap force path remains the
+        ultimate bound).
         """
         try:
             from app.core.task_registry import task_registry
-            return task_registry.has_active_background_agent(session_id)
+            return task_registry.has_active_background_work(session_id)
         except Exception:
             return False
 

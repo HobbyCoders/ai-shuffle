@@ -933,3 +933,105 @@ def test_stash_fires_for_background_launched_task():
     assert len(stream_state.pending_task_notifications) == 1
     assert stream_state.pending_task_notifications[0]["task_id"] == "task-1"
     task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# 10. BACKGROUNDED-SHELL UNPARK (local_bash — the reported "frontend never shows
+#     unpark" bug). A session parked on a backgrounded Bash/PowerShell command
+#     (run_in_background, task_type=="local_bash" → registry kind=="shell",
+#     marked in _sdk_background_tasks) MUST unpark on its terminal notification —
+#     exactly like a background sub-agent. Two linkages drive it:
+#       - the parent's launch tool_use_id (was_background_launch), AND
+#       - a robust task_id fallback (is_sdk_background_task) for when the SDK
+#         omits tool_use_id on a shell's notification.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_unparks_backgrounded_shell_via_background_launch():
+    """A backgrounded local_bash shell with its launch tool_use_id recorded unparks
+    on the terminal notification (the primary gate, same as a sub-agent)."""
+    task_registry.start_task("sess-1", "sh-1", "shell", "npm run build")
+    task_registry.mark_sdk_background_task("sess-1", "sh-1")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("sh-1", uuid="u-1", tool_use_id="tu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["task_id"] == "sh-1"
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_unparks_backgrounded_shell_via_task_id_fallback():
+    """THE robustness path: the SDK leaves tool_use_id UNRECORDED on the shell's
+    notification (so was_background_launch is False), but the task is in
+    _sdk_background_tasks — the is_sdk_background_task fallback still drives the
+    unpark. Without this fallback the parked session would hang forever."""
+    task_registry.start_task("sess-1", "sh-1", "shell", "long build")
+    task_registry.mark_sdk_background_task("sess-1", "sh-1")
+    # NOTE: no mark_background_launch — and the notification's tool_use_id is one
+    # the parent never recorded, so the primary gate fails on purpose.
+    assert task_registry.was_background_launch("sess-1", "tu-unrecorded") is False
+
+    client = _FakeClient(
+        [_notif("sh-1", uuid="u-1", tool_use_id="tu-unrecorded")], hang=True
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["task_id"] == "sh-1"
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_unmarked_shell_notification():
+    """A shell notification that is NEITHER a recorded background launch NOR in
+    _sdk_background_tasks (e.g. an app Monitor shell that never parks the parent)
+    must NOT unpark — the indicator still clears, but no spurious follow-up."""
+    task_registry.start_task("sess-1", "mon-1", "shell", "tail -f app.log")
+    # No mark_sdk_background_task, no mark_background_launch.
+
+    # hang=False: suppression `continue`s rather than breaking, so the stream must
+    # end for the pump to terminate.
+    client = _FakeClient([_notif("mon-1", uuid="u-1", tool_use_id="tu-x")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Indicator cleared (registry completed via _record_task_message)...
+    assert task_registry.get_active("sess-1") == []
+    # ...but NO spurious unpark for the app-managed shell.
+    handler._deliver_unpark.assert_not_awaited()
+    assert client.received == 1
+
+
+def test_stash_fires_for_backgrounded_shell_via_fallback():
+    """In-stream stash: a backgrounded shell that completes in-stream (started this
+    turn, in _sdk_background_tasks) IS stashed via the is_sdk_background_task
+    fallback even when its tool_use_id was not recorded as a launch."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    task_registry.mark_started_this_turn("sess-1", "sh-1")
+    task_registry.mark_sdk_background_task("sess-1", "sh-1")
+    # No mark_background_launch — the fallback must carry it.
+    cwh._stash_terminal_notification(
+        stream_state, _terminal_event("sh-1", tool_use_id="tu-unrecorded"), "sess-1"
+    )
+
+    assert len(stream_state.pending_task_notifications) == 1
+    assert stream_state.pending_task_notifications[0]["task_id"] == "sh-1"
+    task_registry.reset_all()

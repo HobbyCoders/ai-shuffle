@@ -13,6 +13,8 @@ These cover the two pure helpers behind the fix:
   ``tool_use_id`` so they land in the right inner group).
 """
 
+from typing import Optional
+
 import pytest
 
 from claude_agent_sdk import (
@@ -262,13 +264,16 @@ class TestRecordTaskMessageUpdate:
 #
 # The SDK emits the same TaskStartedMessage for every flavour of background work
 # and discriminates them only via ``task_type``: "local_bash" is a backgrounded
-# shell command (Bash/PowerShell run_in_background), while "local_agent" /
-# "remote_agent" / "local_workflow" are sub-agents / workflows. The registry kind
-# must follow suit so the task bar renders the SHELL badge for shell commands (not
-# the agent badge) and so a backgrounded shell command does not pin a parked
-# session in the pool (``has_active_background_agent`` counts kind=="agent" only).
+# shell command (Bash/PowerShell run_in_background, and Monitor watches), while
+# "local_agent" / "remote_agent" / "local_workflow" are sub-agents / workflows. The
+# registry kind must follow suit so the task bar renders the SHELL badge for shell
+# commands (not the agent badge). A backgrounded shell ALSO parks its parent and
+# unparks via a terminal notification on the pooled SDK client, so recording it must
+# ALSO arm the pool pin (mark_sdk_background_task) and the unpark gate
+# (mark_background_launch) — the agent-only ``has_active_background_agent`` stays
+# unchanged, but ``has_active_background_work`` now covers the shell.
 
-def _started(task_id, *, task_type=None, uuid="s-1", tool_use_id="tu-1"):
+def _started(task_id, *, task_type=None, uuid="s-1", tool_use_id: Optional[str] = "tu-1"):
     """Build a real SDK TaskStartedMessage (so isinstance checks match)."""
     return TaskStartedMessage(
         subtype="task_started",
@@ -290,11 +295,39 @@ class TestRecordTaskStartedKind:
         task_registry.reset_all()
 
     def test_local_bash_records_shell_kind(self):
-        # A backgrounded Bash/PowerShell command → "shell" badge, no pool pin.
+        # A backgrounded Bash/PowerShell command → "shell" badge.
         _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
         rec = task_registry.get_task("sess-1", "t-bash")
         assert rec["kind"] == "shell"
+        # Agent-only signal stays False (it is, by design, agent-kind only)...
         assert task_registry.has_active_background_agent("sess-1") is False
+        # ...but the shell DOES park its parent, so the widened busy signal pins it
+        # and the SDK-background + unpark gates are armed (see header comment).
+        assert task_registry.has_active_background_work("sess-1") is True
+        assert task_registry.is_sdk_background_task("sess-1", "t-bash") is True
+        # _started uses tool_use_id="tu-1" — recorded as a background launch so the
+        # shell's terminal notification drives a real unpark (not suppress-foreground).
+        assert task_registry.was_background_launch("sess-1", "tu-1") is True
+
+    def test_local_bash_without_tool_use_id_still_pins_via_task_id(self):
+        # If the SDK omits tool_use_id on the shell's TaskStarted, the unpark gate's
+        # tool_use_id linkage is absent — but the always-present task_id still pins
+        # (mark_sdk_background_task) and the is_sdk_background_task fallback still
+        # lets the terminal notification through as an unpark.
+        _record_task_message(
+            "sess-1", _started("t-bash2", task_type="local_bash", tool_use_id=None)
+        )
+        assert task_registry.is_sdk_background_task("sess-1", "t-bash2") is True
+        assert task_registry.has_active_background_work("sess-1") is True
+        # No launch recorded (no tool_use_id), so the fallback is what carries it.
+        assert task_registry.was_background_launch("sess-1", "tu-1") is False
+
+    def test_local_agent_does_not_arm_sdk_background(self):
+        # A sub-agent must NOT be marked as an SDK-background SHELL (it is already
+        # covered as kind=="agent"); arming sdk_background for agents would be
+        # redundant and muddy the shell-only fallback.
+        _record_task_message("sess-1", _started("t-agent", task_type="local_agent"))
+        assert task_registry.is_sdk_background_task("sess-1", "t-agent") is False
 
     def test_local_agent_records_agent_kind(self):
         _record_task_message("sess-1", _started("t-agent", task_type="local_agent"))
@@ -314,9 +347,11 @@ class TestRecordTaskStartedKind:
         assert task_registry.get_task("sess-1", "t-none")["kind"] == "agent"
 
     def test_started_this_turn_marked_for_shell_too(self):
-        # The in-stream unpark stash is gated separately by was_background_launch
-        # (False for shell, since only Task/Agent launches are recorded), so marking
-        # started-this-turn for a shell task is harmless — assert it still happens
-        # so the recording side-effect stays uniform across kinds.
+        # started-this-turn is recorded uniformly across kinds (it scopes the
+        # in-stream stash to the genuine fast path). For a backgrounded shell BOTH
+        # gates now pass: started-this-turn (here) AND was_background_launch (the
+        # shell's tool_use_id is recorded), so a shell that completes in-stream can
+        # fire the fast-path unpark too.
         _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
         assert task_registry.was_started_this_turn("sess-1", "t-bash") is True
+        assert task_registry.was_background_launch("sess-1", "tu-1") is True

@@ -109,6 +109,51 @@ class TaskRegistry:
         # stranded the parked UI (the origin socket is gone, so nothing restarts
         # polling and the follow-up streamed unseen until a full reload).
         self._unpark_pending: set = set()
+        # session_id -> {task_id, ...} for SDK-managed BACKGROUND tasks that PARK
+        # the parent and unpark via a terminal TaskNotificationMessage on the
+        # pooled SDK client — i.e. backgrounded shell commands (Bash/PowerShell
+        # ``run_in_background``, SDK ``task_type=="local_bash"``). These register
+        # in the registry as ``kind="shell"`` (for the SHELL badge), SAME as the
+        # app's own Monitor-tool background shells (see ``mcp/builtin_tools.py``) —
+        # but ONLY the SDK ones depend on the pooled client's lifecycle: evicting
+        # the session would kill the subprocess and drop the completion
+        # notification the parent is parked awaiting. This set lets the pool busy
+        # signal + the unpark drain pump tell the two apart (Monitor shells are
+        # app-managed, independent of the SDK client, and must NOT pin a session).
+        # Populated from ``query_engine._record_task_message`` on the shell's
+        # TaskStartedMessage; cleared with the session (status is checked live, so
+        # a completed task in the set is simply ignored — no per-completion prune).
+        self._sdk_background_tasks: Dict[str, set] = {}
+
+    def mark_sdk_background_task(self, session_id: str, task_id: str) -> None:
+        """Record that ``task_id`` is an SDK-managed background task the parent
+        parks on (currently a backgrounded ``local_bash`` shell command).
+
+        Distinguishes SDK-backgrounded shells (which DO pin a parked session and
+        DO drive an unpark) from the app's Monitor-tool background shells (which
+        share ``kind="shell"`` but are independent of the pooled SDK client and
+        must NOT pin). Defensive: a missing id is a no-op.
+        """
+        if not session_id or not task_id:
+            return
+        self._sdk_background_tasks.setdefault(session_id, set()).add(task_id)
+
+    def is_sdk_background_task(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` was recorded as an SDK-managed background task.
+
+        Used as the unpark gate's robust fallback for backgrounded ``local_bash``
+        shells. The primary gate (``was_background_launch``) keys on the parent's
+        launch ``tool_use_id`` — but the SDK does not reliably populate
+        ``tool_use_id`` on a shell's terminal notification, whereas ``task_id`` is
+        always present. A task in this set is, by construction, a genuinely
+        backgrounded shell the parent parked on (there is no "synchronous
+        local_bash" notification to confuse it with — only ``run_in_background``
+        shells emit a TaskStartedMessage), so its terminal notification always
+        warrants the unpark. Defensive: missing ids return ``False``.
+        """
+        if not session_id or not task_id:
+            return False
+        return task_id in self._sdk_background_tasks.get(session_id, set())
 
     def mark_unpark_pending(self, session_id: str) -> None:
         """Latch that an unpark follow-up turn is committed but not yet streaming.
@@ -320,6 +365,45 @@ class TaskRegistry:
             for r in bucket.values()
         )
 
+    def get_active_background_work(self, session_id: str) -> List[Dict[str, Any]]:
+        """Running tasks that PARK the parent, newest-first, each as a wire dict.
+
+        Superset of the agent-only ``has_active_background_agent`` view: includes
+        BOTH background sub-agents (``kind=="agent"``) AND SDK-backgrounded shell
+        commands (``kind=="shell"`` AND in ``_sdk_background_tasks`` — i.e. a
+        ``local_bash`` ``run_in_background`` Bash/PowerShell command, NOT an
+        app-managed Monitor shell). Both flavours are in-flight work whose terminal
+        TaskNotificationMessage lands LATER on the pooled SDK client and which the
+        parent turn has parked awaiting — so both must pin the session in the pool
+        and warrant a between-turns unpark drain pump. The session pool busy signal
+        and the pump-start guard share this view.
+        """
+        bucket = self._tasks.get(session_id)
+        if not bucket:
+            return []
+        sdk_bg = self._sdk_background_tasks.get(session_id, set())
+        records = [
+            r for tid, r in bucket.items()
+            if r.get("status") == "running"
+            and (r.get("kind") == "agent" or tid in sdk_bg)
+        ]
+        records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+        return [to_wire(r) for r in records]
+
+    def has_active_background_work(self, session_id: str) -> bool:
+        """True iff a background sub-agent OR an SDK-backgrounded shell is running.
+
+        The session-pool busy predicate (``_has_background_work``) honors this so it
+        never evicts/disconnects a PARKED session out from under in-flight work —
+        whether that work is a sub-agent (``kind=="agent"``) or a backgrounded shell
+        command (``local_bash``, tracked in ``_sdk_background_tasks``). The original
+        ``has_active_background_agent`` covered only sub-agents, which let a session
+        parked on a backgrounded Bash/PowerShell command get idle-evicted mid-run —
+        killing the pooled SDK client that owns the shell's completion notification,
+        so the parent never unparked. See ``get_active_background_work``.
+        """
+        return bool(self.get_active_background_work(session_id))
+
     def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.
 
@@ -350,6 +434,7 @@ class TaskRegistry:
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
         self._unpark_pending.discard(session_id)
+        self._sdk_background_tasks.pop(session_id, None)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
@@ -358,6 +443,7 @@ class TaskRegistry:
         self._started_this_turn.clear()
         self._background_launches.clear()
         self._unpark_pending.clear()
+        self._sdk_background_tasks.clear()
 
 
 # Global instance

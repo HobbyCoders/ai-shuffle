@@ -177,6 +177,106 @@ class TestHasActiveBackgroundAgent:
 
 
 # =============================================================================
+# SDK-backgrounded shells: _sdk_background_tasks + get/has_active_background_work
+# =============================================================================
+
+class TestSdkBackgroundWork:
+    """A backgrounded local_bash shell parks its parent and unparks via a terminal
+    notification on the pooled SDK client — exactly like a background sub-agent — so
+    it MUST pin the session and drive an unpark. ``mark_sdk_background_task`` records
+    it; ``get/has_active_background_work`` widen the busy signal to cover it while the
+    agent-only ``has_active_background_agent`` stays unchanged. App-managed Monitor
+    shells (registered via ``start_task`` but NEVER marked) must NOT pin.
+    """
+
+    # --- is_sdk_background_task -------------------------------------------------
+    def test_is_sdk_background_false_for_unmarked(self, reg):
+        reg.start_task("s1", "sh1", "shell", "tail -f log")
+        assert reg.is_sdk_background_task("s1", "sh1") is False
+
+    def test_mark_then_is_sdk_background_true(self, reg):
+        reg.start_task("s1", "sh1", "shell", "npm run build")
+        reg.mark_sdk_background_task("s1", "sh1")
+        assert reg.is_sdk_background_task("s1", "sh1") is True
+
+    def test_is_sdk_background_independent_per_session(self, reg):
+        reg.mark_sdk_background_task("s1", "sh1")
+        assert reg.is_sdk_background_task("s2", "sh1") is False
+
+    def test_mark_blank_ids_never_record(self, reg):
+        reg.mark_sdk_background_task("", "sh1")
+        reg.mark_sdk_background_task("s1", "")
+        assert reg.is_sdk_background_task("", "sh1") is False
+        assert reg.is_sdk_background_task("s1", "") is False
+        # No state stranded -> a real (session, task) still records.
+        reg.mark_sdk_background_task("s1", "sh1")
+        assert reg.is_sdk_background_task("s1", "sh1") is True
+
+    # --- get/has_active_background_work ----------------------------------------
+    def test_agent_counts_without_marking(self, reg):
+        # A sub-agent pins regardless of the sdk-background marking (kind=="agent").
+        reg.start_task("s1", "a1", "agent", "Background agent")
+        assert reg.has_active_background_work("s1") is True
+        assert [t["id"] for t in reg.get_active_background_work("s1")] == ["a1"]
+
+    def test_marked_shell_counts(self, reg):
+        # An SDK-backgrounded local_bash shell pins ONLY once marked.
+        reg.start_task("s1", "sh1", "shell", "long build")
+        assert reg.has_active_background_work("s1") is False
+        reg.mark_sdk_background_task("s1", "sh1")
+        assert reg.has_active_background_work("s1") is True
+        assert [t["id"] for t in reg.get_active_background_work("s1")] == ["sh1"]
+
+    def test_unmarked_shell_does_not_count(self, reg):
+        # App Monitor shell: registered but never marked -> must NOT pin the pool.
+        reg.start_task("s1", "mon1", "shell", "tail -f app.log")
+        assert reg.has_active_background_work("s1") is False
+        assert reg.get_active_background_work("s1") == []
+
+    def test_completed_marked_shell_excluded(self, reg):
+        reg.start_task("s1", "sh1", "shell", "build")
+        reg.mark_sdk_background_task("s1", "sh1")
+        reg.complete_task("s1", "sh1", "completed")
+        # Status is checked live, so a finished marked shell no longer pins.
+        assert reg.has_active_background_work("s1") is False
+        assert reg.get_active_background_work("s1") == []
+
+    def test_mixed_agent_and_shell_newest_first(self, reg):
+        reg.start_task("s1", "a1", "agent", "agent")
+        reg.start_task("s1", "sh1", "shell", "shell")
+        reg.mark_sdk_background_task("s1", "sh1")
+        reg._tasks["s1"]["a1"]["started_at"] = "2024-01-01T00:00:00+00:00"
+        reg._tasks["s1"]["sh1"]["started_at"] = "2024-01-02T00:00:00+00:00"
+        ids = [t["id"] for t in reg.get_active_background_work("s1")]
+        assert ids == ["sh1", "a1"]
+
+    def test_empty_for_unknown_session(self, reg):
+        assert reg.has_active_background_work("missing") is False
+        assert reg.get_active_background_work("missing") == []
+
+    def test_does_not_affect_agent_only_signal(self, reg):
+        # A marked shell pins background_work but NOT the agent-only predicate.
+        reg.start_task("s1", "sh1", "shell", "build")
+        reg.mark_sdk_background_task("s1", "sh1")
+        assert reg.has_active_background_work("s1") is True
+        assert reg.has_active_background_agent("s1") is False
+
+    # --- lifecycle clears ------------------------------------------------------
+    def test_cleared_by_clear_session(self, reg):
+        reg.start_task("s1", "sh1", "shell", "build")
+        reg.mark_sdk_background_task("s1", "sh1")
+        reg.mark_sdk_background_task("s2", "sh9")
+        reg.clear_session("s1")
+        assert reg.is_sdk_background_task("s1", "sh1") is False
+        assert reg.is_sdk_background_task("s2", "sh9") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.mark_sdk_background_task("s1", "sh1")
+        reg.reset_all()
+        assert reg.is_sdk_background_task("s1", "sh1") is False
+
+
+# =============================================================================
 # to_wire shape
 # =============================================================================
 
