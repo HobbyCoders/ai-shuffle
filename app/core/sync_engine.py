@@ -810,6 +810,43 @@ class SyncEngine:
                 if user_id in self._user_connections and not self._user_connections[user_id]:
                     del self._user_connections[user_id]
 
+    async def broadcast_session_attention(
+        self,
+        user_id: str,
+        session_id: str,
+        count: int,
+        kind: str = "question",
+        source_device_id: Optional[str] = None
+    ):
+        """Notify all of a user's devices that a session is (or is no longer)
+        awaiting user input.
+
+        A running session that is parked on an AskUserQuestion / permission
+        prompt is indistinguishable from a busy one on every device except the
+        tab that owns the query (only that socket receives the per-request
+        event). Fanning a lightweight ``session_attention`` event out to every
+        device lets the sessions board surface a "needs you" indicator no matter
+        which tab the user is looking at.
+
+        Args:
+            user_id: The user whose session needs (or no longer needs) input.
+            session_id: The session awaiting input.
+            count: Number of pending items; 0 clears the indicator.
+            kind: "question" or "permission" (for future per-kind styling).
+            source_device_id: Optional device to exclude (e.g. when that device
+                already tracks the prompt through its per-socket event).
+        """
+        await self._broadcast_user_message(
+            user_id,
+            {
+                "type": "session_attention",
+                "session_id": session_id,
+                "kind": kind,
+                "count": count,
+            },
+            source_device_id=source_device_id,
+        )
+
     async def broadcast_user_session_created(
         self,
         user_id: str,

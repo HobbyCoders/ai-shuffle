@@ -499,10 +499,12 @@
 									class:active={isActiveChat(session.id)}
 									onclick={() => onOpenSession(session.id)}
 								>
-									{#if isStreaming(session.id)}
+									{#if needsAttention(session.id)}
+										<!-- Awaiting input wins over "running": surface that the
+										     session is waiting on the user, not just busy. -->
+										<div class="attention-dot" title="Awaiting your input"></div>
+									{:else if isStreaming(session.id)}
 										<div class="streaming-dot"></div>
-									{:else if needsAttention(session.id)}
-										<div class="attention-dot"></div>
 									{/if}
 									<div class="session-info">
 										<span class="session-title">{session.title || 'Untitled'}</span>

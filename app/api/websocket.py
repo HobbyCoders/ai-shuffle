@@ -514,7 +514,8 @@ async def chat_websocket(
                 project_id=project_id,
                 overrides=overrides,
                 broadcast_func=send_json,  # Pass send_json for permission requests
-                api_user_id=api_user_id  # Pass for user-scoped credential resolution
+                api_user_id=api_user_id,  # Pass for user-scoped credential resolution
+                user_id=user_id  # Pass for user-level broadcasts (awaiting-input indicator)
             ):
                 event_type = event.get('type')
                 if event_type == 'plugin_message':

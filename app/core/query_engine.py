@@ -1190,7 +1190,8 @@ async def stream_to_websocket(
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
     broadcast_func: Optional[callable] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1214,6 +1215,8 @@ async def stream_to_websocket(
         overrides: Optional overrides for model, permission_mode, etc.
         broadcast_func: Async function to broadcast messages to the WebSocket
         api_user_id: Optional API user ID for user-specific credential resolution
+        user_id: Optional user ID for user-level broadcasts (e.g. lighting up the
+            "awaiting input" indicator on every one of the user's devices)
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -1300,6 +1303,11 @@ async def stream_to_websocket(
                 "profile_id": profile_id,
                 "config": config,
                 "session_id": session_id,
+                "user_id": user_id,
+                # Reset the outstanding-prompt counter at the start of each turn so a
+                # prior turn that was hard-cancelled mid-prompt (its finally clear
+                # interrupted) can't leave a leaked count that pins the indicator on.
+                "attention_count": 0,
             })
 
             # Handle runtime-changeable options via SDK methods
@@ -1339,6 +1347,10 @@ async def stream_to_websocket(
             "profile_id": profile_id,
             "config": config,
             "session_id": session_id,
+            "user_id": user_id,
+            # Reference count of prompts (questions + permissions) this session is
+            # currently blocked on. Drives the user-level "awaiting input" indicator.
+            "attention_count": 0,
         }
 
         # Create canUseTool callback that reads from callback_refs (mutable dict)
@@ -1357,6 +1369,7 @@ async def stream_to_websocket(
                 _profile_id = refs["profile_id"]
                 _config = refs["config"]
                 _sid = refs["session_id"]
+                _user_id = refs.get("user_id")
 
                 # Extract tool_use_id and agent_id from context (SDK 0.1.52+)
                 # These enable disambiguating parallel permission requests
@@ -1378,6 +1391,46 @@ async def stream_to_websocket(
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
 
+                # User-level "awaiting input" indicator. The per-socket question /
+                # permission event only reaches the tab that owns this query; fanning
+                # a session_attention event out to every one of the user's devices
+                # lets the sessions board show which session is blocked on a prompt,
+                # no matter which tab the user is looking at.
+                async def _bump_attention(delta: int, kind: str):
+                    """Adjust this session's outstanding-prompt count and fan the new
+                    total out to every one of the user's devices. Reference-counted
+                    (not absolute) because a session can be blocked on several prompts
+                    at once — the SDK issues parallel tool calls, so two permission
+                    prompts (or a question + a permission) can be open simultaneously.
+                    If each prompt independently broadcast 0 on resolve, the first to
+                    finish would clear the indicator while its siblings were still
+                    pending. Counting up on enter and down on exit keeps the dot lit
+                    until the LAST prompt resolves. The read-modify-write is safe
+                    without a lock: it runs to completion before the first await, and
+                    the event loop is single-threaded."""
+                    if not _user_id:
+                        return
+                    n = max(0, (callback_refs.get("attention_count") or 0) + delta)
+                    callback_refs["attention_count"] = n
+                    try:
+                        await sync_engine.broadcast_session_attention(
+                            _user_id, _sid, n, kind=kind
+                        )
+                    except Exception:
+                        logger.debug("[WS] session_attention broadcast failed", exc_info=True)
+
+                async def _request_permission(**kwargs):
+                    """Show a permission prompt, wrapped with the awaiting-input
+                    indicator so a backgrounded session blocked on approval is just
+                    as discoverable as one blocked on a question. Clears the
+                    indicator whether the prompt is answered, deferred, or the query
+                    is cancelled (session closed)."""
+                    await _bump_attention(1, "permission")
+                    try:
+                        return await permission_handler.request_permission(**kwargs)
+                    finally:
+                        await _bump_attention(-1, "permission")
+
                 # Handle AskUserQuestion specially
                 if tool_name == "AskUserQuestion":
                     questions = tool_input.get("questions", [])
@@ -1387,13 +1440,20 @@ async def stream_to_websocket(
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
-                    answers = await user_question_handler.request_answers(
-                        request_id=request_id,
-                        tool_use_id=_ctx_tool_use_id or request_id,
-                        session_id=_sid,
-                        questions=questions,
-                        broadcast_func=_broadcast
-                    )
+                    await _bump_attention(1, "question")
+                    try:
+                        answers = await user_question_handler.request_answers(
+                            request_id=request_id,
+                            tool_use_id=_ctx_tool_use_id or request_id,
+                            session_id=_sid,
+                            questions=questions,
+                            broadcast_func=_broadcast
+                        )
+                    finally:
+                        # Decrement whether the question was answered, timed out, or
+                        # the query was cancelled (session closed). The indicator only
+                        # clears once every outstanding prompt in this session resolves.
+                        await _bump_attention(-1, "question")
 
                     logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
                     return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
@@ -1406,7 +1466,7 @@ async def stream_to_websocket(
                         request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                         logger.debug(f"[WS] ExitPlanMode requires approval in {_perm_mode} mode: {request_id}")
 
-                        result = await permission_handler.request_permission(
+                        result = await _request_permission(
                             request_id=request_id,
                             session_id=_sid,
                             profile_id=_profile_id,
@@ -1445,7 +1505,7 @@ async def stream_to_websocket(
                         desc = "Claude wants to control: " + (", ".join(apps) if apps else "your screen")
                         if reason:
                             desc += f"\nReason: {reason}"
-                        result = await permission_handler.request_permission(
+                        result = await _request_permission(
                             request_id=request_id,
                             session_id=_sid,
                             profile_id=_profile_id,
@@ -1471,7 +1531,7 @@ async def stream_to_websocket(
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
 
-                    result = await permission_handler.request_permission(
+                    result = await _request_permission(
                         request_id=request_id,
                         session_id=_sid,
                         profile_id=_profile_id,
