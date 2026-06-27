@@ -1600,6 +1600,34 @@ class LiveSessionStore:
                         f"Skipping cleanup of session {session_id}: active team members"
                     )
                     return False
+                # Likewise keep it alive while a backgrounded shell/sub-agent is
+                # still running. A session PARKED on background work is not
+                # streaming and has no team members, so without this guard the
+                # 30s-delayed cleanup (scheduled when the parking turn ended)
+                # deletes the session and wipes ``task_registry`` MID-RUN — which
+                # is exactly the reported failure: ``TaskList`` returns nothing
+                # while the task is still on the taskbar, and the unpark follow-up
+                # turn's events later land on a "session not found" and are
+                # dropped (frontend never shows the resume). The work's terminal
+                # status flips ``has_active_background_work`` to False, so a later
+                # cleanup (next turn-end, pool eviction, or resource sweep) still
+                # removes the session — this only DEFERS removal, never blocks it.
+                # NOTE: only SDK-backgrounded work counts here (sub-agents +
+                # ``local_bash`` run_in_background shells). App-managed Monitor
+                # shells are deliberately excluded (see ``task_registry``), so a
+                # Monitor watch never pins the live session open.
+                try:
+                    from app.core.task_registry import task_registry
+                    if task_registry.has_active_background_work(session_id):
+                        logger.info(
+                            f"Skipping cleanup of session {session_id}: active background task(s)"
+                        )
+                        return False
+                except Exception:
+                    logger.debug(
+                        "task_registry.has_active_background_work check failed",
+                        exc_info=True,
+                    )
                 msg_count = len(session.messages)
                 del self._sessions[session_id]
                 self._session_locks.pop(session_id, None)

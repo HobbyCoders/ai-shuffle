@@ -116,6 +116,99 @@ class TestSessionManagement:
         assert not store.is_streaming("nonexistent")
 
 
+class TestCleanupGuardsBackgroundWork:
+    """cleanup_ended_session must NOT wipe a session parked on background work.
+
+    A session parked on a backgrounded sub-agent or ``local_bash`` shell is not
+    streaming and has no team members, so the 30s-delayed cleanup would delete it
+    and clear ``task_registry`` mid-run — leaving ``TaskList`` empty while the
+    task is still on the taskbar, and dropping the unpark follow-up's events on a
+    missing session. These tests pin that guard.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        from app.core.task_registry import task_registry
+        task_registry.reset_all()
+        yield
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_skips_cleanup_while_background_agent_running(self, streaming_session):
+        """A running background sub-agent keeps the parked session alive."""
+        from app.core.task_registry import task_registry
+
+        await streaming_session.end_streaming("session-1")  # parked, not streaming
+        task_registry.start_task("session-1", "task-1", "agent", "bg agent")
+
+        removed = await streaming_session.cleanup_ended_session("session-1")
+
+        assert removed is False
+        assert streaming_session.get_session("session-1") is not None
+
+    @pytest.mark.asyncio
+    async def test_skips_cleanup_while_sdk_background_shell_running(self, streaming_session):
+        """A running SDK-backgrounded local_bash shell keeps the session alive."""
+        from app.core.task_registry import task_registry
+
+        await streaming_session.end_streaming("session-1")
+        task_registry.start_task("session-1", "task-1", "shell", "bg shell")
+        task_registry.mark_sdk_background_task("session-1", "task-1")
+
+        removed = await streaming_session.cleanup_ended_session("session-1")
+
+        assert removed is False
+        assert streaming_session.get_session("session-1") is not None
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_app_managed_monitor_shell(self, streaming_session):
+        """An app-managed Monitor shell (NOT SDK-background) must NOT pin the
+        session — cleanup proceeds normally."""
+        from app.core.task_registry import task_registry
+
+        await streaming_session.end_streaming("session-1")
+        # Monitor shells register via start_task only (no mark_sdk_background_task).
+        task_registry.start_task("session-1", "mon-1", "shell", "monitor watch")
+
+        removed = await streaming_session.cleanup_ended_session("session-1")
+
+        assert removed is True
+        assert streaming_session.get_session("session-1") is None
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_after_background_task_completes(self, streaming_session):
+        """Once the background task reaches a terminal status the guard releases
+        and a later cleanup removes the session (deferral, not a permanent block)."""
+        from app.core.task_registry import task_registry
+
+        await streaming_session.end_streaming("session-1")
+        task_registry.start_task("session-1", "task-1", "agent", "bg agent")
+        task_registry.mark_sdk_background_task("session-1", "task-1")
+
+        # Still running → skipped.
+        assert await streaming_session.cleanup_ended_session("session-1") is False
+        assert streaming_session.get_session("session-1") is not None
+
+        # Completes → next cleanup proceeds.
+        task_registry.complete_task("session-1", "task-1", "completed")
+        assert await streaming_session.cleanup_ended_session("session-1") is True
+        assert streaming_session.get_session("session-1") is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_session_with_background_work_still_skipped(self, streaming_session):
+        """The pre-existing is_streaming guard still wins (no behaviour change for
+        an actively streaming session)."""
+        from app.core.task_registry import task_registry
+
+        # Session is streaming AND has background work.
+        task_registry.start_task("session-1", "task-1", "agent", "bg agent")
+
+        removed = await streaming_session.cleanup_ended_session("session-1")
+
+        assert removed is False
+        assert streaming_session.get_session("session-1") is not None
+
+
 # =============================================================================
 # Text Streaming Tests
 # =============================================================================
