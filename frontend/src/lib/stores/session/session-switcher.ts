@@ -353,6 +353,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			totalCacheReadTokens: 0,
 			contextMax: 200_000,
 			streamStartTime: null,
+			// Background tasks are per-session and written only by the poller's
+			// onPollApplied for the CURRENT session. Without this reset the leaving
+			// session's running tasks (e.g. another worktree's sub-agents) stay in
+			// the shared store and flash in the ActiveTasks strip until the target
+			// session's first /live poll overwrites them.
+			activeTasks: [],
 			worktreeCreateNewBranch: false,
 			// Mark context as pending — null signals "not yet loaded" so the
 			// context bar holds its last value instead of flashing to 0%.
@@ -486,6 +492,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deferredPermissions: [],
 			pendingQuestions: [],
 			queuedMessages: [],
+			// Clear another session's running tasks so they don't flash in the
+			// ActiveTasks strip on the fresh compose screen (mirrors defaultState).
+			activeTasks: [],
 			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,
 			streamStartTime: null,

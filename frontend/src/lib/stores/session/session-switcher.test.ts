@@ -141,6 +141,27 @@ describe('session-switcher · switchSession isolation', () => {
 		expect(s.draft).toBe('');
 	});
 
+	it('clears the leaving session running tasks so they do not flash on the target', async () => {
+		// Reproduces the worktree bug: another worktree's running tasks linger in
+		// the shared store and flash in the ActiveTasks strip before the new
+		// session's first poll overwrites them.
+		const leavingTasks = [{
+			id: 't1',
+			subject: 'Build the project',
+			status: 'running' as const,
+			kind: 'shell' as const,
+			summary: null,
+			startedAt: '2026-06-26T00:00:00Z',
+			updatedAt: '2026-06-26T00:00:01Z',
+		}];
+		const { switcher, getState } = makeSwitcher(fullState({ activeTasks: leavingTasks }));
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().activeTasks).toEqual([]);
+	});
+
 	it('restores the target session ephemeral state instead of resetting blindly', async () => {
 		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
 
