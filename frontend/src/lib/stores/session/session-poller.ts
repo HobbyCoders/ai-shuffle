@@ -621,7 +621,20 @@ class SessionPoller {
 		// user had to send a message to unfreeze). The park poll keeps activeTasks
 		// fresh AND detects the wake — the next poll where isStreaming flips back
 		// to true upshifts to the streaming rate.
+		//
+		// `unparkPending` extends mode 2 across the HAND-OFF GAP: when a parked
+		// session's background sub-agent completes, the backend drops it from
+		// activeTasks (it's done) the instant it records the completion, but the
+		// "unpark" follow-up turn it triggers only flips isStreaming back to true a
+		// beat later (after a DB write + history seeding). In that gap a poll
+		// reports (isStreaming=false, activeTasks=[]) — which without this flag is
+		// indistinguishable from "fully idle" and STOPS the poller. The follow-up
+		// then streams into a dead poller and the UI is stranded stale with no task
+		// bar (the origin socket is gone, so nothing restarts polling). The backend
+		// latches unpark_pending for exactly that gap, so we keep park-polling and
+		// catch the wake. Mirrors the `interrupting` guard above.
 		const hasActiveTasks = activeTasks.length > 0;
+		const unparkPending = (data.unpark_pending as boolean) ?? false;
 		const hasTimer = this._timers.has(sessionId);
 		const interrupting = this._isInterrupting?.(sessionId) ?? false;
 
@@ -641,11 +654,13 @@ class SessionPoller {
 			// timer and nothing restarts it, so new messages never render until a
 			// page refresh. See `_isInterrupting`.
 			if (hasTimer) this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
-		} else if (hasActiveTasks) {
+		} else if (hasActiveTasks || unparkPending) {
 			// Park: downshift to the slow park-poll rate (or start it). We start a
 			// timer even from loadSession here, because a freshly-loaded parked
 			// session must keep itself fresh to detect the wake. _ensureTimer is
 			// idempotent and swaps the interval if we were at the streaming rate.
+			// `unparkPending` (no active tasks) keeps us here across the unpark
+			// hand-off gap so we don't STOP and miss the follow-up's stream.
 			const wasStreamingTimer = hasTimer &&
 				this._timers.get(sessionId)!.interval === STREAMING_POLL_INTERVAL_MS;
 			this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);

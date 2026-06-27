@@ -96,6 +96,38 @@ class TaskRegistry:
         # slow path is a background agent launched in turn N whose notification
         # arrives between turn N and N+1.
         self._background_launches: Dict[str, set] = {}
+        # session_ids with an "unpark" follow-up turn COMMITTED but not yet
+        # streaming. Set the instant the drain pump (or in-stream stash) hands a
+        # background sub-agent's completion off to a follow-up ``run_query``, and
+        # cleared the moment that turn calls ``live_session_store.start_streaming``
+        # (or it tears down). It bridges the gap between a background task
+        # completing — ``complete_task`` removes it from ``get_active`` so the poll
+        # reports ``activeTasks=[]`` — and the follow-up turn flipping
+        # ``is_streaming`` back to ``true``. ``/live`` surfaces it so a polling
+        # client keeps its park-poll alive across that gap instead of seeing a
+        # transient ``(is_streaming=false, activeTasks=[])`` and STOPPING — which
+        # stranded the parked UI (the origin socket is gone, so nothing restarts
+        # polling and the follow-up streamed unseen until a full reload).
+        self._unpark_pending: set = set()
+
+    def mark_unpark_pending(self, session_id: str) -> None:
+        """Latch that an unpark follow-up turn is committed but not yet streaming.
+
+        Defensive: a missing ``session_id`` is a no-op.
+        """
+        if not session_id:
+            return
+        self._unpark_pending.add(session_id)
+
+    def clear_unpark_pending(self, session_id: str) -> None:
+        """Drop the unpark-pending latch (follow-up started streaming or failed)."""
+        if not session_id:
+            return
+        self._unpark_pending.discard(session_id)
+
+    def is_unpark_pending(self, session_id: str) -> bool:
+        """True iff an unpark follow-up turn is committed but not yet streaming."""
+        return session_id in self._unpark_pending
 
     def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
         """Idempotency latch for the parent "unpark" follow-up turn.
@@ -317,6 +349,7 @@ class TaskRegistry:
         self._notified.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
+        self._unpark_pending.discard(session_id)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
@@ -324,6 +357,7 @@ class TaskRegistry:
         self._notified.clear()
         self._started_this_turn.clear()
         self._background_launches.clear()
+        self._unpark_pending.clear()
 
 
 # Global instance

@@ -464,7 +464,18 @@ class LiveSessionStore:
             if session_id not in self._session_locks:
                 self._session_locks[session_id] = asyncio.Lock()
             logger.debug(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
-            return session
+
+        # Clear any "unpark pending" latch: this turn is now streaming, so a
+        # polling client will see is_streaming=true and upshift on its own. This is
+        # the primary clear for the unpark follow-up (it flips together with
+        # is_streaming). Outside the lock — task_registry runs on the same loop and
+        # imports nothing from here (no circular dependency). See task_registry.
+        try:
+            from app.core.task_registry import task_registry
+            task_registry.clear_unpark_pending(session_id)
+        except Exception:
+            logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)
+        return session
 
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
         """Add a user message to the session."""
@@ -1493,6 +1504,16 @@ class LiveSessionStore:
                 f"| msgs={len(session.messages)} interrupted={interrupted}"
             )
             logger.info(f"Ended streaming for session {session_id}: {len(session.messages)} messages kept in memory (interrupted={interrupted}). Total in store: sessions={len(self._sessions)} locks={len(self._session_locks)}")
+
+            # Backstop clear of the "unpark pending" latch: a turn ending means no
+            # follow-up is mid-handoff for this session. Safe for the unpark path —
+            # _deliver_unpark_impl sets the latch AFTER its own end_streaming call,
+            # so this never wipes a just-set latch (see task_registry).
+            try:
+                from app.core.task_registry import task_registry
+                task_registry.clear_unpark_pending(session_id)
+            except Exception:
+                logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)
 
             return [m.to_dict() for m in session.messages]
 
