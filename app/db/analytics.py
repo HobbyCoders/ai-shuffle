@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -23,6 +23,19 @@ def _interval_date_expressions() -> Dict[str, str]:
         "week": sql_strftime("%Y-W%W", "u.created_at"),
         "month": sql_strftime("%Y-%m", "u.created_at"),
     }
+
+
+def _to_iso(value: Any) -> Any:
+    """Normalize a DB date/datetime value to an ISO-format string.
+
+    PostgreSQL returns native ``date``/``datetime`` objects for ``::date`` casts
+    and timestamp columns, but the analytics API contract (and its Pydantic
+    response models) expects ISO strings. ``None`` and existing strings (e.g. the
+    ``to_char`` week/month buckets) pass through unchanged.
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
 
 
 # ============================================================================
@@ -402,7 +415,7 @@ def get_analytics_cost_breakdown(
         for row in rows:
             result.append({
                 "key": str(row["key"]) if row["key"] else "unknown",
-                "name": row["name"],
+                "name": _to_iso(row["name"]),
                 "total_tokens_in": row["total_tokens_in"],
                 "total_tokens_out": row["total_tokens_out"],
                 "total_cost_usd": round(row["total_cost_usd"], 6),
@@ -474,7 +487,7 @@ def get_analytics_usage_trends(
         result = []
         for row in rows:
             result.append({
-                "date": row["date"],
+                "date": _to_iso(row["date"]),
                 "tokens_in": row["tokens_in"],
                 "tokens_out": row["tokens_out"],
                 "cost_usd": round(row["cost_usd"], 6),
@@ -551,6 +564,6 @@ def get_analytics_top_sessions(
                 "total_cost_usd": round(row["total_cost_usd"], 6) if row["total_cost_usd"] else 0,
                 "total_tokens_in": row["total_tokens_in"] or 0,
                 "total_tokens_out": row["total_tokens_out"] or 0,
-                "created_at": row["created_at"]
+                "created_at": _to_iso(row["created_at"])
             })
         return result
