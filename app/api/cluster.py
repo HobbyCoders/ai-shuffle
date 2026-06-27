@@ -247,6 +247,50 @@ async def cluster_intake_endpoint(
     return await run_cloud_intake(body, api_user_id=None)
 
 
+class ClusterGitStateRequest(BaseModel):
+    """A peer asking for this install's git state for a repo (branch picker)."""
+    project_id: str
+    repo_url: str
+    github_repo_name: Optional[str] = None
+    default_branch: str = "main"
+
+
+@router.post("/git-state")
+async def cluster_git_state(
+    body: ClusterGitStateRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+) -> Dict[str, Any]:
+    """Report this install's git state for a repo (cluster-secret authed).
+
+    Powers the cloud branch picker: a primary install previews the *worker's*
+    branches and currently checked-out branch so the user can pick from what the
+    remote actually has (no-worktree cloud = local on this device). Read-only —
+    resolves the project without cloning. If the repo isn't present here yet the
+    worker will clone it on the first intake, so we report ``present: false`` and
+    the primary offers just the default branch.
+    """
+    from app.api.cloud import _find_local_project_for_repo
+    from app.core.project_utils import get_project_working_dir
+    from app.core.git_service import git_service
+
+    def _collect() -> Dict[str, Any]:
+        project = _find_local_project_for_repo(body.project_id, body.repo_url)
+        if not project:
+            return {"present": False, "default_branch": body.default_branch, "branches": [], "current_branch": None}
+        working_dir = get_project_working_dir(project)
+        return {
+            "present": True,
+            "default_branch": body.default_branch,
+            # include_remote=True mirrors the local branch selector (the default
+            # of the /branches endpoint) so the picker shows the same branches the
+            # remote device itself would offer.
+            "branches": git_service.list_branches(working_dir, include_remote=True),
+            "current_branch": git_service.get_current_branch(working_dir),
+        }
+
+    return await run_sync(_collect)
+
+
 @router.post("/upload")
 async def cluster_upload(
     file: UploadFile = File(...),

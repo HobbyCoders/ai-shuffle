@@ -13,8 +13,9 @@
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
-	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
+	import { syncWorktrees, createWorktree as createWorktreeApi, getCloudGitState, type Worktree, type Branch, type CloudGitState } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
+	import { isApiError } from '$lib/api/client';
 	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
@@ -48,11 +49,21 @@
 	let deviceDropdownRef = $state<HTMLDivElement | null>(null);
 
 	// Cloud branch-picker dropdown (shown next to the device picker when Cloud is
-	// active). Lets the user pick which branch the remote device runs on — sourced
-	// from the local clone's branches since it's the same GitHub repo (H).
+	// active). Lets the user pick which branch the remote device runs on. The list
+	// mirrors the *remote* device's own branch selector — loaded from that device
+	// via getCloudGitState — so "Cloud = Local on another device".
 	let showCloudBranchDropdown = $state(false);
 	let cloudBranchRef = $state<HTMLDivElement | null>(null);
 	let loadingCloudBranches = $state(false);
+	// The target device's git state (its branches + currently checked-out branch).
+	let cloudGitState = $state<CloudGitState | null>(null);
+	let cloudGitStateError = $state<string | null>(null);
+	// Identifies the (project, device) the loaded/loading state belongs to, so the
+	// loader dedupes and stale responses for a since-changed target are dropped.
+	let cloudStateKey = $state<string | null>(null);
+	// Separate modal instance for staging a new branch on the remote (deferred —
+	// the worker creates it on send), distinct from the local worktree modal.
+	let showCloudCreateModal = $state(false);
 
 	const offloadTargets = $derived(installs ? computeOffloadTargets(installs) : []);
 	const cloudAvailable = $derived(offloadTargets.length > 0);
@@ -239,14 +250,19 @@
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
 	}
 
-	// --- Cloud branch picker (H) ---
-	// All unique branches from the local clone (deduped by effective name, main
-	// included). The cloud device is the same GitHub repo, so these names resolve
-	// there too — picking one sends it as the branch to run on the remote.
-	const cloudBranches = $derived.by(() => {
+	// --- Cloud branch picker ---
+	// The selectable branches mirror the *remote* device's own selector: loaded
+	// from that device (getCloudGitState), deduped by effective name (a remote
+	// `origin/foo` collapses to `foo`, which the worker checks out via DWIM). When
+	// the repo isn't cloned on the target yet (`present:false`) only the default
+	// branch is offered — the worker clones and runs there on send.
+	const cloudBranchOptions = $derived.by(() => {
+		const st = cloudGitState;
+		if (!st) return [] as { name: string; remote: boolean }[];
+		if (!st.present) return [{ name: st.defaultBranch, remote: false }];
 		const seen = new Set<string>();
 		const out: { name: string; remote: boolean }[] = [];
-		for (const b of $branchStore) {
+		for (const b of st.branches) {
 			const name = b.remote ? b.name.replace(/^[^\/]+\//, '') : b.name;
 			if (seen.has(name)) continue;
 			seen.add(name);
@@ -255,31 +271,105 @@
 		return out;
 	});
 
-	const cloudBranchTitle = $derived(
-		$activeSession.cloudBranch
-			? (worktreeOn
-				? `New worktree based on '${$activeSession.cloudBranch}' on the cloud device`
-				: `Run branch '${$activeSession.cloudBranch}' on the cloud device`)
-			: 'A branch will be chosen automatically on the cloud device. Click to pick one.'
-	);
+	// Pill label: no-worktree always runs on a concrete branch (preselected to the
+	// remote's current branch), so never "Auto". Worktree mode keeps the local-style
+	// "Auto (from message)" when no branch is pinned. A staged new branch shows "+name".
+	const cloudBranchLabel = $derived.by(() => {
+		const b = $activeSession.cloudBranch;
+		if ($activeSession.cloudCreateNewBranch && b) return `+ ${b}`;
+		if (b) return b;
+		return worktreeOn ? 'Auto' : '…';
+	});
 
-	async function toggleCloudBranchDropdown() {
+	const cloudBranchTitle = $derived.by(() => {
+		const b = $activeSession.cloudBranch;
+		if ($activeSession.cloudCreateNewBranch && b) {
+			return `Create branch '${b}' on the cloud device and run there`;
+		}
+		if (b) {
+			return worktreeOn
+				? `New worktree for '${b}' on the cloud device`
+				: `Check out '${b}' on the cloud device and run there`;
+		}
+		return worktreeOn
+			? 'A new branch will be auto-generated from your message on the cloud device. Click to pick a base.'
+			: 'Pick which branch the cloud device runs on.';
+	});
+
+	/** Load the target device's git state (its branches + current branch). Dedupes
+	 *  on (project, device) and drops responses for a since-changed target. */
+	async function loadCloudGitState(projectId: string, targetId: string, force = false) {
+		const key = `${projectId}::${targetId}`;
+		if (!force && key === cloudStateKey && cloudGitState) return;
+		cloudStateKey = key;
+		loadingCloudBranches = true;
+		cloudGitStateError = null;
+		try {
+			const state = await getCloudGitState(projectId, targetId);
+			if (cloudStateKey !== key) return; // a newer target won the race
+			cloudGitState = state;
+		} catch (e) {
+			if (cloudStateKey !== key) return;
+			cloudGitState = null;
+			cloudGitStateError = isApiError(e) ? e.detail : 'Failed to load the device’s branches';
+		} finally {
+			if (cloudStateKey === key) loadingCloudBranches = false;
+		}
+	}
+
+	// Load (and reload on device/project change) the remote git state whenever
+	// cloud mode is active and a device is chosen.
+	$effect(() => {
+		if ($activeSession.executionMode !== 'cloud') return;
+		const project = $activeSession.project;
+		const target = $activeSession.cloudTargetInstanceId;
+		if (!project || !target) {
+			cloudGitState = null;
+			cloudStateKey = null;
+			return;
+		}
+		loadCloudGitState(project, target);
+	});
+
+	// Preselect the remote's current branch in no-worktree mode (its default), and
+	// keep the selection valid. Worktree mode defaults to "Auto" (null); a staged
+	// new branch is left untouched.
+	$effect(() => {
+		if ($activeSession.executionMode !== 'cloud') return;
+		if ($activeSession.cloudWorktree) return;
+		if ($activeSession.cloudCreateNewBranch) return;
+		const st = cloudGitState;
+		if (!st) return;
+		const names = new Set(cloudBranchOptions.map((o) => o.name));
+		const cur = $activeSession.cloudBranch;
+		if (cur && names.has(cur)) return; // valid selection kept
+		const def = st.present ? st.currentBranch || st.defaultBranch : st.defaultBranch;
+		if (def && def !== cur) activeSession.setCloudBranch(def);
+	});
+
+	function toggleCloudBranchDropdown() {
 		showCloudBranchDropdown = !showCloudBranchDropdown;
-		if (showCloudBranchDropdown && $activeSession.project) {
-			loadingCloudBranches = true;
-			try {
-				await git.loadBranches();
-			} catch (e) {
-				console.warn('[ExecutionModeBar] Failed to load branches for cloud:', e);
-			} finally {
-				loadingCloudBranches = false;
-			}
+		if (showCloudBranchDropdown && $activeSession.project && $activeSession.cloudTargetInstanceId) {
+			// Refresh on open so a branch created/switched on the device since the
+			// last load shows up.
+			loadCloudGitState($activeSession.project, $activeSession.cloudTargetInstanceId, true);
 		}
 	}
 
 	function selectCloudBranch(name: string | null) {
 		activeSession.setCloudBranch(name);
 		showCloudBranchDropdown = false;
+	}
+
+	function openCloudCreateModal() {
+		showCloudBranchDropdown = false;
+		showCloudCreateModal = true;
+	}
+
+	function handleCloudBranchCreated(branchName: string) {
+		// Stage the new branch — the remote worker creates it on send.
+		activeSession.setCloudNewBranch(branchName);
+		showCloudCreateModal = false;
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -617,10 +707,11 @@
 		{/if}
 
 		<!-- Cloud branch selector (shown when cloud mode active) — pick which branch
-		     the remote device runs on (H). Lists the local clone's branches (same
-		     GitHub repo → same names). "Auto" lets the remote choose. With the
-		     worktree checkbox on, the pick becomes the base for a fresh remote
-		     worktree branch instead of a direct checkout. -->
+		     the remote device runs on. The list mirrors the *remote* device's own
+		     selector (loaded from that device): in no-worktree mode picking a branch
+		     checks it out there and runs on it; in worktree mode "Auto (from message)"
+		     forks a fresh branch from the prompt, else the pick is the worktree base.
+		     "New branch…" stages a branch the worker creates on send. -->
 		{#if baseMode === 'cloud'}
 			<div class="branch-selector" bind:this={cloudBranchRef}>
 				<button
@@ -632,12 +723,12 @@
 					aria-haspopup="menu"
 					aria-expanded={showCloudBranchDropdown}
 				>
-					{#if worktreeOn}
+					{#if worktreeOn || $activeSession.cloudCreateNewBranch}
 						<GitFork size={12} strokeWidth={1.5} />
 					{:else}
 						<GitBranch size={12} strokeWidth={1.5} />
 					{/if}
-					<span class="branch-name">{$activeSession.cloudBranch || 'Auto'}</span>
+					<span class="branch-name">{cloudBranchLabel}</span>
 					<ChevronDown size={12} strokeWidth={1.5} />
 				</button>
 
@@ -648,44 +739,63 @@
 								<Loader2 size={14} class="animate-spin" />
 								<span>Loading...</span>
 							</div>
+						{:else if cloudGitStateError}
+							<p class="branch-empty">{cloudGitStateError}</p>
 						{:else}
-							<!-- Auto: let the remote pick (worktree on → fresh branch from
-							     the prompt; worktree off → remote default). -->
-							<button
-								type="button"
-								class="branch-item auto-item"
-								class:active={!$activeSession.cloudBranch}
-								onclick={() => selectCloudBranch(null)}
-								role="menuitemradio"
-								aria-checked={!$activeSession.cloudBranch}
-							>
-								<GitFork size={13} strokeWidth={1.5} />
-								<span class="branch-item-name">Auto</span>
-								<span class="auto-hint">{worktreeOn ? 'from message' : 'remote default'}</span>
-							</button>
+							<!-- Worktree mode keeps the local-style "Auto (from message)".
+							     No-worktree mode has no Auto — it always runs on a concrete
+							     branch (preselected to the remote's current one). -->
+							{#if worktreeOn}
+								<button
+									type="button"
+									class="branch-item auto-item"
+									class:active={!$activeSession.cloudBranch}
+									onclick={() => selectCloudBranch(null)}
+									role="menuitemradio"
+									aria-checked={!$activeSession.cloudBranch}
+								>
+									<GitFork size={13} strokeWidth={1.5} />
+									<span class="branch-item-name">Auto</span>
+									<span class="auto-hint">from message</span>
+								</button>
+							{/if}
 
-							{#if cloudBranches.length > 0}
-								<div class="branch-divider"></div>
-								<div class="branch-section-label">Branches</div>
-								{#each cloudBranches as b (b.name)}
+							{#if cloudBranchOptions.length > 0}
+								{#if worktreeOn}
+									<div class="branch-divider"></div>
+								{/if}
+								<div class="branch-section-label">
+									{cloudGitState?.present === false ? 'Default branch' : 'Branches'}
+								</div>
+								{#each cloudBranchOptions as b (b.name)}
 									<button
 										type="button"
 										class="branch-item"
-										class:active={$activeSession.cloudBranch === b.name}
+										class:active={!$activeSession.cloudCreateNewBranch && $activeSession.cloudBranch === b.name}
 										onclick={() => selectCloudBranch(b.name)}
 										role="menuitemradio"
-										aria-checked={$activeSession.cloudBranch === b.name}
+										aria-checked={!$activeSession.cloudCreateNewBranch && $activeSession.cloudBranch === b.name}
 									>
 										<GitBranch size={13} strokeWidth={1.5} />
 										<span class="branch-item-name">{b.name}</span>
-										<span class="branch-location-badge" class:remote={b.remote}>
-											{b.remote ? 'remote' : 'local'}
-										</span>
+										{#if cloudGitState?.present !== false && b.name === cloudGitState?.currentBranch}
+											<span class="auto-hint">current</span>
+										{:else}
+											<span class="branch-location-badge" class:remote={b.remote}>
+												{b.remote ? 'remote' : 'local'}
+											</span>
+										{/if}
 									</button>
 								{/each}
 							{:else}
 								<p class="branch-empty">No branches available</p>
 							{/if}
+
+							<div class="branch-divider"></div>
+							<button type="button" class="branch-item create-branch-item" onclick={openCloudCreateModal}>
+								<Plus size={13} strokeWidth={1.5} />
+								<span class="branch-item-name">New branch...</span>
+							</button>
 						{/if}
 					</div>
 				{/if}
@@ -757,6 +867,15 @@
 	projectId={$activeSession.project}
 	onClose={() => showCreateModal = false}
 	onCreated={handleBranchCreated}
+/>
+
+<!-- Cloud "New branch…": staged only — the remote worker creates it on send. -->
+<CreateBranchModal
+	open={showCloudCreateModal}
+	projectId={$activeSession.project}
+	stageOnly={true}
+	onClose={() => showCloudCreateModal = false}
+	onCreated={handleCloudBranchCreated}
 />
 
 <style>

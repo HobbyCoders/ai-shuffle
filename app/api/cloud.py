@@ -41,15 +41,26 @@ class CloudIntakeRequest(BaseModel):
     base_branch: Optional[str] = None
     pending_upload_paths: Optional[List[str]] = None
     overrides: Optional[Dict[str, Any]] = None
+    # Explicit "Cloud = Local on another device" contract (see module docstring
+    # and run_cloud_intake). When ``use_worktree`` is True the worker forks a new
+    # worktree (legacy behaviour); when False it runs a normal session directly in
+    # the project's main checkout, on ``branch_name`` (checked out / created
+    # there). ``create_new_branch`` makes the worker create ``branch_name`` off
+    # ``base_branch`` first; ``auto_stash`` stashes a dirty checkout before
+    # switching instead of failing with 409.
+    use_worktree: bool = True
+    create_new_branch: bool = False
+    auto_stash: bool = False
 
 
 class CloudIntakeResponse(BaseModel):
     session_id: str
     project_id: str
-    worktree_id: str
+    # Worktree fields are None for the non-worktree ("run in main checkout") path.
+    worktree_id: Optional[str] = None
     branch_name: str
     base_branch: Optional[str] = None
-    worktree_path: str
+    worktree_path: Optional[str] = None
     status: str = "active"
     query_started: bool = False
     project_created: bool = False
@@ -87,37 +98,27 @@ def _instance_suffixed_id(project_id: str) -> str:
     return f"{project_id}-{suffix}"
 
 
-def _ensure_project_for_repo(
+def _find_local_project_for_repo(
     project_id: str,
     repo_url: str,
-    github_repo_name: Optional[str],
-    default_branch: str,
-) -> tuple[Dict[str, Any], bool]:
-    """Resolve THIS install's project for ``repo_url``, cloning if necessary.
+) -> Optional[Dict[str, Any]]:
+    """Resolve THIS install's already-present project for ``repo_url`` — no clone.
 
-    Returns ``(project, created)``.
-
-    Shared-DB rationale: cloud primary and worker installs share one Postgres
-    database, but ``database.get_project(id)`` looks up purely by id and does
-    NOT filter by ``instance_id``. So the verbatim ``project_id`` the primary
-    sends may resolve to the *primary's* own row, whose ``path`` is a directory
-    that exists only on the primary (e.g. a Windows path). Blindly reusing that
-    row makes the worker treat a non-existent path as the project root and fail
-    with "not a git repository". To avoid that we resolve to a project whose
-    working dir is actually a git repo *on this install*, in this order:
+    Read-only lookup half of ``_ensure_project_for_repo`` (cases 1 & 2), shared
+    with the cross-install git-state query so it can report the worker's branches
+    without side effects beyond an idempotent ``git_repositories`` record upsert.
+    Returns the project dict whose working dir is a real git repo *on this
+    install*, or ``None`` if nothing usable is present (caller decides whether to
+    clone). Resolution order:
 
     1. Verbatim id, only if it is a usable git repo here (single-install /
        same-machine case).
     2. This instance's own clone of the repo (``get_all_projects`` is already
        instance-filtered) matched by normalized git remote URL.
-    3. Otherwise create + clone a fresh project, choosing an instance-suffixed
-       id when the verbatim id is already held by a foreign-instance row.
     """
-    from app.api.projects import validate_project_path
     from app.api.git_helpers import ensure_git_repository_record
     from app.core.project_utils import get_project_working_dir
     from app.core.git_service import git_service
-    from app.core.config import settings
 
     target_remote = _normalize_remote_url(repo_url)
 
@@ -131,7 +132,7 @@ def _ensure_project_for_repo(
             ensure_git_repository_record(existing["id"], get_project_working_dir(existing))
         except Exception as e:  # noqa: BLE001
             logger.warning("ensure_git_repository_record failed for %s: %s", existing["id"], e)
-        return existing, False
+        return existing
 
     # 2. This instance's own clone of the same repo. get_all_projects() filters
     #    by effective_instance_id, so these rows are guaranteed local. Match on
@@ -155,7 +156,46 @@ def _ensure_project_for_repo(
                     logger.warning(
                         "ensure_git_repository_record failed for %s: %s", candidate["id"], e
                     )
-                return candidate, False
+                return candidate
+
+    return None
+
+
+def _ensure_project_for_repo(
+    project_id: str,
+    repo_url: str,
+    github_repo_name: Optional[str],
+    default_branch: str,
+) -> tuple[Dict[str, Any], bool]:
+    """Resolve THIS install's project for ``repo_url``, cloning if necessary.
+
+    Returns ``(project, created)``.
+
+    Shared-DB rationale: cloud primary and worker installs share one Postgres
+    database, but ``database.get_project(id)`` looks up purely by id and does
+    NOT filter by ``instance_id``. So the verbatim ``project_id`` the primary
+    sends may resolve to the *primary's* own row, whose ``path`` is a directory
+    that exists only on the primary (e.g. a Windows path). Blindly reusing that
+    row makes the worker treat a non-existent path as the project root and fail
+    with "not a git repository". To avoid that we resolve to a project whose
+    working dir is actually a git repo *on this install*, in this order:
+
+    1-2. An already-present local project (see ``_find_local_project_for_repo``).
+    3. Otherwise create + clone a fresh project, choosing an instance-suffixed
+       id when the verbatim id is already held by a foreign-instance row.
+    """
+    from app.api.projects import validate_project_path
+    from app.api.git_helpers import ensure_git_repository_record
+    from app.core.project_utils import get_project_working_dir
+    from app.core.git_service import git_service
+    from app.core.config import settings
+
+    # 1-2. Reuse an already-present local clone if there is one (no clone).
+    found = _find_local_project_for_repo(project_id, repo_url)
+    if found is not None:
+        return found, False
+
+    existing = database.get_project(project_id)
 
     # 3. Nothing usable on this install — create + clone a fresh project.
     #    Pick an id that won't collide with a foreign row: if the verbatim id is
@@ -212,20 +252,186 @@ def _ensure_project_for_repo(
     return project, created
 
 
+def _switch_or_create_branch_sync(
+    working_dir: str,
+    *,
+    branch_name: str,
+    base_branch: Optional[str],
+    create_new_branch: bool,
+    auto_stash: bool,
+) -> str:
+    """Put the main checkout on ``branch_name`` (non-worktree cloud path).
+
+    Mirrors the local checkout endpoint (``app/api/git.py``) so "Cloud = Local":
+    switching to an existing branch (or creating one off ``base_branch`` then
+    checking it out) blocks on a dirty tree with the *same* 409 message unless
+    ``auto_stash`` is set, in which case it stashes first. When the requested
+    branch is already current and no new branch is asked for, it is a no-op.
+    Returns the branch the checkout now sits on. Runs sync (called via run_sync).
+    """
+    from app.core.git_service import git_service
+
+    current = git_service.get_current_branch(working_dir)
+
+    # Already where we want to be — no checkout, so no dirty-tree concern.
+    if not create_new_branch and (not branch_name or branch_name == current):
+        return current or branch_name
+
+    # A checkout is required. Guard a dirty tree exactly like the checkout
+    # endpoint (untracked files don't block; staged/modified/conflicts do).
+    status_data = git_service.get_status(working_dir)
+    has_uncommitted = bool(
+        status_data.get("staged")
+        or status_data.get("modified")
+        or status_data.get("conflicts")
+    )
+    if has_uncommitted:
+        if not auto_stash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot checkout: you have uncommitted changes. Commit or stash them first.",
+            )
+        if not git_service.stash_push(working_dir, f"auto-stash before checkout {branch_name}"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot checkout: failed to stash your uncommitted changes.",
+            )
+
+    if create_new_branch:
+        start_point = (base_branch or "").strip() or None
+        if not git_service.create_branch(working_dir, branch_name, start_point=start_point):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to create branch '{branch_name}'. It may already exist.",
+            )
+
+    if not git_service.checkout(working_dir, branch_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to checkout '{branch_name}'. It may not exist.",
+        )
+    return branch_name
+
+
+def _create_plain_session_sync(
+    project: Dict[str, Any],
+    profile_id: Optional[str],
+) -> Dict[str, Any]:
+    """Create a normal (non-worktree) session in the project's main checkout.
+
+    Mirrors ``worktree_manager.create_worktree_session``'s session row, minus the
+    worktree linkage, and resolves a profile the same way (request → project
+    default → first profile). ``create_session`` stamps this install's
+    ``instance_id`` so the cross-install relay can reach the session.
+    """
+    import uuid
+
+    resolved_profile = profile_id
+    if not resolved_profile:
+        project_settings = project.get("settings", {}) or {}
+        resolved_profile = project_settings.get("default_profile_id")
+        if not resolved_profile:
+            profiles = database.get_all_profiles()
+            if not profiles:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No profiles available. Please create a profile first.",
+                )
+            resolved_profile = profiles[0]["id"]
+
+    session_id = f"ses-{uuid.uuid4().hex[:12]}"
+    return database.create_session(
+        session_id=session_id,
+        profile_id=resolved_profile,
+        project_id=project["id"],
+        title=None,
+        worktree_id=None,
+        worktree_branch=None,
+        worktree_path=None,
+    )
+
+
+async def _finalize_intake_session(
+    *,
+    session: Dict[str, Any],
+    project_id: str,
+    prompt: str,
+    profile_id: str,
+    api_user_id: Optional[str],
+    worktree_id: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+) -> bool:
+    """Persist the first message + title, broadcast, and launch the query.
+
+    Shared tail of both intake paths (worktree and main-checkout). Returns
+    ``query_started``. ``worktree_id`` is ``None`` for the non-worktree path —
+    ``resolve_working_dir`` then runs in the project's main checkout.
+    """
+    from app.api.sessions_worktree import _detect_command_meta
+    from app.core.headless_query_runner import launch_headless_query
+    from app.core.sync_engine import sync_engine
+
+    title = prompt[:100].strip()
+    if len(prompt) > 100:
+        title = title.rsplit(" ", 1)[0] + "..."
+    msg_role, msg_meta = _detect_command_meta(prompt)
+
+    def _persist_first_message():
+        existing = database.get_session(session["id"]) or {}
+        if not (existing.get("title") or "").strip() and title:
+            database.update_session(session_id=session["id"], title=title)
+        database.add_session_message(
+            session_id=session["id"],
+            role=msg_role,
+            content=prompt,
+            metadata=msg_meta,
+            profile_id=profile_id,
+        )
+
+    await run_sync(_persist_first_message)
+
+    try:
+        await sync_engine.broadcast_user_session_created(
+            user_id="admin", session_id=session["id"], source_device_id=None
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Cloud intake session broadcast failed: %s", e)
+
+    try:
+        await launch_headless_query(
+            prompt=prompt,
+            session_id=session["id"],
+            profile_id=profile_id,
+            project_id=project_id,
+            user_id="admin",
+            api_user_id=api_user_id,
+            worktree_id=worktree_id,
+            overrides=overrides,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Cloud intake failed to launch query: %s", e)
+        return False
+
+
 async def run_cloud_intake(
     body: CloudIntakeRequest,
     api_user_id: Optional[str],
 ) -> CloudIntakeResponse:
-    """Shared intake worker: clone/link a project, spin up a worktree session
-    and start the first query. Invoked by the cluster-secret intake endpoint
+    """Shared intake worker: clone/link a project, start a session and run the
+    first query. Invoked by the cluster-secret intake endpoint
     (``/api/v1/cluster/intake``). ``api_user_id`` is passed in rather than read
     here so the caller controls how the originating request was authenticated.
-    """
-    from app.core.worktree_manager import worktree_manager, WorktreeError
-    from app.api.sessions_worktree import _migrate_uploads_sync, _detect_command_meta
-    from app.core.headless_query_runner import launch_headless_query
-    from app.core.sync_engine import sync_engine
 
+    Two execution paths, selected by ``body.use_worktree`` ("Cloud = Local on
+    another device"):
+
+    - **Worktree** (legacy default): fork a new worktree from the selected branch,
+      or auto-name one from the prompt when no branch is pinned.
+    - **Main checkout**: run a normal session directly in the project's checkout,
+      first checking out / creating ``branch_name`` there — exactly like running
+      locally on that device.
+    """
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
@@ -247,10 +453,21 @@ async def run_cloud_intake(
 
     project_id = project["id"]
 
+    if not body.use_worktree:
+        return await _run_cloud_intake_main_checkout(
+            body, api_user_id, project, project_created, prompt
+        )
+
+    from app.core.worktree_manager import worktree_manager, WorktreeError
+    from app.api.sessions_worktree import _migrate_uploads_sync
+
     # 2. Resolve the branch name. When the primary doesn't pin one, derive a
-    #    fresh branch from the prompt (same slug scheme as the worktree flow).
+    #    fresh branch from the prompt (same slug scheme as the worktree flow). An
+    #    explicit create_new_branch (named "New branch…" in the picker) forks a
+    #    new branch even when a name is given; otherwise a given name is an
+    #    existing branch to check out in the worktree.
     branch_name = (body.branch_name or "").strip()
-    create_new_branch = not branch_name
+    create_new_branch = bool(body.create_new_branch) or not branch_name
     if not branch_name:
         from app.api.git_ai import slugify_branch, infer_prefix
         branch_name = slugify_branch(prompt, infer_prefix(prompt))
@@ -286,47 +503,15 @@ async def run_cloud_intake(
 
     # 4. Persist the first user message + title, then launch the query.
     profile_id = body.profile_id or session.get("profile_id") or "claude-code"
-    title = prompt[:100].strip()
-    if len(prompt) > 100:
-        title = title.rsplit(" ", 1)[0] + "..."
-    msg_role, msg_meta = _detect_command_meta(prompt)
-
-    def _persist_first_message():
-        existing = database.get_session(session["id"]) or {}
-        if not (existing.get("title") or "").strip() and title:
-            database.update_session(session_id=session["id"], title=title)
-        database.add_session_message(
-            session_id=session["id"],
-            role=msg_role,
-            content=prompt,
-            metadata=msg_meta,
-            profile_id=profile_id,
-        )
-
-    await run_sync(_persist_first_message)
-
-    try:
-        await sync_engine.broadcast_user_session_created(
-            user_id="admin", session_id=session["id"], source_device_id=None
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Cloud intake session broadcast failed: %s", e)
-
-    query_started = False
-    try:
-        await launch_headless_query(
-            prompt=prompt,
-            session_id=session["id"],
-            profile_id=profile_id,
-            project_id=project_id,
-            user_id="admin",
-            api_user_id=api_user_id,
-            worktree_id=worktree["id"],
-            overrides=body.overrides,
-        )
-        query_started = True
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Cloud intake failed to launch query: %s", e)
+    query_started = await _finalize_intake_session(
+        session=session,
+        project_id=project_id,
+        prompt=prompt,
+        profile_id=profile_id,
+        api_user_id=api_user_id,
+        worktree_id=worktree["id"],
+        overrides=body.overrides,
+    )
 
     return CloudIntakeResponse(
         session_id=session["id"],
@@ -335,6 +520,101 @@ async def run_cloud_intake(
         branch_name=worktree["branch_name"],
         base_branch=worktree.get("base_branch") or body.base_branch,
         worktree_path=worktree["worktree_path"],
+        status="active",
+        query_started=query_started,
+        project_created=project_created,
+        upload_migration_errors=upload_errors,
+    )
+
+
+async def _run_cloud_intake_main_checkout(
+    body: CloudIntakeRequest,
+    api_user_id: Optional[str],
+    project: Dict[str, Any],
+    project_created: bool,
+    prompt: str,
+) -> CloudIntakeResponse:
+    """Non-worktree cloud path: run a normal session in the project's main
+    checkout, after putting it on the requested branch — "Local on this device".
+    """
+    from app.api.sessions_worktree import _migrate_uploads_to_dir
+    from app.core.project_utils import get_project_working_dir
+
+    project_id = project["id"]
+    working_dir = get_project_working_dir(project)
+
+    # 1. Put the main checkout on the requested branch (create it if asked). An
+    #    empty branch_name means "run on whatever is checked out" (the default
+    #    the primary preselects from the remote's current branch). 409 on a dirty
+    #    tree unless auto_stash — propagated to the primary so it can offer
+    #    "Stash & switch".
+    branch_name = (body.branch_name or "").strip()
+    create_new_branch = bool(body.create_new_branch)
+    if create_new_branch and not branch_name:
+        # Defensive: a create request with no name — derive one like the
+        # worktree flow rather than failing.
+        from app.api.git_ai import slugify_branch, infer_prefix
+        branch_name = slugify_branch(prompt, infer_prefix(prompt))
+
+    try:
+        effective_branch = await run_sync(
+            _switch_or_create_branch_sync,
+            working_dir,
+            branch_name=branch_name,
+            base_branch=body.base_branch,
+            create_new_branch=create_new_branch,
+            auto_stash=bool(body.auto_stash),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Cloud intake branch switch failed")
+        raise HTTPException(status_code=500, detail=f"Branch switch failed: {e}")
+
+    # 2. Create a normal (non-worktree) session owned by this install.
+    try:
+        session = await run_sync(_create_plain_session_sync, project, body.profile_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected error creating cloud session")
+        raise HTTPException(status_code=500, detail="Failed to create session")
+
+    # 3. Migrate any uploaded files into the main checkout.
+    upload_errors: Optional[List[str]] = None
+    if body.pending_upload_paths:
+        try:
+            from pathlib import Path
+
+            upload_errors = await run_sync(
+                _migrate_uploads_to_dir,
+                project_id,
+                Path(working_dir),
+                body.pending_upload_paths,
+            ) or None
+        except Exception as e:  # noqa: BLE001
+            upload_errors = [str(e)]
+
+    # 4. Persist the first message + title, then launch the query in the main
+    #    checkout (worktree_id=None ⇒ resolve_working_dir uses the project dir).
+    profile_id = body.profile_id or session.get("profile_id") or "claude-code"
+    query_started = await _finalize_intake_session(
+        session=session,
+        project_id=project_id,
+        prompt=prompt,
+        profile_id=profile_id,
+        api_user_id=api_user_id,
+        worktree_id=None,
+        overrides=body.overrides,
+    )
+
+    return CloudIntakeResponse(
+        session_id=session["id"],
+        project_id=project_id,
+        worktree_id=None,
+        branch_name=effective_branch or body.default_branch,
+        base_branch=body.base_branch,
+        worktree_path=None,
         status="active",
         query_started=query_started,
         project_created=project_created,

@@ -33,7 +33,24 @@ UPLOAD_TIMEOUT = 120.0
 
 
 class CloudRelayError(Exception):
-    """Raised when a peer install returns an error or is unreachable."""
+    """Raised when a peer install returns an error or is unreachable.
+
+    ``status_code``/``detail`` capture the peer's HTTP response when there was
+    one (None for transport-level failures) so callers can re-map a meaningful
+    status — e.g. surface a worker 409 (dirty checkout) to the primary's caller
+    as a 409 rather than collapsing every peer error to 502.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        detail: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
 
 
 def _raise_for_status(resp: httpx.Response, action: str) -> None:
@@ -45,7 +62,9 @@ def _raise_for_status(resp: httpx.Response, action: str) -> None:
         except Exception:  # noqa: BLE001
             detail = (resp.text or "")[:300]
         raise CloudRelayError(
-            f"Peer install {action} failed ({resp.status_code}): {detail}"
+            f"Peer install {action} failed ({resp.status_code}): {detail}",
+            status_code=resp.status_code,
+            detail=detail or None,
         )
 
 
@@ -61,6 +80,9 @@ def _intake_payload(
     base_branch: Optional[str],
     pending_upload_paths: Optional[list[str]],
     overrides: Optional[Dict[str, Any]],
+    use_worktree: bool,
+    create_new_branch: bool,
+    auto_stash: bool,
 ) -> Dict[str, Any]:
     """Build the JSON body for the cluster intake call."""
     return {
@@ -74,6 +96,9 @@ def _intake_payload(
         "base_branch": base_branch,
         "pending_upload_paths": pending_upload_paths or [],
         "overrides": overrides,
+        "use_worktree": use_worktree,
+        "create_new_branch": create_new_branch,
+        "auto_stash": auto_stash,
     }
 
 
@@ -238,13 +263,18 @@ async def cluster_intake(
     base_branch: Optional[str] = None,
     pending_upload_paths: Optional[list[str]] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    use_worktree: bool = True,
+    create_new_branch: bool = False,
+    auto_stash: bool = False,
 ) -> Dict[str, Any]:
     """Offload to a registered install via the cluster-secret intake endpoint.
 
-    The worker (``run_cloud_intake``) clones/links the project, spins up a
-    worktree session and starts the query. Targeted by registry-resolved
-    ``base_url`` and authenticated with the shared cluster secret. The returned
-    ``session_id`` is shared cluster-wide, so the primary needs no proxy row.
+    The worker (``run_cloud_intake``) clones/links the project, then either forks
+    a worktree session (``use_worktree=True``) or runs a normal session in the
+    project's main checkout on ``branch_name`` (``use_worktree=False``) and starts
+    the query. Targeted by registry-resolved ``base_url`` and authenticated with
+    the shared cluster secret. The returned ``session_id`` is shared cluster-wide,
+    so the primary needs no proxy row.
     """
     payload = _intake_payload(
         project_id=project_id,
@@ -257,6 +287,9 @@ async def cluster_intake(
         base_branch=base_branch,
         pending_upload_paths=pending_upload_paths,
         overrides=overrides,
+        use_worktree=use_worktree,
+        create_new_branch=create_new_branch,
+        auto_stash=auto_stash,
     )
     async with httpx.AsyncClient(timeout=INTAKE_TIMEOUT) as client:
         try:
@@ -268,6 +301,32 @@ async def cluster_intake(
         except httpx.HTTPError as e:
             raise InstallOffline(f"Could not reach target device: {e}") from e
     _raise_for_status(resp, "cluster intake")
+    return resp.json()
+
+
+async def relay_git_state(
+    target_instance_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ask a registered install for a project's git state (branches + current).
+
+    Mirrors ``cluster_intake`` but addresses the target by ``instance_id`` (there
+    is no session yet) via ``resolve_install_base_url``. POSTs ``payload``
+    (``{project_id, repo_url, github_repo_name, default_branch}``) to the worker's
+    ``/api/v1/cluster/git-state`` endpoint and returns its JSON
+    (``{present, branches, current_branch, default_branch}``).
+    """
+    base_url = resolve_install_base_url(target_instance_id)
+    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/api/v1/cluster/git-state",
+                json=payload,
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach target device: {e}") from e
+    _raise_for_status(resp, "cluster git-state")
     return resp.json()
 
 

@@ -41,6 +41,15 @@ class CreateCloudSessionRequest(BaseModel):
     # The registered install to run on, resolved from the device picker. The
     # result is an ordinary cross-install session (no local proxy row). Required.
     target_instance_id: Optional[str] = None
+    # "Cloud = Local on another device": when ``use_worktree`` is False the
+    # session runs directly in the target's main checkout on ``branch_name``
+    # (the worker checks it out / creates it there), mirroring local no-worktree
+    # mode. When True the target forks a worktree (auto-named from the prompt if
+    # ``branch_name`` is empty). ``create_new_branch`` / ``auto_stash`` are
+    # forwarded verbatim to the worker. Defaults preserve the legacy worktree path.
+    use_worktree: bool = True
+    create_new_branch: bool = False
+    auto_stash: bool = False
 
 
 class CloudSessionResponse(BaseModel):
@@ -72,6 +81,54 @@ def _resolve_github_repo(project_id: str) -> tuple[str, Optional[str], str]:
             ),
         )
     return remote_url, github_repo_name, default_branch or "main"
+
+
+@cloud_router.get("/cloud/git-state")
+async def get_cloud_git_state(
+    request: Request,
+    project_id: str,
+    target_instance_id: str,
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Preview a target device's git state for the cloud branch picker.
+
+    Resolves the project's GitHub remote, then asks the chosen install (via the
+    cluster relay) which branches it has and what it currently has checked out —
+    so the picker can mirror the *remote's* branch selector and default to its
+    current branch. Returns ``{present, branches, current_branch, default_branch}``.
+    """
+    from app.core import cloud_relay
+
+    project = await run_sync(database.get_project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    api_user = get_api_user_from_request(request)
+    if api_user and api_user.get("project_id") and api_user["project_id"] != project_id:
+        raise HTTPException(status_code=403, detail="Access denied to this project")
+
+    clone_url, github_repo_name, default_branch = await run_sync(
+        _resolve_github_repo, project_id
+    )
+
+    try:
+        state = await cloud_relay.relay_git_state(
+            target_instance_id,
+            {
+                "project_id": project_id,
+                "repo_url": clone_url,
+                "github_repo_name": github_repo_name,
+                "default_branch": default_branch,
+            },
+        )
+    except cloud_relay.InstallOffline as e:
+        # Device unreachable -> 503, kept distinct from the worker's dirty-tree
+        # 409 so the frontend never mistakes "offline" for "stash & switch".
+        raise HTTPException(status_code=503, detail=str(e))
+    except cloud_relay.CloudRelayError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return state
 
 
 @cloud_router.post("/cloud", response_model=CloudSessionResponse)
@@ -128,7 +185,8 @@ async def _create_offload_via_registry(
             cloud_relay.resolve_install_base_url, body.target_instance_id
         )
     except cloud_relay.InstallOffline as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        # Device unreachable -> 503 (see note on the cluster_intake handler below).
+        raise HTTPException(status_code=503, detail=str(e))
 
     clone_url, github_repo_name, default_branch = await run_sync(
         _resolve_github_repo, body.project_id
@@ -144,7 +202,8 @@ async def _create_offload_via_registry(
         except Exception as e:  # noqa: BLE001
             logger.warning("Offload attachment upload failed for %s: %s", path, e)
 
-    # Hand off to the target (creates/links project, worktree, starts query).
+    # Hand off to the target (creates/links project, then runs in a worktree or
+    # directly in the main checkout depending on use_worktree, and starts query).
     try:
         intake = await cloud_relay.cluster_intake(
             base_url,
@@ -158,10 +217,22 @@ async def _create_offload_via_registry(
             base_branch=body.base_branch,
             pending_upload_paths=remote_upload_paths,
             overrides=body.overrides,
+            use_worktree=body.use_worktree,
+            create_new_branch=body.create_new_branch,
+            auto_stash=body.auto_stash,
         )
     except cloud_relay.InstallOffline as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        # The device went offline during handoff -> 503, NOT 409. The frontend
+        # treats a 409 on this path as a dirty-tree conflict and offers a
+        # "Stash & switch" retry; an unreachable device must never trigger that
+        # (stashing can't fix offline, and the retry would just fail again).
+        raise HTTPException(status_code=503, detail=str(e))
     except cloud_relay.CloudRelayError as e:
+        # Preserve a worker 409 (dirty checkout on the remote) with its detail so
+        # the frontend can offer "Stash & switch" (retry with auto_stash=true).
+        # Other peer errors collapse to a generic 502.
+        if e.status_code == 409:
+            raise HTTPException(status_code=409, detail=e.detail or str(e))
         raise HTTPException(status_code=502, detail=str(e))
 
     remote_session_id = intake.get("session_id")

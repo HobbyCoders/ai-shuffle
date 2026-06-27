@@ -131,11 +131,17 @@ export interface ActiveSessionState {
 	 *  modifier surfaced as the "Worktree" checkbox, mirroring local worktree mode
 	 *  for cloud sessions. */
 	cloudWorktree: boolean;
-	/** When executionMode === 'cloud': the existing project branch to run on the
-	 *  remote device (null = let the remote auto-derive a fresh branch). Sourced
-	 *  from the local clone's branch list — same GitHub repo, so the names match,
-	 *  which is what makes cloud branch selection feel seamless. */
+	/** When executionMode === 'cloud': the branch to run on the remote device.
+	 *  In no-worktree cloud this is an existing branch on the *remote* (the worker
+	 *  checks it out), or — with `cloudCreateNewBranch` — a new branch to create
+	 *  there. In worktree cloud, null = let the remote auto-derive a fresh branch
+	 *  from the message; otherwise the branch to fork the worktree from. Sourced
+	 *  from the remote device's branch list (`getCloudGitState`). */
 	cloudBranch: string | null;
+	/** When executionMode === 'cloud' && !cloudWorktree: the chosen `cloudBranch`
+	 *  is a NEW branch to create on the remote device (off its current branch),
+	 *  rather than an existing one to check out. Always false in worktree mode. */
+	cloudCreateNewBranch: boolean;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -226,6 +232,7 @@ function defaultState(): ActiveSessionState {
 		cloudTargetInstanceId: null,
 		cloudWorktree: false,
 		cloudBranch: null,
+		cloudCreateNewBranch: false,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -597,6 +604,7 @@ export const activeSession = {
 			// The chosen cloud branch is project-specific; drop it on project switch
 			// (the worktree preference itself is kept, like executionMode).
 			cloudBranch: null,
+			cloudCreateNewBranch: false,
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -654,16 +662,31 @@ export const activeSession = {
 			executionMode: mode,
 			cloudTargetInstanceId: mode === 'cloud' ? s.cloudTargetInstanceId : null,
 			cloudBranch: mode === 'cloud' ? s.cloudBranch : null,
+			cloudCreateNewBranch: mode === 'cloud' ? s.cloudCreateNewBranch : false,
 		}));
 	},
 	setCloudTarget(instanceId: string | null) {
-		_update(s => ({ ...s, cloudTargetInstanceId: instanceId }));
+		// The branch list is per-device; switching the target device invalidates
+		// the chosen branch so it can't carry over to a device that may not have
+		// it (the selector reloads the new device's branches and re-defaults).
+		_update(s => ({
+			...s,
+			cloudTargetInstanceId: instanceId,
+			cloudBranch: instanceId === s.cloudTargetInstanceId ? s.cloudBranch : null,
+			cloudCreateNewBranch:
+				instanceId === s.cloudTargetInstanceId ? s.cloudCreateNewBranch : false,
+		}));
 	},
 	setCloudWorktree(val: boolean) {
 		_update(s => ({ ...s, cloudWorktree: val }));
 	},
 	setCloudBranch(branch: string | null) {
-		_update(s => ({ ...s, cloudBranch: branch }));
+		// Selecting an existing branch clears any pending "create new" intent.
+		_update(s => ({ ...s, cloudBranch: branch, cloudCreateNewBranch: false }));
+	},
+	setCloudNewBranch(branch: string) {
+		// Stage a not-yet-created branch: the worker creates it on send.
+		_update(s => ({ ...s, cloudBranch: branch, cloudCreateNewBranch: true }));
 	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },
@@ -688,8 +711,8 @@ export const activeSession = {
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
 
-	startCloudSession: (prompt: string, pendingUploadPaths?: string[]) =>
-		messageSender.startCloudSession(prompt, pendingUploadPaths),
+	startCloudSession: (prompt: string, pendingUploadPaths?: string[], autoStash?: boolean) =>
+		messageSender.startCloudSession(prompt, pendingUploadPaths, autoStash),
 
 	// ── Queued Messages (delegated to message-sender) ──────────────
 
