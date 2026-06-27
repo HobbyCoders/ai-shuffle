@@ -19,6 +19,7 @@
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
+	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 
 	let { children }: { children: Snippet } = $props();
@@ -85,7 +86,9 @@
 					files.syncFromServer(),
 					gitActionPreferences.syncFromServer(),
 					timezonePreference.syncFromServer(),
-					hydrateModelRegistry()
+					hydrateModelRegistry(),
+					// Seed the notification bell from persisted history.
+					notify.loadHistory()
 				]);
 			}
 

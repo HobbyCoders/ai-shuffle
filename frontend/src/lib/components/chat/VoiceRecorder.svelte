@@ -5,6 +5,7 @@
 	 */
 	import { tick, onDestroy } from 'svelte';
 	import { convertToWav } from '$lib/utils/audioConvert';
+	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
 		onTranscription: (text: string) => void;
@@ -318,10 +319,7 @@
 
 <!-- Recording Error Message -->
 {#if recordingError}
-	<div class="error-banner">
-		<span>{recordingError}</span>
-		<button type="button" onclick={() => recordingError = ''} class="error-close">&times;</button>
-	</div>
+	<Banner severity="error" message={recordingError} dismissible onDismiss={() => (recordingError = '')} />
 {/if}
 
 <!-- Voice button is rendered inline within the send-button-wrapper -->
@@ -373,32 +371,6 @@
 </div>
 
 <style>
-	/* Error banner (for recording errors shown above the input) */
-	.error-banner {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-		margin-bottom: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: color-mix(in srgb, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
-		border-radius: var(--radius, 0.75rem);
-		font-size: 0.8125rem;
-		color: var(--destructive);
-	}
-
-	.error-close {
-		font-size: 1.25rem;
-		line-height: 1;
-		opacity: 0.7;
-		transition: opacity 0.15s;
-	}
-
-	.error-close:hover {
-		opacity: 1;
-	}
-
 	/* ===== VOICE BUTTON WITH RICH VISUAL FEEDBACK ===== */
 	/* Wrapper clips animation rings without affecting sibling dropdown menus */
 	.voice-btn-wrapper {

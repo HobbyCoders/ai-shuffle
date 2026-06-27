@@ -6,6 +6,7 @@
 	 */
 
 	import { onMount } from 'svelte';
+	import Banner from '$lib/components/Banner.svelte';
 
 	// Types
 	interface Webhook {
@@ -230,9 +231,7 @@
 	{#if loading}
 		<div class="text-center py-4 text-muted-foreground">Loading webhooks...</div>
 	{:else if error}
-		<div class="bg-status-error border border-status-error rounded-lg p-3 text-destructive text-sm">
-			{error}
-		</div>
+		<Banner severity="error" message={error} />
 	{:else}
 		<!-- Header -->
 		<div class="flex items-center justify-between">
@@ -258,9 +257,7 @@
 				</h4>
 
 				{#if formError}
-					<div class="bg-status-error border border-status-error rounded-md p-2 text-destructive text-xs mb-3">
-						{formError}
-					</div>
+					<Banner severity="error" message={formError} />
 				{/if}
 
 				<div class="space-y-3">
@@ -343,22 +340,9 @@
 
 		<!-- Test Result -->
 		{#if testResult}
-			<div class={`rounded-lg p-3 text-sm ${testResult.success ? 'bg-status-success border border-status-success text-success' : 'bg-status-error border border-status-error text-destructive'}`}>
-				{#if testResult.success}
-					Test successful! Status: {testResult.status_code}, Response time: {testResult.response_time_ms}ms
-				{:else}
-					Test failed: {testResult.error}
-					{#if testResult.status_code}
-						(Status: {testResult.status_code})
-					{/if}
-				{/if}
-				<button
-					onclick={() => { testResult = null; }}
-					class="ml-2 text-xs underline opacity-70 hover:opacity-100"
-				>
-					Dismiss
-				</button>
-			</div>
+			<Banner severity={testResult.success ? 'success' : 'error'} dismissible onDismiss={() => (testResult = null)}>
+				{#if testResult.success}Test successful! Status: {testResult.status_code}, Response time: {testResult.response_time_ms}ms{:else}Test failed: {testResult.error}{#if testResult.status_code} (Status: {testResult.status_code}){/if}{/if}
+			</Banner>
 		{/if}
 
 		<!-- Webhooks List -->

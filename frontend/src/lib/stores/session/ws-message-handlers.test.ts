@@ -16,6 +16,12 @@ import type { ActiveSessionState } from '../active-session';
 // have their own dedicated tests (error-reporter.test.ts, fix-with-ai.test.ts).
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
 vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
+// The unified notification funnel: assert the handler feeds server events into
+// the store via `notify.ingest`, rather than rendering them itself.
+vi.mock('../notifications', () => ({ notify: { ingest: vi.fn() } }));
+
+import { notify } from '../notifications';
+import { startFixChat } from '$lib/services/fix-with-ai';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -149,6 +155,100 @@ describe('ws-message-handlers', () => {
 			expect(() => {
 				handlers.handleMessage({});
 			}).not.toThrow();
+		});
+	});
+
+	describe('notification handler (unified funnel)', () => {
+		// `notify.ingest` / `startFixChat` are module-level mocks; clear their call
+		// history per-test so each can assert on `mock.calls[0]`.
+		beforeEach(() => {
+			(notify.ingest as ReturnType<typeof vi.fn>).mockClear();
+			(startFixChat as ReturnType<typeof vi.fn>).mockClear();
+		});
+
+		it('feeds a server notification into the store via notify.ingest', () => {
+			handlers.handleMessage({
+				type: 'notification',
+				notification: {
+					id: 'srv-1',
+					severity: 'success',
+					category: 'session_complete',
+					message: 'Session finished',
+					session_id: 'session-1',
+				},
+			});
+
+			expect(notify.ingest).toHaveBeenCalledTimes(1);
+			const [payload, action] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			expect(payload.id).toBe('srv-1');
+			expect(payload.message).toBe('Session finished');
+			// Non-api_error categories carry no rebuilt client action.
+			expect(action).toBeUndefined();
+		});
+
+		it('strips the wire action descriptor before ingesting', () => {
+			handlers.handleMessage({
+				type: 'notification',
+				notification: {
+					id: 'srv-2',
+					severity: 'error',
+					category: 'api_error',
+					message: 'API error: HTTP 500',
+					action: { kind: 'fix_with_ai', payload: { status_code: 500 } },
+				},
+			});
+
+			const [payload] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			// The server `{kind, payload}` descriptor can't render as a button, so it
+			// must not be forwarded as part of the ingested payload.
+			expect(payload.action).toBeUndefined();
+		});
+
+		it('rebuilds a Fix-with-AI action for api_error (non-429) and wires startFixChat', () => {
+			handlers.handleMessage({
+				type: 'notification',
+				notification: {
+					id: 'srv-3',
+					severity: 'error',
+					category: 'api_error',
+					message: 'API error: HTTP 500',
+					session_id: 'session-9',
+					action: { kind: 'fix_with_ai', payload: { status_code: 500, session_id: 'session-9' } },
+				},
+			});
+
+			const [payload, action] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			expect(payload.duration_ms).toBe(10000);
+			expect(action).toBeTruthy();
+			expect(action.label).toBe('Fix with AI');
+
+			action.onClick();
+			expect(startFixChat).toHaveBeenCalledTimes(1);
+			expect((startFixChat as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+				status_code: 500,
+				session_id: 'session-9',
+			});
+		});
+
+		it('treats a 429 api_error as a transient warning with no Fix-with-AI action', () => {
+			handlers.handleMessage({
+				type: 'notification',
+				notification: {
+					id: 'srv-4',
+					severity: 'warning',
+					category: 'api_error',
+					message: 'Rate limited — slow down or wait for the next window.',
+				},
+			});
+
+			const [payload, action] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			expect(payload.duration_ms).toBe(5000);
+			expect(action).toBeUndefined();
+		});
+
+		it('ignores a notification message with no notification payload', () => {
+			expect(() => handlers.handleMessage({ type: 'notification' })).not.toThrow();
+			expect(notify.ingest).not.toHaveBeenCalled();
 		});
 	});
 

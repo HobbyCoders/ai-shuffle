@@ -3,13 +3,13 @@
 	 * Toast viewport — renders the global `toast` store as a stack of dismissible
 	 * notifications. Mounted once at the app shell level. Slice C (SDK 0.1.81).
 	 */
-	import { toast, type Toast } from '$lib/stores/toast';
+	import { liveToasts, notify, type AppNotification } from '$lib/stores/notifications';
 	import { AlertTriangle, AlertOctagon, Info, CheckCircle2, X } from 'lucide-svelte';
 
-	const toastState = $derived($toast);
+	const toasts = $derived($liveToasts);
 
-	function iconFor(t: Toast) {
-		switch (t.tone) {
+	function iconFor(t: AppNotification) {
+		switch (t.severity) {
 			case 'error':
 				return AlertOctagon;
 			case 'warning':
@@ -22,11 +22,11 @@
 	}
 </script>
 
-{#if toastState.toasts.length > 0}
+{#if toasts.length > 0}
 	<div class="toast-viewport" role="region" aria-label="Notifications" aria-live="polite">
-		{#each toastState.toasts as t (t.id)}
+		{#each toasts as t (t.id)}
 			{@const Icon = iconFor(t)}
-			<div class="toast tone-{t.tone}" role={t.tone === 'error' ? 'alert' : 'status'}>
+			<div class="toast tone-{t.severity}" role={t.severity === 'error' ? 'alert' : 'status'}>
 				<div class="toast-icon" aria-hidden="true">
 					<Icon size={16} />
 				</div>
@@ -38,7 +38,7 @@
 							class="toast-action"
 							onclick={() => {
 								t.action?.onClick();
-								toast.dismiss(t.id);
+								notify.dismissLive(t.id);
 							}}
 						>
 							{t.action.label}
@@ -48,7 +48,7 @@
 				<button
 					type="button"
 					class="toast-close"
-					onclick={() => toast.dismiss(t.id)}
+					onclick={() => notify.dismissLive(t.id)}
 					aria-label="Dismiss notification"
 					title="Dismiss"
 				>

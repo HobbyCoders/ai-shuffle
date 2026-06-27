@@ -11,9 +11,10 @@
 	import {
 		Folder, File as FileIcon, FileCode, FileText, FileImage, FileVideo, FileAudio,
 		FileArchive, FileSpreadsheet, Database, Settings, Package,
-		FolderPlus, Upload, Download, Trash2, Edit3, Home, ChevronRight, Check, X, Loader2, AlertCircle
+		FolderPlus, Upload, Download, Trash2, Edit3, Home, ChevronRight, Check, X, Loader2
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, type FileItem } from '$lib/stores/files.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import FilesTreeNode from './FilesTreeNode.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -231,11 +232,7 @@
 	{/if}
 
 	{#if error}
-		<div class="fs-error">
-			<AlertCircle size={15} strokeWidth={1.7} />
-			<span>{error}</span>
-			<button class="fs-error-close" onclick={() => files.clearError()} aria-label="Dismiss"><X size={14} strokeWidth={2} /></button>
-		</div>
+		<Banner severity="error" message={error} dismissible onDismiss={() => files.clearError()} />
 	{/if}
 
 	<!-- Two-column layout -->
@@ -414,14 +411,6 @@
 	}
 	.fs-newfolder input:focus { border-color: var(--ring); }
 
-	.fs-error {
-		flex-shrink: 0; display: flex; align-items: center; gap: 8px;
-		margin: 0 28px 12px; padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); font-size: 0.8125rem;
-	}
-	.fs-error-close { margin-left: auto; background: transparent; border: none; color: var(--destructive); cursor: pointer; padding: 2px; display: grid; place-items: center; }
-
 	/* Buttons */
 	.fs-btn {
 		display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px;
@@ -531,7 +520,7 @@
 	@media (max-width: 767px) {
 		.fs-head { padding: 16px 16px 0; }
 		.fs-toolbar { padding: 12px 16px 10px; }
-		.fs-newfolder, .fs-error { margin: 0 16px 10px; }
+		.fs-newfolder { margin: 0 16px 10px; }
 		.fs-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
 		/* No folder tree on mobile — a single-column flat file list (mockup #page-files). */
 		.fs-side { display: none; }

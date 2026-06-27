@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { Plus, Trash2, X, Check, Settings, Terminal, User, Wrench, ChevronDown } from 'lucide-svelte';
+	import { Plus, Trash2, Check, Settings, Terminal, User, Wrench, ChevronDown } from 'lucide-svelte';
 	import { groups } from '$lib/stores/groups.svelte';
 	import type { SubagentExport } from '$lib/api/client';
+	import Banner from '$lib/components/Banner.svelte';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import {
@@ -197,12 +198,7 @@
 	{/snippet}
 
 	{#if error}
-		<div class="card-error-banner">
-			<span class="flex-1">{error}</span>
-			<button onclick={onClearError}>
-				<X class="w-4 h-4" />
-			</button>
-		</div>
+		<Banner severity="error" message={error} dismissible onDismiss={onClearError} />
 	{/if}
 
 	<!-- Identity Tab -->
@@ -407,10 +403,6 @@
 </StudioEditorShell>
 
 <style>
-	.flex-1 {
-		flex: 1;
-	}
-
 	/* Required asterisk */
 	.req {
 		color: var(--destructive);

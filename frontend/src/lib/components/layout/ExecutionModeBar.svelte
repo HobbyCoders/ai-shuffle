@@ -19,6 +19,7 @@
 	import { untrack } from 'svelte';
 	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
@@ -736,18 +737,7 @@
 	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
 	{#if $activeSession.executionMode === 'worktree' && worktreeError}
 		<div class="wt-error-row">
-			<div class="wt-error-banner">
-				<svg class="wt-error-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
-				</svg>
-				<span class="wt-error-text">{worktreeError}</span>
-				<button
-					type="button"
-					class="wt-error-dismiss"
-					onclick={() => { localWorktreeError = null; activeSession.clearWorktreeError(); }}
-					aria-label="Dismiss error"
-				>&times;</button>
-			</div>
+			<Banner severity="error" message={worktreeError} dismissible onDismiss={() => { localWorktreeError = null; activeSession.clearWorktreeError(); }} />
 		</div>
 	{/if}
 </div>
@@ -1043,50 +1033,6 @@
 		display: flex;
 		justify-content: center;
 		padding: 0 8px;
-	}
-
-	.wt-error-banner {
-		display: flex;
-		align-items: flex-start;
-		gap: 6px;
-		padding: 6px 10px;
-		border-radius: 8px;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-		max-width: 100%;
-		min-width: 0;
-	}
-
-	.wt-error-icon {
-		flex-shrink: 0;
-		color: var(--destructive);
-		margin-top: 1px;
-	}
-
-	.wt-error-text {
-		flex: 1;
-		min-width: 0;
-		font-size: 0.6875rem;
-		line-height: 1.4;
-		color: var(--destructive);
-		word-break: break-word;
-	}
-
-	.wt-error-dismiss {
-		flex-shrink: 0;
-		background: none;
-		border: none;
-		color: var(--destructive);
-		font-size: 1rem;
-		line-height: 1;
-		cursor: pointer;
-		padding: 0 2px;
-		opacity: 0.7;
-		transition: opacity 150ms ease;
-	}
-
-	.wt-error-dismiss:hover {
-		opacity: 1;
 	}
 
 	/* Loading state */

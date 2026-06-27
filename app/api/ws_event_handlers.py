@@ -832,14 +832,36 @@ async def handle_done(
         # Notify watching mobile devices that the session finished (best-effort,
         # non-blocking). Skip user-initiated interrupts — the user is present.
         if not is_interrupted:
+            session_name = (session_row or {}).get("name") or "Your session"
+
+            # OS/mobile push adapter (unchanged) — reaches devices not on this page.
             try:
                 from app.services.push_notification import fire_and_forget_notify
 
-                session_name = (session_row or {}).get("name") or "Your session"
                 fire_and_forget_notify(
                     title="Session finished",
                     body=f"{session_name} has finished responding.",
                     data={"type": "session_done", "session_id": ectx.session_id},
+                )
+            except Exception:
+                pass  # Notifications are best-effort; never break streaming.
+
+            # Unified funnel: in-app success toast + bell history, fanned out to
+            # every device of this user over the user-scoped WS channel. push=False
+            # because the mobile/OS push above already covers off-page devices.
+            try:
+                from app.services.notification_service import emit_notification
+
+                await emit_notification(
+                    ectx.user_id or "admin",
+                    severity="success",
+                    message=f"{session_name} has finished responding.",
+                    title="Session finished",
+                    category="session_complete",
+                    surface="toast",
+                    session_id=ectx.session_id,
+                    persist=True,
+                    push=False,
                 )
             except Exception:
                 pass  # Notifications are best-effort; never break streaming.

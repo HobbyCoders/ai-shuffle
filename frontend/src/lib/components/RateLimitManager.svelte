@@ -9,6 +9,7 @@
 	 * - Delete configurations
 	 */
 	import { onMount } from 'svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { api } from '$lib/api/client';
 
 	interface RateLimitConfig {
@@ -203,11 +204,11 @@
 	</div>
 
 	{#if error}
-		<div class="alert error">{error}</div>
+		<Banner severity="error" message={error} />
 	{/if}
 
 	{#if success}
-		<div class="alert success">{success}</div>
+		<Banner severity="success" message={success} />
 	{/if}
 
 	{#if loading}
@@ -435,24 +436,6 @@
 		margin: 0;
 		font-size: 0.875rem;
 		color: var(--text-secondary);
-	}
-
-	.alert {
-		padding: 0.75rem 1rem;
-		border-radius: 0.375rem;
-		font-size: 0.875rem;
-	}
-
-	.alert.error {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	.alert.success {
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.loading {

@@ -10,6 +10,7 @@
 	 */
 
 	import { onMount, onDestroy } from 'svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import type {
@@ -372,19 +373,7 @@
 	{#if loading}
 		<div class="text-center py-8 text-muted-foreground text-sm">Loading connectors...</div>
 	{:else if error && view === 'list'}
-		<div
-			class="bg-status-error border border-status-error rounded-lg p-3 text-destructive text-sm mb-4"
-		>
-			{error}
-			<button
-				onclick={() => {
-					error = '';
-				}}
-				class="ml-2 text-xs underline opacity-70 hover:opacity-100"
-			>
-				Dismiss
-			</button>
-		</div>
+		<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 	{/if}
 
 	<!-- ============================================================ -->
@@ -861,11 +850,8 @@
 			<!-- Form -->
 			<div class="bg-muted/50 rounded-lg p-4 border border-border">
 				{#if formError}
-					<div
-						class="bg-status-error border border-status-error rounded-md p-2 text-destructive text-xs mb-3"
-						transition:slide={{ duration: 200, easing: quintOut }}
-					>
-						{formError}
+					<div transition:slide={{ duration: 200, easing: quintOut }}>
+						<Banner severity="error" message={formError} />
 					</div>
 				{/if}
 

@@ -17,8 +17,9 @@
 	} from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
 	import { validateMcpServerConfig } from '$lib/api/mcp';
-	import { AlertCircle, X, Check, Trash2, Server, Network, KeyRound } from 'lucide-svelte';
+	import { AlertCircle, Check, Trash2, Server, Network, KeyRound } from 'lucide-svelte';
 	import BuildMcpList from '$lib/components/layout/build/BuildMcpList.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
 		mobile?: boolean;
@@ -202,13 +203,7 @@
 		{/if}
 
 		{#if $mcpError}
-			<div class="error-banner">
-				<AlertCircle size={16} />
-				<span>{$mcpError}</span>
-				<button onclick={() => mcp.clearError()} class="error-close" aria-label="Dismiss">
-					<X size={14} />
-				</button>
-			</div>
+			<Banner severity="error" message={$mcpError} dismissible onDismiss={() => mcp.clearError()} />
 		{/if}
 
 		<!-- Server -->
@@ -333,27 +328,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 3px;
-	}
-
-	.error-banner {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		padding: 11px 14px;
-		border-radius: 10px;
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive);
-		font-size: 13px;
-	}
-	.error-close {
-		margin-left: auto;
-		padding: 4px;
-		background: transparent;
-		border: none;
-		color: var(--destructive);
-		cursor: pointer;
-		border-radius: 6px;
-		display: inline-flex;
 	}
 
 	/* Group head with a trailing action link */

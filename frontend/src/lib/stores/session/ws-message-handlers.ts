@@ -13,7 +13,7 @@
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
-import { toast } from '../toast';
+import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
@@ -367,6 +367,57 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (msgType === 'user_session_created') {
 			appLoadSessions();
 			appLoadApiUserSessions();
+			return;
+		}
+
+		// Unified notification funnel: server emitted a user-facing message via
+		// app/services/notification_service.emit_notification. Already persisted
+		// server-side — feed it to the store for live render + the bell. Actions
+		// can't cross the wire as closures, so we rebuild interactive ones
+		// (e.g. "Fix with AI") here, keyed on `category`.
+		if (msgType === 'notification') {
+			const n = data.notification as
+				| {
+						id: string;
+						severity: NotificationSeverity;
+						surface?: NotificationSurface;
+						category?: string;
+						title?: string;
+						message: string;
+						session_id?: string;
+						read?: boolean;
+						created_at?: number;
+						action?: { kind?: string; payload?: Record<string, unknown> } | null;
+				  }
+				| undefined;
+			if (!n) return;
+
+			let action: NotificationAction | undefined;
+			let duration_ms: number | undefined;
+			if (n.category === 'api_error') {
+				// Mirror the legacy api_error UX: 429 is transient (5s, no fix),
+				// other errors get 10s + a one-click "Fix with AI".
+				duration_ms = n.severity === 'warning' ? 5000 : 10000;
+				if (n.severity !== 'warning') {
+					const payload = n.action?.payload ?? {};
+					action = {
+						label: 'Fix with AI',
+						onClick: () =>
+							startFixChat({
+								source: 'ws',
+								message: n.message,
+								status_code:
+									typeof payload.status_code === 'number' ? payload.status_code : undefined,
+								session_id: n.session_id ?? (payload.session_id as string | undefined),
+							}),
+					};
+				}
+			}
+
+			// Drop the server-side `{kind, payload}` action descriptor — it can't be
+			// rendered directly; the rebuilt closure (if any) is passed separately.
+			const { action: _serverAction, ...payload } = n;
+			notify.ingest({ ...payload, duration_ms }, action);
 			return;
 		}
 
@@ -830,8 +881,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'api_error': {
-				// Slice C: surface API-level errors (e.g. Anthropic 429/5xx) as a
-				// transient toast. Backend-agnostic — we only key off `status`.
+				// API-level errors (e.g. Anthropic 429/5xx) are now surfaced through
+				// the unified notification funnel: the backend emits a `notification`
+				// event (persisted + the bell + every device) which the handler above
+				// renders — including the "Fix with AI" action. We no longer toast
+				// here (that would double up). We DO still log to the durable
+				// error_log for observability (GetAppErrors), keyed off `status`.
 				const status = Number(data.status ?? 0);
 				const customMessage = typeof data.message === 'string' ? data.message : '';
 				let message: string;
@@ -845,24 +900,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					message = customMessage || 'An API error occurred.';
 				}
 				const apiErrSessionId = getState().sessionId ?? undefined;
-				// Rate-limit (429) is transient and self-resolves — no "Fix with AI".
-				const showFix = status !== 429;
-				toast.push(message, {
-					tone: status === 429 ? 'warning' : 'error',
-					duration_ms: showFix ? 10000 : 5000,
-					action: showFix
-						? {
-								label: 'Fix with AI',
-								onClick: () =>
-									startFixChat({
-										source: 'ws',
-										message,
-										status_code: status > 0 ? status : undefined,
-										session_id: apiErrSessionId,
-									}),
-							}
-						: undefined,
-				});
 				reportClientError({
 					source: 'ws',
 					message,

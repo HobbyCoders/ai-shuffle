@@ -626,6 +626,59 @@ async def execute_query(
     }
 
 
+async def _emit_api_error_notification(
+    api_user_id: Optional[str],
+    session_id: Optional[str],
+    api_err: Any,
+) -> None:
+    """Funnel an SDK ``api_error`` through the unified notification system.
+
+    Single source of truth for API-level errors (Anthropic 429 / 5xx): persists
+    to the bell and broadcasts the user-scoped ``notification`` event so every
+    device the user has open renders one consistent toast. The interactive
+    "Fix with AI" button is rebuilt client-side (keyed on ``category`` —
+    closures can't cross the wire), so we only ship a serializable action
+    descriptor here. Never raises — must not break the streaming path.
+    """
+    try:
+        from app.services.notification_service import emit_notification
+
+        try:
+            status = int(api_err)
+        except (TypeError, ValueError):
+            status = 0
+
+        if status == 429:
+            severity = "warning"
+            message = "Rate limited — slow down or wait for the next window."
+            action = None  # transient + self-resolving — no "Fix with AI"
+        elif 500 <= status < 600:
+            severity = "error"
+            message = f"Service error: HTTP {status}"
+            action = {"kind": "fix_with_ai", "payload": {"status_code": status, "session_id": session_id}}
+        elif status > 0:
+            severity = "error"
+            message = f"API error: HTTP {status}"
+            action = {"kind": "fix_with_ai", "payload": {"status_code": status, "session_id": session_id}}
+        else:
+            severity = "error"
+            message = "An API error occurred."
+            action = {"kind": "fix_with_ai", "payload": {"session_id": session_id}}
+
+        await emit_notification(
+            api_user_id or "admin",
+            severity=severity,
+            message=message,
+            category="api_error",
+            surface="toast",
+            session_id=session_id,
+            persist=True,
+            action=action,
+        )
+    except Exception:
+        logger.debug("api_error notification emit failed", exc_info=True)
+
+
 async def stream_query(
     prompt: str,
     profile_id: str,
@@ -1103,6 +1156,10 @@ async def stream_query(
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
                     yield {"type": "api_error", "status": api_err, "session_id": session_id}
+                    # Funnel through the unified notification system (persist + the
+                    # bell + all the user's devices). The frontend `api_error`
+                    # handler no longer toasts — the `notification` event does.
+                    await _emit_api_error_notification(api_user_id, session_id, api_err)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2478,6 +2535,10 @@ async def stream_to_websocket(
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
                     yield {"type": "api_error", "status": api_err, "session_id": session_id}
+                    # Funnel through the unified notification system (persist + the
+                    # bell + all the user's devices). The frontend `api_error`
+                    # handler no longer toasts — the `notification` event does.
+                    await _emit_api_error_notification(api_user_id, session_id, api_err)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

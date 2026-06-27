@@ -23,6 +23,7 @@
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 	import ClaudeStatusIndicator from '$lib/components/ClaudeStatusIndicator.svelte';
+	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 
 	import type { Snippet } from 'svelte';
 
@@ -57,6 +58,7 @@
 
 		<div class="hdr-meta">
 			<ClaudeStatusIndicator />
+			<NotificationCenter />
 			{#if showStt}
 				<button
 					class="header-btn mic"

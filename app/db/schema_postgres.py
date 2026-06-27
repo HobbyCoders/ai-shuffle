@@ -1,5 +1,5 @@
 """
-PostgreSQL DDL schema — creates all 48 tables, indexes, and FTS infrastructure.
+PostgreSQL DDL schema — creates all 49 tables, indexes, and FTS infrastructure.
 
 This defines the PostgreSQL schema (all tables, indexes, and FTS
 infrastructure) corresponding to ``database.py._create_schema()``
@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 49
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1204,6 +1204,37 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_source ON error_log(source)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_session ON error_log(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_fingerprint ON error_log(fingerprint)")
+
+    # ------------------------------------------------------------------
+    # 49. Notifications — unified user-facing notification history (the bell).
+    #
+    # The single source of truth for every persisted banner / toast in the
+    # app. Distinct from ``error_log`` (debug/observability): this is the
+    # user-facing history surfaced by the NotificationCenter, with read /
+    # dismissed state per row. Server-originated notifications are written by
+    # app/services/notification_service.py; client-originated ones are POSTed
+    # by the frontend notification store. See app/db/notifications.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            severity TEXT NOT NULL DEFAULT 'info',
+            surface TEXT NOT NULL DEFAULT 'toast',
+            category TEXT,
+            source TEXT NOT NULL DEFAULT 'server',
+            title TEXT,
+            message TEXT NOT NULL,
+            action_kind TEXT,
+            action_payload JSONB,
+            session_id TEXT,
+            read BOOLEAN DEFAULT FALSE,
+            dismissed BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
 
     # ==================================================================
     # SEED DATA
