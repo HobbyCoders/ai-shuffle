@@ -19,7 +19,8 @@
 		memoryError
 	} from '$lib/stores/projectMemory.svelte';
 	import type { MemoryFile, MemoryLocation } from '$lib/api/projectMemory';
-	import { FileText, Plus, Trash2, X, Save, RotateCcw, FolderOpen, Lock } from 'lucide-svelte';
+	import { FileText, Plus, Trash2, Save, RotateCcw, FolderOpen, Lock } from 'lucide-svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -147,10 +148,7 @@
 		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
 	{:else}
 		{#if $memoryError}
-			<div class="err-banner">
-				<span class="flex-1">{$memoryError}</span>
-				<button onclick={() => projectMemory.clearError()} aria-label="Dismiss error"><X size={15} /></button>
-			</div>
+			<Banner severity="error" message={$memoryError} dismissible onDismiss={() => projectMemory.clearError()} />
 		{/if}
 
 		{#each $allMemoryFiles as file (file.location)}

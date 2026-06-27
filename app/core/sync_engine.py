@@ -863,6 +863,27 @@ class SyncEngine:
             source_device_id=source_device_id
         )
 
+    async def broadcast_notification(
+        self,
+        user_id: str,
+        notification: Dict[str, Any],
+        source_device_id: Optional[str] = None,
+    ):
+        """Push a unified notification to all of a user's connected devices.
+
+        The single live-delivery channel for the notification system: server code
+        funnels through ``app/services/notification_service.emit_notification``,
+        which persists the row then calls this to fan it out as a ``notification``
+        WS event. User-scoped (not session/device-scoped) so a notification
+        reaches every device the user has open, even ones not watching the
+        originating session.
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={"type": "notification", "notification": notification},
+            source_device_id=source_device_id,
+        )
+
     async def broadcast_branch_changed(
         self,
         user_id: str,

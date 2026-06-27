@@ -10,8 +10,6 @@
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
 	import { slide } from 'svelte/transition';
 	import {
-		AlertCircle,
-		X,
 		Plus,
 		Trash2,
 		ChevronDown,
@@ -23,6 +21,7 @@
 		DollarSign
 	} from 'lucide-svelte';
 	import AutomationTriggerConfig from './AutomationTriggerConfig.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
 		currentView: 'create' | 'edit';
@@ -190,12 +189,8 @@
 </script>
 
 {#if formError}
-	<div class="error-banner" transition:slide={{ duration: 150 }}>
-		<AlertCircle size={16} />
-		<span style="flex:1">{formError}</span>
-		<button onclick={() => onUpdateFormError('')} aria-label="Dismiss">
-			<X size={14} />
-		</button>
+	<div transition:slide={{ duration: 150 }}>
+		<Banner severity="error" message={formError} dismissible onDismiss={() => onUpdateFormError('')} />
 	</div>
 {/if}
 
@@ -520,27 +515,6 @@
 	.req {
 		color: var(--destructive);
 		font-weight: 700;
-	}
-
-	/* Error banner */
-	.error-banner {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		padding: 11px 14px;
-		margin-bottom: 18px;
-		border-radius: 10px;
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive);
-		font-size: 13px;
-	}
-	.error-banner button {
-		background: none;
-		border: none;
-		color: var(--destructive);
-		cursor: pointer;
-		display: inline-flex;
-		padding: 2px;
 	}
 
 	/* Collapsible group head (button styled as a grouphead) */

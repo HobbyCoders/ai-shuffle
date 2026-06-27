@@ -8,9 +8,10 @@
 	 * data + editor flow; only the list view is new. Theme tokens only.
 	 */
 	import type { Hook, PluginHookInfo, HookTestResult } from '$lib/api/hooks';
+	import Banner from '$lib/components/Banner.svelte';
 	import {
 		Search, Plus, Terminal, Globe, MessageSquare, Zap, Play, Trash2,
-		AlertCircle, CheckCircle, XCircle, X, Loader2, FileCode
+		AlertCircle, X, Loader2, FileCode
 	} from 'lucide-svelte';
 
 	type Tab = 'app' | 'project' | 'plugins';
@@ -167,18 +168,16 @@
 		</div>
 	</div>
 
-	<!-- Test result toast -->
+	<!-- Test result -->
 	{#if testResult}
-		<div class="bhl-toast" class:ok={testResult.result.success} class:bad={!testResult.result.success}>
-			{#if testResult.result.success}
-				<CheckCircle size={15} strokeWidth={1.8} />
-				<span>Hook test successful{testResult.result.duration_ms != null ? ` (${testResult.result.duration_ms}ms)` : ''}</span>
-			{:else}
-				<XCircle size={15} strokeWidth={1.8} />
-				<span>Hook test failed: {testResult.result.error}</span>
-			{/if}
-			<button class="bhl-toast-close" onclick={onClearTest} aria-label="Dismiss"><X size={14} strokeWidth={2} /></button>
-		</div>
+		<Banner
+			severity={testResult.result.success ? 'success' : 'error'}
+			message={testResult.result.success
+				? `Hook test successful${testResult.result.duration_ms != null ? ` (${testResult.result.duration_ms}ms)` : ''}`
+				: `Hook test failed: ${testResult.result.error}`}
+			dismissible
+			onDismiss={onClearTest}
+		/>
 	{/if}
 
 	<!-- Error -->
@@ -364,11 +363,6 @@
 	.bhl-btn--danger:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 
 	/* Toast + error */
-	.bhl-toast { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: calc(var(--radius, 0.75rem) - 2px); font-size: 0.8125rem; }
-	.bhl-toast.ok { background: color-mix(in oklch, var(--success) 14%, transparent); color: var(--success); border: 1px solid color-mix(in oklch, var(--success) 30%, transparent); }
-	.bhl-toast.bad { background: color-mix(in oklch, var(--destructive) 14%, transparent); color: var(--destructive); border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent); }
-	.bhl-toast-close { margin-left: auto; background: transparent; border: none; color: inherit; cursor: pointer; padding: 2px; border-radius: 4px; display: grid; place-items: center; opacity: 0.8; }
-	.bhl-toast-close:hover { opacity: 1; }
 	.bhl-error { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: calc(var(--radius, 0.75rem) - 2px); background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); font-size: 0.8125rem; }
 	.bhl-error-close { margin-left: auto; background: transparent; border: none; color: var(--destructive); cursor: pointer; padding: 2px; border-radius: 4px; display: grid; place-items: center; }
 

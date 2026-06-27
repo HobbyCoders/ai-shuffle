@@ -46,10 +46,8 @@
 	import { slide, fade } from 'svelte/transition';
 	import {
 		Search,
-		X,
 		Loader2,
 		Plus,
-		AlertCircle,
 		CheckCircle,
 		XCircle,
 		ArrowLeft,
@@ -59,6 +57,7 @@
 	import './card-design-system.css';
 
 	// Sub-components
+	import Banner from '$lib/components/Banner.svelte';
 	import AutomationsList from './automations/AutomationsList.svelte';
 	import AutomationsStudio from './automations/AutomationsStudio.svelte';
 	import AutomationForm from './automations/AutomationForm.svelte';
@@ -509,29 +508,22 @@
 </script>
 
 {#snippet automationsMainContent()}
-	<!-- Test result toast -->
+	<!-- Test result -->
 	{#if testResult}
-		<div class="auto-toast" class:success={testResult.budget_ok} class:warn={!testResult.budget_ok} transition:slide={{ duration: 200 }}>
-			{#if testResult.budget_ok}
-				<CheckCircle size={16} />
-			{:else}
-				<AlertCircle size={16} />
-			{/if}
-			<span>{testResult.message}</span>
-			<button onclick={() => testResult = null} class="toast-close">
-				<X size={14} />
-			</button>
+		<div class="auto-banner" transition:slide={{ duration: 200 }}>
+			<Banner
+				severity={testResult.budget_ok ? 'success' : 'warning'}
+				message={testResult.message}
+				dismissible
+				onDismiss={() => (testResult = null)}
+			/>
 		</div>
 	{/if}
 
 	<!-- Error display -->
 	{#if error}
-		<div class="auto-error" transition:slide={{ duration: 200 }}>
-			<AlertCircle size={16} />
-			<span>{error}</span>
-			<button onclick={() => error = ''} class="toast-close">
-				<X size={14} />
-			</button>
+		<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
+			<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 		</div>
 	{/if}
 
@@ -710,10 +702,8 @@
 		<!-- Detail (run history) — full canvas; AutomationDetail renders its own header/back. -->
 		<div class="automations-card card-system" style="position: relative;">
 			{#if error}
-				<div class="auto-error" transition:slide={{ duration: 200 }}>
-					<AlertCircle size={16} />
-					<span>{error}</span>
-					<button onclick={() => error = ''} class="toast-close"><X size={14} /></button>
+				<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
+					<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 				</div>
 			{/if}
 			<div class="auto-content">
@@ -979,53 +969,12 @@
 	}
 
 	/* ═══════════════════ Toast / Error ═══════════════════ */
-	.auto-toast {
-		display: flex;
-		align-items: center;
-		gap: 8px;
+	.auto-banner {
 		margin: 0 16px;
-		padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		font-size: 0.8125rem;
 	}
 
-	.auto-toast.success {
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
-	}
-
-	.auto-toast.warn {
-		background: color-mix(in oklch, var(--warning) 15%, transparent);
-		color: var(--warning);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-	}
-
-	.auto-error {
-		display: flex;
-		align-items: center;
-		gap: 8px;
+	.auto-error-banner {
 		margin: 12px 16px 0;
-		padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		font-size: 0.8125rem;
-	}
-
-	.toast-close {
-		margin-left: auto;
-		padding: 2px;
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		opacity: 0.7;
-		color: inherit;
-		transition: opacity 150ms ease;
-	}
-
-	.toast-close:hover {
-		opacity: 1;
 	}
 
 	/* ═══════════════════ Content ═══════════════════ */

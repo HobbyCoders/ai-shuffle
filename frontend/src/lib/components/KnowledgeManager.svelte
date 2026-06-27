@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { KnowledgeDocumentSummary, KnowledgeStats, KnowledgeSearchResult } from '$lib/api/client';
+	import Banner from '$lib/components/Banner.svelte';
 	import {
 		getKnowledgeDocuments,
 		getKnowledgeStats,
@@ -203,10 +204,7 @@
 		<!-- Content -->
 		<div class="flex-1 overflow-y-auto p-5 space-y-5">
 			{#if error}
-				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
-					{error}
-					<button onclick={() => error = ''} class="ml-2 underline">Dismiss</button>
-				</div>
+				<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 			{/if}
 
 			<!-- Upload area -->

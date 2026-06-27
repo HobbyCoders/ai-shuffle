@@ -13,6 +13,7 @@
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { stopSessionTask } from '$lib/api/sessions';
+	import Banner from '$lib/components/Banner.svelte';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
@@ -108,9 +109,8 @@
 		<!-- Empty state: Workspace selector + centered input -->
 		<div class="empty-state">
 			{#if $activeSession.error}
-				<div class="error-banner">
-					<span>{$activeSession.error}</span>
-					<button onclick={() => activeSession.clearError()}>&times;</button>
+				<div class="empty-error-overlay">
+					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
 				</div>
 			{/if}
 
@@ -132,10 +132,7 @@
 					<!-- Cross-install (cloud) session whose owning device is offline:
 					     history is still readable from the shared DB, but live control
 					     can't reach it right now. Non-blocking, view-only notice. -->
-					<div class="offline-banner" role="status">
-						<span class="offline-dot" aria-hidden="true"></span>
-						<span>Device offline — view only. You can read this chat, but can't send until the device reconnects.</span>
-					</div>
+					<Banner severity="warning" message="Device offline — view only. You can read this chat, but can't send until the device reconnects." />
 				{/if}
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />
@@ -320,63 +317,17 @@
 		max-width: 640px;
 	}
 
-	.empty-input-wrapper {
-		width: 100%;
-	}
-
-	.error-banner {
+	/* Overlay the error so it doesn't shift the vertically-centered content. */
+	.empty-error-overlay {
 		position: absolute;
 		top: 1rem;
 		left: 1rem;
 		right: 1rem;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		padding: 0.75rem 1rem;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
-		border-radius: 0.5rem;
-		color: var(--destructive);
-		font-size: 0.875rem;
+		z-index: 5;
 	}
 
-	.error-banner button {
-		flex-shrink: 0;
-		background: none;
-		border: none;
-		color: var(--destructive);
-		font-size: 1.25rem;
-		cursor: pointer;
-		padding: 0;
-		line-height: 1;
-		opacity: 0.7;
-	}
-
-	.error-banner button:hover {
-		opacity: 1;
-	}
-
-	.offline-banner {
-		display: flex;
-		align-items: center;
-		gap: 0.625rem;
-		margin: 0.5rem 0.75rem 0;
-		padding: 0.5rem 0.875rem;
-		background: color-mix(in oklch, var(--warning) 12%, transparent);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-		border-radius: 0.5rem;
-		color: var(--warning-foreground, var(--warning));
-		font-size: 0.8125rem;
-		line-height: 1.3;
-	}
-
-	.offline-banner .offline-dot {
-		flex-shrink: 0;
-		width: 0.5rem;
-		height: 0.5rem;
-		border-radius: 9999px;
-		background: var(--warning);
+	.empty-input-wrapper {
+		width: 100%;
 	}
 
 	/* ========================================

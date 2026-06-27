@@ -15,6 +15,7 @@
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
+	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import TiptapEditor from './TiptapEditor.svelte';
@@ -572,33 +573,24 @@
 
 		<!-- Error Message (upload errors, voice recording errors) -->
 		{#if errorMessage}
-			<div class="error-banner">
-				<span>{errorMessage}</span>
-				<button type="button" onclick={() => errorMessage = ''} class="error-close">&times;</button>
-			</div>
+			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
 		{/if}
 
 		<!-- Worktree Error Message -->
 		{#if $activeSession.worktreeError}
-			<div class="error-banner worktree-error">
-				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<circle cx="6" cy="6" r="2" stroke-width="2"/>
-					<circle cx="12" cy="18" r="2" stroke-width="2"/>
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
-				</svg>
-				<span>{$activeSession.worktreeError}</span>
-				<button type="button" onclick={() => activeSession.clearWorktreeError()} class="error-close">&times;</button>
-			</div>
+			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
 		{/if}
 
 		<!-- Worktree reopening spinner (shown briefly while recreating worktree) -->
 		{#if $activeSession.isReopeningWorktree}
-			<div class="error-banner worktree-completed reopening">
-				<svg class="w-4 h-4 flex-shrink-0 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-				</svg>
-				<span>Reopening worktree...</span>
-			</div>
+			<Banner severity="info" icon={false}>
+				<span style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;">
+					<svg class="w-4 h-4 flex-shrink-0 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					</svg>
+					<span>Reopening worktree…</span>
+				</span>
+			</Banner>
 		{/if}
 
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
@@ -772,55 +764,6 @@
 		width: 1.25rem;
 		height: 1.25rem;
 		flex-shrink: 0;
-	}
-
-	/* Error banner */
-	.error-banner {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-		margin-bottom: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: color-mix(in srgb, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
-		border-radius: var(--radius, 0.75rem);
-		font-size: 0.8125rem;
-		color: var(--destructive);
-	}
-
-	.error-close {
-		font-size: 1.25rem;
-		line-height: 1;
-		opacity: 0.7;
-		transition: opacity 0.15s;
-	}
-
-	/* Worktree-specific error styling */
-	.error-banner.worktree-error {
-		background: color-mix(in srgb, var(--warning) 10%, transparent);
-		border-color: color-mix(in srgb, var(--warning) 30%, transparent);
-		color: var(--warning);
-	}
-
-	.error-banner.worktree-error svg {
-		color: var(--warning);
-	}
-
-	/* Worktree completed (read-only) styling */
-	.error-banner.worktree-completed {
-		justify-content: center;
-		background: color-mix(in srgb, var(--muted-foreground) 8%, transparent);
-		border-color: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
-		color: var(--muted-foreground);
-	}
-
-	.error-banner.worktree-completed svg {
-		color: var(--success);
-	}
-
-	.error-close:hover {
-		opacity: 1;
 	}
 
 	/* Main Island - Two tier structure */

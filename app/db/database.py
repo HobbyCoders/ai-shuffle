@@ -83,7 +83,8 @@ def _safe_json(value):
 #      postgres_only read cutover (idx_sse_session, idx_sse_session_sub)
 # v48: Drop cloud_remote_url + cloud_remote_session_id from sessions — the legacy
 #      per-session offload proxy is replaced by the cluster intake/relay model
-SCHEMA_VERSION = 48
+# v49: Add notifications table (unified banner/notification history for the bell)
+SCHEMA_VERSION = 49
 
 
 def _run_column_migrations(cursor):
@@ -482,6 +483,34 @@ def _run_column_migrations(cursor):
                 logger.warning("link_group_id backfill skipped", exc_info=True)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
 
+    # notifications (v49). Unified banner/notification history backing the bell.
+    # Idempotent so upgrades from any older version land the table without needing
+    # the SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
+    # the SessionStore / error_log / installs blocks above). Kept separate from
+    # error_log (debug observability) — this is the user-facing message layer.
+    if not table_exists(cursor, "notifications"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                severity TEXT NOT NULL DEFAULT 'info',
+                surface TEXT NOT NULL DEFAULT 'toast',
+                category TEXT,
+                source TEXT NOT NULL DEFAULT 'server',
+                title TEXT,
+                message TEXT NOT NULL,
+                action_kind TEXT,
+                action_payload JSONB,
+                session_id TEXT,
+                read BOOLEAN DEFAULT FALSE,
+                dismissed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("notifications")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -541,6 +570,10 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     from datetime import timedelta
     results = {}
     cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    # Notifications are user-facing history (the bell), not debug logs — keep them
+    # longer than the 7-day log cutoff, but still bound growth (errors auto-persist).
+    cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    NOTIFICATIONS_PER_USER_CAP = 500
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -567,6 +600,33 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
                 results[f"cleaned_{table}"] = cursor.rowcount
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
+
+        # 2b. Notifications retention: drop anything older than 30 days, then cap
+        # each user to the most recent N rows so the table can't grow unbounded.
+        try:
+            cursor.execute("DELETE FROM notifications WHERE created_at < %s", (cutoff_30d,))
+            results["cleaned_notifications_age"] = cursor.rowcount
+        except Exception as e:
+            results["cleaned_notifications_age"] = f"error: {e}"
+        try:
+            cursor.execute(
+                """
+                DELETE FROM notifications
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY user_id ORDER BY created_at DESC
+                        ) AS rn
+                        FROM notifications
+                    ) ranked
+                    WHERE rn > %s
+                )
+                """,
+                (NOTIFICATIONS_PER_USER_CAP,),
+            )
+            results["cleaned_notifications_cap"] = cursor.rowcount
+        except Exception as e:
+            results["cleaned_notifications_cap"] = f"error: {e}"
 
     # 3. VACUUM — reclaims disk space. Must run outside a transaction.
     # Skipped when sessions are actively streaming to avoid an exclusive lock

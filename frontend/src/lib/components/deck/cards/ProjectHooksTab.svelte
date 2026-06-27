@@ -20,7 +20,8 @@
 	import type { HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';
-	import { Search, X, Zap, Package, CheckCircle2, AlertTriangle } from 'lucide-svelte';
+	import Banner from '$lib/components/Banner.svelte';
+	import { Search, Zap, Package } from 'lucide-svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -118,10 +119,7 @@
 	{#if $hooksLoading}
 		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
 	{:else if $hooksError}
-		<div class="err-banner">
-			<span class="flex-1">{$hooksError}</span>
-			<button onclick={() => hooks.clearError()} aria-label="Dismiss error"><X size={15} /></button>
-		</div>
+		<Banner severity="error" message={$hooksError} dismissible onDismiss={() => hooks.clearError()} />
 	{:else}
 		<!-- Custom / Plugins segmented control -->
 		<div class="hooks-head">
@@ -143,17 +141,17 @@
 			</div>
 		{/if}
 
-		<!-- Test result toast -->
+		<!-- Test result -->
 		{#if testResult}
-			<div class="test-toast" class:ok={testResult.result.success} class:bad={!testResult.result.success}>
-				{#if testResult.result.success}
-					<CheckCircle2 size={15} />
-					<span class="flex-1">Test passed ({testResult.result.duration_ms}ms)</span>
-				{:else}
-					<AlertTriangle size={15} />
-					<span class="flex-1">Test failed: {testResult.result.error}</span>
-				{/if}
-				<button onclick={() => (testResult = null)} aria-label="Dismiss"><X size={14} /></button>
+			<div class="test-banner">
+				<Banner
+					severity={testResult.result.success ? 'success' : 'error'}
+					message={testResult.result.success
+						? `Test passed (${testResult.result.duration_ms}ms)`
+						: `Test failed: ${testResult.result.error}`}
+					dismissible
+					onDismiss={() => (testResult = null)}
+				/>
 			</div>
 		{/if}
 
@@ -204,42 +202,7 @@
 		margin-bottom: 16px;
 	}
 
-	.test-toast {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		padding: 10px 14px;
+	.test-banner {
 		margin-bottom: 16px;
-		border-radius: 10px;
-		font-size: 12.5px;
-		font-weight: 500;
-	}
-
-	.test-toast .flex-1 {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.test-toast button {
-		display: flex;
-		background: none;
-		border: none;
-		color: inherit;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-
-	.test-toast :global(svg) {
-		flex-shrink: 0;
-	}
-
-	.test-toast.ok {
-		background: color-mix(in oklch, var(--success) 14%, transparent);
-		color: var(--success);
-	}
-
-	.test-toast.bad {
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive);
 	}
 </style>

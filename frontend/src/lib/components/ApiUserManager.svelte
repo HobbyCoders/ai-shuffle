@@ -7,6 +7,7 @@
 	 */
 
 	import { onMount } from 'svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
 	import type {
@@ -221,12 +222,7 @@
 	{#if loading}
 		<div class="text-center py-4 text-muted-foreground">Loading API users...</div>
 	{:else if error}
-		<div class="bg-status-error border border-status-error rounded-lg p-3 text-destructive text-sm">
-			{error}
-			<button onclick={() => { error = ''; }} class="ml-2 text-xs underline opacity-70 hover:opacity-100">
-				Dismiss
-			</button>
-		</div>
+		<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 	{:else}
 		<!-- Header -->
 		<div class="flex items-center justify-between">
@@ -287,8 +283,8 @@
 				</h4>
 
 				{#if formError}
-					<div class="bg-status-error border border-status-error rounded-md p-2 text-destructive text-xs mb-3">
-						{formError}
+					<div class="mb-3">
+						<Banner severity="error" message={formError} />
 					</div>
 				{/if}
 

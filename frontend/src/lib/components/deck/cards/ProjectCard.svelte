@@ -13,9 +13,10 @@
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
 	import { groups } from '$lib/stores/groups.svelte';
 	import {
-		Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, Brain,
+		Search, Plus, Trash2, FolderOpen, Settings, Server, Bot, Zap, Brain,
 		ChevronRight, ChevronLeft, Loader2, AlertTriangle
 	} from 'lucide-svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
@@ -159,10 +160,7 @@
 				</div>
 
 				{#if error}
-					<div class="pc-error">
-						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)} aria-label="Dismiss"><X size={14} /></button>
-					</div>
+					<Banner severity="error" message={error} dismissible onDismiss={() => (error = null)} />
 				{/if}
 
 				<!-- Sub-nav -->
@@ -216,10 +214,7 @@
 
 				<div class="pc-list-body">
 					{#if error}
-						<div class="pc-error">
-							<span class="flex-1">{error}</span>
-							<button onclick={() => (error = null)} aria-label="Dismiss"><X size={14} /></button>
-						</div>
+						<Banner severity="error" message={error} dismissible onDismiss={() => (error = null)} />
 					{/if}
 
 					<div class="pc-toolbar">
@@ -312,8 +307,6 @@
 <AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} />
 
 <style>
-	.flex-1 { flex: 1; }
-
 	.pc {
 		display: flex;
 		flex-direction: column;
@@ -453,15 +446,6 @@
 	.pc-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
 	.pc-btn--danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 35%, var(--border)); }
 	.pc-btn--danger:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
-
-	/* Error */
-	.pc-error {
-		display: flex; align-items: center; gap: 8px; margin-top: 16px; padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive); font-size: 0.8125rem;
-	}
-	.pc-error button { background: transparent; border: none; color: var(--destructive); cursor: pointer; padding: 2px; display: grid; place-items: center; }
 
 	/* List */
 	.pc-list-body { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }

@@ -17,6 +17,7 @@
 	import type { Project } from '$lib/stores/types';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword, startClaudeLogin, completeClaudeLogin } from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
+	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
@@ -404,9 +405,8 @@
 			<!-- Content -->
 			<div class="content">
 				{#if error}
-					<div class="alert error" transition:slide={{ duration: 200 }}>
-						<span>{error}</span>
-						<button onclick={() => error = ''} class="close-btn">&times;</button>
+					<div transition:slide={{ duration: 200 }}>
+						<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
 					</div>
 				{/if}
 
@@ -603,33 +603,4 @@
 	}
 
 	/* Alerts & Messages */
-	.alert {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 10px 14px;
-		border-radius: var(--radius);
-		font-size: 0.875rem;
-		margin-bottom: 12px;
-	}
-
-	.alert.error {
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive);
-		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-	}
-
-	.close-btn {
-		background: none;
-		border: none;
-		font-size: 1.25rem;
-		cursor: pointer;
-		opacity: 0.7;
-		color: inherit;
-		line-height: 1;
-	}
-
-	.close-btn:hover {
-		opacity: 1;
-	}
 </style>

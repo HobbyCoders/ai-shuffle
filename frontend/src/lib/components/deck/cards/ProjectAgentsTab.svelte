@@ -16,8 +16,9 @@
 		projectAgentsError,
 		projectAgentCount
 	} from '$lib/stores/projectAgents.svelte';
-	import { Search, Bot, Trash2, X } from 'lucide-svelte';
+	import { Search, Bot, Trash2 } from 'lucide-svelte';
 	import { getModelLabel } from '$lib/constants/models';
+	import Banner from '$lib/components/Banner.svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -85,10 +86,7 @@
 		{/if}
 
 		{#if $projectAgentsError}
-			<div class="err-banner">
-				<span class="flex-1">{$projectAgentsError}</span>
-				<button onclick={() => projectAgents.clearError()} aria-label="Dismiss error"><X size={15} /></button>
-			</div>
+			<Banner severity="error" message={$projectAgentsError} dismissible onDismiss={() => projectAgents.clearError()} />
 		{/if}
 
 		{#if filteredAgents().length === 0}
