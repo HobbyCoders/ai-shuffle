@@ -21,7 +21,7 @@ A real-time chat workspace powered by Claude via the Agent SDK. Features include
 
 ### Connectors
 Connect AI Shuffle to external platforms so Claude can respond to messages from:
-- **Messaging:** Telegram, Discord, WhatsApp, Slack, Line, Signal, MS Teams, iMessage
+- **Messaging:** Telegram, Discord, WhatsApp, Slack, Line, Signal, MS Teams, iMessage, BlueBubbles
 - **Smart Home:** Home Assistant, Philips Hue
 - **Other:** Spotify, Gmail, Webhooks
 
@@ -86,13 +86,13 @@ Full REST API for external integrations:
                               │
                     ┌─────────┼─────────┐
                     ▼         ▼         ▼
-              ┌──────────┐ ┌───────┐ ┌──────────┐
-              │Connectors│ │SQLite │ │MCP Servers│
-              │(14 types)│ │  DB   │ │(stdio/sse)│
-              └──────────┘ └───────┘ └──────────┘
+              ┌──────────┐ ┌──────────┐ ┌──────────┐
+              │Connectors│ │PostgreSQL│ │MCP Servers│
+              │(14 types)│ │    DB    │ │(stdio/sse)│
+              └──────────┘ └──────────┘ └──────────┘
 ```
 
 - **Frontend:** SvelteKit with Svelte 5, Tailwind CSS, TipTap editor
-- **Backend:** FastAPI with WebSocket support, SQLite database
+- **Backend:** FastAPI with WebSocket support, PostgreSQL database
 - **AI:** Claude Agent SDK for Python — manages sessions, streaming, tool execution
-- **Storage:** SQLite for metadata, JSONL files for message history
+- **Storage:** PostgreSQL for metadata, JSONL files for message history

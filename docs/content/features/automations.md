@@ -39,7 +39,7 @@ Runs on a cron schedule using standard 5-field cron expressions.
 
 ```json
 {
-  "cron_expression": "0 9 * * 1-5",
+  "expression": "0 9 * * 1-5",
   "timezone": "America/New_York"
 }
 ```
@@ -61,7 +61,7 @@ Runs repeatedly at a fixed interval. The minimum interval is 60 seconds.
 
 ```json
 {
-  "interval_seconds": 300
+  "seconds": 300
 }
 ```
 
@@ -89,7 +89,7 @@ curl -X POST http://localhost:8000/api/v1/automations/{automation_id}/trigger \
   -d '{"data": "your payload here"}'
 ```
 
-The JSON payload is available in the prompt template via `{{event}}` variables.
+The JSON payload is available in the prompt template via `{{payload}}` variables.
 
 ### Connector Event
 
@@ -128,7 +128,7 @@ Event type: {{event.type}}
 
 Dot notation is supported for nested data, such as `{{event.session_id}}` or `{{event.payload.message}}`.
 
-For webhook triggers, the entire JSON payload is available under `{{event}}`. For connector event triggers, the event data includes fields like `session_id`, `type`, and `payload`.
+For webhook triggers, the entire JSON POST body is available under `{{payload}}` (for example, `{{payload.data}}`). For connector event triggers, the event data is available under `{{event}}` and includes fields like `session_id`, `type`, and `payload`.
 
 ### Dry-Run Testing
 
@@ -259,7 +259,7 @@ curl -X POST http://localhost:8000/api/v1/automations \
     "description": "Summarizes project activity every morning",
     "trigger_type": "cron",
     "trigger_config": {
-      "cron_expression": "0 9 * * 1-5",
+      "expression": "0 9 * * 1-5",
       "timezone": "America/New_York"
     },
     "prompt": "Summarize all git commits from the past 24 hours in project {{project_name}}. Include a brief description of each change and highlight anything that needs attention.",
@@ -304,7 +304,7 @@ Generate a morning summary of recent activity across all sessions:
 {
   "name": "Morning Stand-up",
   "trigger_type": "cron",
-  "trigger_config": {"cron_expression": "0 9 * * 1-5", "timezone": "US/Pacific"},
+  "trigger_config": {"expression": "0 9 * * 1-5", "timezone": "US/Pacific"},
   "prompt": "Review all sessions from the past 24 hours. Summarize what was accomplished, what's in progress, and flag any errors or blockers.",
   "profile_id": "default",
   "max_turns": 5,
@@ -339,7 +339,7 @@ Run a weekly code review on recent changes:
 {
   "name": "Weekly Code Review",
   "trigger_type": "cron",
-  "trigger_config": {"cron_expression": "0 14 * * 5", "timezone": "UTC"},
+  "trigger_config": {"expression": "0 14 * * 5", "timezone": "UTC"},
   "prompt": "Review all git commits from the past week. Identify potential issues, suggest improvements, and summarize code quality trends.",
   "profile_id": "code-reviewer",
   "project_id": "main-app",

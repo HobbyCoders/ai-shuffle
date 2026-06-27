@@ -15,9 +15,10 @@ MCP is an open protocol that lets AI models interact with external systems throu
 Key concepts:
 
 - **Three server types:** stdio (subprocess), SSE (Server-Sent Events), HTTP
-- **Three scopes:** USER (global), LOCAL (project root config), PROJECT (project-scoped config)
+- **Multiple scopes:** USER (global), LOCAL (project root config), PROJECT (project-scoped config), and INSTALLED (per-project entries in `~/.claude.json`)
+- **Built-in servers:** AI Shuffle ships managed integrations (e.g. `claude-in-chrome`) that appear alongside configured servers
 - **Tool discovery:** MCP tools are automatically discovered and namespaced
-- **Admin-only management:** Creating, updating, and deleting servers requires admin privileges
+- **Admin-only management:** Creating, updating, deleting, and toggling servers requires admin privileges
 
 ## Server Types
 
@@ -63,7 +64,7 @@ Best for: stateless tools, REST-like integrations, serverless functions.
 
 ## Scopes
 
-MCP servers can be configured at three levels:
+MCP servers can be configured at several levels:
 
 ### USER (Global)
 
@@ -83,14 +84,26 @@ Scoped to a specific project in AI Shuffle's database. Similar to LOCAL but mana
 
 Use for: project-level integrations managed through the AI Shuffle UI.
 
-When listing MCP servers for a project, all three scopes are returned grouped by scope:
+### INSTALLED
+
+Per-project servers stored in `~/.claude.json` under the project's `mcpServers` entry (the same place the Claude Code CLI tracks installed servers). When adding a project server, pass `"scope": "installed"` to write here. Removing or toggling an installed server targets this same location.
+
+Use for: servers installed for a project outside AI Shuffle's project config files.
+
+### Built-in servers
+
+AI Shuffle also ships managed built-in integrations (currently `claude-in-chrome`) that are surfaced through the same API. These are not user-configured and cannot be created or deleted; they are enabled or disabled via the toggle endpoints and the global `settings.json` disable list.
+
+When listing MCP servers for a project, every scope is returned grouped by scope, plus a `total_count` that sums all of them:
 
 ```json
 {
+  "builtin": [...],
   "user": [...],
+  "installed": [...],
   "local": [...],
   "project": [...],
-  "total_count": 5
+  "total_count": 0
 }
 ```
 
@@ -168,6 +181,17 @@ curl -X DELETE http://localhost:8000/api/v1/mcp/servers/{server_name} \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
+#### Toggle a Global Server
+
+Enable or disable a global (or built-in) server via `settings.json`:
+
+```bash
+curl -X PATCH http://localhost:8000/api/v1/mcp/servers/{server_name}/toggle \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "enabled": false }'
+```
+
 ### Project-Scoped Servers
 
 #### List Project Servers (All Scopes)
@@ -193,7 +217,7 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/mcp/servers \
   }'
 ```
 
-The `scope` field must be `"local"` or `"project"` (not `"user"` -- use the global endpoint for that).
+The `scope` field accepts `"local"`, `"project"`, or `"installed"` (not `"user"` -- use the global endpoint for that). It defaults to `"local"`.
 
 #### Update a Project Server
 
@@ -211,6 +235,19 @@ curl -X PUT "http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{ser
 ```bash
 curl -X DELETE "http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}?scope=local" \
   -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+The `scope` query parameter accepts `local`, `project`, `installed`, or `user`.
+
+#### Toggle a Project Server
+
+Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`):
+
+```bash
+curl -X PATCH http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}/toggle \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "enabled": false }'
 ```
 
 ### Statistics

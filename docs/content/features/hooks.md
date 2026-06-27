@@ -6,16 +6,18 @@ order: 2
 
 # Hooks
 
-Hooks let you execute custom code at key points during an AI session. Use them to log tool usage, enforce safety policies, send notifications, block dangerous operations, or integrate with external systems.
+Hooks let you execute custom code at key points during an AI session. Use them to log tool usage, send notifications, post follow-up messages into the chat, or integrate with external systems.
 
 ## Overview
 
-A hook is a piece of logic -- either a shell command or a webhook call -- that AI Shuffle runs when a specific event occurs during Claude's workflow. Hooks are scoped to a project and can be enabled or disabled individually.
+A hook is a piece of logic -- a shell command, a webhook call, or a chat message -- that AI Shuffle runs when a specific event occurs during Claude's workflow. Hooks are scoped to a project and can be enabled or disabled individually.
+
+Hooks run asynchronously (fire-and-forget): when an event fires, matching hooks are dispatched in the background and the session continues without waiting for them. A hook cannot block, approve, or modify a tool call -- its exit code or response is not consulted by the workflow. Failures are logged, not surfaced to the session.
 
 Key concepts:
 
 - **Per-project:** Each hook belongs to a specific project
-- **Two types:** Bash (run a shell command) and Webhook (HTTP POST to a URL)
+- **Three types:** Bash (run a shell command), Webhook (HTTP POST to a URL), and Message (post a prompt into the active chat)
 - **Nine event types:** Cover the full session lifecycle from start to finish
 - **Tool matching:** Optionally filter tool-related events by tool name pattern
 - **Plugin hooks:** Installed plugins can contribute read-only hooks
@@ -58,16 +60,24 @@ Send an HTTP POST request to a URL when the event fires. Optionally sign the pay
 
 When a `secret` is provided, the request includes an HMAC-SHA256 signature header that the receiving server can use to verify the request is authentic.
 
+### Message Hooks
+
+Post a prompt into the active chat session when the event fires. The rendered template is injected as a new user message, letting you trigger follow-up work automatically.
+
+| Field              | Type   | Description                                              |
+|--------------------|--------|----------------------------------------------------------|
+| `message_template` | string | Prompt template sent as a new user message in the active chat |
+
 ## Hook Events
 
 AI Shuffle supports 9 hook event types that cover the full lifecycle of an AI session.
 
 ### PreToolUse
 
-Fires **before** Claude executes a tool. Use this to approve, modify, or block tool calls.
+Fires **before** Claude executes a tool. Use this to observe or react to upcoming tool calls. Hooks run asynchronously and cannot approve, modify, or block the tool.
 
 - Supports `tool_matcher` to filter by tool name
-- Common use: block dangerous commands, require approval for destructive operations
+- Common use: log or alert on dangerous commands, record destructive operations before they run
 
 ### PostToolUse
 
@@ -234,23 +244,23 @@ Create a bash hook to log every tool invocation to a file:
 }
 ```
 
-### Block Dangerous Bash Commands
+### Warn on Dangerous Bash Commands
 
-Use a PreToolUse hook to intercept and block potentially dangerous shell commands:
+Use a PreToolUse hook to detect and log potentially dangerous shell commands. Hooks run asynchronously and cannot block the tool, so use this to record or alert rather than to prevent execution:
 
 ```json
 {
-  "name": "Block rm -rf",
+  "name": "Warn on rm -rf",
   "event": "PreToolUse",
   "hook_type": "bash",
-  "command": "echo $HOOK_DATA | grep -q 'rm -rf /' && exit 1 || exit 0",
+  "command": "echo \"$HOOK_DATA\" | grep -q 'rm -rf /' && echo \"[$(date)] WARNING: rm -rf detected: $HOOK_DATA\" >> /var/log/ai-shuffle-warnings.log",
   "timeout": 3000,
   "enabled": true,
   "tool_matcher": "Bash"
 }
 ```
 
-A non-zero exit code from a PreToolUse bash hook blocks the tool from executing.
+The hook's exit code is not consulted by the workflow, so the tool runs regardless of what the command returns.
 
 ### Slack Notification on Session End
 

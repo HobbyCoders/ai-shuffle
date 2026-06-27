@@ -10,7 +10,7 @@ order: 14
 
 The Webhook connector is the most flexible connector in AI Shuffle. It allows Claude to receive and send messages via standard HTTP webhooks, making it possible to integrate with virtually any service that can make or receive HTTP requests. Whether you are connecting a custom application, an IoT device, a CI/CD pipeline, a monitoring system, or any other HTTP-capable service, the Webhook connector can handle it.
 
-The connector supports three modes of operation: **inbound** (receive webhooks from external services), **outbound** (send Claude's responses to a configured URL), and **bidirectional** (both). It includes optional authentication via bearer tokens and HMAC signature verification for secure integrations.
+The connector supports three modes of operation: **inbound** (receive webhooks from external services), **outbound** (deliver event notifications to a configured URL), and **bidirectional** (both). It includes optional authentication via bearer tokens and HMAC signature verification for secure integrations.
 
 ## Prerequisites
 
@@ -27,8 +27,8 @@ Decide which mode fits your integration:
 | Mode | Use Case | Description |
 |------|----------|-------------|
 | `inbound` | Receive events from external services | AI Shuffle exposes an endpoint that external services can POST to. Claude processes the incoming messages and responds within AI Shuffle. |
-| `outbound` | Send Claude's responses to an external service | When Claude generates a response, it is automatically POSTed to a configured URL. |
-| `bidirectional` | Two-way integration | Combines inbound and outbound. External services send messages in, and Claude's responses are sent back out to a configured URL. |
+| `outbound` | Send event notifications to an external service | Event notifications are automatically POSTed to a configured URL. |
+| `bidirectional` | Two-way integration | Combines inbound and outbound. External services send messages in, and event notifications are sent back out to a configured URL. |
 
 ### 2. Create the Webhook connector
 
@@ -43,7 +43,7 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "connector_type": "webhook",
     "config": {
       "mode": "inbound",
-      "inbound_path": "/hooks/monitoring",
+      "inbound_path": "monitoring",
       "inbound_token": "my_secret_bearer_token"
     }
   }'
@@ -60,8 +60,8 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "connector_type": "webhook",
     "config": {
       "mode": "outbound",
-      "outbound_url": "https://your-service.example.com/api/messages",
-      "outbound_headers": {
+      "url": "https://your-service.example.com/api/messages",
+      "headers": {
         "Authorization": "Bearer your_service_token",
         "X-Source": "ai-shuffle"
       }
@@ -80,11 +80,11 @@ curl -X POST http://localhost:8000/api/v1/connectors \
     "connector_type": "webhook",
     "config": {
       "mode": "bidirectional",
-      "inbound_path": "/hooks/custom",
+      "inbound_path": "custom",
       "inbound_token": "my_inbound_secret",
       "secret": "my_hmac_signing_secret",
-      "outbound_url": "https://your-service.example.com/api/responses",
-      "outbound_headers": {
+      "url": "https://your-service.example.com/api/responses",
+      "headers": {
         "Authorization": "Bearer your_service_token"
       }
     }
@@ -105,19 +105,15 @@ curl -X POST http://localhost:8000/api/v1/connectors/{connector_id}/activate \
 Once activated, the inbound webhook endpoint is available at:
 
 ```
-POST http://localhost:8000/api/v1/connectors/webhook/{connector_id}/inbound
+POST http://localhost:8000/api/v1/connectors/hooks/{inbound_path}
 ```
 
-Or, if you configured a custom `inbound_path`:
-
-```
-POST http://localhost:8000{inbound_path}
-```
+The `{inbound_path}` is the bare slug you set in the connector's `inbound_path` config (e.g. `monitoring`). The connector must be running and in `inbound` or `bidirectional` mode for the endpoint to match.
 
 **Basic test with curl:**
 
 ```bash
-curl -X POST http://localhost:8000/hooks/monitoring \
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer my_secret_bearer_token" \
   -d '{
@@ -127,10 +123,12 @@ curl -X POST http://localhost:8000/hooks/monitoring \
   }'
 ```
 
+The bearer token may alternatively be supplied via the `X-Webhook-Token` header instead of `Authorization: Bearer`.
+
 **Test without authentication (if `inbound_token` is not set):**
 
 ```bash
-curl -X POST http://localhost:8000/hooks/monitoring \
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Deployment to production completed successfully."
@@ -144,7 +142,7 @@ curl -X POST http://localhost:8000/hooks/monitoring \
 PAYLOAD='{"message": "Signed webhook test"}'
 SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "my_hmac_signing_secret" | awk '{print $2}')
 
-curl -X POST http://localhost:8000/hooks/monitoring \
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/monitoring \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Signature: sha256=$SIGNATURE" \
   -d "$PAYLOAD"
@@ -152,7 +150,7 @@ curl -X POST http://localhost:8000/hooks/monitoring \
 
 ### 5. Test outbound webhooks
 
-For outbound mode, Claude's responses are automatically sent to the configured `outbound_url`. To test this, start a simple HTTP listener:
+For outbound mode, event notifications are automatically sent to the configured `url`. To test this, start a simple HTTP listener:
 
 ```bash
 # Using Python's built-in HTTP server (for testing only)
@@ -172,18 +170,18 @@ HTTPServer(('0.0.0.0', 9999), Handler).serve_forever()
 "
 ```
 
-Then send a message through AI Shuffle that triggers a response. The response payload will be printed by the test listener.
+Then trigger an event in AI Shuffle that the connector delivers. The notification payload will be printed by the test listener.
 
 ## Configuration Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | string | Yes | The webhook mode: `"inbound"`, `"outbound"`, or `"bidirectional"` |
-| `inbound_path` | string | No | Custom URL path for the inbound webhook endpoint (e.g., `/hooks/my-service`). If not set, a default path is generated based on the connector ID. Only used in `inbound` and `bidirectional` modes. |
-| `inbound_token` | string | No | Bearer token required for authenticating inbound webhook requests. When set, incoming requests must include `Authorization: Bearer <token>` header. Only used in `inbound` and `bidirectional` modes. |
-| `secret` | string | No | HMAC secret for verifying webhook signatures. When set, incoming requests are validated against `X-Webhook-Signature` header using HMAC-SHA256. Only used in `inbound` and `bidirectional` modes. |
-| `outbound_url` | string | No | The URL where Claude's responses are POSTed. Required for `outbound` and `bidirectional` modes. |
-| `outbound_headers` | object | No | Additional HTTP headers to include in outbound requests (e.g., authorization headers, custom identifiers). Only used in `outbound` and `bidirectional` modes. |
+| `mode` | string | No | The webhook mode: `"inbound"`, `"outbound"` (default), or `"bidirectional"` |
+| `inbound_path` | string | No | URL slug for the inbound webhook endpoint, a bare slug with no leading slash (e.g., `my-service`). The public endpoint is `/api/v1/connectors/hooks/<slug>`. Required to enable inbound; without it there is no inbound endpoint. Only used in `inbound` and `bidirectional` modes. |
+| `inbound_token` | string | No | Bearer token required for authenticating inbound webhook requests. When set, incoming requests must include `Authorization: Bearer <token>` (or `X-Webhook-Token: <token>`) header. Only used in `inbound` and `bidirectional` modes. |
+| `secret` | string | No | HMAC secret used for verifying inbound signatures and signing outbound requests. When set, incoming requests are validated against the `X-Webhook-Signature` header using HMAC-SHA256. |
+| `url` | string | No | The outbound webhook endpoint URL where notifications are POSTed. Required for `outbound` and `bidirectional` modes. |
+| `headers` | object | No | Additional HTTP headers to include in outbound requests (e.g., authorization headers, custom identifiers). Only used in `outbound` and `bidirectional` modes. |
 
 ## Capabilities
 
@@ -224,16 +222,19 @@ Additional fields are passed as metadata and may be used by Claude for context:
 
 ### Outbound payload format
 
-Claude's responses are sent as JSON POST requests to the `outbound_url`:
+Outbound event notifications are sent as JSON POST requests to the configured `url`:
 
 ```json
 {
-  "connector_id": "abc123",
-  "session_id": "session_456",
-  "message": "Claude's response text here",
+  "event": "session.complete",
+  "data": {
+    "message": "Event details here"
+  },
   "timestamp": "2026-02-16T10:30:05Z"
 }
 ```
+
+The `event` field is the event type, `data` carries the event-specific payload, and `timestamp` is an ISO-8601 UTC time. Outbound requests also include `X-Webhook-Event` and `X-Webhook-Delivery-Id` headers, and an `X-Webhook-Signature` header when a `secret` is configured.
 
 ### HMAC Signature Verification
 
@@ -248,7 +249,7 @@ PAYLOAD='{"message": "Hello from webhook"}'
 SECRET="my_hmac_signing_secret"
 SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
 
-curl -X POST http://localhost:8000/hooks/my-service \
+curl -X POST http://localhost:8000/api/v1/connectors/hooks/my-service \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Signature: sha256=$SIGNATURE" \
   -d "$PAYLOAD"
@@ -266,7 +267,7 @@ secret = b"my_hmac_signing_secret"
 signature = hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 requests.post(
-    "http://localhost:8000/hooks/my-service",
+    "http://localhost:8000/api/v1/connectors/hooks/my-service",
     data=payload,
     headers={
         "Content-Type": "application/json",
@@ -295,13 +296,13 @@ const signature = crypto
 
 ### Inbound webhook returns 404
 
-- **Check the path.** Ensure you are POSTing to the correct URL. If you set `inbound_path` to `/hooks/my-service`, the full URL is `http://localhost:8000/hooks/my-service`.
-- **Connector not activated.** The webhook endpoint is only registered when the connector is active. Verify the connector status.
-- **Trailing slash mismatch.** Some HTTP clients add a trailing slash. Ensure the path matches exactly, with or without a trailing slash.
+- **Check the slug.** Ensure you are POSTing to the correct URL. If you set `inbound_path` to `my-service`, the full URL is `http://localhost:8000/api/v1/connectors/hooks/my-service`. The slug in the URL must match `inbound_path` exactly.
+- **Connector not running.** The slug only matches when the connector is running and in `inbound` or `bidirectional` mode. Verify the connector status and mode.
+- **No `inbound_path` configured.** Inbound requires `inbound_path` to be set; without it there is no inbound endpoint to match.
 
-### Inbound webhook returns 401 Unauthorized
+### Inbound webhook returns 403 Forbidden
 
-- **Missing or wrong token.** If `inbound_token` is configured, every inbound request must include the header `Authorization: Bearer <your_inbound_token>`. Check that the token matches exactly.
+- **Missing or wrong token.** If `inbound_token` is configured, every inbound request must include the header `Authorization: Bearer <your_inbound_token>` (or `X-Webhook-Token: <your_inbound_token>`). Check that the token matches exactly.
 - **HMAC signature invalid.** If `secret` is configured and the signature does not match, the request is rejected. Verify that you are signing the exact raw request body (no extra whitespace or reformatting) with the correct secret.
 
 ### Inbound webhook returns 400 Bad Request
@@ -313,7 +314,7 @@ const signature = crypto
 ### Outbound requests are not being sent
 
 - **Check mode.** The connector must be in `outbound` or `bidirectional` mode.
-- **Check `outbound_url`.** Verify the URL is correct and the target service is reachable from the AI Shuffle host.
+- **Check `url`.** Verify the outbound URL is correct and the target service is reachable from the AI Shuffle host.
 - **Check target service.** Ensure the target service is running and accepting POST requests. Check its logs for incoming requests.
 - **Network issues.** If the target service is on a different network, verify there are no firewall rules blocking the connection.
 

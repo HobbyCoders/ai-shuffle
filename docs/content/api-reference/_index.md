@@ -102,10 +102,10 @@ The API enforces rate limits per-IP and per-user. When rate limited, you'll rece
 Real-time chat uses WebSocket connections:
 
 ```
-ws://localhost:8000/api/v1/ws/chat/{session_id}
+ws://localhost:8000/api/v1/ws/chat
 ```
 
-See the [WebSocket documentation](/docs/api-reference/websocket) for protocol details.
+The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": "...", "session_id": "...", "profile": "..."}`), not in the URL path. See the [WebSocket documentation](/docs/api-reference/websocket) for protocol details.
 
 ## Endpoint Categories
 

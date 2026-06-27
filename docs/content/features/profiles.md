@@ -36,20 +36,23 @@ A profile contains a `config` object with the following settings:
 
 #### Models
 
-| Value                              | Description                   |
-|------------------------------------|-------------------------------|
-| `claude-sonnet-4-5-20250929`       | Claude Sonnet 4.5             |
-| `claude-opus-4-6`                  | Claude Opus 4.6               |
-| `claude-haiku-3-5-20241022`        | Claude Haiku 3.5              |
-| `sonnet`                           | Alias for latest Sonnet       |
-| `opus`                             | Alias for latest Opus         |
-| `haiku`                            | Alias for latest Haiku        |
+| Value               | Description                   |
+|---------------------|-------------------------------|
+| `claude-sonnet-4-6` | Claude Sonnet 4.6             |
+| `claude-haiku-4-5`  | Claude Haiku 4.5              |
+| `claude-opus-4-6`   | Claude Opus 4.6               |
+| `claude-opus-4-7`   | Claude Opus 4.7               |
+| `claude-opus-4-8`   | Claude Opus 4.8               |
+| `sonnet`            | Alias for `claude-sonnet-4-6` |
+| `opus`              | Alias for `claude-opus-4-8`   |
+| `haiku`             | Alias for `claude-haiku-4-5`  |
 
 #### Permission Modes
 
 | Mode                | Description                                                 |
 |---------------------|-------------------------------------------------------------|
 | `default`           | Ask for permission on potentially destructive operations     |
+| `auto`              | Auto-approve operations without prompting                    |
 | `acceptEdits`       | Automatically accept file edits, ask for other operations    |
 | `plan`              | Plan-only mode -- Claude explains what it would do           |
 | `bypassPermissions` | Skip all permission prompts (use with caution)               |
@@ -61,6 +64,8 @@ Controls Claude's extended thinking behavior. More thinking produces better resu
 | Mode           | Description                                          |
 |----------------|------------------------------------------------------|
 | `default`      | Standard thinking behavior                            |
+| `disabled`     | Turn off extended thinking                            |
+| `adaptive`     | Let the model decide how much to think               |
 | `think`        | Enable extended thinking                              |
 | `think_harder` | More thorough extended thinking                       |
 | `ultra_think`  | Maximum extended thinking (highest token usage)        |
@@ -75,6 +80,7 @@ For Opus 4.6 and later models, use effort-based reasoning instead of thinking mo
 | `medium` | Balanced reasoning and speed                   |
 | `high`   | Thorough reasoning                             |
 | `max`    | Maximum reasoning depth                        |
+| `xhigh`  | Highest reasoning depth (Opus 4.7+ only)       |
 
 ### Tool Configuration
 
@@ -155,6 +161,8 @@ Controls which Claude Code configuration files are loaded. By default, all sourc
 |-----------------------------|------|-----------------------------------------------|
 | `max_buffer_size`           | int  | Maximum bytes when buffering CLI stdout        |
 | `enable_file_checkpointing` | bool | Enable file snapshots for rewind (SDK 0.1.15+) |
+| `app_config_tools`          | bool | Let the agent manage hooks, automations, MCP servers, and profiles through conversation (admin sessions only) |
+| `strict_mcp_config`         | bool | Lock the MCP server set for the session; reject mid-session changes (SDK 0.1.74+) |
 
 ## API Reference
 
