@@ -46,22 +46,21 @@ class ChatActivity : AppCompatActivity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     /**
-     * Whether the scroll container under the user's finger is at its top. The
-     * hosted web UI keeps `body` at `overflow: hidden` and scrolls inside nested
-     * containers, so the WebView's own scroll offset is always 0 and can't gate
-     * pull-to-refresh. Instead, injected JS reports the touched container's
-     * position via [RefreshBridge]; we only let SwipeRefreshLayout take the
-     * gesture when the content can't scroll up. Written from the WebView's JS
+     * Whether the current touch gesture began on the hosted web UI's main app
+     * header (the `.topbar`). Pull-to-refresh is reserved exclusively for that
+     * header so it never competes with normal scrolling anywhere else in the
+     * page — including at the top of the chat or side panels. Injected JS reports
+     * this on every touchstart via [RefreshBridge]. Written from the WebView's JS
      * thread, read on the UI thread, hence @Volatile.
      */
     @Volatile
-    private var contentAtTop = true
+    private var pullFromHeader = false
 
-    /** Bridge the injected JS calls on touchstart to report scroll position. */
+    /** Bridge the injected JS calls on touchstart to report where the touch began. */
     private inner class RefreshBridge {
         @JavascriptInterface
-        fun setAtTop(atTop: Boolean) {
-            contentAtTop = atTop
+        fun setFromHeader(fromHeader: Boolean) {
+            pullFromHeader = fromHeader
         }
     }
 
@@ -167,18 +166,19 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Swipe down from the top of the content to reload the web UI — the only way
-     * to pick up a freshly deployed frontend inside the chrome-less WebView.
-     * [contentAtTop] (fed by injected JS) ensures the gesture only engages when
-     * the touched scroll container is already at its top, so it never steals
-     * upward scrolls inside the chat or side panels.
+     * Swipe down from the web UI's main app header to reload — the only way to
+     * pick up a freshly deployed frontend inside the chrome-less WebView.
+     * [pullFromHeader] (fed by injected JS) ensures the gesture only engages when
+     * the touch began on the header, so it never steals scrolls anywhere else in
+     * the page. Reporting "the child can scroll up" for every non-header touch
+     * tells SwipeRefreshLayout to leave that gesture to the WebView.
      */
     private fun configureSwipeRefresh() {
         with(binding.swipeRefresh) {
             // Match the dark web UI so the spinner is visible against it.
             setProgressBackgroundColorSchemeColor(0xFF1E1F22.toInt())
             setColorSchemeColors(0xFFFFFFFF.toInt())
-            setOnChildScrollUpCallback { _, _ -> !contentAtTop }
+            setOnChildScrollUpCallback { _, _ -> !pullFromHeader }
             setOnRefreshListener { binding.webView.reload() }
         }
     }
@@ -308,32 +308,23 @@ class ChatActivity : AppCompatActivity() {
         const val EXTRA_SERVER_ID = "server_id"
 
         /**
-         * Installed once per full page load. On every touchstart it walks up from
-         * the touched element to the nearest vertically scrollable ancestor and
-         * reports whether it's at the top, so native pull-to-refresh only fires
-         * when the content can't scroll up further. Survives SvelteKit's
-         * client-side route changes (same document); the guard avoids stacking
-         * duplicate listeners across reloads.
+         * Installed once per full page load. On every touchstart it reports
+         * whether the touch began inside the web UI's main app header
+         * (`.topbar`), so native pull-to-refresh only arms for a pull that starts
+         * on the header and never interferes with scrolling elsewhere. Survives
+         * SvelteKit's client-side route changes (same document); the guard avoids
+         * stacking duplicate listeners across reloads.
          */
         private val REFRESH_GATE_JS = """
             (function () {
               if (window.__aishRefreshGate) return;
               window.__aishRefreshGate = true;
-              function atTop(el) {
-                while (el && el.nodeType === 1 &&
-                       el !== document.body && el !== document.documentElement) {
-                  var s = getComputedStyle(el);
-                  if ((s.overflowY === 'auto' || s.overflowY === 'scroll') &&
-                      el.scrollHeight > el.clientHeight) {
-                    return el.scrollTop <= 0;
-                  }
-                  el = el.parentElement;
-                }
-                var d = document.scrollingElement || document.documentElement;
-                return (d ? d.scrollTop : 0) <= 0 && (window.pageYOffset || 0) <= 0;
-              }
               document.addEventListener('touchstart', function (e) {
-                try { AndroidRefresh.setAtTop(atTop(e.target)); } catch (_) {}
+                try {
+                  var t = e.target;
+                  var onHeader = !!(t && t.closest && t.closest('.topbar'));
+                  AndroidRefresh.setFromHeader(onHeader);
+                } catch (_) {}
               }, { passive: true, capture: true });
             })();
         """.trimIndent()
