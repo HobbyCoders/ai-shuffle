@@ -332,7 +332,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (eventType) {
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
-			if (eventType === 'queue_updated') {
+			// Scope to the active session: a late/cross-session event (e.g. a
+			// stale queue_updated for the session we just switched away from, or
+			// the watch_session restore racing the switch) must not clobber the
+			// current session's queue.
+			if (eventType === 'queue_updated' &&
+				(!eventSessionId || eventSessionId === state.sessionId)) {
 				const syncData = data.data as Record<string, unknown> | undefined;
 				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
 				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));

@@ -1587,6 +1587,33 @@ async def chat_websocket(
                             current_session_id = session_id
                             logger.debug(f"Device {device_id} watching session {session_id}")
 
+                            # Restore the session's queued messages to this
+                            # device. The frontend resets its queue to [] on every
+                            # session switch and hydrates session state via HTTP
+                            # /live, which does NOT carry queue state (it's
+                            # server-side only). Without this, queued messages
+                            # vanish from the UI on switch / reconnect even though
+                            # they remain in the DB and still fire when the turn
+                            # ends. Mirror the queue_updated event emitted by the
+                            # queue_message / remove / clear handlers.
+                            try:
+                                watch_queue = await run_sync(
+                                    database.get_queued_messages, session_id
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    f"[Queue] Failed to load queued messages for "
+                                    f"{session_id} on watch: {exc}"
+                                )
+                                watch_queue = []
+                            if watch_queue:
+                                await send_json({
+                                    "type": "sync",
+                                    "event_type": "queue_updated",
+                                    "session_id": session_id,
+                                    "data": {"queued_messages": watch_queue},
+                                })
+
                     elif msg_type == "close_session":
                         # Close/unload the current session
                         old_session_id = current_session_id
