@@ -698,6 +698,42 @@ async def chat_websocket(
                     source_device_id=None
                 )
 
+            # --- Background "unpark" drain pump (ERROR path; Bug C) ---
+            # Mirror of the success-branch pump start above. This turn ERRORED but
+            # background work it launched (a sub-agent OR an SDK-backgrounded shell)
+            # may still be in flight on the pooled, still-alive SDK client. Its
+            # terminal notification lands LATER with nothing reading it, permanently
+            # stranding the parent (registry task stuck "running", parent never
+            # unparks). end_streaming(interrupted) above already cleared is_streaming,
+            # so the pump sees an idle client; its own liveness guard makes this a
+            # no-op if the error killed the client (reaped by force-eviction instead).
+            # A user Stop takes the CancelledError branch, which does NOT pump.
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+            ):
+                from app.core.task_registry import task_registry
+                _active_bg_work = task_registry.get_active_background_work(session_id)
+                if _active_bg_work:
+                    ctx.debug(
+                        logger,
+                        f"Unpark (error path): {len(_active_bg_work)} background task(s) "
+                        f"(agent/shell) still in flight — starting between-turns drain pump",
+                    )
+                    _start_drain_pump_impl(
+                        session_id,
+                        drain_coro_factory=lambda: _drain_notifications_impl(
+                            session_id,
+                            profile_id,
+                            project_id,
+                            worktree_id,
+                            device_id=device_id,
+                            user_id=user_id,
+                            send_json=send_json,
+                            deliver_unpark=_deliver_unpark,
+                        ),
+                    )
+
             # Dispatch notifications for session error (non-blocking)
             session_data = await run_sync(database.get_session, session_id)
             try:

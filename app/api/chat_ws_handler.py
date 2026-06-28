@@ -2530,6 +2530,35 @@ class ChatWebSocketHandler:
                     source_device_id=None
                 )
 
+            # --- Background "unpark" drain pump (ERROR path; Bug C) ---
+            # Mirror of the success-branch pump start above. This turn ERRORED rather
+            # than completing cleanly, but background work it had already launched (a
+            # sub-agent OR an SDK-backgrounded local_bash shell) may still be running
+            # on the pooled, still-alive SDK client. Its terminal
+            # TaskNotificationMessage will land LATER with nothing reading it — the
+            # exact SLOW-path race the success branch starts a pump for. Without this
+            # mirror, an error that did NOT kill the client (a transient handler/
+            # processing error) permanently strands the parent: the registry task
+            # stays "running" and the parent never unparks. end_streaming(interrupted)
+            # above already cleared is_streaming, so the pump sees an idle client; its
+            # own liveness guard (peek → not alive / is_streaming → return) makes this
+            # a safe no-op when the error DID tear the client down (that case is reaped
+            # by force-eviction cleanup instead — see live_session_store force path).
+            # A user Stop takes the CancelledError branch above, which intentionally
+            # does NOT pump (the user explicitly stopped — don't resurrect the turn).
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+            ):
+                _active_bg_work = task_registry.get_active_background_work(session_id)
+                if _active_bg_work:
+                    ctx.debug(
+                        logger,
+                        f"Unpark (error path): {len(_active_bg_work)} background task(s) "
+                        f"(agent/shell) still in flight — starting between-turns drain pump",
+                    )
+                    self._start_drain_pump(session_id, profile_id, project_id, worktree_id)
+
             # Dispatch notifications for session error (non-blocking)
             session_data = database.get_session(session_id)
             try:

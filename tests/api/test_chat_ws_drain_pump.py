@@ -528,6 +528,72 @@ async def test_run_query_calls_stop_drain_pump_at_start():
             stop_mock.assert_awaited_once_with("sess-1")
 
 
+# ---------------------------------------------------------------------------
+# 6b. ERROR-PATH pump start (Bug C) — a turn that ERRORS while background work is
+#     still in flight must ALSO start the between-turns pump (symmetric to the
+#     success path), or the parent never unparks when the slow sub-agent finishes.
+#     A user Stop (CancelledError) must NOT — the user explicitly stopped.
+# ---------------------------------------------------------------------------
+
+def _raising_stream(exc):
+    """A stream_to_websocket stand-in that raises ``exc`` the moment it is iterated
+    (after the registry already reflects the in-flight task)."""
+    async def _gen(*args, **kwargs):
+        raise exc
+        yield  # unreachable — marks _gen as an async generator
+
+
+    return _gen
+
+
+@pytest.mark.asyncio
+async def test_run_query_starts_pump_on_error_with_active_agent_task():
+    """Bug C: a turn that raises mid-stream (NOT a user Stop) while a background
+    agent task is still in flight starts a between-turns drain pump on the error
+    path, so the parent unparks when the task's terminal notification lands."""
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+
+    # The SDK launched a background agent this turn; the registry has it running.
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+    with _run_query_patches(handler, _raising_stream(RuntimeError("boom mid-stream"))):
+        with patch.object(cwh, "dispatch_session_error", new=AsyncMock()):
+            await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    handler._start_drain_pump.assert_called_once()
+    assert handler._start_drain_pump.call_args.args[0] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_run_query_no_pump_on_error_when_no_active_agent_task():
+    """A turn that errors with NO in-flight background work does not start a pump
+    (nothing to wait for)."""
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+
+    with _run_query_patches(handler, _raising_stream(RuntimeError("boom"))):
+        with patch.object(cwh, "dispatch_session_error", new=AsyncMock()):
+            await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    handler._start_drain_pump.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_query_no_pump_on_cancel_even_with_active_agent_task():
+    """A user Stop (CancelledError) must NOT start an unpark pump even with active
+    background work — the cancel branch intentionally leaves the parked work to the
+    explicit-stop teardown rather than resurrecting the turn."""
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+    with _run_query_patches(handler, _raising_stream(asyncio.CancelledError())):
+        await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    handler._start_drain_pump.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_stopped_session_does_not_deliver_unpark():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
