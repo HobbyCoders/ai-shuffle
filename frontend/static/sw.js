@@ -2,7 +2,7 @@
 // Version: 2.0.0
 // Auto-update enabled - clients reload automatically on new version
 
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 9;
 const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
@@ -242,21 +242,33 @@ self.addEventListener('push', (event) => {
   );
 });
 
-// Notification click handler
+// Notification click handler — open the relevant session, or the app root.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
+  // Session-scoped notifications (e.g. "Session finished") carry a session_id
+  // in their data payload. Deep-link straight to that session so the click
+  // opens it instead of dumping the user on the app root.
+  const data = event.notification.data || {};
+  const sessionId = data.session_id;
+  const targetUrl = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : '/';
+
   event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((clientList) => {
-      // Focus existing window if available
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      // Reuse an already-open app window: focus it and ask it to open the
+      // session in place (no reload). The page listens for OPEN_SESSION.
       for (const client of clientList) {
-        if (client.url === '/' && 'focus' in client) {
+        if (new URL(client.url).origin === self.location.origin && 'focus' in client) {
+          if (sessionId) {
+            client.postMessage({ type: 'OPEN_SESSION', sessionId });
+          }
           return client.focus();
         }
       }
-      // Open new window
+      // No window open — launch one at the deep link; the page reads
+      // `?session=` on load and opens it.
       if (clients.openWindow) {
-        return clients.openWindow('/');
+        return clients.openWindow(targetUrl);
       }
     })
   );

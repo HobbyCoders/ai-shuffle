@@ -120,6 +120,23 @@
 	}
 
 	/**
+	 * Open a session in response to a notification click. Both the OS push
+	 * notification (relayed by the service worker via postMessage) and the in-app
+	 * browser notification (notifySessionComplete, via a window event) funnel
+	 * here. Skip the switch when the session is already the one on screen so the
+	 * click doesn't trigger a needless reload/flash.
+	 */
+	function handleNotificationOpenSession(sessionId: string | null | undefined) {
+		if (!sessionId) return;
+		const alreadyOpen =
+			$activeView?.type === 'chat' &&
+			$activeView.sessionId === sessionId &&
+			$activeSession?.sessionId === sessionId;
+		if (alreadyOpen) return;
+		handleOpenSession(sessionId);
+	}
+
+	/**
 	 * Open a feature page (settings, files, plugins, etc.)
 	 */
 	function handleOpenFeature(type: ViewType) {
@@ -151,6 +168,8 @@
 
 	let visibilityChangeHandler: (() => void) | null = null;
 	let cleanupGlobalStt: (() => void) | null = null;
+	let swMessageHandler: ((event: MessageEvent) => void) | null = null;
+	let openSessionEventHandler: ((event: Event) => void) | null = null;
 
 	onMount(async () => {
 		if (!$isAuthenticated) {
@@ -215,6 +234,22 @@
 			url.searchParams.delete('session');
 			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 		}
+
+		// Notification clicks open the relevant session without a reload. The
+		// service worker relays an OS push click via postMessage; the in-app
+		// "Session Complete" notification dispatches an 'open-session' window event.
+		swMessageHandler = (event: MessageEvent) => {
+			if (event.data?.type === 'OPEN_SESSION') {
+				handleNotificationOpenSession(event.data.sessionId as string | undefined);
+			}
+		};
+		openSessionEventHandler = (event: Event) => {
+			handleNotificationOpenSession((event as CustomEvent).detail?.sessionId);
+		};
+		if ('serviceWorker' in navigator) {
+			navigator.serviceWorker.addEventListener('message', swMessageHandler);
+		}
+		window.addEventListener('open-session', openSessionEventHandler);
 
 		// Sync from server when window regains focus
 		visibilityChangeHandler = () => {
@@ -312,6 +347,12 @@
 		if (typeof window !== 'undefined') {
 			if (visibilityChangeHandler) {
 				document.removeEventListener('visibilitychange', visibilityChangeHandler);
+			}
+			if (swMessageHandler && 'serviceWorker' in navigator) {
+				navigator.serviceWorker.removeEventListener('message', swMessageHandler);
+			}
+			if (openSessionEventHandler) {
+				window.removeEventListener('open-session', openSessionEventHandler);
 			}
 		}
 		shortcutRegistrations.forEach((reg) => reg.unregister());

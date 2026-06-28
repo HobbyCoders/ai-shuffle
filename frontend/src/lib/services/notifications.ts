@@ -154,7 +154,9 @@ export function notifySessionComplete(info: SessionCompleteInfo): Notification |
 		body,
 		tag: `session-${sessionId}-${Date.now()}`,
 		onClick: () => {
-			window.location.hash = '';
+			// Ask the page to open the finished session (the SW notification path
+			// uses the same event via postMessage → window event).
+			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId } }));
 		}
 	});
 }

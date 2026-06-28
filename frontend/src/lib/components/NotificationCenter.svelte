@@ -68,6 +68,12 @@
 
 	function onItemClick(n: AppNotification) {
 		if (!n.read) notify.markRead(n.id);
+		// Session-scoped notifications (e.g. "Session finished") deep-link to their
+		// session — reuse the same 'open-session' funnel as the toast / OS push.
+		if (n.session_id) {
+			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: n.session_id } }));
+			closeDropdown('notifications');
+		}
 	}
 
 	function relativeTime(ms: number): string {
