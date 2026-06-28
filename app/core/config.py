@@ -146,6 +146,14 @@ class Settings(BaseSettings):
     # Set via ADMIN_PASSWORD env var or .env file to survive server restarts
     admin_password: Optional[str] = None
 
+    # Notes disk-sync worker. Notes are materialized to per-install local .md
+    # files; this periodic worker reconciles those files with the shared database
+    # in both directions so an edit made anywhere (an agent, the user over
+    # SSH/SMB, or another install) converges everywhere. See app.core.notes_sync.
+    # Interval is a poll cadence (watchdog-style fs events are unreliable on the
+    # network/fuse filesystems these installs commonly run on). 0 disables it.
+    notes_sync_interval_seconds: int = 15
+
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
     # Size limits

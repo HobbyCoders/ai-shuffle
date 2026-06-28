@@ -372,6 +372,39 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(_periodic_db_maintenance()))
     logger.info("Database maintenance task started (every 4 hours, first run in 30s)")
 
+    notes_interval = settings.notes_sync_interval_seconds
+    if notes_interval and notes_interval > 0:
+        async def _periodic_notes_sync():
+            """Background task: reconcile note .md files with the shared DB.
+
+            Notes are materialized to per-install local files for the agent to
+            edit; nothing else actively pushes those direct file edits back to
+            the shared database (or pulls another install's DB changes down to
+            local files). This worker closes that loop in both directions so an
+            edit made anywhere — agent, SSH/SMB, or a peer install — converges
+            everywhere without anyone opening the note in the UI.
+            """
+            from app.core import notes_sync
+
+            # Let startup materialization finish first.
+            await asyncio.sleep(10)
+            while True:
+                try:
+                    await asyncio.to_thread(notes_sync.sync_notes_once)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Periodic notes sync failed: {e}")
+                try:
+                    await asyncio.sleep(notes_interval)
+                except asyncio.CancelledError:
+                    break
+
+        tasks.append(asyncio.create_task(_periodic_notes_sync()))
+        logger.info(
+            f"Notes disk-sync task started (every {notes_interval}s, first run in 10s)"
+        )
+
     return tasks
 
 
