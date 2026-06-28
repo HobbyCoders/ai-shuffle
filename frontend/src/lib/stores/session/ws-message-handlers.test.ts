@@ -883,4 +883,105 @@ describe('ws-message-handlers', () => {
 			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalled();
 		});
 	});
+
+	describe('parked-watcher recovery (Bug 2)', () => {
+		// A watcher whose session parked on a long-running background task has
+		// isStreaming=false (it stopped streaming when the turn parked). When the
+		// task finishes, the server fires a follow-up unpark turn that sync_engine
+		// broadcasts as an `event_type` ('stream_start'/'stream_end'/'stream_chunk')
+		// with NO top-level `type`. Before the fix, the shouldNotify gate matched
+		// only `type` values, so a not-streaming watcher dropped these events, the
+		// stopped poller never restarted, and the UI showed stale state until a
+		// manual reload. These tests pin the recovery: each unpark event_type must
+		// reach the notifier for the in-view session even when isStreaming=false.
+
+		function parkedWatcherDeps() {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = false; // parked — not actively streaming
+			const d = createMockDeps({ getState: vi.fn(() => state) });
+			return d;
+		}
+
+		it('forwards an unpark stream_start to the notifier while parked (isStreaming=false)', () => {
+			deps = parkedWatcherDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_start',
+				session_id: 'session-1',
+				data: { message_id: 'm-unpark' },
+			});
+
+			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
+				'session-1',
+				expect.objectContaining({ event_type: 'stream_start' }),
+			);
+		});
+
+		it('forwards an unpark stream_end to the notifier while parked', () => {
+			deps = parkedWatcherDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_end',
+				session_id: 'session-1',
+				data: {},
+			});
+
+			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
+				'session-1',
+				expect.objectContaining({ event_type: 'stream_end' }),
+			);
+		});
+
+		it('forwards an unpark stream_chunk to the notifier while parked', () => {
+			deps = parkedWatcherDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_chunk',
+				session_id: 'session-1',
+				data: { content: 'resumed work' },
+			});
+
+			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
+				'session-1',
+				expect.objectContaining({ event_type: 'stream_chunk' }),
+			);
+		});
+
+		it('does NOT forward an unpark stream event for a different (background) session', () => {
+			// The recovery is scoped inside the isForActiveSession guard, so an
+			// unpark broadcast for a session that is NOT in view must not trigger a
+			// poll for the active session (that was the ghost-poll / phantom-token
+			// regression the routing comment warns about).
+			deps = parkedWatcherDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_start',
+				session_id: 'some-other-session',
+				data: {},
+			});
+
+			expect(deps.sessionNotifier.handleMessage).not.toHaveBeenCalled();
+		});
+
+		it('does NOT forward a non-stream event_type to a parked watcher (e.g. message_added)', () => {
+			// Only the three streaming-lifecycle event_types recover a parked
+			// watcher. A generic sync event like message_added must still be gated
+			// out while not streaming, so we do not re-introduce broad ghost polls.
+			deps = parkedWatcherDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'message_added',
+				session_id: 'session-1',
+				data: {},
+			});
+
+			expect(deps.sessionNotifier.handleMessage).not.toHaveBeenCalled();
+		});
+	});
 });

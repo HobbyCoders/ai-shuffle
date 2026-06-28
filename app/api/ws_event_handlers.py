@@ -60,7 +60,7 @@ class MutableStreamState:
     # without re-parsing the live store.
     team_tool_buffer: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Terminal background-task notifications stashed in-loop (deduped via
-    # task_registry.mark_notified) so run_query can fire ONE consolidated
+    # task_registry.mark_unparked) so run_query can fire ONE consolidated
     # "unpark" follow-up turn after the streaming loop closes.
     pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
 

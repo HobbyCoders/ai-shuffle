@@ -537,7 +537,7 @@ async def chat_websocket(
 
                 # --- Background-agent "unpark" stash (FAST sub-agent path) ---
                 # A sub-agent finishing BEFORE the parent's ResultMessage arrives
-                # in-stream; stash it (deduped via task_registry.mark_notified) to
+                # in-stream; stash it (deduped via task_registry.mark_unparked) to
                 # deliver ONE consolidated follow-up turn after the loop. The SLOW
                 # case (notification lands AFTER receive_response() returns at the
                 # parent's ResultMessage) is caught by the between-turns drain pump

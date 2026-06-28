@@ -144,10 +144,19 @@ def _make_handler():
 
 @pytest.fixture(autouse=True)
 def _isolate_drain_pumps():
-    """Each test gets a clean registry + pump dict."""
+    """Each test gets a clean registry + pump dict.
+
+    Also shrinks the unpark consolidation window to a tiny value so tests that
+    drive a ``hang=True`` client don't sit out the full real-world window after
+    a deliverable. The fake clients yield synchronously, so any positive window
+    still batches every buffered completion — only the magnitude changes.
+    """
     task_registry.reset_all()
     ws_cleanup._drain_pumps.clear()
+    _saved_window = cwh._UNPARK_BATCH_WINDOW_SECONDS
+    cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.05
     yield
+    cwh._UNPARK_BATCH_WINDOW_SECONDS = _saved_window
     ws_cleanup._drain_pumps.clear()
     task_registry.reset_all()
 
@@ -307,12 +316,12 @@ async def test_stop_drain_pump_noop_when_none():
 async def test_pump_skips_already_notified_completion():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
     # Genuine background launch so the foreground gate passes and the dedup path
-    # (mark_notified) is the thing under test, not the suppress-foreground gate.
+    # (mark_unparked) is the thing under test, not the suppress-foreground gate.
     task_registry.mark_background_launch("sess-1", "tu-1")
-    # Pre-arm: this (task, signature) was already delivered (e.g. caught in-stream).
+    # Pre-arm: this task already drove an unpark (e.g. caught in-stream). The latch
+    # is keyed on task_id ALONE now, so a fresh per-rest uuid can't re-arm it.
     out_file = ""
-    signature = "u-1"  # uuid takes precedence in the signature
-    assert task_registry.mark_notified("sess-1", "task-1", signature) is True
+    assert task_registry.mark_unparked("sess-1", "task-1") is True
 
     # hang=False: the dup is skipped (no break), so the stream must END for the
     # pump to terminate. A real idle client either keeps yielding (cancelled at
@@ -653,6 +662,89 @@ async def test_pump_ignores_non_terminal_task_updated():
 
 
 # ---------------------------------------------------------------------------
+# 7b. CONSOLIDATION + PER-TASK DEDUP + PHANTOM SUPPRESSION (Bug 1 policy)
+#     "Consolidate + dedup (keep auto-resume)": fire AT MOST ONE unpark per task,
+#     batch near-simultaneous completions into ONE follow-up turn, and never wake
+#     on a phantom (untracked) top-level rest.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_consolidates_simultaneous_completions_into_one_turn():
+    """Policy #3: two background tasks whose terminal notifications are both
+    buffered on the pooled client when the pump runs fold into ONE follow-up turn
+    (``pending`` carries BOTH), instead of one unpark turn per completion."""
+    task_registry.start_task("sess-1", "task-1", "agent", "first")
+    task_registry.start_task("sess-1", "task-2", "agent", "second")
+    # Both notifications carry the _notif default tool_use_id "tu-1"; record it as a
+    # genuine background launch so both pass the foreground gate.
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient(
+        [
+            _notif("task-1", uuid="u-1", summary="r1"),
+            _notif("task-2", uuid="u-2", summary="r2"),
+        ],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # ONE delivery carrying BOTH completions (order preserved).
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert [p["task_id"] for p in pending] == ["task-1", "task-2"]
+    assert task_registry.get_active("sess-1") == []
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_same_task_fresh_uuid_does_not_refire():
+    """Policy #2: the newer CLI re-emits a terminal notification for the SAME task
+    with a FRESH uuid each time it comes to rest. Only the FIRST drives an unpark; a
+    later re-emission with a different uuid is deduped because the latch is keyed on
+    task_id ALONE (a fresh uuid used to re-arm the old (task_id, signature) latch and
+    storm the session)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+    handler = _make_handler()
+
+    # First pump: the task's first at-rest notification delivers once.
+    client1 = _FakeClient([_notif("task-1", uuid="u-1")], hang=True)
+    with _patch_pool(_fake_state(client1)):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+    assert handler._deliver_unpark.await_count == 1
+
+    # The CLI resumes the agent; it comes to rest AGAIN with a DIFFERENT uuid.
+    # hang=False so the deduped notification just ends the stream (no second turn).
+    client2 = _FakeClient([_notif("task-1", uuid="u-2-different")], hang=False)
+    with _patch_pool(_fake_state(client2)):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+    # STILL one delivery — the fresh uuid did not re-arm the per-task latch.
+    assert handler._deliver_unpark.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_killed_update_for_untracked_task():
+    """Policy #1: a killed/stopped TaskUpdatedMessage for a task the registry never
+    tracked (the session's OWN top-level agent coming to rest, or a phantom) must NOT
+    unpark — only genuine tracked background tasks do. The killed path has no
+    background-launch gate, so without the get_task guard this phantom stormed the
+    session with 'nothing to act on' turns."""
+    # NOTE: no start_task — "phantom-1" is unknown to the registry.
+    client = _FakeClient([_updated("phantom-1", status="killed", uuid="uu-9")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    handler._deliver_unpark.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # 8. SPURIOUS-UNPARK SUPPRESSION (the reported bug)
 #    A prior-turn orphan task_notification leaking IN-STREAM in a LATER, unrelated
 #    turn must NOT fire an unpark (it was not started THIS turn) — but the registry
@@ -708,8 +800,9 @@ def test_stash_fires_for_task_started_this_turn():
 
 
 def test_stash_does_not_double_stash_same_task():
-    """Even started-this-turn, a duplicate (same signature) is deduped by
-    mark_notified — at most ONE pending entry per genuine completion."""
+    """Even started-this-turn, a duplicate is deduped by mark_unparked (keyed on
+    task_id alone) — at most ONE pending entry per task, even across re-emissions
+    with a fresh per-rest uuid."""
     from app.api.ws_event_handlers import MutableStreamState
 
     task_registry.reset_all()

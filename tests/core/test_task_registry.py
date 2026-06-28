@@ -348,6 +348,55 @@ class TestMarkNotified:
         assert reg.mark_notified("s1", "t1", "uuid-1") is True
 
 
+class TestMarkUnparked:
+    """One-unpark-per-task latch keyed on task_id ALONE (Bug 1, policy #2).
+
+    Unlike ``mark_notified`` (which re-arms on a fresh per-rest uuid and so let one
+    task storm the session with repeated 'nothing to act on' follow-ups), a given
+    task drives AT MOST ONE unpark for its whole life regardless of signature.
+    """
+
+    def test_true_once_then_false(self, reg):
+        assert reg.mark_unparked("s1", "t1") is True
+        assert reg.mark_unparked("s1", "t1") is False
+        assert reg.mark_unparked("s1", "t1") is False
+
+    def test_fresh_uuid_cannot_rearm(self, reg):
+        # The whole point: there is no signature/uuid input, so a task that re-rests
+        # under a fresh uuid can never re-arm the latch.
+        assert reg.mark_unparked("s1", "t1") is True
+        assert reg.was_unparked("s1", "t1") is True
+        assert reg.mark_unparked("s1", "t1") is False
+
+    def test_independent_per_task_and_session(self, reg):
+        assert reg.mark_unparked("s1", "t1") is True
+        assert reg.mark_unparked("s1", "t2") is True   # different task
+        assert reg.mark_unparked("s2", "t1") is True   # different session
+
+    def test_was_unparked_reflects_state(self, reg):
+        assert reg.was_unparked("s1", "t1") is False
+        reg.mark_unparked("s1", "t1")
+        assert reg.was_unparked("s1", "t1") is True
+
+    def test_blank_ids_never_latch(self, reg):
+        assert reg.mark_unparked("", "t1") is False
+        assert reg.mark_unparked("s1", "") is False
+        assert reg.was_unparked("", "t1") is False
+        # No state stranded -> a real (session, task) still latches True.
+        assert reg.mark_unparked("s1", "t1") is True
+
+    def test_cleared_by_clear_session(self, reg):
+        assert reg.mark_unparked("s1", "t1") is True
+        reg.clear_session("s1")
+        assert reg.was_unparked("s1", "t1") is False
+        assert reg.mark_unparked("s1", "t1") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        assert reg.mark_unparked("s1", "t1") is True
+        reg.reset_all()
+        assert reg.mark_unparked("s1", "t1") is True
+
+
 class TestStartedThisTurn:
     """The per-turn scope set that suppresses spurious in-stream unparks.
 

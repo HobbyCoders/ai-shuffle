@@ -9,7 +9,8 @@ Drives the REAL ChatWebSocketHandler.run_query while faking the SDK stream
   follow-up run_query is spawned, with a synthesized prompt that contains the
   literal `<task-notification>` substring AND the `<result>` text read from the
   task's output_file.
-- A DUPLICATE notification (same uuid) spawns NO follow-up (mark_notified dedup).
+- A DUPLICATE notification (same task) spawns NO follow-up (mark_unparked dedup,
+  one unpark per task_id for its whole life).
 
 All heavy collaborators (live_session_store, sync_engine, database, the
 session-pool/SDK, websocket I/O, cleanup) are mocked; no Postgres or SDK client
@@ -236,7 +237,7 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
 
     # Genuine FAST path: agent started this turn (via the task_started event,
     # which _fake_stream marks started-this-turn). The dedup under test is
-    # mark_notified (same uuid twice), not the started-this-turn scope guard.
+    # mark_unparked (same task twice), not the started-this-turn scope guard.
     notif = {
         "type": "task_notification",
         "task_id": "task-1",
@@ -272,14 +273,15 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
 
 @pytest.mark.asyncio
 async def test_already_notified_uuid_spawns_none(tmp_path):
-    """If the uuid was already marked notified before the stream, no follow-up."""
+    """If the task already drove an unpark before the stream, no follow-up."""
     task_registry.reset_all()
-    # Genuine background launch so the dedup (mark_notified) is the thing under test.
+    # Genuine background launch so the dedup (mark_unparked) is the thing under test.
     task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("RESULT", encoding="utf-8")
-    # Pre-arm: this exact (task, uuid) was already delivered.
-    assert task_registry.mark_notified("sess-1", "task-1", "uuid-1") is True
+    # Pre-arm: this task already drove an unpark (one-per-task latch, keyed on
+    # task_id alone — a fresh per-rest uuid can no longer re-arm it, Bug 1 #2).
+    assert task_registry.mark_unparked("sess-1", "task-1") is True
 
     events = [
         {

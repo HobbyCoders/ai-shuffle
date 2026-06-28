@@ -124,6 +124,17 @@ class TaskRegistry:
         # TaskStartedMessage; cleared with the session (status is checked live, so
         # a completed task in the set is simply ignored — no per-completion prune).
         self._sdk_background_tasks: Dict[str, set] = {}
+        # session_id -> set of task_ids that have ALREADY driven an unpark
+        # follow-up turn. Unlike ``_notified`` (keyed on (task_id, signature) and
+        # therefore RE-ARMED by a fresh per-rest uuid), this is keyed on the
+        # ``task_id`` ALONE: a given background task drives AT MOST ONE unpark for
+        # its whole life. The newer Claude CLI emits a TaskNotificationMessage
+        # EACH TIME an agent comes to rest with no live background children — a
+        # repeatable resumable rest-signal with a fresh uuid every time, NOT a
+        # one-shot completion — so the old signature latch let the same task
+        # re-notify on every rest and storm the session with "nothing to act on"
+        # follow-ups. Cleared only with the session.
+        self._unparked: Dict[str, set] = {}
 
     def mark_sdk_background_task(self, session_id: str, task_id: str) -> None:
         """Record that ``task_id`` is an SDK-managed background task the parent
@@ -194,6 +205,36 @@ class TaskRegistry:
             return False
         seen.add(key)
         return True
+
+    def mark_unparked(self, session_id: str, task_id: str) -> bool:
+        """One-unpark-per-task latch, keyed on ``task_id`` ALONE.
+
+        Returns ``True`` only the FIRST time ``task_id`` is seen for
+        ``session_id``; every later call returns ``False`` regardless of the
+        notification's uuid/signature. This is the dedup gate for the unpark
+        follow-up turn: a background task drives at most ONE follow-up for its
+        whole life. It deliberately ignores the per-rest uuid that
+        ``mark_notified`` keyed on, because the newer CLI re-emits a terminal
+        TaskNotificationMessage with a FRESH uuid each time the agent comes to
+        rest — which RE-ARMED the old latch and let one task storm the session
+        with repeated "nothing to act on" follow-ups.
+
+        Defensive: a missing ``session_id``/``task_id`` never latches (returns
+        ``False``) so a stray notification can't strand state.
+        """
+        if not session_id or not task_id:
+            return False
+        seen = self._unparked.setdefault(session_id, set())
+        if task_id in seen:
+            return False
+        seen.add(task_id)
+        return True
+
+    def was_unparked(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` has already driven an unpark for ``session_id``."""
+        if not session_id or not task_id:
+            return False
+        return task_id in self._unparked.get(session_id, set())
 
     def reset_started_this_turn(self, session_id: str) -> None:
         """Clear the "started this turn" set for a session.
@@ -435,6 +476,7 @@ class TaskRegistry:
         self._background_launches.pop(session_id, None)
         self._unpark_pending.discard(session_id)
         self._sdk_background_tasks.pop(session_id, None)
+        self._unparked.pop(session_id, None)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
@@ -444,6 +486,7 @@ class TaskRegistry:
         self._background_launches.clear()
         self._unpark_pending.clear()
         self._sdk_background_tasks.clear()
+        self._unparked.clear()
 
 
 # Global instance

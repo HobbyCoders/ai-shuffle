@@ -108,14 +108,29 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 # distinct from ``_TERMINAL_TASK_STATUSES`` so the notification path is untouched.
 _UNPARK_ON_TASK_UPDATE_STATUSES = frozenset({"killed", "stopped"})
 
+# Consolidation window for the drain pump. After the first deliverable completion
+# is detected, the pump keeps draining any FURTHER completions that are already
+# buffered (or land within this window) and folds them into ONE follow-up turn,
+# instead of firing a separate "unpark" turn per completion. Small by design: the
+# dominant win is collapsing the backlog of completions that piled up on the pooled
+# client WHILE the previous turn was streaming (the pump is stopped during a turn),
+# all of which drain near-instantly because they are already queued. Tests patch
+# this to a tiny value; read fresh at the call site so monkeypatching takes effect.
+_UNPARK_BATCH_WINDOW_SECONDS = 1.5
 
-# The note Claude Code attaches to every task-notification: it fires each time the
-# agent comes to rest with no live background children, and the user can resume it
-# so the same task-id may notify more than once.
+
+# Guidance attached to every consolidated <task-notification> follow-up turn. The
+# app now fires AT MOST ONE unpark per background task (see
+# ``task_registry.mark_unparked``) and batches near-simultaneous completions into a
+# single turn, so this is an informational, one-time consolidation — NOT a prompt
+# for new work. The wording steers the model away from manufacturing a verbose
+# "nothing to act on" rationalization (the symptom this whole change targets).
 _TASK_NOTIFICATION_NOTE = (
-    "This notification fires each time the agent comes to rest with no live "
-    "background children; the user can resume it, so the same task-id may notify "
-    "more than once."
+    "Background work has come to rest. This is an automatic, one-time summary of "
+    "its result(s) for your awareness — you are NOT being asked to do anything. If "
+    "the outcome is already reflected in your earlier work, or needs no follow-up, "
+    "stop after a brief acknowledgement; do not invent next steps or re-explain "
+    "what already finished."
 )
 
 
@@ -183,9 +198,9 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
 
     If a sub-agent finishes BEFORE the parent's ``ResultMessage``, its terminal
     notification arrives in-stream; stash it (deduped via
-    ``task_registry.mark_notified``) so the post-loop unpark fires ONE
-    consolidated follow-up turn. No-op for non-terminal / non-notification
-    events, so it is safe to call for every streamed event.
+    ``task_registry.mark_unparked``, keyed on ``task_id`` alone) so the post-loop
+    unpark fires ONE consolidated follow-up turn. No-op for non-terminal /
+    non-notification events, so it is safe to call for every streamed event.
 
     SCOPE GUARD (spurious-unpark fix): only stash a notification for a task whose
     ``TaskStartedMessage`` arrived during THIS turn (``was_started_this_turn``) —
@@ -255,7 +270,7 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
         )
         return
 
-    if task_registry.mark_notified(session_id, task_id, signature):
+    if task_registry.mark_unparked(session_id, task_id):
         _log_unpark_decision(
             path="in-stream",
             session_id=session_id,
@@ -307,7 +322,7 @@ async def _deliver_unpark_impl(
     create_task(run_query)) so streaming tears down + re-inits without a race.
 
     The caller owns any stopped/interrupting guards and dedup via
-    ``task_registry.mark_notified`` BEFORE building ``pending`` — by the time we
+    ``task_registry.mark_unparked`` BEFORE building ``pending`` — by the time we
     are called the completion is latched, so a failure here cannot re-trigger.
     Returns ``True`` if a follow-up turn was handed off (caller must return).
     """
@@ -493,7 +508,7 @@ async def _drain_notifications_impl(
         user_id=user_id,
     )
 
-    pending: Optional[Dict[str, Any]] = None
+    pending: List[Dict[str, Any]] = []
     try:
         state = get_session_pool().peek(session_id)  # peek = no LRU promote
         if state is None or not state.adapter.is_alive() or state.is_streaming:
@@ -521,7 +536,34 @@ async def _drain_notifications_impl(
         )
         sub_state = MutableStreamState()
 
-        async for message in client.receive_messages():
+        agen = client.receive_messages()
+        batch_deadline: Optional[float] = None
+        while True:
+            if batch_deadline is None:
+                # No deliverable yet — block for the next pooled-client message.
+                try:
+                    message = await agen.__anext__()
+                except StopAsyncIteration:
+                    break
+            else:
+                # At least one completion is already queued for delivery — keep
+                # draining any FURTHER completions that are buffered (or land within
+                # the consolidation window) so near-simultaneous completions fold
+                # into ONE follow-up turn instead of one turn per completion
+                # (Bug 1, policy #3). The backlog that piled up while the previous
+                # turn was streaming is already queued, so it drains near-instantly.
+                _wait = batch_deadline - time.monotonic()
+                if _wait <= 0:
+                    break
+                try:
+                    message = await asyncio.wait_for(agen.__anext__(), timeout=_wait)
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    # Window elapsed (or stream ended) — deliver what we have. A
+                    # message still buffered on the anyio receive stream is left
+                    # intact (a cancelled receive does not consume an item), so the
+                    # next pump run re-reads it and re-dedupes via mark_unparked.
+                    break
+
             # Feed EVERY message into the registry — this is what unfreezes the
             # indicator (start/update/complete_task) for the terminal
             # notification even before we deliver the unpark.
@@ -563,8 +605,32 @@ async def _drain_notifications_impl(
                 _u_task_id = getattr(message, "task_id", None)
                 _u_uuid = getattr(message, "uuid", None)
                 _u_signature = _u_uuid or f":{_u_status}"
-                if not task_registry.mark_notified(session_id, _u_task_id, _u_signature):
-                    # Already delivered (e.g. a notification raced in first) — keep draining.
+                # SUPPRESS PHANTOM TOP-LEVEL REST (Bug 1, policy #1): the newer CLI
+                # emits a killed/stopped TaskUpdatedMessage when the SESSION'S OWN
+                # top-level agent comes to rest — a phantom that was never a tracked
+                # background task. Unlike the notification path below, this branch has
+                # no background-launch gate, so without this check that phantom would
+                # storm the session with "nothing to act on" unparks. A genuine
+                # user-killed background task WAS started via the registry, so it has
+                # a live record (complete_task keeps it, only flipping status); a
+                # phantom self-rest has none. Gate on a record so only real tracked
+                # tasks unpark.
+                if task_registry.get_task(session_id, _u_task_id) is None:
+                    _log_unpark_decision(
+                        path="pump",
+                        session_id=session_id,
+                        task_id=_u_task_id,
+                        status=_u_status,
+                        signature=_u_signature,
+                        started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                        decision="suppress-untracked",
+                    )
+                    continue
+                # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
+                # for its whole life, regardless of the per-rest uuid the newer CLI
+                # re-stamps on each at-rest re-emission.
+                if not task_registry.mark_unparked(session_id, _u_task_id):
+                    # Already drove an unpark for this task — keep draining.
                     _log_unpark_decision(
                         path="pump",
                         session_id=session_id,
@@ -584,7 +650,7 @@ async def _drain_notifications_impl(
                     started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
                     decision="deliver-killed",
                 )
-                pending = {
+                pending.append({
                     "task_id": _u_task_id,
                     "status": _u_status,
                     "summary": None,
@@ -592,10 +658,13 @@ async def _drain_notifications_impl(
                     "uuid": _u_uuid,
                     "usage": None,
                     "tool_use_id": None,
-                }
-                # Fire per-completion: break out and deliver immediately so a later
-                # user message cancelling the pump can't lose this one.
-                break
+                })
+                # Consolidate (Bug 1, policy #3): keep draining within the batch
+                # window instead of breaking, so completions landing close together
+                # fold into ONE follow-up turn.
+                if batch_deadline is None:
+                    batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
+                continue
 
             if not isinstance(message, TaskNotificationMessage):
                 continue
@@ -670,8 +739,12 @@ async def _drain_notifications_impl(
             task_id = frame.get("task_id")
             output_file = frame.get("output_file")
             signature = frame.get("uuid") or f"{output_file}:{status}"
-            if not task_registry.mark_notified(session_id, task_id, signature):
-                # Already delivered (e.g. also caught in-stream) — keep draining.
+            # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
+            # for its whole life. The newer CLI re-emits a terminal notification
+            # with a FRESH uuid each time the agent comes to rest, which used to
+            # re-arm the old (task_id, signature) latch and storm the session.
+            if not task_registry.mark_unparked(session_id, task_id):
+                # Already drove an unpark for this task — keep draining.
                 _log_unpark_decision(
                     path="pump",
                     session_id=session_id,
@@ -692,7 +765,7 @@ async def _drain_notifications_impl(
                 started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
                 decision="deliver",
             )
-            pending = {
+            pending.append({
                 "task_id": task_id,
                 "status": status,
                 "summary": frame.get("summary"),
@@ -700,10 +773,13 @@ async def _drain_notifications_impl(
                 "uuid": frame.get("uuid"),
                 "usage": frame.get("usage"),
                 "tool_use_id": frame.get("tool_use_id"),
-            }
-            # Fire per-completion: break out and deliver immediately so a later
-            # user message cancelling the pump can't lose this one.
-            break
+            })
+            # Consolidate (Bug 1, policy #3): keep draining within the batch window
+            # instead of breaking, so completions landing close together fold into
+            # ONE follow-up turn.
+            if batch_deadline is None:
+                batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
+            continue
     except asyncio.CancelledError:
         # Stopped by stop_drain_pump (a new turn is starting) — exit without
         # firing. Re-raise so the awaiter sees the cancellation.
@@ -719,13 +795,13 @@ async def _drain_notifications_impl(
     # pump that is spawning it (self-deadlock).
     _drop_drain_pump_self(session_id, _drain_pumps)
 
-    if pending is not None:
+    if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
             ctx.debug(logger, "Drain pump: session stopped/interrupting — not delivering unpark")
             return
         await deliver_unpark(
-            pending=[pending],
+            pending=pending,
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
@@ -2212,7 +2288,7 @@ class ChatWebSocketHandler:
                 # --- Background-agent "unpark" stash (FAST sub-agent path) ---
                 # If a sub-agent finishes BEFORE the parent's ResultMessage, its
                 # terminal task_notification arrives IN-STREAM; stash it (deduped
-                # by task_registry.mark_notified) to fire ONE consolidated
+                # by task_registry.mark_unparked) to fire ONE consolidated
                 # follow-up turn in the post-loop block — never start a new query
                 # mid-loop. No-op for non-terminal / non-notification events.
                 #

@@ -322,7 +322,22 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				msgType === 'stream_start' ||
 				msgType === 'done' ||
 				msgType === 'stopped' ||
-				msgType === 'interrupted';
+				msgType === 'interrupted' ||
+				// PARKED-WATCHER RECOVERY (Bug 2): when a watched session parks on a
+				// long-running background task and later UNPARKS, the follow-up turn
+				// streams server-side and `sync_engine` broadcasts it as an
+				// `event_type` ('stream_start'/'stream_end'/'stream_chunk') — NOT a
+				// `type`. A parked watcher has `isStreaming=false` and no other
+				// condition above matches an event_type, so without these the
+				// notifier was never reached, the stopped poller never restarted, and
+				// the UI showed stale state until a manual reload. We're already
+				// inside the `isForActiveSession` guard, so this only ever fires for
+				// the session in view — no cross-session ghost polls. The notifier
+				// maps stream_start→startStreaming, stream_end→final poll, and has a
+				// stream_chunk fallback that restarts a dropped poller mid-stream.
+				eventType === 'stream_start' ||
+				eventType === 'stream_end' ||
+				eventType === 'stream_chunk';
 			if (!isInterruptTransition && shouldNotify) {
 				sessionNotifier.handleMessage(state.sessionId, data);
 			}
