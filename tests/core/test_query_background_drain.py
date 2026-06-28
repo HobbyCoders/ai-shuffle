@@ -1,0 +1,95 @@
+"""
+Bug D regression: the REST fire-and-forget background path must enforce the same
+single-reader invariant as the WebSocket turn loop.
+
+`_run_background_query` reuses the pooled SDK client and reads its message stream
+(`client.query()` + `receive_response()`). A between-turns "drain pump" (the R2
+reader, `receive_messages()`) may be reading that SAME client when the background
+query arrives. Two coroutines reading one anyio message stream loses/corrupts
+messages, so the background path MUST cancel any live drain pump BEFORE it touches
+the pooled client — exactly what every WS turn does via stop_drain_pump() at turn
+start.
+
+These tests pin that ordering: stop_drain_pump(session_id) is awaited before the
+session pool is acquired (i.e. before this turn becomes a reader).
+"""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from app.core.query_background import _run_background_query
+
+
+def _preamble_patches(stop_mock, *, pool_side_effect):
+    """Patch every collaborator between function entry and the pool acquisition.
+
+    `get_session_pool` is given `pool_side_effect` so the function halts the moment
+    it reaches the pool section — that boundary is the first place this turn would
+    become a reader of the pooled client, so halting there lets us assert the pump
+    was already stopped without mocking the entire streaming loop.
+    """
+    sync_mock = MagicMock()
+    sync_mock.broadcast_message_added = AsyncMock()
+    oauth_mock = MagicMock()
+    oauth_mock.ensure_fresh_credentials = AsyncMock()
+    return [
+        patch("app.core.query_background.run_sync", new=AsyncMock(return_value={"id": "msg-1"})),
+        patch("app.core.query_background.sync_engine", new=sync_mock),
+        patch("app.core.query_background.direct_oauth", new=oauth_mock),
+        patch(
+            "app.core.query_background.build_options_from_profile",
+            new=MagicMock(return_value=(MagicMock(), {})),
+        ),
+        patch("app.core.query_background.get_session_pool", side_effect=pool_side_effect),
+        # The function-local `from app.api.ws_cleanup import stop_drain_pump` resolves
+        # against the ws_cleanup module, so that is where the patch must land.
+        patch("app.api.ws_cleanup.stop_drain_pump", new=stop_mock),
+    ]
+
+
+async def test_run_background_query_stops_drain_pump_before_pool_access():
+    """The pump is cancelled before the pooled client is acquired."""
+    stop_mock = AsyncMock()
+    sentinel = RuntimeError("__halt_at_pool__")
+
+    patches = _preamble_patches(stop_mock, pool_side_effect=sentinel)
+    for p in patches:
+        p.start()
+    try:
+        with pytest.raises(RuntimeError, match="__halt_at_pool__"):
+            await _run_background_query(
+                "sess-1", "hello",
+                {"id": "profile-1"}, None, None, None, None, None,
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    # The pump-stop ran (proving it precedes pool acquisition, which raised the
+    # sentinel) and targeted the correct session.
+    stop_mock.assert_awaited_once_with("sess-1")
+
+
+async def test_run_background_query_pump_stop_precedes_pool_call_order():
+    """stop_drain_pump is invoked strictly before get_session_pool()."""
+    calls = []
+    stop_mock = AsyncMock(side_effect=lambda sid: calls.append(("stop", sid)))
+
+    def _pool():
+        calls.append(("pool", None))
+        raise RuntimeError("__halt_at_pool__")
+
+    patches = _preamble_patches(stop_mock, pool_side_effect=_pool)
+    for p in patches:
+        p.start()
+    try:
+        with pytest.raises(RuntimeError, match="__halt_at_pool__"):
+            await _run_background_query(
+                "sess-9", "hi",
+                {"id": "profile-1"}, None, None, None, None, None,
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert calls == [("stop", "sess-9"), ("pool", None)]

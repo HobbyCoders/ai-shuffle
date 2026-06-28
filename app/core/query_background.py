@@ -130,6 +130,19 @@ async def _run_background_query(
         session_id=session_id
     )
 
+    # --- Single-reader invariant (Bug D) ---
+    # Before this background turn becomes a reader of the pooled SDK client
+    # (reuse + client.query() + receive_response() below), cancel any between-turns
+    # drain pump that may be reading the SAME client. The pump is the R2 reader
+    # (receive_messages()) the WS turn loop always stops via stop_drain_pump() at
+    # turn start; the REST fire-and-forget path must enforce the same invariant or
+    # two coroutines race on one anyio message stream → lost/corrupted messages.
+    # The pump only samples is_streaming once at startup, so flipping it below is
+    # NOT enough to make it self-terminate — it must be explicitly cancelled here.
+    # Function-local import: app.core must not import app.api at module load (cycle).
+    from app.api.ws_cleanup import stop_drain_pump
+    await stop_drain_pump(session_id)
+
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
     existing_state = pool.get(session_id)
