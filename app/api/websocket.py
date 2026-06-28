@@ -1726,6 +1726,40 @@ async def chat_websocket(
                             await send_json({"type": "error", "message": "No session for queue"})
                             continue
 
+                        # Cross-install (cloud) session: it runs on the owning
+                        # install, where the worktree/working dir live. Relay the
+                        # queue op there — it stores the message in the shared
+                        # queue and drains it on the owner when idle. Draining
+                        # here would try to run the query against a worktree this
+                        # install does not have (the original "cloud mode queue"
+                        # error). The queue lives in the shared DB, so we read it
+                        # back to update this device's queue UI immediately (and
+                        # to reconcile away the frontend's optimistic entry on a
+                        # relay failure).
+                        cloud_sess = await run_sync(database.get_session, sid)
+                        from app.core import cloud_relay
+                        if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                            relay_error: Optional[str] = None
+                            try:
+                                await cloud_relay.relay_queue_message(
+                                    cloud_sess, content, qp_profile, qp_project
+                                )
+                            except cloud_relay.InstallOffline as e:
+                                relay_error = f"Device offline — cannot queue: {e}"
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning(f"Cluster relay_queue_message failed for {sid}: {e}")
+                                relay_error = f"Could not reach owning device: {e}"
+                            queue = await run_sync(database.get_queued_messages, sid)
+                            await send_json({
+                                "type": "sync",
+                                "event_type": "queue_updated",
+                                "session_id": sid,
+                                "data": {"queued_messages": queue},
+                            })
+                            if relay_error:
+                                await send_json({"type": "error", "message": relay_error})
+                            continue
+
                         await run_sync(
                             database.add_queued_message,
                             session_id=sid,

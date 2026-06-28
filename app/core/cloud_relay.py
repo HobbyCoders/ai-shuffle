@@ -183,6 +183,33 @@ async def relay_message(
     _raise_for_status(resp, "cluster message")
 
 
+async def relay_queue_message(
+    session: Dict[str, Any],
+    content: str,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    """Relay a "send later" queued message to the install that owns the session.
+
+    The owner stores it in the shared queue and, if the session is idle there,
+    drains it immediately — running the query in the owner's worktree/working
+    dir. Draining on the *controlling* install would try to run the query
+    against a worktree it does not have (the original "cloud mode queue" error).
+    """
+    base_url, sid = resolve_target(session)
+    payload = {"content": content, "profile_id": profile_id, "project_id": project_id}
+    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/queue_message",
+                json=payload,
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster queue_message")
+
+
 async def relay_interrupt(session: Dict[str, Any]) -> None:
     """Relay an interrupt/stop to the install that owns the session."""
     base_url, sid = resolve_target(session)

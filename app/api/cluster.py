@@ -109,6 +109,55 @@ async def cluster_message(
     return {"ok": True, "session_id": session_id}
 
 
+class ClusterQueueMessageRequest(BaseModel):
+    """A peer install relaying a "send later" queued message for a session we own."""
+    content: str
+    profile_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+@router.post("/sessions/{session_id}/queue_message")
+async def cluster_queue_message(
+    session_id: str,
+    body: ClusterQueueMessageRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Queue a "send later" message on a session this install owns (peer relay).
+
+    Reuses the same server-side queue handler the local ``/ws/chat`` path uses:
+    the message is stored in the shared queue, broadcast to devices, and — if
+    the session is idle here — drained immediately by running the query in this
+    install's worktree. If a query is already streaming, the post-query drain
+    picks it up. Keyed by the *shared* session id and runs as admin (the
+    originating install already authenticated its own user).
+    """
+    from app.core.headless_query_runner import HeadlessChatHandler
+
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty queue content")
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    handler.current_session_id = session_id
+    try:
+        await handler.handle_queue_message({
+            "session_id": session_id,
+            "content": content,
+            "profile": body.profile_id,
+            "project": body.project_id or session.get("project_id"),
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Cluster queue_message failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to queue message")
+
+    logger.info("Cluster queue_message from install %s on session %s", install_id or "?", session_id)
+    return {"ok": True, "session_id": session_id}
+
+
 @router.post("/sessions/{session_id}/interrupt")
 async def cluster_interrupt(
     session_id: str,
