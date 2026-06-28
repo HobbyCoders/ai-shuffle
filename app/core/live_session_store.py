@@ -1570,7 +1570,7 @@ class LiveSessionStore:
             )
             return discarded
 
-    async def cleanup_ended_session(self, session_id: str) -> bool:
+    async def cleanup_ended_session(self, session_id: str, *, force: bool = False) -> bool:
         """
         Remove an ended session from memory.
 
@@ -1583,6 +1583,19 @@ class LiveSessionStore:
         an active session would cause all subsequent subagent/tool events
         to be silently dropped ("session not found").
 
+        ``force=True`` is for the case where the pooled SDK client backing this
+        session was just DESTROYED (hard-cap LRU force-eviction or a dead
+        subprocess). The background-work guard below would otherwise refuse
+        cleanup FOREVER — the in-flight sub-agent/shell can never deliver its
+        terminal notification (the client that would have delivered it is gone),
+        so ``has_active_background_work`` stays True permanently, leaking the
+        buffer + registry and stranding the UI's task strip on a task that can
+        never complete. Forced cleanup reaps any still-"running" registry tasks
+        to ``killed`` (so a concurrent ``/live`` poll sees them terminal) and then
+        proceeds past the team-member / background-work guards. The streaming
+        guard is still honored even under force: if a brand-new query took over
+        the id, we must not wipe it.
+
         Returns:
             True if session was removed, False if not found or still streaming
         """
@@ -1592,42 +1605,64 @@ class LiveSessionStore:
                 if session.is_streaming:
                     logger.info(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
                     return False
-                # Keep the session alive while team members are still doing
-                # background work — otherwise the watcher's updates would
-                # land on a missing session and be dropped silently.
-                if self.has_active_team_members(session_id):
-                    logger.info(
-                        f"Skipping cleanup of session {session_id}: active team members"
-                    )
-                    return False
-                # Likewise keep it alive while a backgrounded shell/sub-agent is
-                # still running. A session PARKED on background work is not
-                # streaming and has no team members, so without this guard the
-                # 30s-delayed cleanup (scheduled when the parking turn ended)
-                # deletes the session and wipes ``task_registry`` MID-RUN — which
-                # is exactly the reported failure: ``TaskList`` returns nothing
-                # while the task is still on the taskbar, and the unpark follow-up
-                # turn's events later land on a "session not found" and are
-                # dropped (frontend never shows the resume). The work's terminal
-                # status flips ``has_active_background_work`` to False, so a later
-                # cleanup (next turn-end, pool eviction, or resource sweep) still
-                # removes the session — this only DEFERS removal, never blocks it.
-                # NOTE: only SDK-backgrounded work counts here (sub-agents +
-                # ``local_bash`` run_in_background shells). App-managed Monitor
-                # shells are deliberately excluded (see ``task_registry``), so a
-                # Monitor watch never pins the live session open.
-                try:
-                    from app.core.task_registry import task_registry
-                    if task_registry.has_active_background_work(session_id):
+                if force:
+                    # The SDK client is gone — in-flight background work can never
+                    # finish on its own. Reap it so the final /live poll drops the
+                    # rows, then fall through past the guards to actually remove
+                    # the session (clear_session below also wipes the registry).
+                    try:
+                        from app.core.task_registry import task_registry
+                        reaped = 0
+                        for rec in task_registry.get_active(session_id):
+                            task_registry.complete_task(session_id, rec["id"], "killed")
+                            reaped += 1
+                        if reaped:
+                            logger.warning(
+                                f"Force-cleanup of session {session_id}: reaped "
+                                f"{reaped} orphaned background task(s) to killed "
+                                f"(SDK client destroyed; work cannot complete)"
+                            )
+                    except Exception:
+                        logger.debug(
+                            "force-cleanup task reap failed", exc_info=True
+                        )
+                else:
+                    # Keep the session alive while team members are still doing
+                    # background work — otherwise the watcher's updates would
+                    # land on a missing session and be dropped silently.
+                    if self.has_active_team_members(session_id):
                         logger.info(
-                            f"Skipping cleanup of session {session_id}: active background task(s)"
+                            f"Skipping cleanup of session {session_id}: active team members"
                         )
                         return False
-                except Exception:
-                    logger.debug(
-                        "task_registry.has_active_background_work check failed",
-                        exc_info=True,
-                    )
+                    # Likewise keep it alive while a backgrounded shell/sub-agent is
+                    # still running. A session PARKED on background work is not
+                    # streaming and has no team members, so without this guard the
+                    # 30s-delayed cleanup (scheduled when the parking turn ended)
+                    # deletes the session and wipes ``task_registry`` MID-RUN — which
+                    # is exactly the reported failure: ``TaskList`` returns nothing
+                    # while the task is still on the taskbar, and the unpark follow-up
+                    # turn's events later land on a "session not found" and are
+                    # dropped (frontend never shows the resume). The work's terminal
+                    # status flips ``has_active_background_work`` to False, so a later
+                    # cleanup (next turn-end, pool eviction, or resource sweep) still
+                    # removes the session — this only DEFERS removal, never blocks it.
+                    # NOTE: only SDK-backgrounded work counts here (sub-agents +
+                    # ``local_bash`` run_in_background shells). App-managed Monitor
+                    # shells are deliberately excluded (see ``task_registry``), so a
+                    # Monitor watch never pins the live session open.
+                    try:
+                        from app.core.task_registry import task_registry
+                        if task_registry.has_active_background_work(session_id):
+                            logger.info(
+                                f"Skipping cleanup of session {session_id}: active background task(s)"
+                            )
+                            return False
+                    except Exception:
+                        logger.debug(
+                            "task_registry.has_active_background_work check failed",
+                            exc_info=True,
+                        )
                 msg_count = len(session.messages)
                 del self._sessions[session_id]
                 self._session_locks.pop(session_id, None)

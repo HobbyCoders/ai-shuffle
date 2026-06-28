@@ -260,21 +260,32 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 	// ── Handler: stopped / interrupted ───────────────────────────────
 
-	function handleStoppedOrInterrupted(_data: Record<string, unknown>): void {
+	function handleStoppedOrInterrupted(data: Record<string, unknown>): void {
 		if (internal.interruptPending) { internal.pendingTools.clear(); return; }
 
+		// Route by the EVENT's session_id, not the active session — mirror
+		// handleDone. A stopped/interrupted event for a BACKGROUND session must
+		// not clobber the ACTIVE session's pendingTools / wsStreamContent or fire
+		// a spurious pollFinal on it. Pre-fix this handler ignored data.session_id
+		// entirely and always mutated whatever session was in view.
+		const sessionId = data.session_id as string | undefined;
 		const currentState = getState();
-		const stoppedSessionId = currentState.sessionId;
+		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
+		const stoppedSessionId = sessionId || currentState.sessionId;
 
-		// Trigger a final authoritative poll (survives stop(), see handleDone).
+		// Trigger a final authoritative poll for the session that actually
+		// stopped (survives stop(), see handleDone).
 		if (stoppedSessionId) sessionPoller.pollFinal(stoppedSessionId);
 
-		clearStopTimeout();
-		internal.pendingTools.clear();
-		// Clear WS stream buffer
-		update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
+		if (isActiveSession) {
+			clearStopTimeout();
+			internal.pendingTools.clear();
+			// Clear WS stream buffer
+			update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
+		}
 
-		// Clean up streamingSessions
+		// Clean up streamingSessions (cross-session/cross-device safe — keyed by
+		// the stopped session's id).
 		if (stoppedSessionId) {
 			streamingSessions.update(map => {
 				if (!map.has(stoppedSessionId)) return map;

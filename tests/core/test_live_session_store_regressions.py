@@ -936,6 +936,87 @@ class TestSingleStreamingTextInvariant:
         assert second.content == "ANSWER-B", "new deltas land only on the new message"
 
 
+# =============================================================================
+# Bug A/B: a PARKED session (parked on in-flight background work) that is
+# force-evicted from the pool — hard-cap LRU force-eviction (reason "lru_force")
+# or a dead subprocess (reason "dead") — destroys the pooled SDK client. That
+# client was the ONLY thing that could deliver the background work's terminal
+# notification, so task_registry.has_active_background_work() stays True FOREVER.
+# The plain cleanup_ended_session() background-work guard then refuses cleanup
+# permanently: the live buffer + task registry leak, and the UI's task strip is
+# stranded on a task that can never complete. `force=True` reaps the orphaned
+# tasks to "killed" and tears the session down anyway.
+#
+# `force` flows from resource_monitor._cleanup_evicted_sessions, which sets it
+# only for the "lru_force"/"dead" reasons (normal lru/idle eviction skip parked
+# sessions, so they never need it).
+# =============================================================================
+
+class TestForceCleanupOrphanedBackgroundWork:
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        # cleanup_ended_session's guard + clear_session use the GLOBAL singleton.
+        from app.core.task_registry import task_registry
+        task_registry.reset_all()
+        yield
+        task_registry.reset_all()
+
+    async def test_guard_blocks_plain_cleanup_of_parked_session(self, store):
+        """Without force, a parked session's cleanup is refused — the leak."""
+        from app.core.task_registry import task_registry
+
+        await store.start_streaming("s1", initial_messages=[])
+        await store.end_streaming("s1")
+        # Parked on an in-flight background sub-agent.
+        task_registry.start_task("s1", "agent-1", "agent", "bg work")
+        assert task_registry.has_active_background_work("s1") is True
+
+        result = await store.cleanup_ended_session("s1")
+        assert result is False
+        assert store.get_session("s1") is not None  # leaked, by design pre-fix
+
+    async def test_force_cleanup_reaps_orphans_and_removes_session(self, store):
+        """force=True tears down the session AND reaps the orphaned task."""
+        from app.core.task_registry import task_registry
+
+        await store.start_streaming("s1", initial_messages=[])
+        await store.end_streaming("s1")
+        task_registry.start_task("s1", "agent-1", "agent", "bg work")
+
+        result = await store.cleanup_ended_session("s1", force=True)
+        assert result is True
+        assert store.get_session("s1") is None
+        # Registry cleared for the session -> the next /live returns no
+        # activeTasks, so the UI strip clears instead of stranding.
+        assert task_registry.get_active("s1") == []
+        assert task_registry.has_active_background_work("s1") is False
+
+    async def test_force_still_refuses_a_restreamed_session(self, store):
+        """force must NEVER wipe a session a brand-new query just took over."""
+        from app.core.task_registry import task_registry
+
+        await store.start_streaming("s1", initial_messages=[])
+        await store.end_streaming("s1")
+        task_registry.start_task("s1", "agent-1", "agent", "bg work")
+        # A new query takes over the same session id.
+        await store.start_streaming("s1", initial_messages=[])
+
+        result = await store.cleanup_ended_session("s1", force=True)
+        assert result is False
+        assert store.get_session("s1") is not None
+        assert store.is_streaming("s1") is True
+
+    async def test_force_cleanup_of_session_without_tasks_is_fine(self, store):
+        """force on a session with no background work just removes it (no error)."""
+        await store.start_streaming("s1", initial_messages=[])
+        await store.end_streaming("s1")
+
+        result = await store.cleanup_ended_session("s1", force=True)
+        assert result is True
+        assert store.get_session("s1") is None
+
+
 class TestPerSessionLockStability:
     """The per-session lock must be stable for the session's whole lifetime."""
 

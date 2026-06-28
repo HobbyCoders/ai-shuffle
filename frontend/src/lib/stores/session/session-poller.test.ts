@@ -168,3 +168,61 @@ describe('session-poller · loadSession reconciliation', () => {
 		expect(result!.messages.map(m => m.id)).toEqual(['msg-1', 'msg-2']);
 	});
 });
+
+describe('session-poller · poll watchdog (stuck _inFlight recovery)', () => {
+	// Mirror the module-private timing constants.
+	const STREAMING_INTERVAL = 150; // STREAMING_POLL_INTERVAL_MS
+	const POLL_TIMEOUT = 15000; // POLL_TIMEOUT_MS
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SESSION_ID);
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it('aborts a stalled poll so the loop recovers instead of wedging forever', async () => {
+		// The first poll hangs until its AbortController fires; later polls resolve.
+		// This reproduces a `/live` request the backend holds open mid-teardown
+		// after the SDK client is killed — the exact case that used to pin
+		// `_inFlight` and freeze the UI (stuck "streaming") until a page reload.
+		let calls = 0;
+		fetchMock.mockImplementation((_url: string, opts: { signal: AbortSignal }) => {
+			calls += 1;
+			if (calls === 1) {
+				return new Promise<Response>((_resolve, reject) => {
+					opts.signal.addEventListener('abort', () =>
+						reject(new DOMException('Aborted', 'AbortError'))
+					);
+				});
+			}
+			return Promise.resolve(
+				makeLiveResponse({ lastUpdateId: 9, isStreaming: false, messages: [] })
+			);
+		});
+
+		sessionPoller.startStreaming(SESSION_ID);
+
+		// While the immediate poll hangs, interval ticks must NOT issue overlapping
+		// requests — the loop is correctly serialized by `_inFlight`. Pre-fix, this
+		// serialization is also what wedged it forever: still exactly one request.
+		await vi.advanceTimersByTimeAsync(STREAMING_INTERVAL * 5);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// Advance past the watchdog: the stalled fetch aborts → `finally` clears
+		// `_inFlight` → the next interval tick issues a fresh poll that resolves.
+		// Without the watchdog this advance would still show exactly one call.
+		await vi.advanceTimersByTimeAsync(POLL_TIMEOUT);
+		expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+	});
+});

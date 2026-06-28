@@ -355,7 +355,13 @@ const wsConn: WsConnection = createWsConnection({
 
 		_update(s => ({ ...s, wsConnected: false }));
 
-		if (wasStreaming && sessionId) {
+		// Revive HTTP polling on WS loss for streaming AND parked sessions. A
+		// session parked on background work (isStreaming=false, activeTasks>0) is
+		// still live — its sub-agent can complete and unpark while the socket is
+		// down. startStreaming forces a full (since_update_id=0) poll, so the park
+		// branch in _applyPollResult re-arms the 1500ms park timer; without this a
+		// parked session is stranded with no poller until a manual reload.
+		if (sessionId && (wasStreaming || _state.activeTasks.length > 0)) {
 			sessionPoller.startStreaming(sessionId);
 		}
 
@@ -383,7 +389,17 @@ const wsConn: WsConnection = createWsConnection({
 		// before the WS reconnect handshake completes. Critical for mobile
 		// unlock latency. No-op updates are filtered by shallow-equality in
 		// the poller, so this is cheap even when nothing changed.
-		if (_state.isStreaming) {
+		//
+		// Streaming AND parked sessions go through startStreaming, not pollNow.
+		// onVisibilityHidden stop()s the poll timer; for a parked session
+		// (isStreaming=false, activeTasks>0) pollNow then issues ONE
+		// since_update_id=<non-zero> request that 304s when nothing changed, so
+		// _applyPollResult never runs and the park branch never re-arms the
+		// 1500ms timer — the session is stranded (no poller) until reload.
+		// startStreaming forces a full since_update_id=0 poll so the park branch
+		// re-arms; it does NOT flip the UI to streaming (isStreaming comes from
+		// the server response, which is false for a parked session).
+		if (_state.isStreaming || _state.activeTasks.length > 0) {
 			sessionPoller.startStreaming(_state.sessionId);
 		} else {
 			sessionPoller.pollNow(_state.sessionId);

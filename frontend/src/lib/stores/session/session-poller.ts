@@ -39,6 +39,24 @@ const STREAMING_POLL_INTERVAL_MS = 150;
  */
 const PARK_POLL_INTERVAL_MS = 1500;
 
+/**
+ * Hard timeout for a single `/live` poll fetch.
+ *
+ * Every poll self-serializes through the `_inFlight` guard (no overlapping
+ * requests). That guard is cleared in `_poll`'s `finally` — which only runs once
+ * the fetch settles. A request that never settles (the backend holding the
+ * response open mid-teardown after the SDK client was killed, a half-open
+ * socket, etc.) therefore pins `_inFlight` forever: every subsequent interval
+ * tick early-returns at the guard and the poll loop is wedged even though the
+ * timer keeps firing. The UI freezes on its last-applied state (stuck
+ * "streaming", stale task strip) until a full page reload — whose loadSession()
+ * path has its OWN AbortController and so always recovers. Time-boxing the poll
+ * fetch removes that asymmetry: a stall aborts → catch → finally clears
+ * `_inFlight` → the next tick re-polls and reconciles. Matches loadSession's
+ * window.
+ */
+const POLL_TIMEOUT_MS = 15000;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface PollTimer {
@@ -437,12 +455,17 @@ class SessionPoller {
 
 		const pollGeneration = this._streamingGeneration.get(sessionId) ?? 0;
 
+		// Time-box the fetch so a never-settling `/live` request can't pin
+		// `_inFlight` and wedge the loop forever (see POLL_TIMEOUT_MS).
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+
 		try {
 			const lastUpdateId = sessionState.getLastUpdateId(sessionId);
 
 			const response = await fetch(
 				`/api/v1/sessions/${sessionId}/live?since_update_id=${lastUpdateId}`,
-				{ credentials: 'include' }
+				{ credentials: 'include', signal: controller.signal }
 			);
 
 			if (response.status === 304) {
@@ -460,9 +483,16 @@ class SessionPoller {
 			this._applyPollResult(sessionId, data, pollGeneration);
 			this._errorCounts.delete(sessionId);
 		} catch (e) {
-			console.warn(`[Poller] _poll(${sessionId}): fetch error`, e);
+			if (e instanceof DOMException && e.name === 'AbortError') {
+				// Stalled poll aborted by the watchdog — the `finally` below clears
+				// `_inFlight` so the next interval tick issues a fresh request.
+				console.warn(`[Poller] _poll(${sessionId}): timed out after ${POLL_TIMEOUT_MS}ms — unwedging`);
+			} else {
+				console.warn(`[Poller] _poll(${sessionId}): fetch error`, e);
+			}
 			this._recordError(sessionId, e);
 		} finally {
+			clearTimeout(timeoutId);
 			this._inFlight.delete(sessionId);
 		}
 	}

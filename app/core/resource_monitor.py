@@ -393,6 +393,15 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
     NOTE: this is NEVER called for live/streaming sessions — the monitor no
     longer force-evicts streaming sessions on a timer (see report_long_streaming).
     """
+    # ``lru_force`` (hard-cap eviction of a busy session) and ``dead`` (subprocess
+    # died) are the only reasons that can remove a session PARKED on in-flight
+    # background work — normal ``lru``/``idle`` eviction skip parked sessions. In
+    # those two cases the pooled SDK client was just destroyed, so the parked
+    # work can never deliver its terminal notification: cleanup_ended_session's
+    # background-work guard would refuse cleanup FOREVER, leaking the buffer +
+    # registry and stranding the UI's task strip. Force the teardown so the
+    # session is actually reclaimed and the orphaned tasks are reaped to killed.
+    force = reason in ("lru_force", "dead")
     for session_id in session_ids:
         try:
             from app.core.live_session_store import live_session_store
@@ -403,7 +412,7 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
                         session_id, metadata={"cleanup_reason": reason}, interrupted=True
                     )
                 # Then clean up the session from memory
-                await live_session_store.cleanup_ended_session(session_id)
+                await live_session_store.cleanup_ended_session(session_id, force=force)
                 cleaned_key = f"live_store_cleaned_{reason}"
                 cleaned[cleaned_key] = cleaned.get(cleaned_key, 0) + 1
         except Exception as e:

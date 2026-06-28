@@ -372,6 +372,62 @@ describe('ws-message-handlers', () => {
 			expect(fn).toBeDefined();
 			expect(fn(new Map([['session-1', 1]])).has('session-1')).toBe(false);
 		});
+
+		it('does NOT clobber the active session when a BACKGROUND session stops', () => {
+			// Bug 3: pre-fix, handleStoppedOrInterrupted ignored data.session_id and
+			// always mutated the ACTIVE session — so a stopped/interrupted event for
+			// any OTHER session wiped the active session's pendingTools /
+			// wsStreamContent and fired a spurious pollFinal on it. Mirror handleDone:
+			// route by the event's session_id.
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = false;
+			deps.internal.pendingTools.add('tool-keep');
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'stopped', session_id: 'session-bg' });
+
+			// Final poll targets the session that actually stopped, not the active one.
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-bg');
+			expect(deps.sessionPoller.pollFinal).not.toHaveBeenCalledWith('session-active');
+			// The active session is untouched: pending tools preserved, no stop-timeout
+			// clear, no wsStreamContent mutation (the whole active-only block is skipped).
+			expect(deps.internal.pendingTools.has('tool-keep')).toBe(true);
+			expect(deps.clearStopTimeout).not.toHaveBeenCalled();
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('clears the active session pendingTools on its OWN stopped event', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = false;
+			deps.internal.pendingTools.add('tool-x');
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'stopped', session_id: 'session-1' });
+
+			expect(deps.internal.pendingTools.has('tool-x')).toBe(false);
+			expect(deps.clearStopTimeout).toHaveBeenCalled();
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
+		});
+
+		it('treats a stopped event with no session_id as the active session', () => {
+			// Backward-compat: events that omit session_id still apply to the session
+			// in view (matches handleDone's `!sessionId` fallback).
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = false;
+			deps.internal.pendingTools.add('tool-y');
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'stopped' });
+
+			expect(deps.internal.pendingTools.has('tool-y')).toBe(false);
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
+		});
 	});
 
 	describe('user_message_discarded handler', () => {
