@@ -557,6 +557,75 @@ describe('ws-message-handlers', () => {
 			expect(deps.update).toHaveBeenCalled();
 			expect(capturedError).toBe('Something went wrong');
 		});
+
+		it('stops the active session poller and clears interrupt state on its OWN error', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = true;
+			let rejected: unknown = '__unset__';
+			deps.internal.interruptConfirmResolve = (v: boolean) => { rejected = v; };
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'error',
+				session_id: 'session-1',
+				message: 'boom',
+			});
+
+			// Active error: poller stopped, banner shown, interrupt-and-query promise
+			// rejected and the flag cleared.
+			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-1');
+			expect(deps.update).toHaveBeenCalled();
+			expect(deps.internal.interruptPending).toBe(false);
+			expect(rejected).toBe(false);
+			expect(deps.internal.interruptConfirmResolve).toBeNull();
+		});
+
+		it('does NOT clobber the active session when a BACKGROUND session errors', () => {
+			// Frontend U1: pre-fix, the error handler ignored data.session_id and
+			// always stopped the ACTIVE session's poller, reset its isStreaming, blew
+			// away wsStreamContent, and rejected its interrupt-and-query promise — so a
+			// background session's stream error froze whatever was in view. Mirror
+			// handleDone / handleStoppedOrInterrupted: route by the event's session_id.
+			const state = mockState();
+			state.sessionId = 'session-active';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = true;
+			let resolverCalled = false;
+			deps.internal.interruptConfirmResolve = () => { resolverCalled = true; };
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'error',
+				session_id: 'session-bg',
+				message: 'background blew up',
+			});
+
+			// The errored (background) session's poller is stopped — cross-session safe.
+			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-bg');
+			expect(deps.sessionPoller.stop).not.toHaveBeenCalledWith('session-active');
+			// The active session is untouched: no banner, no isStreaming reset, and the
+			// interrupt machinery is preserved (the whole active-only block is skipped).
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.internal.interruptPending).toBe(true);
+			expect(resolverCalled).toBe(false);
+			expect(deps.internal.interruptConfirmResolve).not.toBeNull();
+		});
+
+		it('treats an error with no session_id as the active session', () => {
+			// Backward-compat: a synchronous pre-stream command error (e.g. an empty
+			// prompt) carries no session_id and still applies to the session in view.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'error', message: 'empty prompt' });
+
+			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-1');
+			expect(deps.update).toHaveBeenCalled();
+		});
 	});
 
 	describe('tool tracking', () => {

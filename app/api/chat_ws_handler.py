@@ -2506,7 +2506,9 @@ class ChatWebSocketHandler:
             ctx.error(logger, f"Query error: {e}", exc_info=True)
             # Surface the actual error to the user instead of a generic message
             error_detail = str(e) if str(e) else type(e).__name__
-            await self.send_json({"type": "error", "message": f"Error: {error_detail}"})
+            # Carry session_id (the in-loop stamp above doesn't reach this except
+            # block) so the frontend routes the error to the right session.
+            await self.send_json({"type": "error", "message": f"Error: {error_detail}", "session_id": session_id})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients

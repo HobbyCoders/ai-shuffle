@@ -844,32 +844,50 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'error': {
-				internal.interruptPending = false;
-				// Reject any pending interrupt-and-query promise
-				if (internal.interruptConfirmResolve) {
-					internal.interruptConfirmResolve(false);
-					internal.interruptConfirmResolve = null;
-				}
-				// Error is a terminal event — stop polling, reset streaming, show error.
-				// Must reset isStreaming so the user can send another message.
+				// Route by the EVENT's session_id, not the active session — mirror
+				// handleDone / handleStoppedOrInterrupted. A BACKGROUND session's
+				// error must never stop the ACTIVE session's poller, reset its
+				// isStreaming, blow away its wsStreamContent, or unwind its
+				// interrupt-and-query promise. The backend now stamps session_id on
+				// error events (interactive + headless paths); fall back to the
+				// active session only when the id is absent (e.g. a synchronous
+				// pre-stream command error like an empty prompt).
+				const errSessionId = data.session_id as string | undefined;
 				const errState = getState();
-				if (errState.sessionId) sessionPoller.stop(errState.sessionId);
+				const isActiveError = !errSessionId || errSessionId === errState.sessionId;
+				const erroredSessionId = errSessionId || errState.sessionId;
 				const errMessage = data.message as string;
-				update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+
+				// Cross-session safe: stop the errored session's poller and drop its
+				// streaming pill regardless of which session is in view.
+				if (erroredSessionId) {
+					sessionPoller.stop(erroredSessionId);
+					streamingSessions.update(map => {
+						if (!map.has(erroredSessionId)) return map;
+						const newMap = new Map(map);
+						newMap.delete(erroredSessionId);
+						return newMap;
+					});
+				}
+
+				// Always log for observability (keyed to the session that errored).
 				reportClientError({
 					source: 'ws',
 					message: errMessage || 'Stream error',
 					detail: typeof data.detail === 'string' ? data.detail : undefined,
-					session_id: errState.sessionId ?? undefined,
+					session_id: erroredSessionId ?? undefined,
 				});
-				const errorSessionId = errState.sessionId;
-				if (errorSessionId) {
-					streamingSessions.update(map => {
-						if (!map.has(errorSessionId)) return map;
-						const newMap = new Map(map);
-						newMap.delete(errorSessionId);
-						return newMap;
-					});
+
+				// Only the in-view session surfaces the banner, resets its streaming
+				// flag (so the user can send again), and rejects a pending
+				// interrupt-and-query promise.
+				if (isActiveError) {
+					internal.interruptPending = false;
+					if (internal.interruptConfirmResolve) {
+						internal.interruptConfirmResolve(false);
+						internal.interruptConfirmResolve = null;
+					}
+					update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
 				}
 				break;
 			}

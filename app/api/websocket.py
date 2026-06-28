@@ -527,6 +527,13 @@ async def chat_websocket(
                 # Important: Do NOT skip store updates if WebSocket fails!
                 # The live_session_store must be updated regardless of WebSocket state
                 # so that polling clients can receive updates.
+                # Tag every event with session_id so the frontend can reject
+                # late-arriving events from a previous session (cross-session guard).
+                # Mirrors the headless path (chat_ws_handler.run_query); without it,
+                # session-id-less events (notably `error`) are treated as belonging
+                # to the ACTIVE session and clobber an unrelated in-view stream.
+                if not event.get('session_id'):
+                    event['session_id'] = session_id
                 ws_connected = await send_json(event)
                 if not ws_connected and not stream_state.connection_lost_logged:
                     stream_state.connection_lost_logged = True
@@ -674,7 +681,10 @@ async def chat_websocket(
             query_wall_elapsed = time.monotonic() - query_wall_start
             ctx.error(logger, f"Query error after {query_wall_elapsed:.1f}s: {e}", exc_info=True)
             error_detail = str(e) if str(e) else type(e).__name__
-            await send_json({"type": "error", "message": f"Error: {error_detail}"})
+            # Carry session_id so the frontend routes this error to the right
+            # session and never clobbers an unrelated active stream (cross-session
+            # guard — matches the in-loop stamp above and the headless path).
+            await send_json({"type": "error", "message": f"Error: {error_detail}", "session_id": session_id})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
