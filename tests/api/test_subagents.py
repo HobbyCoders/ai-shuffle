@@ -1003,6 +1003,9 @@ class TestDatabaseInteraction:
                 prompt="Test Prompt",
                 tools=["bash", "read"],
                 model="claude-sonnet-4-20250514",
+                skills=None,
+                memory=None,
+                mcp_servers=None,
                 is_builtin=False
             )
 
@@ -1041,7 +1044,10 @@ class TestDatabaseInteraction:
                 description="New Desc",
                 prompt=...,
                 tools=...,
-                model=...
+                model=...,
+                skills=...,
+                memory=...,
+                mcp_servers=...
             )
 
     def test_delete_calls_database(self, subagents_test_client):
@@ -1098,6 +1104,19 @@ class TestDatabaseInteraction:
 # Builtin Subagent Seeding Tests
 # =============================================================================
 
+# Isolate seeding-logic tests from the real BUILTIN_SUBAGENTS list (which has
+# multiple entries). These tests assert call counts and exact IDs for a single
+# built-in, so they patch BUILTIN_SUBAGENTS down to just this one definition.
+_CHS_DEF = {
+    "id": "chat-history-summarizer",
+    "name": "Chat History Summarizer",
+    "description": "Summarizes chat history",
+    "prompt": "Summarizer prompt",
+    "tools": ["Read", "Grep", "Glob"],
+    "model": "claude-sonnet-4-6",
+}
+
+
 class TestBuiltinSubagentSeeding:
     """Test the seed_builtin_subagents function behavior."""
 
@@ -1105,7 +1124,8 @@ class TestBuiltinSubagentSeeding:
         """Seeding creates built-in subagent when it doesn't exist."""
         from app.core.builtin_subagents import seed_builtin_subagents
 
-        with patch("app.core.builtin_subagents.database") as mock_db:
+        with patch("app.core.builtin_subagents.database") as mock_db, \
+             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = None
             mock_db.create_subagent.return_value = {
                 "id": "chat-history-summarizer",
@@ -1133,7 +1153,9 @@ class TestBuiltinSubagentSeeding:
             "default_prompt": None
         }
 
-        with patch("app.core.builtin_subagents.database") as mock_db:
+        with patch("app.core.builtin_subagents.database") as mock_db, \
+             patch("app.core.builtin_subagents._update_builtin_defaults"), \
+             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
             results = seed_builtin_subagents()
@@ -1155,7 +1177,8 @@ class TestBuiltinSubagentSeeding:
         }
 
         with patch("app.core.builtin_subagents.database") as mock_db, \
-             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update:
+             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update, \
+             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
             results = seed_builtin_subagents()
@@ -1167,15 +1190,18 @@ class TestBuiltinSubagentSeeding:
         """Seeding skips properly configured built-in subagents."""
         from app.core.builtin_subagents import seed_builtin_subagents
 
-        # Properly configured built-in
+        # Properly configured built-in — defaults match the code definition,
+        # so seeding should detect no change and report "exists".
         existing_subagent = {
             "id": "chat-history-summarizer",
             "name": "Chat History Summarizer",
             "is_builtin": True,
-            "default_prompt": "Some prompt"  # Has defaults
+            "default_prompt": _CHS_DEF["prompt"],
+            "default_model": _CHS_DEF["model"],
         }
 
-        with patch("app.core.builtin_subagents.database") as mock_db:
+        with patch("app.core.builtin_subagents.database") as mock_db, \
+             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
             results = seed_builtin_subagents()
@@ -1197,7 +1223,8 @@ class TestBuiltinSubagentSeeding:
         }
 
         with patch("app.core.builtin_subagents.database") as mock_db, \
-             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update:
+             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update, \
+             patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
             results = seed_builtin_subagents(force_update=True)
