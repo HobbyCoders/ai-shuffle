@@ -175,6 +175,7 @@ def create_postgres_schema(cursor) -> None:
             worktree_id TEXT,
             worktree_branch TEXT,
             worktree_path TEXT,
+            cloud_branch TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
             is_favorite BOOLEAN DEFAULT FALSE,

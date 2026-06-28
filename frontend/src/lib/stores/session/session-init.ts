@@ -520,6 +520,14 @@ export function createSessionInit(deps: SessionInitDeps) {
 				if (meta.execution_mode !== undefined && meta.execution_mode !== _state.executionMode) {
 					metaDelta.executionMode = meta.execution_mode as 'local' | 'worktree' | 'cloud';
 				}
+				// No-worktree cloud sessions carry their checked-out branch here (the
+				// worker persisted it at intake). Surface it into `cloudBranch` so the
+				// branch pill shows it after a reload, when ExecutionModeBar (which
+				// otherwise preselects it) isn't mounted. cloud+worktree uses
+				// `worktree_branch` above instead.
+				if (meta.cloud_branch !== undefined && meta.cloud_branch !== null && meta.cloud_branch !== _state.cloudBranch) {
+					metaDelta.cloudBranch = meta.cloud_branch;
+				}
 				// Cross-install control reachability: a remote session whose owner is
 				// offline is served from shared-DB history (view-only). `controllable`
 				// is absent for local sessions → default to true so they stay sendable.

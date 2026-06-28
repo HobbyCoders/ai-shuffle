@@ -239,6 +239,22 @@ async def _create_offload_via_registry(
     if not remote_session_id:
         raise HTTPException(status_code=502, detail="Target device did not return a session id")
 
+    # No-worktree cloud: the worker checks out `branch_name` on its main checkout,
+    # and that branch is recorded nowhere the client can read after a reload
+    # (worktree cloud sessions already carry it via the shared worktree row). On a
+    # shared database the worker's session row is visible here, so persist the
+    # chosen branch onto it for display. Best-effort: a non-shared DB (rowcount 0)
+    # or transient error must not fail the offload that already started remotely.
+    if not body.use_worktree and body.branch_name:
+        try:
+            await run_sync(
+                database.set_session_cloud_branch, remote_session_id, body.branch_name
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Failed to persist cloud_branch for %s: %s", remote_session_id, e
+            )
+
     # The session id is shared across the cluster — the frontend opens it like
     # any other (remote) session. No proxy row written.
     return CloudSessionResponse(

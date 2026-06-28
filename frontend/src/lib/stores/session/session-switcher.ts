@@ -162,6 +162,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
 			worktreeDeleted: state.worktreeDeleted,
+			cloudBranch: state.cloudBranch,
 		};
 	}
 
@@ -382,6 +383,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
+			// No-worktree cloud branch: restore from ephemeral so the pill shows it
+			// immediately on switch; the next /live poll refreshes it authoritatively.
+			cloudBranch: ephemeral?.cloudBranch ?? null,
 			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 

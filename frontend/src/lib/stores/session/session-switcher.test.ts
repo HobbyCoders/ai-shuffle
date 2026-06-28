@@ -181,6 +181,7 @@ describe('session-switcher · switchSession isolation', () => {
 			selectedWorktreeBranch: null,
 			worktreeMode: 'new',
 			worktreeDeleted: false,
+			cloudBranch: null,
 		});
 
 		await switcher.switchSession('session-B');
