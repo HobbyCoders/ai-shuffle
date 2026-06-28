@@ -1798,11 +1798,55 @@ class LiveSessionStore:
         return session_id in self._sessions
 
     async def cleanup_session(self, session_id: str) -> None:
-        """Remove a session from the store (e.g., on error)."""
+        """Remove a session from the store (e.g., on error).
+
+        This is the ERROR/teardown path (connect failure, dead origin socket,
+        stuck-streaming disconnect, worktree deletion). Unlike
+        ``cleanup_ended_session`` it has no streaming/team/background-work guards
+        to honor — every caller has already decided the session is being torn
+        down (the SDK client is gone or never came up), so any work tracked for
+        it can never complete. It must therefore reap the same way the force
+        path of ``cleanup_ended_session`` does, or it leaks (U3):
+
+          * orphaned "running" task_registry rows — left behind they surface as
+            PHANTOM active tasks: a later ``/live`` poll still returns them in
+            ``activeTasks`` (computed straight from the registry, independent of
+            store membership), so the frontend taskbar shows a task that can
+            never finish, and
+          * Monitor shell subprocesses — the proc keeps running, its reader
+            awaits readline() forever, and the ``_background_tasks`` entry leaks
+            for the whole process lifetime (the U2 strand, on the error path).
+        """
         async with self._lock:
             removed_session = self._sessions.pop(session_id, None)
             self._session_locks.pop(session_id, None)
             msg_count = len(removed_session.messages) if removed_session else 0
+            # Reap orphaned registry tasks to "killed" so a concurrent /live poll
+            # drops them, then clear the bucket entirely. Lazy import avoids a
+            # circular dependency (task_registry imports nothing from here).
+            try:
+                from app.core.task_registry import task_registry
+                reaped = 0
+                for rec in task_registry.get_active(session_id):
+                    task_registry.complete_task(session_id, rec["id"], "killed")
+                    reaped += 1
+                if reaped:
+                    logger.warning(
+                        f"Force-clean of session {session_id}: reaped {reaped} "
+                        f"orphaned background task(s) to killed (session torn "
+                        f"down on error; work cannot complete)"
+                    )
+                task_registry.clear_session(session_id)
+            except Exception:
+                logger.debug("force-clean task reap/clear failed", exc_info=True)
+            # Reap any Monitor shell subprocesses this session spawned (U2 on the
+            # error path). Scheduled fire-and-forget so the up-to-5s terminate/
+            # kill escalation never blocks this lock.
+            try:
+                from app.mcp.builtin_tools import reap_session_background_shells
+                reap_session_background_shells(session_id)
+            except Exception:
+                logger.debug("background shell reap scheduling failed", exc_info=True)
             logger.info(f"Force-cleaned session {session_id} ({msg_count} messages). Remaining: sessions={len(self._sessions)} locks={len(self._session_locks)}")
 
     def reset_all(self) -> None:
