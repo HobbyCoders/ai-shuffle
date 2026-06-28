@@ -1675,6 +1675,18 @@ class LiveSessionStore:
                     task_registry.clear_session(session_id)
                 except Exception:
                     logger.debug("task_registry.clear_session failed", exc_info=True)
+                # Reap any Monitor shell subprocesses this session spawned (U2).
+                # They are excluded from the background-work guard above (so a
+                # watch never pins the session open), which means that without an
+                # explicit reap they strand when the session is removed: the
+                # subprocess keeps running, its reader awaits readline() forever,
+                # and the _background_tasks entry leaks. Scheduled fire-and-forget
+                # so the up-to-5s terminate/kill escalation never blocks this lock.
+                try:
+                    from app.mcp.builtin_tools import reap_session_background_shells
+                    reap_session_background_shells(session_id)
+                except Exception:
+                    logger.debug("background shell reap scheduling failed", exc_info=True)
                 remaining = len(self._sessions)
                 remaining_locks = len(self._session_locks)
                 logger.info(f"Cleaned up ended session {session_id} ({msg_count} messages). Remaining: sessions={remaining} locks={remaining_locks}")

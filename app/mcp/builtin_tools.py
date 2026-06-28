@@ -49,10 +49,18 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 class _BackgroundTask:
     """A spawned subprocess whose stdout is buffered for later retrieval."""
 
-    def __init__(self, task_id: str, command: str, cwd: Optional[str]) -> None:
+    def __init__(
+        self, task_id: str, command: str, cwd: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> None:
         self.task_id = task_id
         self.command = command
         self.cwd = cwd
+        # The AI Shuffle session that spawned this shell, so its subprocess +
+        # reader task can be reaped when that session is finally removed (a
+        # Monitor shell deliberately does NOT pin the session open). None for
+        # module-level spawns with no session context.
+        self.session_id = session_id
         self.lines: List[str] = []
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.exit_code: Optional[int] = None
@@ -118,13 +126,82 @@ async def stop_background_shell_task(
     }
 
 
+# Strong references to in-flight reap tasks so the fire-and-forget scheduler
+# below does not let them be garbage-collected mid-run.
+_reap_tasks: set = set()
+
+
+async def stop_session_background_shells(session_id: str) -> int:
+    """Terminate + reap every Monitor shell spawned by a session (U2).
+
+    Monitor shells deliberately do NOT pin a live session open (see
+    task_registry / live_session_store.cleanup_ended_session), so when the
+    session is finally removed its shells would otherwise STRAND: the subprocess
+    keeps running, its ``_reader`` task awaits ``readline()`` forever (for a
+    long-running command like ``tail -f``), and the ``_background_tasks`` entry —
+    with its line buffer — leaks for the whole process lifetime. This stops each
+    subprocess (escalating to kill after 5s), cancels the reader, and drops the
+    registry entry. Also reaps already-finished shells, bounding the dict's
+    growth to session lifetime.
+
+    Returns the number of shell tasks reaped.
+    """
+    victims = [
+        (tid, t) for tid, t in list(_background_tasks.items())
+        if t.session_id == session_id
+    ]
+    reaped = 0
+    for tid, task in victims:
+        # Cancel the reader first so it stops touching task/registry state.
+        rt = task._reader_task
+        if rt is not None and not rt.done():
+            rt.cancel()
+        # Terminate the subprocess, escalating to kill after 5s.
+        proc = task.process
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            except ProcessLookupError:
+                pass
+            except Exception:
+                logger.debug(f"Error terminating background shell {tid}", exc_info=True)
+        _background_tasks.pop(tid, None)
+        reaped += 1
+    if reaped:
+        logger.info(
+            f"Reaped {reaped} background shell(s) for ended session {session_id}"
+        )
+    return reaped
+
+
+def reap_session_background_shells(session_id: str) -> None:
+    """Schedule async reap of a session's Monitor shells (non-blocking).
+
+    Fire-and-forget so the caller — live_session_store.cleanup_ended_session,
+    which holds the store lock — is never blocked by the up-to-5s terminate/kill
+    escalation. A no-op when called with no running event loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    t = loop.create_task(stop_session_background_shells(session_id))
+    _reap_tasks.add(t)
+    t.add_done_callback(_reap_tasks.discard)
+
+
 async def _spawn_background(
     command: str,
     cwd: Optional[str],
     session_id: Optional[str] = None,
 ) -> _BackgroundTask:
     task_id = str(uuid.uuid4())[:8]
-    task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd)
+    task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd, session_id=session_id)
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=cwd,
