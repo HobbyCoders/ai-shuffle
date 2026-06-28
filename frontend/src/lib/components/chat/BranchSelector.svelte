@@ -60,6 +60,23 @@
 			: ($gitStatus?.current_branch ?? null)
 	);
 
+	// Cloud mode runs on the second install, so the local checkout is irrelevant —
+	// show the branch the work actually runs on there. Both sub-modes are covered:
+	// cloud+worktree exposes its (possibly auto-named) branch via the shared
+	// worktree row → `worktreeBranch`; cloud+no-worktree records the checked-out
+	// branch on the session row at intake → `cloudBranch` (surfaced via /live). With
+	// neither resolved yet, fall back to "Auto" (a cloud worktree will auto-generate
+	// one from the message) or "…" (branch not yet known).
+	const cloudBranchLabel = $derived.by(() => {
+		const running = worktreeBranch || $activeSession.cloudBranch;
+		if (running) return running;
+		return $activeSession.cloudWorktree ? 'Auto' : '…';
+	});
+
+	// The branch text shown in the pill. Cloud mode reads the cloud worker's branch
+	// rather than the local checkout (which isn't where the work runs).
+	const displayBranch = $derived(isCloudMode ? cloudBranchLabel : currentBranch);
+
 	const branchLocked = $derived(isCloudMode || isWorktreeMode || isStreaming || checkingOut);
 
 	// Local branches for the dropdown (exclude remotes).
@@ -144,7 +161,9 @@
 		onclick={toggleDropdown}
 		disabled={branchLocked}
 		title={isCloudMode
-			? 'Running on the cloud install — branch managed by the worker'
+			? displayBranch && displayBranch !== '…'
+				? `Cloud branch: ${displayBranch} — managed by the worker`
+				: 'Running on the cloud install — branch managed by the worker'
 			: isWorktreeMode
 				? `Worktree branch: ${currentBranch ?? 'unknown'}`
 				: isStreaming
@@ -156,11 +175,11 @@
 		{#if projectName}
 			<FolderClosed size={13} strokeWidth={1.5} />
 			<span class="pill-label project-name">{projectName}</span>
-			{#if currentBranch}<span class="separator">/</span>{/if}
+			{#if displayBranch}<span class="separator">/</span>{/if}
 		{/if}
 		<GitBranch size={13} strokeWidth={1.5} />
-		{#if currentBranch}
-			<span class="pill-label branch-name">{currentBranch}</span>
+		{#if displayBranch}
+			<span class="pill-label branch-name">{displayBranch}</span>
 		{/if}
 		{#if checkingOut}
 			<Loader2 size={11} strokeWidth={2} class="spin" />

@@ -205,6 +205,13 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "worktree_path"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
             migrations_applied.append("sessions.worktree_path")
+        # Cloud (no-worktree) offload branch: the branch the worker checks out on
+        # its main checkout for a cloud session. Persisted by the primary at intake
+        # so the branch a cloud session runs on survives reloads and shows in the
+        # UI (cloud+worktree sessions already carry it via worktree_branch).
+        if not column_exists(cursor, "sessions", "cloud_branch"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_branch TEXT")
+            migrations_applied.append("sessions.cloud_branch")
         # Legacy cloud offload removal (v48): the per-session proxy model
         # (cloud_remote_url / cloud_remote_session_id) is superseded by the
         # cluster intake/relay, which shares one session id across installs via
@@ -725,6 +732,7 @@ from app.db.sessions import (  # noqa: F401
     delete_session,
     toggle_session_favorite,
     set_session_favorite,
+    set_session_cloud_branch,
     session_has_forks,
     get_session_forks,
     get_session_messages,

@@ -57,6 +57,10 @@ export interface SessionMeta {
 	worktree_branch?: string | null;
 	worktree_deleted?: boolean;
 	execution_mode?: string;
+	/** No-worktree cloud sessions only: the branch the worker checked out, persisted
+	 *  at intake so the UI can show it after reloads. cloud+worktree uses
+	 *  `worktree_branch` instead (the two are mutually exclusive). */
+	cloud_branch?: string | null;
 	/** Cross-install (cloud) sessions only: whether the owning device is
 	 *  currently reachable. When false, the /live response is served from
 	 *  shared-DB history and the session is view-only (see `controllable`). */

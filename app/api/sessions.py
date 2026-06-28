@@ -666,6 +666,12 @@ async def get_live_session(
             meta["controllable"] = True
             if session.get("title"):
                 meta.setdefault("title", session.get("title"))
+            # Surface the branch the worker runs on. cloud+worktree sessions carry
+            # it in the relayed worktree_branch; for no-worktree cloud, fall back to
+            # the branch persisted on the shared-DB row at intake (cloud_branch).
+            cloud_branch = session.get("cloud_branch")
+            if cloud_branch and not meta.get("worktree_branch"):
+                meta["cloud_branch"] = cloud_branch
             data["session_meta"] = meta
             return data
 
@@ -686,6 +692,13 @@ async def get_live_session(
         session_meta["worktree_branch"] = wt_meta["worktree_branch"]
         session_meta["worktree_deleted"] = wt_meta["worktree_deleted"]
         session_meta["execution_mode"] = wt_meta["execution_mode"]
+
+    # No-worktree cloud branch persisted at intake — surfaced so the UI can show
+    # which branch the session runs on even when served from shared-DB history
+    # (e.g. the owning device is offline). cloud+worktree uses worktree_branch.
+    cloud_branch = session.get("cloud_branch")
+    if cloud_branch and not session_meta.get("worktree_branch"):
+        session_meta["cloud_branch"] = cloud_branch
 
     # Cross-install session served from local history because the owner is
     # unreachable: flag it view-only so the UI shows a "device offline" badge and

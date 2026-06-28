@@ -25,6 +25,10 @@ export interface SessionEphemeral {
 	selectedWorktreeBranch: string | null;
 	worktreeMode: 'new' | 'existing';
 	worktreeDeleted: boolean;
+	// No-worktree cloud sessions: the worker's checked-out branch. Carried so the
+	// branch pill shows it immediately on a session switch (mirrors worktreeBranch)
+	// instead of flashing "…" until the first /live poll repopulates it.
+	cloudBranch: string | null;
 }
 
 // ─── LRU Cache ───────────────────────────────────────────────────────────────
