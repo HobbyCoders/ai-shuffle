@@ -66,19 +66,69 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
       ``stopped`` which the streaming loop maps to ``killed`` in the registry —
       so the task drops off the next ``/live`` poll without us pre-marking it.
 
+    "Ghost" tasks — ones already terminated by outside forces (idle eviction,
+    process death, session teardown) but still parked ``running`` in the
+    registry with no live client left to stop — are REAPED here: marked
+    ``killed`` so they drop off the next ``/live`` poll, and reported as a
+    successful stop. Without this the "x" hits a dead session, returns
+    ``ok: false``, and the UI strip is left showing a task that can never be
+    cleared (its button stuck disabled).
+
     Returns ``{"ok": bool, "kind": ..., "detail"?: ...}``. Never raises.
     """
+    from app.core.task_registry import task_registry
+
+    # Idempotent / stale-UI guard: if the registry already holds this task in a
+    # terminal state, the strip is just showing a stale row — report success so
+    # the "x" clears it on the next poll instead of erroring.
+    existing = task_registry.get_task(session_id, task_id)
+    if existing is not None and existing.get("status") != "running":
+        return {
+            "ok": True,
+            "kind": existing.get("kind") or "agent",
+            "task_id": task_id,
+            "detail": "already finished",
+        }
+
     # 1) Monitor shell task — terminate the subprocess directly.
     from app.mcp.builtin_tools import stop_background_shell_task
     shell = await stop_background_shell_task(task_id, session_id=session_id)
     if shell is not None:
         return {"ok": True, "kind": "shell", **shell}
 
+    # A registry shell task with no tracked subprocess is a ghost (the shell
+    # already exited without the registry being told). Reap it rather than
+    # mis-routing a shell id to the SDK's agent-task stop (which would error).
+    if existing is not None and existing.get("kind") == "shell":
+        task_registry.complete_task(session_id, task_id, "killed")
+        return {
+            "ok": True,
+            "kind": "shell",
+            "task_id": task_id,
+            "detail": "reaped (shell gone)",
+        }
+
     # 2) Background sub-agent — ask the SDK to stop it.
     state = get_session_pool().peek(session_id)
-    if not state:
-        return {"ok": False, "kind": "agent", "detail": "session not active"}
-    if not state.is_connected or not state.client:
+    if not state or not state.is_connected or not state.client:
+        # Outside forces tore down the live session / SDK client, but the task
+        # can still be parked "running" in the registry — a ghost the UI shows
+        # forever with no client left to stop it. Reap it so the close button
+        # works: mark it killed (drops off the next /live poll) and report
+        # success.
+        if existing is not None:
+            task_registry.complete_task(session_id, task_id, "killed")
+            return {
+                "ok": True,
+                "kind": existing.get("kind") or "agent",
+                "task_id": task_id,
+                "detail": "reaped (session gone)",
+            }
+        # The registry never knew the task and there is no live session — there
+        # is nothing to reap and nothing the UI is showing. Report the dead
+        # session honestly (distinguishing gone-from-pool vs disconnected).
+        if not state:
+            return {"ok": False, "kind": "agent", "detail": "session not active"}
         return {"ok": False, "kind": "agent", "detail": "session not connected"}
 
     try:

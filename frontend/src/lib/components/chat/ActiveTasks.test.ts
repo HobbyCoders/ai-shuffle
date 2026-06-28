@@ -80,6 +80,47 @@ describe('ActiveTasks', () => {
 		expect(stopBtn.disabled).toBe(true);
 	});
 
+	it('re-enables the stop button when the stop fails (onStop resolves false)', async () => {
+		// Bug 4: a stop that did not take (ghost task / dead session) resolves
+		// `false`. The button must re-enable so the user can retry — not stick
+		// disabled forever on a row the next poll won't remove.
+		const onStop = vi.fn(async () => false);
+		render(ActiveTasks, { props: { tasks: [makeTask()], onStop } });
+
+		const stopBtn = screen.getByRole('button', { name: /stop task/i }) as HTMLButtonElement;
+		await fireEvent.click(stopBtn);
+
+		expect(onStop).toHaveBeenCalledTimes(1);
+		expect(stopBtn.disabled).toBe(false);
+		// A second attempt is allowed (the guard reset).
+		await fireEvent.click(stopBtn);
+		expect(onStop).toHaveBeenCalledTimes(2);
+	});
+
+	it('re-enables the stop button when onStop throws', async () => {
+		const onStop = vi.fn(async () => {
+			throw new Error('network');
+		});
+		render(ActiveTasks, { props: { tasks: [makeTask()], onStop } });
+
+		const stopBtn = screen.getByRole('button', { name: /stop task/i }) as HTMLButtonElement;
+		await fireEvent.click(stopBtn);
+
+		expect(stopBtn.disabled).toBe(false);
+	});
+
+	it('keeps the stop button disabled on a successful stop (resolves undefined)', async () => {
+		// A successful stop leaves the button disabled + dimmed; the next /live
+		// poll drops the whole row once the registry marks the task terminal.
+		const onStop = vi.fn(async () => undefined);
+		render(ActiveTasks, { props: { tasks: [makeTask()], onStop } });
+
+		const stopBtn = screen.getByRole('button', { name: /stop task/i }) as HTMLButtonElement;
+		await fireEvent.click(stopBtn);
+
+		expect(stopBtn.disabled).toBe(true);
+	});
+
 	it('collapses to a single "Running N tasks" line and hides task rows', async () => {
 		const tasks = [makeTask({ id: 'a', subject: 'Task A' }), makeTask({ id: 'b', subject: 'Task B' })];
 		render(ActiveTasks, { props: { tasks } });

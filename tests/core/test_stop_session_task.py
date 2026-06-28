@@ -159,3 +159,109 @@ class TestStopSessionTask:
         assert result["ok"] is False
         assert result["kind"] == "agent"
         assert "boom" in result["detail"]
+
+
+# =============================================================================
+# stop_session_task — "ghost" task reaping (Bug 4)
+#
+# Tasks terminated by outside forces (idle eviction, process death, session
+# teardown) can be left parked "running" in the registry with no live client to
+# stop them. Clicking the UI's "x" must REAP such ghosts — mark them killed so
+# they drop off the next /live poll — and report success, rather than returning
+# ok:false and leaving the strip showing a task whose close button is stuck
+# disabled forever.
+# =============================================================================
+
+class TestStopSessionTaskReapsGhosts:
+    @pytest.mark.asyncio
+    async def test_agent_ghost_reaped_when_session_gone(self):
+        # A backgrounded sub-agent still 'running' in the registry, but the live
+        # session is gone from the pool (peek -> None).
+        task_registry.start_task("s1", "agent-ghost", "agent", "bg work")
+        fake_pool = MagicMock()
+        fake_pool.peek.return_value = None
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "agent-ghost")
+
+        assert result["ok"] is True
+        assert result["kind"] == "agent"
+        assert "reaped" in result["detail"]
+        # Marked terminal -> drops off the next /live poll.
+        assert task_registry.get_active("s1") == []
+        rec = task_registry.get_task("s1", "agent-ghost")
+        assert rec is not None and rec["status"] == "killed"
+
+    @pytest.mark.asyncio
+    async def test_agent_ghost_reaped_when_session_disconnected(self):
+        task_registry.start_task("s1", "agent-ghost", "agent", "bg work")
+        fake_state = MagicMock(is_connected=False, client=None)
+        fake_pool = MagicMock()
+        fake_pool.peek.return_value = fake_state
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "agent-ghost")
+
+        assert result["ok"] is True
+        assert "reaped" in result["detail"]
+        assert task_registry.get_active("s1") == []
+
+    @pytest.mark.asyncio
+    async def test_shell_ghost_reaped_when_subprocess_untracked(self):
+        # A registry shell task whose subprocess already exited (not in
+        # _background_tasks) — the shell helper returns None and we must reap it
+        # rather than mis-route a shell id to the SDK's agent stop.
+        task_registry.start_task("s1", "sh-ghost", "shell", "sleep 999")
+        # Deliberately NOT adding to bt._background_tasks -> untracked ghost.
+        result = await stop_session_task("s1", "sh-ghost")
+
+        assert result["ok"] is True
+        assert result["kind"] == "shell"
+        assert "reaped" in result["detail"]
+        rec = task_registry.get_task("s1", "sh-ghost")
+        assert rec is not None and rec["status"] == "killed"
+
+    @pytest.mark.asyncio
+    async def test_already_terminal_task_is_idempotent_success(self):
+        # The registry already has the task in a terminal state (e.g. a prior
+        # kill that the UI hasn't polled yet). Closing it again must succeed so
+        # the stale row clears — without touching the session pool at all.
+        task_registry.start_task("s1", "agent-done", "agent", "bg work")
+        task_registry.complete_task("s1", "agent-done", "killed")
+
+        called = {"peek": False}
+        fake_pool = MagicMock()
+
+        def _peek(*a, **k):
+            called["peek"] = True
+            return None
+
+        fake_pool.peek.side_effect = _peek
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "agent-done")
+
+        assert result["ok"] is True
+        assert "already finished" in result["detail"]
+        # Short-circuited before any pool/SDK interaction.
+        assert called["peek"] is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_task_with_dead_session_still_reports_honestly(self):
+        # No registry record AND no live session -> nothing to reap, nothing the
+        # UI is showing. Preserve the honest ok:false so callers aren't misled.
+        fake_pool = MagicMock()
+        fake_pool.peek.return_value = None
+        with patch(
+            "app.core.query_session_lifecycle.get_session_pool",
+            return_value=fake_pool,
+        ):
+            result = await stop_session_task("s1", "never-seen")
+        assert result["ok"] is False
+        assert "not active" in result["detail"]

@@ -22,8 +22,13 @@
 
 	interface Props {
 		tasks: Task[];
-		/** Stop one task by id. The task drops off the next /live poll once stopped. */
-		onStop?: (taskId: string) => void | Promise<void>;
+		/**
+		 * Stop one task by id. The task drops off the next /live poll once stopped.
+		 * Resolves `false` when the stop didn't take (e.g. the task was already
+		 * gone) so the row's close button can be re-enabled instead of sticking
+		 * disabled forever; `true`/`void` means the stop is in flight.
+		 */
+		onStop?: (taskId: string) => boolean | void | Promise<boolean | void>;
 	}
 
 	let { tasks, onStop }: Props = $props();
@@ -44,10 +49,19 @@
 	async function stopTask(id: string) {
 		if (stopping[id]) return;
 		stopping = { ...stopping, [id]: true };
+		let ok = false;
 		try {
-			await onStop?.(id);
+			// onStop resolves `false` when the stop didn't take (task already
+			// gone, dead session); `true`/`undefined` means it's in flight.
+			ok = (await onStop?.(id)) !== false;
 		} catch {
-			// Stop failed (e.g. task already gone) — re-enable so the user can retry.
+			ok = false;
+		}
+		if (!ok) {
+			// Re-enable so the user can retry — the row is still here because the
+			// stop didn't take (the next poll won't remove it). On success we
+			// leave it disabled + dimmed; the next /live poll drops the row once
+			// the registry marks the task terminal.
 			const next = { ...stopping };
 			delete next[id];
 			stopping = next;

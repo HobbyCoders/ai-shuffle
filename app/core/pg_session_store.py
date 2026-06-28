@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from claude_agent_sdk.types import (
@@ -73,6 +74,40 @@ def _subpath_of(key: SessionKey | SessionListSubkeysKey) -> str | None:
     if sp is None or sp == "":
         return None
     return sp
+
+
+# Postgres ``text``/``json``/``jsonb`` cannot store U+0000 (NUL) or lone UTF-16
+# surrogates (U+D800–U+DFFF): an INSERT carrying either fails with
+# "unsupported Unicode escape sequence: <0x00> cannot be converted to text" and
+# aborts the whole transaction. SDK transcript entries occasionally contain
+# these — e.g. a tool result that echoed a binary or UTF-16-encoded file — and
+# ``psycopg2.extras.Json`` serializes them verbatim, so the mirror ``append``
+# raised and the SDK surfaced a ``mirror_error`` system message to the chat.
+# JSON itself permits these code points, so the on-disk JSONL transcript is
+# unaffected; we sanitize only at the Postgres boundary. uuids (and every other
+# id field) never contain these code points, so the drift verifier — which
+# compares ``entry->>'uuid'`` — stays green.
+_PG_ILLEGAL_RE = re.compile("[\x00\ud800-\udfff]")
+
+
+def _scrub_pg_illegal(value: Any) -> Any:
+    """Recursively replace Postgres-illegal code points (NUL, lone surrogates)
+    in every string within ``value`` with U+FFFD, returning a cleaned copy.
+
+    Dict keys are scrubbed too (a NUL in a key would break the INSERT just the
+    same). Non-string scalars pass through untouched. The common case — content
+    with no illegal code points — returns the original object without copying
+    its strings, so the hot path stays cheap.
+    """
+    if isinstance(value, str):
+        if _PG_ILLEGAL_RE.search(value) is None:
+            return value
+        return _PG_ILLEGAL_RE.sub("�", value)
+    if isinstance(value, dict):
+        return {_scrub_pg_illegal(k): _scrub_pg_illegal(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_pg_illegal(v) for v in value]
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +139,10 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
             "INSERT INTO session_store_entries "
             "(project_key, session_id, subpath, entry) "
             "VALUES (%s, %s, %s, %s)",
-            [(project_key, session_id, subpath, Json(dict(e))) for e in entries],
+            [
+                (project_key, session_id, subpath, Json(_scrub_pg_illegal(dict(e))))
+                for e in entries
+            ],
         )
 
         # Subagent appends MUST NOT touch the main session's summary.
@@ -152,7 +190,7 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
             "SET data = %s, "
             "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT "
             "WHERE project_key = %s AND session_id = %s",
-            (Json(folded["data"]), project_key, session_id),
+            (Json(_scrub_pg_illegal(folded["data"])), project_key, session_id),
         )
 
 
@@ -227,7 +265,10 @@ def _backfill_entries_sync(
                 "INSERT INTO session_store_entries "
                 "(project_key, session_id, subpath, entry) "
                 "VALUES (%s, %s, %s, %s)",
-                [(project_key, session_id, subpath, Json(dict(e))) for e in chunk],
+                [
+                    (project_key, session_id, subpath, Json(_scrub_pg_illegal(dict(e))))
+                    for e in chunk
+                ],
             )
             written += len(chunk)
 
@@ -270,7 +311,7 @@ def _backfill_entries_sync(
             "SET data = %s, "
             "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT "
             "WHERE project_key = %s AND session_id = %s",
-            (Json(folded["data"]), project_key, session_id),
+            (Json(_scrub_pg_illegal(folded["data"])), project_key, session_id),
         )
 
     return written

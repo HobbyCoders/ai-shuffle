@@ -13,6 +13,7 @@
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { stopSessionTask } from '$lib/api/sessions';
+	import { notify } from '$lib/stores/notifications';
 	import Banner from '$lib/components/Banner.svelte';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
@@ -92,10 +93,25 @@
 
 	// Stop one in-flight background task (the "x" on the ActiveTasks strip).
 	// The task drops off the next /live poll once the backend confirms the stop.
-	async function handleStopTask(taskId: string) {
+	// Returns true on a successful stop; false (with a toast) when the stop
+	// didn't take — so ActiveTasks can re-enable the button instead of leaving
+	// it stuck disabled on a ghost row.
+	async function handleStopTask(taskId: string): Promise<boolean> {
 		const sessionId = $activeSession.sessionId;
-		if (!sessionId) return;
-		await stopSessionTask(sessionId, taskId);
+		if (!sessionId) return false;
+		try {
+			const result = await stopSessionTask(sessionId, taskId);
+			if (!result.ok) {
+				notify.error(
+					`Couldn't stop task — ${result.detail ?? 'it may have already finished'}.`
+				);
+				return false;
+			}
+			return true;
+		} catch (e) {
+			notify.error('Failed to stop task. Please try again.');
+			return false;
+		}
 	}
 
 	// Handle project selection from WorkspaceSelector
