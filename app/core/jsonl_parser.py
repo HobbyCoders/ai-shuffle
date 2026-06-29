@@ -95,6 +95,71 @@ def _is_background_ack_result(tool_msg: Dict[str, Any], output: str) -> bool:
     )
 
 
+# Phrases a backgrounded sub-agent's launch-ACK tool_result carries while the
+# agent keeps running. The run_in_background flag (captured on the Task tool_use)
+# is the primary signal; this is the fallback when the flag wasn't recorded.
+_SUBAGENT_BG_ACK_PHRASES = (
+    "launched successfully",
+    "working in the background",
+    "running in the background",
+    "background with id",
+    "notified automatically",
+)
+
+
+def _is_background_subagent_ack(task_info: Dict[str, Any], output: str) -> bool:
+    """True if a Task/Agent tool_result is only the launch-ACK of a *backgrounded*
+    sub-agent that is still running — not its real completion.
+
+    A backgrounded sub-agent (``run_in_background: true``) returns control to the
+    parent immediately with a launch acknowledgement; its real outcome arrives
+    later as a terminal ``<task-notification>`` (handled separately), NOT a second
+    tool_result for this id. Without this guard a reload flips a still-running
+    backgrounded sub-agent to "completed" — the premature-✓ bug (mirrors the live
+    path's run_in_background skip in query_engine, and ``_is_background_ack_result``
+    for backgrounded Bash).
+    """
+    if task_info.get("run_in_background"):
+        return True
+    text = (output or "").strip().lower()
+    if not text:
+        return False
+    return any(p in text for p in _SUBAGENT_BG_ACK_PHRASES)
+
+
+def _extract_task_notification_field(content: str, tag: str) -> Optional[str]:
+    """Pull a single ``<tag>value</tag>`` field out of a task-notification body."""
+    import re
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", content, re.DOTALL)
+    return m.group(1).strip() if m else None
+
+
+def _apply_task_notification_status(
+    content: str,
+    messages: List[Dict[str, Any]],
+    messages_by_tool_id: Dict[str, int],
+) -> None:
+    """Flip the sub-agent a terminal ``<task-notification>`` refers to.
+
+    A backgrounded sub-agent's launch-ACK result leaves its card RUNNING (see
+    ``_is_background_subagent_ack``); its real completion arrives only as this
+    SDK-internal notification, keyed by the launch ``tool-use-id``. Reflect that
+    terminal state on reload instead of leaving the card stuck "running". Scoped
+    to sub-agents — backgrounded Bash keeps its existing handling.
+    """
+    tool_use_id = _extract_task_notification_field(content, "tool-use-id")
+    if not tool_use_id:
+        return
+    idx = messages_by_tool_id.get(tool_use_id)
+    if idx is None or idx >= len(messages):
+        return
+    msg = messages[idx]
+    if msg.get("type") != "subagent":
+        return
+    status = (_extract_task_notification_field(content, "status") or "").lower()
+    msg["agentStatus"] = "error" if status in ("failed", "stopped", "error") else "completed"
+
+
 def _truncate_for_display(content: str, max_size: int = MAX_DISPLAY_OUTPUT_SIZE) -> str:
     """
     Truncate content for display purposes.
@@ -1060,8 +1125,12 @@ def _transform_entries(
                     })
                     continue
 
-                # Skip SDK-internal task notifications (background agent callbacks)
+                # A terminal task-notification marks a backgrounded sub-agent done.
+                # Flip the matching sub-agent card (by launch tool-use-id) to its
+                # terminal status so a reload reflects reality instead of a stuck
+                # "running"; otherwise these SDK-internal callbacks aren't shown.
                 if _is_task_notification(content):
+                    _apply_task_notification_status(content, messages, messages_by_tool_id)
                     continue
 
                 # Plain user message - skip empty content and system/command-related messages
@@ -1162,7 +1231,16 @@ def _transform_entries(
                                 if msg_idx is not None and msg_idx < len(messages):
                                     msg = messages[msg_idx]
                                     msg["content"] = output[:2000] if output else ""
-                                    msg["agentStatus"] = "error" if is_error else "completed"
+                                    if is_error:
+                                        msg["agentStatus"] = "error"
+                                    elif _is_background_subagent_ack(_task_info, output):
+                                        # Backgrounded sub-agent still running — this
+                                        # result is only the launch-ACK. Keep RUNNING so
+                                        # reload doesn't claim premature completion; the
+                                        # terminal <task-notification> flips it to done.
+                                        msg["agentStatus"] = "running"
+                                    else:
+                                        msg["agentStatus"] = "completed"
 
                                     # Lazy-load agent children via the injected
                                     # loader (file- or store-backed). The loader
@@ -1331,7 +1409,18 @@ def _transform_entries(
                                 task_tool_uses[tool_id] = {
                                     "agent_type": agent_type,
                                     "description": description,
-                                    "prompt": prompt
+                                    "prompt": prompt,
+                                    # Backgrounded sub-agents (run_in_background) return
+                                    # only a launch-ACK as their tool_result; capture the
+                                    # flag so the result branch keeps the card RUNNING
+                                    # instead of marking premature completion.
+                                    "run_in_background": bool(
+                                        isinstance(tool_input, dict)
+                                        and (
+                                            tool_input.get("run_in_background")
+                                            or tool_input.get("runInBackground")
+                                        )
+                                    ),
                                 }
 
                                 # For now, we don't have the agent_id from tool_use alone
