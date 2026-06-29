@@ -225,3 +225,57 @@ describe('stabilizeMessageIdentity', () => {
 		expect(hasUniqueIds(messages)).toBe(true);
 	});
 });
+
+// ─── Rewind jsonlUuid carry-forward ──────────────────────────────────────────
+// Regression for "rewind blocked on a just-sent message until reload": a live
+// user message is optimistic (no jsonlUuid). The post-turn poll delivers the
+// server copy WITH jsonlUuid (the rewind checkpoint id). The merge adopts the
+// optimistic object for reference stability — and previously DROPPED the server
+// jsonlUuid, so MessageActions saw `messageUuid == null` and refused to rewind
+// ("missing its checkpoint id. Try reloading"). The adopted object must carry
+// the server's jsonlUuid forward.
+describe('stabilizeMessageIdentity — rewind jsonlUuid carry-forward', () => {
+	it('carries the server jsonlUuid onto an adopted optimistic user message', () => {
+		// Optimistic message id is `user-<ts>`; server copy has its own id + uuid.
+		const prior = [msg({ id: 'user-1700000000000', role: 'user', type: 'text', content: 'hello 2' })];
+		const incoming = [
+			msg({
+				id: 'srv-user',
+				role: 'user',
+				type: 'text',
+				content: 'hello 2',
+				jsonlUuid: 'caf2d784-b103-4c4a-a612-308d2e992828'
+			})
+		];
+
+		const { messages, changed } = stabilizeMessageIdentity(incoming, prior);
+
+		expect(changed).toBe(true);
+		const u = messages.find((m) => m.role === 'user');
+		expect(u?.jsonlUuid).toBe('caf2d784-b103-4c4a-a612-308d2e992828');
+	});
+
+	it('does not clobber a jsonlUuid the optimistic message already has', () => {
+		const prior = [msg({ id: 'u1', role: 'user', type: 'text', content: 'hi', jsonlUuid: 'keep-me' })];
+		const incoming = [msg({ id: 'u1', role: 'user', type: 'text', content: 'hi', jsonlUuid: 'other' })];
+
+		const { messages } = stabilizeMessageIdentity(incoming, prior);
+
+		const u = messages.find((m) => m.role === 'user');
+		expect(u?.jsonlUuid).toBe('keep-me');
+	});
+
+	it('preserves the server jsonlUuid through the id-swap branch (assistant settle)', () => {
+		const prior = [user(), streamingText('Answer', 'client-id')];
+		const incoming = [
+			user(),
+			msg({ id: 'server-id', role: 'assistant', type: 'text', content: 'Answer', streaming: false, jsonlUuid: 'asst-uuid' })
+		];
+
+		const { messages } = stabilizeMessageIdentity(incoming, prior);
+
+		const a = assistantTexts(messages)[0];
+		expect(a.id).toBe('client-id'); // adopts the stable client id
+		expect(a.jsonlUuid).toBe('asst-uuid'); // but keeps the server's rewind uuid
+	});
+});
