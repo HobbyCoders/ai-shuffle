@@ -130,6 +130,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _persist_turn_results,
     log_captured_cli_stderr,
 )
+from app.core.memory_sync import reconcile_memory, push_memory
 from app.core.query_background import (  # noqa: F401 — re-exports
     _pending_background_tasks,
     _store_background_task,
@@ -524,6 +525,9 @@ async def execute_query(
             "parent_tool_use_id": None,
         }
 
+    # Pull shared agent-memory from the DB before the CLI reads it.
+    await reconcile_memory(project_id, getattr(options, "cwd", None))
+
     try:
         async for message in query(prompt=_prompt_stream(), options=options):
             # Mirror background-task lifecycle into the registry (TaskList / /live).
@@ -645,6 +649,9 @@ async def execute_query(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Push agent-memory the CLI wrote this turn up to the shared DB.
+    await push_memory(project_id, getattr(options, "cwd", None))
 
     # Notify connected frontends that this session has new messages
     # (non-streaming queries don't use LiveSessionStore, so we broadcast
@@ -868,6 +875,9 @@ async def stream_query(
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
+
+        # Pull shared agent-memory from the DB before the CLI reads it.
+        await reconcile_memory(project_id, getattr(options, "cwd", None))
 
         adapter = ClaudeAgentAdapter()
 
@@ -1275,6 +1285,9 @@ async def stream_query(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Push agent-memory the CLI wrote this turn up to the shared DB.
+    await push_memory(project_id, getattr(options, "cwd", None))
 
     # Yield terminal event. CancelledError path already yielded 'interrupted'
     # at the top of the except block; only yield here for SDK interrupt (no
@@ -1725,6 +1738,10 @@ async def stream_to_websocket(
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
+
+        # Pull shared agent-memory from the DB into the local memory dir before
+        # the CLI reads it, so this install sees memories written elsewhere.
+        await reconcile_memory(project_id, options.cwd)
 
         adapter = ClaudeAgentAdapter()
         logger.debug("[WS] ClaudeAgentAdapter created, attempting connect...")
@@ -2749,6 +2766,9 @@ async def stream_to_websocket(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Push any agent-memory the CLI wrote this turn up to the shared DB.
+    await push_memory(project_id, getattr(options, "cwd", None))
 
     # For slash commands that produced no visible content, yield a notification
     # SDK built-in commands like /memory, /cost, /model execute inside the subprocess

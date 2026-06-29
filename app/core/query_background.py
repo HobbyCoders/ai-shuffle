@@ -47,6 +47,7 @@ from app.core.query_persistence import (
 )
 from app.core.query_streaming import truncate_large_payload
 from app.core.query_options import build_options_from_profile
+from app.core.memory_sync import reconcile_memory, push_memory
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,11 @@ async def _run_background_query(
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
+
+        # Pull shared agent-memory from the DB before the CLI reads it.
+        await reconcile_memory(
+            project.get("id") if project else None, getattr(options, "cwd", None)
+        )
 
         adapter = ClaudeAgentAdapter()
 
@@ -520,6 +526,11 @@ async def _run_background_query(
         profile_id=profile_id,
         interrupted=interrupted,
         log_prefix="[Background] ",
+    )
+
+    # Push agent-memory the CLI wrote this turn up to the shared DB.
+    await push_memory(
+        project.get("id") if project else None, getattr(options, "cwd", None)
     )
 
     logger.debug(f"[Background] Query completed for session {session_id}")

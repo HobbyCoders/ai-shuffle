@@ -221,6 +221,16 @@ class Settings(BaseSettings):
     #                      reads are deleted. Final cutover.
     session_store_mode: str = "disabled"
 
+    # Cross-install agent-memory sync. When enabled, each session mirrors the
+    # Claude Code CLI's per-project memory directory (MEMORY.md + per-fact .md
+    # files) to/from the shared database: it reconciles from the DB before the
+    # CLI starts and pushes local changes back after each turn. Keyed by a
+    # project's link_group_id (or project_id when unlinked), so installs that
+    # share a git remote share one logical memory. Safe to disable
+    # (AGENT_MEMORY_SYNC=false) — it no-ops for project-less sessions and never
+    # breaks a turn on error.
+    agent_memory_sync: bool = True
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

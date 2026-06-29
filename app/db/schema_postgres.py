@@ -925,6 +925,30 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
 
+    # ------------------------------------------------------------------
+    # 47. Agent memory files (cross-install sync of the Claude Code CLI
+    #     per-project memory directory: MEMORY.md + per-fact .md files).
+    #     Keyed by `memory_key` = a project's link_group_id (stable across
+    #     installs sharing a git remote) or its project_id when unlinked.
+    #     `deleted` rows are tombstones so a delete on one install propagates.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_memory_files (
+            id TEXT PRIMARY KEY,
+            memory_key TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            content TEXT,
+            content_hash TEXT,
+            deleted BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_by TEXT,
+            UNIQUE (memory_key, relative_path)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_key ON agent_memory_files(memory_key)"
+    )
+
     # ==================================================================
     # INDEXES
     # ==================================================================
