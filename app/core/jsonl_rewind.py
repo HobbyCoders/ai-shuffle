@@ -20,7 +20,7 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Mapping, Optional, Sequence, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 
@@ -58,6 +58,80 @@ class RewindResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def _next_real_user_index(
+    entries: Sequence[Mapping[str, Any]], start_index: int
+) -> Optional[int]:
+    """Index of the next genuine user prompt after ``start_index``.
+
+    Skips ``user`` entries that only carry tool_result blocks (those are the
+    SDK echoing tool output, not a new human turn). Returns ``None`` when no
+    further user prompt exists.
+    """
+    for i in range(start_index + 1, len(entries)):
+        entry = entries[i]
+        if entry.get('type') == 'user' and entry.get('message', {}).get('role') == 'user':
+            content = entry.get('message', {}).get('content', '')
+            if isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(block, dict) and block.get('type') == 'tool_result'
+                    for block in content
+                )
+                if has_tool_result:
+                    continue
+            return i
+    return None
+
+
+def compute_rewind_keep_count(
+    entries: Sequence[Mapping[str, Any]],
+    target_uuid: str,
+    include_response: bool,
+    target_role: str,
+) -> Tuple[Optional[int], Optional[str]]:
+    """Pure rewind slicing: how many leading transcript entries to KEEP.
+
+    Returns ``(keep_count, error)``. ``keep_count`` is the count of entries to
+    keep (i.e. ``entries[:keep_count]``); ``keep_count == len(entries)`` means
+    the target is already the tail and nothing is removed. ``error`` is a
+    non-None string only when ``target_uuid`` is absent from ``entries``.
+
+    This is the single source of truth for *where* a rewind truncates so the
+    on-disk JSONL file (:meth:`JSONLRewindService.truncate_to_checkpoint`) and
+    the Postgres session store
+    (:func:`app.core.pg_session_store.truncate_session_store_to_checkpoint`)
+    cut at identical points. ``entries`` are raw transcript dicts (each with
+    ``uuid``/``type``/``message``) — JSONL lines and store ``entry`` JSONB have
+    the same shape.
+
+    Semantics (matching the long-standing JSONL behavior):
+
+    - ``target_role == 'assistant'``: keep the assistant message and everything
+      before it; drop from the next user prompt onward.
+    - user target, ``include_response=True``: keep the user prompt and its
+      assistant reply; drop from the *next* user prompt onward.
+    - user target, ``include_response=False``: drop the target user prompt and
+      everything after it.
+    """
+    target_index = None
+    for i, entry in enumerate(entries):
+        if entry.get('uuid') == target_uuid:
+            target_index = i
+            break
+
+    if target_index is None:
+        return None, f"Message with UUID {target_uuid} not found"
+
+    if target_role == 'assistant' or include_response:
+        truncate_before = _next_real_user_index(entries, target_index)
+        if truncate_before is None:
+            # Target is already the tail — nothing after it to remove.
+            return len(entries), None
+        return truncate_before, None
+
+    # User message, drop the message itself and everything after it.
+    return target_index, None
 
 
 class JSONLRewindService:
@@ -307,88 +381,19 @@ class JSONLRewindService:
                 error="No entries found in JSONL file"
             )
 
-        # Find the target message index
-        target_index = None
-        for i, entry in enumerate(entries):
-            if entry.get('uuid') == target_uuid:
-                target_index = i
-                break
-
-        if target_index is None:
+        # Determine where to truncate (shared with the Postgres session store so
+        # JSONL and store cut at the same point — see compute_rewind_keep_count).
+        keep_count, slice_error = compute_rewind_keep_count(
+            entries, target_uuid, include_response, target_role
+        )
+        if slice_error is not None:
             return RewindResult(
                 success=False,
                 message="Target checkpoint not found",
-                error=f"Message with UUID {target_uuid} not found in JSONL"
+                error=f"{slice_error} in JSONL"
             )
 
-        # Determine where to truncate based on target role
-        if target_role == 'assistant':
-            # For assistant messages: keep the assistant message and everything before it
-            # Find the next user message after this assistant message
-            truncate_before = None
-            for i in range(target_index + 1, len(entries)):
-                entry = entries[i]
-                if entry.get('type') == 'user' and entry.get('message', {}).get('role') == 'user':
-                    # Skip tool results
-                    content = entry.get('message', {}).get('content', '')
-                    if isinstance(content, list):
-                        has_tool_result = any(
-                            isinstance(block, dict) and block.get('type') == 'tool_result'
-                            for block in content
-                        )
-                        if has_tool_result:
-                            continue
-                    # Found the next user message
-                    truncate_before = i
-                    break
-
-            if truncate_before is None:
-                # Target assistant message is at the end, nothing to truncate
-                return RewindResult(
-                    success=True,
-                    message="Already at the target checkpoint (nothing to rewind)",
-                    checkpoint_uuid=target_uuid,
-                    messages_removed=0
-                )
-
-            keep_entries = entries[:truncate_before]
-        elif include_response:
-            # For user messages with include_response=True:
-            # Find the next user message after target, truncate before it
-            # This keeps the assistant's response to the target message
-            truncate_before = None
-            for i in range(target_index + 1, len(entries)):
-                entry = entries[i]
-                if entry.get('type') == 'user' and entry.get('message', {}).get('role') == 'user':
-                    # Skip tool results
-                    content = entry.get('message', {}).get('content', '')
-                    if isinstance(content, list):
-                        has_tool_result = any(
-                            isinstance(block, dict) and block.get('type') == 'tool_result'
-                            for block in content
-                        )
-                        if has_tool_result:
-                            continue
-                    # Found the next user message
-                    truncate_before = i
-                    break
-
-            if truncate_before is None:
-                # Target is the last user message, nothing to truncate
-                return RewindResult(
-                    success=True,
-                    message="Already at the target checkpoint (nothing to rewind)",
-                    checkpoint_uuid=target_uuid,
-                    messages_removed=0
-                )
-
-            keep_entries = entries[:truncate_before]
-        else:
-            # For user messages with include_response=False:
-            # Truncate BEFORE the target user message (remove it entirely)
-            # This allows the user to re-prompt with the message content in the input field
-            keep_entries = entries[:target_index]
-
+        keep_entries = entries[:keep_count]
         messages_removed = len(entries) - len(keep_entries)
 
         # Count remaining user turns (for updating turn_count in DB)

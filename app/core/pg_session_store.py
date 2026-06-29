@@ -467,6 +467,108 @@ def _list_subkeys_sync(key: SessionListSubkeysKey) -> list[str]:
     return _list_subpaths_by_session_id_sync(key["session_id"])
 
 
+class RewindTargetNotFound(Exception):
+    """Raised when a rewind target uuid is absent from the session store."""
+
+
+def _truncate_main_transcript_to_keep_count_sync(
+    session_id: str, keep_count: int
+) -> int:
+    """Delete main-transcript (``subpath IS NULL``) rows beyond the first
+    ``keep_count``, ordered by ``id ASC``. Returns the number of rows deleted.
+
+    ``keep_count <= 0`` removes every main-transcript row. The boundary is
+    resolved by ``id`` (the per-session order column) so deletion is exact even
+    though ``id`` values are not contiguous. Subagent transcripts
+    (``subpath IS NOT NULL``) are intentionally left untouched: a truncated turn
+    no longer references them, so they are inert, and mapping each subagent
+    transcript back to the turn that spawned it is not worth the risk here.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM session_store_entries "
+            "WHERE session_id = %s AND subpath IS NULL ORDER BY id ASC",
+            (session_id,),
+        )
+        ids = [row["id"] for row in cur.fetchall()]
+        total = len(ids)
+        if keep_count >= total:
+            return 0
+        if keep_count <= 0:
+            cur.execute(
+                "DELETE FROM session_store_entries "
+                "WHERE session_id = %s AND subpath IS NULL",
+                (session_id,),
+            )
+            return cur.rowcount or 0
+        boundary_id = ids[keep_count - 1]
+        cur.execute(
+            "DELETE FROM session_store_entries "
+            "WHERE session_id = %s AND subpath IS NULL AND id > %s",
+            (session_id, boundary_id),
+        )
+        return cur.rowcount or 0
+
+
+def _truncate_session_store_to_checkpoint_sync(
+    sdk_session_id: str,
+    target_uuid: str,
+    include_response: bool,
+    target_role: str,
+) -> int:
+    """Truncate the stored main transcript at a rewind checkpoint.
+
+    Loads the session's main-transcript entries, resolves the keep-count with
+    the shared :func:`app.core.jsonl_rewind.compute_rewind_keep_count` helper
+    (so the store cuts at the exact same point as the JSONL), and deletes the
+    rows after it. Returns the number of rows removed.
+
+    Raises :class:`RewindTargetNotFound` when there are no entries for the
+    session or ``target_uuid`` is not present.
+    """
+    entries = _load_entries_by_session_id_sync(sdk_session_id, None)
+    if not entries:
+        raise RewindTargetNotFound(
+            f"No session store entries for session {sdk_session_id}"
+        )
+
+    # Lazy import keeps the module import graph one-directional (jsonl_rewind
+    # already imports app.core.* freely; importing it at module top here would
+    # risk a future cycle).
+    from app.core.jsonl_rewind import compute_rewind_keep_count
+
+    keep_count, slice_error = compute_rewind_keep_count(
+        entries, target_uuid, include_response, target_role
+    )
+    if slice_error is not None or keep_count is None:
+        raise RewindTargetNotFound(slice_error or "Rewind target could not be resolved")
+
+    return _truncate_main_transcript_to_keep_count_sync(sdk_session_id, keep_count)
+
+
+async def truncate_session_store_to_checkpoint(
+    sdk_session_id: str,
+    target_uuid: str,
+    include_response: bool,
+    target_role: str,
+) -> int:
+    """Async wrapper around :func:`_truncate_session_store_to_checkpoint_sync`.
+
+    Used by the rewind endpoint to make the Postgres session store — the source
+    of truth the UI reads in ``postgres_only`` mode — actually reflect the
+    rewind. Without this the store keeps the truncated messages and they
+    reappear on the next reload.
+    """
+    return await asyncio.to_thread(
+        _truncate_session_store_to_checkpoint_sync,
+        sdk_session_id,
+        target_uuid,
+        include_response,
+        target_role,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Async SessionStore adapter (duck-typed; no Protocol subclass needed).
 # ---------------------------------------------------------------------------
@@ -586,4 +688,8 @@ class PgSessionStore:
         )
 
 
-__all__ = ["PgSessionStore"]
+__all__ = [
+    "PgSessionStore",
+    "RewindTargetNotFound",
+    "truncate_session_store_to_checkpoint",
+]

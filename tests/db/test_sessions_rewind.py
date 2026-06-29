@@ -247,17 +247,25 @@ class TestDeleteSessionMessagesAfterJsonlUUID:
         ]
         db.add_session_messages_batch(rows)
 
-    def test_keeps_target_and_earlier_rows(self, mock_db):
-        """target=u2, include_response=False: keep u1, a1, u2. Delete a2, u3."""
+    def test_drops_target_and_following_rows(self, mock_db):
+        """target=u2, include_response=False: drop u2 itself and everything
+        after it (a2, u3), keeping only u1, a1.
+
+        This mirrors the JSONL truncation (``entries[:target_index]``) and the
+        frontend's documented intent for a user-message rewind:
+        ``include_response=false removes this message and everything after``
+        (MessageActions.svelte). Rewinding a user message must make that message
+        disappear from the chat — keeping it would reintroduce the reported bug.
+        """
         self._seed(mock_db)
         deleted = db.delete_session_messages_after_jsonl_uuid(
             session_id="s1",
             target_uuid="u2",
             include_response=False,
         )
-        assert deleted == 2
+        assert deleted == 3
         remaining = [r["content"] for r in db.get_session_messages("s1")]
-        assert remaining == ["u1", "a1", "u2"]
+        assert remaining == ["u1", "a1"]
 
     def test_include_response_keeps_following_assistant(self, mock_db):
         """target=u2, include_response=True: keep u1, a1, u2, a2. Delete u3."""
@@ -282,15 +290,21 @@ class TestDeleteSessionMessagesAfterJsonlUUID:
         assert deleted == 0
         assert len(db.get_session_messages("s1")) == 5
 
-    def test_target_is_last_row_deletes_nothing(self, mock_db):
+    def test_target_is_last_row_drops_target(self, mock_db):
+        """target=u3 (the last row), include_response=False: drop u3 itself.
+
+        Even when the target is the final message, a user-message rewind removes
+        it (and there is nothing after to remove), leaving the prior turns.
+        """
         self._seed(mock_db)
         deleted = db.delete_session_messages_after_jsonl_uuid(
             session_id="s1",
             target_uuid="u3",
             include_response=False,
         )
-        assert deleted == 0
-        assert len(db.get_session_messages("s1")) == 5
+        assert deleted == 1
+        remaining = [r["content"] for r in db.get_session_messages("s1")]
+        assert remaining == ["u1", "a1", "u2", "a2"]
 
     def test_scoped_to_session_id(self, mock_db):
         """Must not delete messages from other sessions even if uuid collides."""

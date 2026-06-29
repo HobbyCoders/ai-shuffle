@@ -27,6 +27,10 @@ from app.core.slash_commands import (
 )
 # New V2 rewind services - direct JSONL manipulation
 from app.core.jsonl_rewind import jsonl_rewind_service
+from app.core.pg_session_store import (
+    RewindTargetNotFound,
+    truncate_session_store_to_checkpoint,
+)
 from app.core.rewind_db_sync import resolve_rewind_anchor, apply_rewind_delete
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
@@ -569,9 +573,48 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         else:
             errors.append(file_error or "File rewind failed")
 
-    # Execute chat rewind using JSONL rewind service
+    # Execute chat rewind. There are up to three storage layers to keep in sync:
+    #   (a) the Postgres session store (``session_store_entries``) — the source
+    #       of truth the UI reads in ``postgres_only`` mode,
+    #   (b) the on-disk JSONL transcript the SDK resumes from, and
+    #   (c) the legacy ``session_messages`` rows.
+    # Which one is authoritative depends on ``session_store_mode``.
     if request.restore_chat:
-        # Resolve the DB anchor BEFORE truncating the JSONL. The fallback
+        store_mode = settings.session_store_mode
+        postgres_only = store_mode == "postgres_only"
+        store_truncation_enabled = store_mode in ("mirror", "postgres_only")
+
+        # (a) Truncate the Postgres session store FIRST. In postgres_only this
+        # is the authoritative chat the UI reads — skipping it is the exact bug
+        # where rewind "succeeds" but the message stays in chat because it still
+        # lives in the store and reappears on reload.
+        store_removed = 0
+        store_truncated = False
+        if store_truncation_enabled:
+            try:
+                store_removed = await truncate_session_store_to_checkpoint(
+                    sdk_session_id=sdk_session_id,
+                    target_uuid=request.target_uuid,
+                    include_response=request.include_response,
+                    target_role=request.target_role,
+                )
+                store_truncated = True
+            except RewindTargetNotFound as store_nf:
+                logger.warning(
+                    f"Rewind store truncation: target not found for "
+                    f"session={session_id} target={request.target_uuid}: {store_nf}"
+                )
+                if postgres_only:
+                    errors.append(f"Store rewind failed: {store_nf}")
+            except Exception as store_err:
+                logger.error(
+                    f"Rewind store truncation failed for session {session_id}: {store_err}",
+                    exc_info=True,
+                )
+                if postgres_only:
+                    errors.append(f"Store rewind failed: {store_err}")
+
+        # (c) Resolve the DB anchor BEFORE truncating the JSONL. The fallback
         # content-matcher (B) needs the JSONL intact to look up the target
         # uuid's text when user rows lack a persisted jsonl_uuid. This also
         # runs the (A) backfill so subsequent rewinds hit the fast path.
@@ -589,6 +632,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                 exc_info=True,
             )
 
+        # (b) Truncate the on-disk JSONL. Primary signal in disabled/mirror;
+        # best-effort in postgres_only, where the tmpfs transcript may be gone
+        # on a fresh server and the store is authoritative.
         result = jsonl_rewind_service.truncate_to_checkpoint(
             sdk_session_id=sdk_session_id,
             target_uuid=request.target_uuid,
@@ -596,8 +642,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             include_response=request.include_response,
             target_role=request.target_role
         )
-        if result.success:
-            chat_rewound = True
+        jsonl_ok = result.success
+        if jsonl_ok:
             messages_removed = result.messages_removed or 0
             # Mirror the JSONL truncation into session_messages. Without this,
             # rewind leaves orphan rows the UI renders on reload (the original
@@ -617,7 +663,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                         exc_info=True,
                     )
                     errors.append(f"DB sync failed: {db_err}")
-            else:
+            elif not postgres_only:
+                # In postgres_only, session_messages only holds user rows and is
+                # not what the UI reads, so a missing anchor there is expected.
                 logger.warning(
                     f"Rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}. "
@@ -628,18 +676,31 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                 f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
                 f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
             )
-            # Clear stale messages from live_session_store so the next
-            # load_session reads from the truncated JSONL instead of
-            # serving pre-rewind data from memory.
-            await live_session_store.cleanup_ended_session(session_id)
             # Update turn_count in DB so sidebar correctly hides empty sessions.
             if result.remaining_user_turns is not None:
                 current_turns = session.get("turn_count", 0)
                 turn_diff = result.remaining_user_turns - current_turns
                 if turn_diff != 0:
                     database.update_session(session_id, turn_increment=turn_diff)
-        else:
+        elif not postgres_only:
             errors.append(f"Chat rewind failed: {result.error}")
+
+        # Overall chat-rewind success: in postgres_only the store is the chat;
+        # elsewhere the JSONL is. (Either succeeding counts everywhere else so a
+        # mirror-mode store hit isn't lost if the JSONL is unexpectedly absent.)
+        if postgres_only:
+            chat_rewound = store_truncated
+        else:
+            chat_rewound = jsonl_ok or store_truncated
+
+        if chat_rewound:
+            # Report a non-zero count even when only the store was truncated.
+            if not messages_removed and store_removed:
+                messages_removed = store_removed
+            # Clear stale messages from live_session_store so the next
+            # load_session reads truncated data instead of serving pre-rewind
+            # data from memory.
+            await live_session_store.cleanup_ended_session(session_id)
 
     # Determine overall success
     # Chat rewind is the primary operation - if it succeeds, the operation is successful

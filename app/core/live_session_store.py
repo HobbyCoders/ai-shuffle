@@ -17,7 +17,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -249,6 +249,91 @@ class LiveSession:
                 "cache_read_tokens": self.cache_read_tokens,
             }
         }
+
+
+def _user_entry_text(content: Any) -> str:
+    """Concatenate the text of a user transcript entry's content.
+
+    Handles both the plain-string form and the list-of-blocks form, mirroring
+    how a genuine prompt is rendered. Used only to distinguish real prompts from
+    SDK command/system wrappers (whose text starts with ``<``).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        return "".join(parts)
+    return ""
+
+
+def _extract_store_rewind_uuids(
+    entries: Sequence[Mapping[str, Any]]
+) -> Tuple[List[str], List[str]]:
+    """Pull the ordered transcript uuids of rewindable messages from raw store
+    entries.
+
+    Returns ``(user_uuids, assistant_uuids)`` — the uuids of genuine user
+    prompts and of assistant messages that carry rendered text, each in
+    transcript order. These are the only two message kinds the chat UI can
+    rewind to, and the ordering lets us align them positionally with the live
+    in-memory messages (which are produced from the same turns in the same
+    order) so live messages can inherit the durable uuid without a reload.
+
+    ``entries`` are raw transcript dicts (store ``entry`` JSONB / JSONL lines),
+    each shaped ``{uuid, type, message: {role, content}}``.
+    """
+    user_uuids: List[str] = []
+    assistant_uuids: List[str] = []
+    for entry in entries:
+        uuid_ = entry.get("uuid")
+        if not uuid_:
+            continue
+        etype = entry.get("type")
+        message = entry.get("message") or {}
+        role = message.get("role")
+        content = message.get("content", "")
+        if etype == "user" and role == "user":
+            # Keep only genuine human prompts — the same definition the rest of
+            # the rewind system uses (rewind_db_sync._is_user_prompt_entry): no
+            # meta/sidechain rows, no tool_result echoes, and no SDK command
+            # wrappers / system reminders (their text starts with "<"). This is
+            # what makes the count line up with the live user text bubbles.
+            if entry.get("isMeta") or entry.get("isSidechain"):
+                continue
+            if isinstance(content, list):
+                if any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                ):
+                    continue
+            text = _user_entry_text(content)
+            if not text or text.startswith("<"):
+                continue
+            user_uuids.append(uuid_)
+        elif etype == "assistant" and role == "assistant":
+            # Only assistant entries with non-empty rendered text map to a live
+            # text message (end_streaming drops whitespace-only text blocks, so
+            # this stays aligned with what the UI shows).
+            has_text = False
+            if isinstance(content, str):
+                has_text = bool(content.strip())
+            elif isinstance(content, list):
+                for b in content:
+                    if (
+                        isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and isinstance(b.get("text"), str)
+                        and b.get("text", "").strip()
+                    ):
+                        has_text = True
+                        break
+            if has_text:
+                assistant_uuids.append(uuid_)
+    return user_uuids, assistant_uuids
 
 
 class LiveSessionStore:
@@ -1428,6 +1513,134 @@ class LiveSessionStore:
             session.cache_read_tokens = cache_read_tokens
             self._increment_update_id(session)
 
+    def _stamp_uuids_by_ordinal(
+        self,
+        session: "LiveSession",
+        user_uuids: List[str],
+        assistant_uuids: List[str],
+    ) -> None:
+        """Assign transcript uuids to live messages by per-role position.
+
+        The Kth live user text message gets the Kth user uuid; likewise for
+        assistant text messages. Only writes onto messages that lack a uuid, so
+        a correct uuid already present on a seeded-from-history message is never
+        clobbered.
+
+        Guarded by an exact per-role count match: a uuid is stamped only when
+        the number of live text messages of that role equals the number of
+        transcript uuids for it. Equal counts over two same-order sequences
+        guarantee positional correspondence, so this can never assign a uuid to
+        the wrong message (a wrong-target rewind). On any mismatch (e.g. a rare
+        prompt whose text starts with "<") that role is left for the next reload
+        to resolve from the store.
+        """
+        live_user = [
+            m for m in session.messages if m.role == "user" and m.type == "text"
+        ]
+        live_assistant = [
+            m for m in session.messages if m.role == "assistant" and m.type == "text"
+        ]
+
+        if len(live_user) == len(user_uuids):
+            for msg, uuid_ in zip(live_user, user_uuids):
+                if not msg.uuid:
+                    msg.uuid = uuid_
+        else:
+            logger.debug(
+                "uuid backfill: user count mismatch (live=%d store=%d) — "
+                "skipping user stamping",
+                len(live_user),
+                len(user_uuids),
+            )
+
+        if len(live_assistant) == len(assistant_uuids):
+            for msg, uuid_ in zip(live_assistant, assistant_uuids):
+                if not msg.uuid:
+                    msg.uuid = uuid_
+        else:
+            logger.debug(
+                "uuid backfill: assistant count mismatch (live=%d store=%d) — "
+                "skipping assistant stamping",
+                len(live_assistant),
+                len(assistant_uuids),
+            )
+
+    def _stamp_last_assistant_uuid(
+        self, session: "LiveSession", metadata: Optional[Dict[str, Any]]
+    ) -> None:
+        """Stamp this turn's final assistant text message from turn metadata.
+
+        ``last_assistant_uuid`` is captured straight from the SDK stream (see
+        query_engine), so it is available even in the brief window before the
+        Postgres mirror has flushed the final assistant entry — making the most
+        recent assistant message rewindable without depending on that flush.
+        Only fills a missing uuid.
+        """
+        if not metadata:
+            return
+        last_uuid = metadata.get("last_assistant_uuid")
+        if not last_uuid:
+            return
+        for msg in reversed(session.messages):
+            if msg.role == "assistant" and msg.type == "text":
+                if not msg.uuid:
+                    msg.uuid = last_uuid
+                return
+
+    async def _backfill_message_uuids(
+        self, session: "LiveSession", metadata: Optional[Dict[str, Any]]
+    ) -> None:
+        """Fill durable transcript uuids onto the live messages of an ended turn.
+
+        User-prompt uuids are read from the canonical Postgres session store
+        (reliably present — the prompt is written at the very start of the turn)
+        and aligned positionally with the live user messages. The final
+        assistant message's uuid comes from the turn metadata (race-proof). This
+        is what lets a user rewind the message they just sent before any reload.
+
+        Best-effort and defensive: any failure leaves the messages as-is (they
+        still get their uuids on the next reload from the store).
+        """
+        sdk_session_id: Optional[str] = None
+        try:
+            from app.db import database
+
+            row = await asyncio.to_thread(database.get_session, session.session_id)
+            if row:
+                sdk_session_id = row.get("sdk_session_id")
+        except Exception:
+            logger.debug(
+                "uuid backfill: get_session failed for %s",
+                session.session_id,
+                exc_info=True,
+            )
+
+        if sdk_session_id:
+            try:
+                from app.core.pg_session_store import (
+                    _load_entries_by_session_id_sync,
+                )
+
+                entries = await asyncio.to_thread(
+                    _load_entries_by_session_id_sync, sdk_session_id, None
+                )
+            except Exception:
+                entries = None
+                logger.debug(
+                    "uuid backfill: store load failed for %s",
+                    sdk_session_id,
+                    exc_info=True,
+                )
+
+            if entries:
+                user_uuids, assistant_uuids = _extract_store_rewind_uuids(entries)
+                self._stamp_uuids_by_ordinal(session, user_uuids, assistant_uuids)
+
+        # Always apply the metadata override last so the current turn's final
+        # assistant message is rewindable even if the store read was empty or
+        # the final entry has not been mirrored yet.
+        self._stamp_last_assistant_uuid(session, metadata)
+
     async def end_streaming(
         self,
         session_id: str,
@@ -1499,6 +1712,19 @@ class LiveSessionStore:
                         if interrupted:
                             msg.content += "\n\n[Stopped]"
                         break
+
+            # Populate transcript uuids on the just-finished live messages so the
+            # UI can rewind during this post-turn window WITHOUT a reload. The
+            # live message objects are created without a uuid (only seeded-from-
+            # history ones have one), so the rewind button's strict-uuid guard
+            # would otherwise block until the page is reloaded. See
+            # _backfill_message_uuids.
+            try:
+                await self._backfill_message_uuids(session, metadata)
+            except Exception:
+                logger.debug(
+                    "end_streaming: live uuid backfill failed", exc_info=True
+                )
 
             session.is_streaming = False
             session.active_block_type = None
