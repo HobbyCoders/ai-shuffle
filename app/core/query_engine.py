@@ -128,6 +128,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    log_captured_cli_stderr,
 )
 from app.core.query_background import (  # noqa: F401 — re-exports
     _pending_background_tasks,
@@ -894,6 +895,7 @@ async def stream_query(
             is_connected=True,
             connect_options=options,
             credentials_mtime=claude_credentials_mtime(),
+            cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)
 
@@ -1223,6 +1225,10 @@ async def stream_query(
             logger.error(f"Stream query error (unwrapped from ExceptionGroup) for session {session_id}: {actual}", exc_info=actual)
         else:
             logger.error(f"Stream query error for session {session_id}: {e}")
+        # Surface the subprocess's own stderr (exit code / stack trace it printed
+        # before dying). Mid-stream the connect-scoped cli_stderr_lines is out of
+        # scope, so without this the real exit-1 reason was only ever at DEBUG.
+        log_captured_cli_stderr(session_id, state.cli_stderr_lines, context="rest-stream mid-stream")
         # Mark client as disconnected on error
         state.is_connected = False
         yield {"type": "error", "message": str(actual)}
@@ -1753,6 +1759,7 @@ async def stream_to_websocket(
             callback_refs=callback_refs,
             connect_options=options,
             credentials_mtime=claude_credentials_mtime(),
+            cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)
 
@@ -2683,6 +2690,11 @@ async def stream_to_websocket(
 
     except Exception as e:
         logger.error(f"[WS] Query error for session {session_id}: {e}")
+        # Surface the subprocess's own stderr (the exit code / stack trace it
+        # printed before dying). This is the interactive path that owns
+        # background sub-agents; when its subprocess exits mid-stream those
+        # tasks get reaped and vanish, so recording WHY here is the key signal.
+        log_captured_cli_stderr(session_id, state.cli_stderr_lines, context="ws mid-stream")
         state.is_connected = False
         crashed = True
         yield {"type": "error", "message": str(e)}

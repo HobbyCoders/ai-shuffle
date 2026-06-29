@@ -173,4 +173,55 @@ describe('ActiveTasks', () => {
 		expect(screen.getByText('Running 1 task')).toBeTruthy();
 		expect(screen.queryByText('Task A')).toBeNull();
 	});
+
+	// ── Terminal (failed/killed) tasks — the silent-vanish fix ────────────────
+	// A background task whose SDK client died is reaped to "killed" and surfaced
+	// for a retention window (see task_registry.get_visible) so the strip shows
+	// the failure instead of the row disappearing with no indication.
+	describe('terminal task surfacing', () => {
+		it('renders a strip of only terminal tasks (the failure is still shown)', () => {
+			const { container } = render(ActiveTasks, {
+				props: { tasks: [makeTask({ id: 'dead', subject: 'Crashed task', status: 'killed' })] }
+			});
+			// The strip renders rather than collapsing to nothing.
+			expect(container.querySelector('.active-tasks')).not.toBeNull();
+			expect(screen.getByText('Crashed task')).toBeTruthy();
+			// The failed status is visible and the row carries the killed style hook.
+			expect(screen.getByText('killed')).toBeTruthy();
+			expect(container.querySelector('.task-row.is-killed')).not.toBeNull();
+		});
+
+		it('marks an errored task with the is-error style and shows its status', () => {
+			const { container } = render(ActiveTasks, {
+				props: { tasks: [makeTask({ id: 'boom', subject: 'Errored task', status: 'error' })] }
+			});
+			expect(screen.getByText('error')).toBeTruthy();
+			expect(container.querySelector('.task-row.is-error')).not.toBeNull();
+		});
+
+		it('omits the stop button for a terminal task even when onStop is provided', () => {
+			// A dead task can't be stopped — the "x" is hidden so the only control
+			// shown is for genuinely-running work.
+			const onStop = vi.fn();
+			render(ActiveTasks, {
+				props: { tasks: [makeTask({ id: 'dead', status: 'killed' })], onStop }
+			});
+			expect(screen.queryByRole('button', { name: /stop task/i })).toBeNull();
+		});
+
+		it('still shows the stop button for a running task alongside a terminal one', () => {
+			const onStop = vi.fn();
+			render(ActiveTasks, {
+				props: {
+					tasks: [
+						makeTask({ id: 'live', subject: 'Still going', status: 'running' }),
+						makeTask({ id: 'dead', subject: 'Crashed', status: 'killed' })
+					],
+					onStop
+				}
+			});
+			// Exactly one stop button — for the running task only.
+			expect(screen.getAllByRole('button', { name: /stop task/i }).length).toBe(1);
+		});
+	});
 });

@@ -586,6 +586,124 @@ class TestClearAndNoOps:
 
 
 # =============================================================================
+# Failure retention: get_visible surfaces reaped/dead tasks past clear_session
+# =============================================================================
+
+class TestRecentTerminalRetention:
+    """The fix for "a background task vanished from the UI with no failed
+    indication".
+
+    When the pooled SDK client dies, force-cleanup reaps the session's running
+    tasks to "killed" (``complete_task``) and then immediately ``clear_session``
+    wipes the live ``_tasks`` map — so the very next ``/live`` poll saw no tasks
+    and the taskbar row dropped silently. A FAILURE terminal status ("error"/
+    "killed") is now retained for a short window in ``_recent_terminal`` and
+    surfaced by ``get_visible`` (the ``/live`` DISPLAY view) even after
+    ``clear_session``. ``get_active`` (the running-only control-flow view) is
+    unchanged. A normal "completed" is NOT retained.
+    """
+
+    def test_killed_survives_clear_session_in_get_visible(self, reg):
+        # Reproduces the exact force-cleanup sequence at the registry level.
+        reg.start_task("s1", "bg1", "agent", "background work")
+        assert [t["id"] for t in reg.get_active("s1")] == ["bg1"]
+        # Reap to killed (what force-cleanup does), then clear the live bucket.
+        reg.complete_task("s1", "bg1", "killed")
+        reg.clear_session("s1")
+        # Running-only view is empty (task is gone from _tasks)...
+        assert reg.get_active("s1") == []
+        # ...but the DISPLAY view still surfaces the failure for the window.
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["bg1"]
+        assert visible[0]["status"] == "killed"
+        assert visible[0]["kind"] == "agent"
+
+    def test_error_status_also_retained(self, reg):
+        reg.start_task("s1", "bg1", "shell", "build")
+        reg.complete_task("s1", "bg1", "error")
+        reg.clear_session("s1")
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["bg1"]
+        assert visible[0]["status"] == "error"
+
+    def test_completed_is_not_retained(self, reg):
+        # A clean completion already drove its result/unpark; it must not linger.
+        reg.start_task("s1", "bg1", "agent", "done well")
+        reg.complete_task("s1", "bg1", "completed")
+        reg.clear_session("s1")
+        assert reg.get_visible("s1") == []
+
+    def test_get_visible_merges_running_and_failed(self, reg):
+        reg.start_task("s1", "live", "agent", "still going")
+        reg.start_task("s1", "dead", "shell", "crashed")
+        reg.complete_task("s1", "dead", "killed")
+        # Deterministic newest-first ordering by startedAt.
+        reg._tasks["s1"]["live"]["started_at"] = "2024-01-02T00:00:00+00:00"
+        reg._recent_terminal["s1"]["dead"]["task"]["startedAt"] = "2024-01-01T00:00:00+00:00"
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["live", "dead"]
+        # get_active stays running-only — control flow is unaffected.
+        assert [t["id"] for t in reg.get_active("s1")] == ["live"]
+
+    def test_get_visible_dedupes_live_over_retained(self, reg):
+        # Defensive: a task id present in BOTH the live map (running) and the
+        # retention store must appear once, with the live record winning.
+        reg.start_task("s1", "t1", "agent", "live")
+        reg._recent_terminal.setdefault("s1", {})["t1"] = {
+            "task": {"id": "t1", "subject": "stale", "status": "killed",
+                     "kind": "agent", "summary": None,
+                     "startedAt": "2024-01-01T00:00:00+00:00",
+                     "updatedAt": "2024-01-01T00:00:00+00:00"},
+            "recorded_at": 1.0e12,  # far future -> not pruned
+        }
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["t1"]
+        assert visible[0]["status"] == "running"  # live record wins
+
+    def test_retention_expires_after_window(self, reg):
+        reg.start_task("s1", "bg1", "agent", "background work")
+        reg.complete_task("s1", "bg1", "killed")
+        reg.clear_session("s1")
+        assert [t["id"] for t in reg.get_visible("s1")] == ["bg1"]
+        # Age the retained entry past the window — the next read prunes it.
+        reg._recent_terminal["s1"]["bg1"]["recorded_at"] = 0.0
+        assert reg.get_visible("s1") == []
+        # The empty bucket is dropped rather than lingering forever.
+        assert "s1" not in reg._recent_terminal
+
+    def test_get_visible_unknown_session_empty(self, reg):
+        assert reg.get_visible("missing") == []
+
+    def test_retention_independent_per_session(self, reg):
+        reg.start_task("s1", "a", "agent", "a")
+        reg.start_task("s2", "b", "agent", "b")
+        reg.complete_task("s1", "a", "killed")
+        reg.complete_task("s2", "b", "killed")
+        reg.clear_session("s1")
+        # s1's failure survives clear; s2 is untouched and still surfaces too.
+        assert [t["id"] for t in reg.get_visible("s1")] == ["a"]
+        assert [t["id"] for t in reg.get_visible("s2")] == ["b"]
+        # s1's retained failure never leaks into s2.
+        assert {t["id"] for t in reg.get_visible("s2")} == {"b"}
+
+    def test_reset_all_clears_retention(self, reg):
+        reg.start_task("s1", "bg1", "agent", "x")
+        reg.complete_task("s1", "bg1", "killed")
+        reg.reset_all()
+        assert reg.get_visible("s1") == []
+        assert reg._recent_terminal == {}
+
+    def test_reaped_failure_resnapshots_status(self, reg):
+        # The retention snapshot reflects the status at completion time, not a
+        # later re-registration (start_task never flips a terminal task running).
+        reg.start_task("s1", "bg1", "agent", "x")
+        reg.complete_task("s1", "bg1", "killed")
+        reg.start_task("s1", "bg1", "agent", "late start")  # must NOT revive it
+        assert reg.get_active("s1") == []
+        assert reg.get_visible("s1")[0]["status"] == "killed"
+
+
+# =============================================================================
 # TaskList MCP tool envelope
 # =============================================================================
 
@@ -725,6 +843,62 @@ class TestLiveActiveTasks:
         assert result["activeTasks"] == []
         # unpark_pending defaults to False and is always present.
         assert result["unpark_pending"] is False
+        await live_session_store.cleanup_session(session_id)
+        tr.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_live_surfaces_reaped_failure_after_clear_session(self):
+        """/live surfaces a dead background task as failed instead of vanishing.
+
+        Reproduces the silent-vanish bug end-to-end at the endpoint: a task is
+        reaped to "killed" and the registry's live bucket is cleared (what
+        force-cleanup does), yet /live still carries the failed row in activeTasks
+        because the endpoint reads the DISPLAY view (get_visible), which retains
+        the failure for a window. The live session is kept streaming purely as a
+        no-DB harness so the in-memory /live path returns without a Postgres load.
+        """
+        from app.api import sessions as sessions_api
+        from app.core.live_session_store import live_session_store
+        from app.core.task_registry import task_registry as tr
+
+        session_id = "live-reaped"
+        tr.reset_all()
+        await live_session_store.start_streaming(session_id, initial_messages=[])
+
+        # Background task runs, then its SDK client dies: reap to killed + clear.
+        tr.start_task(session_id, "bg1", "agent", "doomed work")
+        tr.complete_task(session_id, "bg1", "killed")
+        tr.clear_session(session_id)
+        assert tr.get_active(session_id) == []  # gone from the running-only view
+
+        fake_session = {"id": session_id, "title": "T"}
+        with patch.object(
+            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
+        ):
+            result = await sessions_api.get_live_session(
+                request=object(),
+                session_id=session_id,
+                since_update_id=0,
+                token="tok",
+            )
+
+        # The failed row is surfaced (not silently dropped) with its killed status.
+        assert [t["id"] for t in result["activeTasks"]] == ["bg1"]
+        assert result["activeTasks"][0]["status"] == "killed"
+
+        # Once the retention window lapses, the row ages out of activeTasks.
+        tr._recent_terminal[session_id]["bg1"]["recorded_at"] = 0.0
+        with patch.object(
+            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
+        ):
+            result2 = await sessions_api.get_live_session(
+                request=object(),
+                session_id=session_id,
+                since_update_id=0,
+                token="tok",
+            )
+        assert result2["activeTasks"] == []
+
         await live_session_store.cleanup_session(session_id)
         tr.reset_all()
 

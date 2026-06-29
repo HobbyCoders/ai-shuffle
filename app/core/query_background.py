@@ -43,6 +43,7 @@ from app.core.query_persistence import (
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    log_captured_cli_stderr,
 )
 from app.core.query_streaming import truncate_large_payload
 from app.core.query_options import build_options_from_profile
@@ -209,6 +210,7 @@ async def _run_background_query(
             is_connected=True,
             connect_options=options,
             credentials_mtime=claude_credentials_mtime(),
+            cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)
 
@@ -456,6 +458,10 @@ async def _run_background_query(
 
     except Exception as e:
         logger.error(f"[Background] Stream query error for session {session_id}: {e}")
+        # Surface the subprocess's own stderr (exit code / stack trace it printed
+        # before dying) so a mid-stream exit-1 on the background path records WHY
+        # instead of leaking as "Task exception was never retrieved".
+        log_captured_cli_stderr(session_id, state.cli_stderr_lines, context="background mid-stream")
         state.is_connected = False
         metadata["error"] = str(e)
 

@@ -33,6 +33,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _now_epoch() -> float:
+    """Current UTC time as epoch seconds (for retention-window math)."""
+    return datetime.now(timezone.utc).timestamp()
+
+
+# How long a FAILED background task (status "error"/"killed") stays surfaced on
+# ``/live`` after it dies, so the taskbar shows the failure instead of the row
+# silently vanishing. Bounded so a dead session's poller park-polls for at most
+# this long before going idle. Kept short enough to limit waste, long enough that
+# a glancing user sees the failure (and survives a reload, since retention is
+# server-side). See ``_recent_terminal`` / ``get_visible``.
+_RECENT_TERMINAL_WINDOW_SECONDS = 120.0
+
+# Statuses that mean a task DIED rather than finished cleanly. Only these are
+# retained for surfacing — a "completed" task finished its work (and already
+# drove its unpark/result), so it must NOT linger on the taskbar.
+_FAILURE_STATUSES = frozenset({"error", "killed"})
+
+
 # Value vocabulary (documented, not enforced): the registry deliberately does NOT
 # reject unknown values, so a new SDK kind/status can flow through without a code
 # change. kind ∈ {"agent", "shell"}; status ∈ {"running", "completed", "error",
@@ -135,6 +154,32 @@ class TaskRegistry:
         # re-notify on every rest and storm the session with "nothing to act on"
         # follow-ups. Cleared only with the session.
         self._unparked: Dict[str, set] = {}
+        # session_id -> {task_id -> {"task": <wire dict>, "recorded_at": <epoch>}}
+        # for tasks that reached a FAILURE terminal status ("error"/"killed").
+        # This is the retention store that fixes the "background task vanished
+        # from the UI with no failed indication" bug: when the pooled SDK client
+        # dies, force-cleanup reaps the session's running tasks to "killed"
+        # (``complete_task``) and then immediately ``clear_session`` wipes
+        # ``_tasks`` — so the very next ``/live`` poll saw no tasks and the
+        # taskbar row dropped silently. This store deliberately SURVIVES
+        # ``clear_session`` for ``_RECENT_TERMINAL_WINDOW_SECONDS`` so ``/live``
+        # (via ``get_visible``) keeps surfacing the dead task as failed for a
+        # window. Self-pruning on read/write; rebuilt on restart. Keyed by
+        # task_id so a re-reaped task replaces rather than duplicates its row.
+        self._recent_terminal: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    def _prune_recent_terminal(self, session_id: str, *, now: Optional[float] = None) -> None:
+        """Drop expired failure-retention entries for a session; drop the bucket
+        if it empties. Defensive: a missing session is a no-op."""
+        bucket = self._recent_terminal.get(session_id)
+        if not bucket:
+            return
+        cutoff = (now if now is not None else _now_epoch()) - _RECENT_TERMINAL_WINDOW_SECONDS
+        expired = [tid for tid, e in bucket.items() if e.get("recorded_at", 0.0) < cutoff]
+        for tid in expired:
+            bucket.pop(tid, None)
+        if not bucket:
+            self._recent_terminal.pop(session_id, None)
 
     def mark_sdk_background_task(self, session_id: str, task_id: str) -> None:
         """Record that ``task_id`` is an SDK-managed background task the parent
@@ -360,21 +405,69 @@ class TaskRegistry:
         record["updated_at"] = _now_iso()
 
     def complete_task(self, session_id: str, task_id: str, status: str) -> None:
-        """Set a terminal status on a task. No-op if the task is unknown."""
+        """Set a terminal status on a task. No-op if the task is unknown.
+
+        When the status is a FAILURE ("error"/"killed"), a snapshot of the task is
+        also stashed in the retention store so ``/live`` (``get_visible``) keeps
+        surfacing it as failed for ``_RECENT_TERMINAL_WINDOW_SECONDS`` even after
+        ``clear_session`` wipes the live ``_tasks`` map — otherwise a force-cleanup
+        reap (dead SDK client) drops the row with no failed indication.
+        """
         record = self._tasks.get(session_id, {}).get(task_id)
         if record is None:
             return
         record["status"] = status
         record["updated_at"] = _now_iso()
+        if status in _FAILURE_STATUSES:
+            now = _now_epoch()
+            self._prune_recent_terminal(session_id, now=now)
+            bucket = self._recent_terminal.setdefault(session_id, {})
+            bucket[task_id] = {"task": to_wire(record), "recorded_at": now}
 
     def get_active(self, session_id: str) -> List[Dict[str, Any]]:
-        """Running tasks only, newest-first, each as a wire dict."""
+        """Running tasks only, newest-first, each as a wire dict.
+
+        This is the running-only view used by every CONTROL-FLOW predicate (pool
+        busy signal, unpark gating). It must stay running-only — the ``/live``
+        DISPLAY view (which also surfaces recently-failed tasks) is ``get_visible``.
+        """
         bucket = self._tasks.get(session_id)
         if not bucket:
             return []
         records = [r for r in bucket.values() if r.get("status") == "running"]
         records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return [to_wire(r) for r in records]
+
+    def get_visible(self, session_id: str) -> List[Dict[str, Any]]:
+        """Tasks to SHOW on the taskbar: running tasks PLUS recently-failed ones.
+
+        This is the ``/live`` DISPLAY view — distinct from ``get_active`` so the
+        running-only control-flow predicates are unaffected. A failed task
+        (status "error"/"killed") that was reaped on force-cleanup is surfaced for
+        ``_RECENT_TERMINAL_WINDOW_SECONDS`` so the row shows the failure instead of
+        vanishing silently, then ages out (the poller park-polls during the window
+        and goes idle once it empties). Deduped by id (a live record wins over a
+        retained snapshot), newest-first by ``startedAt``.
+
+        NOTE: the poller treats a non-empty ``activeTasks`` as "keep park-polling".
+        Including a retained failure here therefore keeps a dead session's poller
+        alive for the window — that is intentional and self-limiting (it stops the
+        moment the window expires).
+        """
+        active = self.get_active(session_id)
+        self._prune_recent_terminal(session_id)
+        retained = self._recent_terminal.get(session_id)
+        if not retained:
+            return active
+        seen = {t.get("id") for t in active}
+        merged = list(active)
+        for entry in retained.values():
+            wire = entry.get("task") or {}
+            if wire.get("id") in seen:
+                continue
+            merged.append(wire)
+        merged.sort(key=lambda t: t.get("startedAt") or "", reverse=True)
+        return merged
 
     def has_active_background_agent(self, session_id: str) -> bool:
         """True iff a background sub-agent (kind=="agent") is still running.
@@ -469,7 +562,14 @@ class TaskRegistry:
         return to_wire(record) if record is not None else None
 
     def clear_session(self, session_id: str) -> None:
-        """Drop all tasks for a session (called when the live session is removed)."""
+        """Drop all tasks for a session (called when the live session is removed).
+
+        The failure-retention store (``_recent_terminal``) is deliberately NOT
+        wiped here: force-cleanup reaps running tasks to "killed" and then calls
+        this, so wiping it would re-introduce the silent-vanish bug. Retained
+        failures age out on their own window (pruned here so a cleared session's
+        already-expired entries don't linger).
+        """
         self._tasks.pop(session_id, None)
         self._notified.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
@@ -477,6 +577,7 @@ class TaskRegistry:
         self._unpark_pending.discard(session_id)
         self._sdk_background_tasks.pop(session_id, None)
         self._unparked.pop(session_id, None)
+        self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
@@ -487,6 +588,7 @@ class TaskRegistry:
         self._unpark_pending.clear()
         self._sdk_background_tasks.clear()
         self._unparked.clear()
+        self._recent_terminal.clear()
 
 
 # Global instance

@@ -58,6 +58,44 @@ def _extract_connection_error(exc: Exception, cli_stderr_lines: list[str]) -> st
     return f"Connection failed: {exc}"
 
 
+def log_captured_cli_stderr(
+    session_id: str,
+    cli_stderr_lines: Optional[list],
+    context: str = "",
+) -> None:
+    """Record captured CLI subprocess stderr at ERROR after a mid-stream crash.
+
+    The connect-time handlers already surface captured stderr through
+    ``_extract_connection_error`` (it lands in the user-facing error message and
+    an ERROR log line). But a subprocess that dies MID-STREAM — the common case
+    behind a background task that silently vanishes — raises from
+    ``receive_response()`` where ``cli_stderr_lines`` was previously out of
+    scope. The real reason (exit code, the stack trace the CLI printed before
+    dying) was therefore only ever logged at DEBUG by the stderr callback, and
+    the SDK reader-task error otherwise leaked as "Task exception was never
+    retrieved". Persisting the capture list on ``SessionState`` lets the
+    streaming exception handlers call this so the next exit-1 records WHY.
+
+    Best-effort and never raises — a logging helper must not mask the original
+    error it is trying to explain.
+    """
+    try:
+        if not cli_stderr_lines:
+            return
+        # A long-lived pooled subprocess accumulates stderr across turns; the
+        # lines nearest the crash are the most diagnostic, so keep the tail.
+        tail = [ln.strip() for ln in cli_stderr_lines[-40:] if ln and ln.strip()]
+        if not tail:
+            return
+        ctx = f" [{context}]" if context else ""
+        logger.error(
+            "[Captured CLI stderr]%s session=%s: %s",
+            ctx, session_id, " | ".join(tail),
+        )
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        pass
+
+
 _SUBAGENT_TOOLS = {"Task", "Agent"}
 
 

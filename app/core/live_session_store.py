@@ -1607,9 +1607,11 @@ class LiveSessionStore:
                     return False
                 if force:
                     # The SDK client is gone — in-flight background work can never
-                    # finish on its own. Reap it so the final /live poll drops the
-                    # rows, then fall through past the guards to actually remove
-                    # the session (clear_session below also wipes the registry).
+                    # finish on its own. Reap it to "killed" so the taskbar shows
+                    # the failure (the registry retains the killed rows for a short
+                    # window past clear_session — see task_registry.get_visible —
+                    # instead of the row silently vanishing), then fall through past
+                    # the guards to actually remove the session.
                     try:
                         from app.core.task_registry import task_registry
                         reaped = 0
@@ -1821,9 +1823,11 @@ class LiveSessionStore:
             removed_session = self._sessions.pop(session_id, None)
             self._session_locks.pop(session_id, None)
             msg_count = len(removed_session.messages) if removed_session else 0
-            # Reap orphaned registry tasks to "killed" so a concurrent /live poll
-            # drops them, then clear the bucket entirely. Lazy import avoids a
-            # circular dependency (task_registry imports nothing from here).
+            # Reap orphaned registry tasks to "killed" so the taskbar surfaces the
+            # failure, then clear the live bucket. The killed rows survive
+            # clear_session for a short retention window (task_registry.get_visible)
+            # so the dead task shows as failed instead of vanishing silently. Lazy
+            # import avoids a circular dependency (task_registry imports nothing here).
             try:
                 from app.core.task_registry import task_registry
                 reaped = 0

@@ -74,7 +74,11 @@
 	let timer: ReturnType<typeof setInterval> | null = null;
 
 	$effect(() => {
-		if (tasks.length > 0 && !collapsed) {
+		// Only tick while at least one RUNNING task is visible — a strip of purely
+		// terminal (failed/finished) rows has frozen clocks, so the timer would
+		// churn with nothing to update.
+		const hasRunning = tasks.some((t) => t.status === 'running');
+		if (hasRunning && !collapsed) {
 			if (timer === null) {
 				now = Date.now();
 				timer = setInterval(() => { now = Date.now(); }, 1000);
@@ -105,6 +109,23 @@
 
 	function kindLabel(kind: Task['kind']): string {
 		return kind === 'agent' ? 'agent' : 'shell';
+	}
+
+	/** A task is terminal (no longer doing work) once it has failed or finished. */
+	function isTerminal(status: Task['status']): boolean {
+		return status === 'error' || status === 'killed' || status === 'completed';
+	}
+
+	/**
+	 * Clock endpoint for the elapsed display. A running task counts up against the
+	 * live `now`; a terminal (failed/finished) task FREEZES at its `updatedAt` so a
+	 * dead row doesn't keep ticking "running for 5m…". Falls back to `now` when the
+	 * timestamp is missing/unparseable.
+	 */
+	function clockEnd(task: Task, nowMs: number): number {
+		if (!isTerminal(task.status)) return nowMs;
+		const end = Date.parse(task.updatedAt);
+		return Number.isNaN(end) ? nowMs : end;
 	}
 </script>
 
@@ -150,10 +171,10 @@
 							</span>
 							<span class="task-status" data-status={task.status}>{task.status}</span>
 							{#if task.startedAt}
-								{@const e = elapsed(task.startedAt, now)}
+								{@const e = elapsed(task.startedAt, clockEnd(task, now))}
 								{#if e}<span class="task-elapsed">{e}</span>{/if}
 							{/if}
-							{#if onStop}
+							{#if onStop && !isTerminal(task.status)}
 								<button
 									type="button"
 									class="stop-btn"
@@ -305,7 +326,8 @@
 		color: var(--primary);
 	}
 
-	.task-row.is-error .task-status {
+	.task-row.is-error .task-status,
+	.task-row.is-killed .task-status {
 		color: var(--destructive);
 	}
 

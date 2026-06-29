@@ -72,6 +72,15 @@ class SessionState:
     # auth), in which case it never triggers a reconnect.
     credentials_mtime: Optional[float] = None
 
+    # Live capture list for this subprocess's stderr, shared with the wrapped
+    # stderr callback registered at connect() time (see _wrap_stderr_capture).
+    # Persisted here so the streaming exception handlers can log the captured
+    # CLI output at ERROR when the subprocess dies MID-STREAM — at that point
+    # the connect-scoped cli_stderr_lines local is long out of scope, which is
+    # why mid-stream exit-1 crashes previously recorded no reason. None until a
+    # client is created (a reused pooled client keeps the list from creation).
+    cli_stderr_lines: Optional[list] = None
+
     @property
     def client(self) -> Optional["ClaudeSDKClient"]:
         """Backward-compatible access to the underlying SDK client.

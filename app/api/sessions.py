@@ -611,11 +611,16 @@ async def get_live_session(
     # Check session exists and user has access
     session = await require_session(request, session_id)
 
-    # Active background tasks (SDK agent tasks + Monitor shell subprocesses).
+    # Active background tasks (SDK agent tasks + Monitor shell subprocesses) PLUS
+    # any recently-failed task still inside the retention window. ``get_visible``
+    # (not ``get_active``) is the DISPLAY view: it surfaces a task that died —
+    # e.g. reaped to "killed" when its pooled SDK client was destroyed — for a
+    # short window so the taskbar shows the failure instead of the row silently
+    # vanishing. Running-only control-flow predicates still use ``get_active``.
     # Attached fresh to EVERY local response path (delta or full, streaming or
     # not) — never routed through the live store's last_update_id delta logic, so
-    # a task finishing is reflected on the very next poll. [] when none.
-    active_tasks = task_registry.get_active(session_id)
+    # a task finishing/failing is reflected on the very next poll. [] when none.
+    active_tasks = task_registry.get_visible(session_id)
 
     # "Unpark pending": a background sub-agent completed (so it has already dropped
     # out of ``active_tasks``) and the parent's unpark follow-up turn is committed
