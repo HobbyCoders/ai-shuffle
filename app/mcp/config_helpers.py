@@ -6,6 +6,8 @@ and shared constants used across all config tool modules.
 """
 
 import json
+from datetime import date, datetime
+from typing import Any
 
 from app.core.models import VALID_HOOK_EVENTS
 
@@ -19,9 +21,21 @@ VALID_HOOK_TYPES = ["bash", "webhook", "message"]
 VALID_TRIGGER_TYPES = ["cron", "interval", "webhook"]
 
 
+def _json_default(obj: Any) -> str:
+    """Fallback serializer for types stdlib json can't encode natively.
+
+    The DB layer (psycopg) returns real datetime/date objects, which json.dumps
+    rejects. ISO-format those to match the rest of the API; degrade anything
+    else to its string form so a stray type can never crash a read tool.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return str(obj)
+
+
 def _tool_result(result: dict) -> dict:
     """Wrap a result dict in the MCP tool response format."""
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=_json_default)}]}
 
 
 def _error(message: str) -> dict:

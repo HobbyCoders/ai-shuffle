@@ -673,6 +673,7 @@ def build_options_from_profile(
             app_config_srv = create_app_config_server(
                 is_admin=True,
                 project_id=project.get("id") if project else None,
+                project_dir=working_dir,
             )
             if app_config_srv:
                 mcp_servers_dict["app-config"] = app_config_srv

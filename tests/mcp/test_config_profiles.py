@@ -113,6 +113,25 @@ class TestGetProfile:
         assert "config" in body
         assert body["config"]["model"] == "claude-haiku-4-20250514"
 
+    @pytest.mark.asyncio
+    async def test_get_profile_serializes_datetime_fields(self, admin_tools):
+        """Regression: the DB layer returns real datetime objects (psycopg),
+        so the result serializer must ISO-normalize them rather than crash with
+        'Object of type datetime is not JSON serializable'."""
+        from datetime import datetime, timezone
+
+        profile = _make_profile(
+            id="dt-profile",
+            created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        )
+        tool = _get_tool(admin_tools, "getProfile")
+        with patch("app.db.database.get_profile", return_value=profile):
+            result = await tool.handler({"profile_id": "dt-profile"})
+        body = _decode(result)
+        assert body["id"] == "dt-profile"
+        assert body["created_at"].startswith("2026-01-02T03:04:05")
+
 
 # =============================================================================
 # createProfile

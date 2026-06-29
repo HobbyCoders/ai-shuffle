@@ -13,13 +13,20 @@ from app.mcp.config_helpers import _tool_result, _error
 logger = logging.getLogger(__name__)
 
 
-def _create_mcp_tools(is_admin: bool, project_id: Optional[str]) -> list:
-    """Create MCP server management tools."""
+def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list:
+    """Create MCP server management tools.
+
+    Args:
+        is_admin: whether write tools are permitted.
+        project_dir: the current project's *directory* (path), used for
+            LOCAL/PROJECT scope .mcp.json files. This must be a filesystem
+            path, not a project identifier — see McpService.__init__.
+    """
     from claude_agent_sdk import tool
     from app.core.mcp_service import get_mcp_service, McpScope, McpServerType
 
     _is_admin = is_admin
-    _project_id = project_id
+    _project_dir = project_dir
     tools = []
 
     def _server_to_dict(server) -> dict:
@@ -52,7 +59,7 @@ def _create_mcp_tools(is_admin: bool, project_id: Optional[str]) -> list:
         },
     )
     async def list_mcp_servers(args: dict) -> dict:
-        service = get_mcp_service(project_dir=_project_id)
+        service = get_mcp_service(project_dir=_project_dir)
         scope_filter = args.get("scope", "all")
 
         if scope_filter == "all":
@@ -152,7 +159,7 @@ def _create_mcp_tools(is_admin: bool, project_id: Optional[str]) -> list:
         )
 
         try:
-            service = get_mcp_service(project_dir=_project_id)
+            service = get_mcp_service(project_dir=_project_dir)
             service.add_server(args["name"], config, scope)
             return _tool_result({
                 "success": True,
@@ -203,7 +210,7 @@ def _create_mcp_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error(f"Invalid scope: {args['scope']}")
 
         try:
-            service = get_mcp_service(project_dir=_project_id)
+            service = get_mcp_service(project_dir=_project_dir)
             service.remove_server(args["name"], scope)
             return _tool_result({
                 "success": True,
@@ -233,7 +240,7 @@ def _create_mcp_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         try:
-            service = get_mcp_service(project_dir=_project_id)
+            service = get_mcp_service(project_dir=_project_dir)
             service.set_server_enabled(args["name"], args["enabled"])
             state = "enabled" if args["enabled"] else "disabled"
             return _tool_result({

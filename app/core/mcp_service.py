@@ -226,11 +226,13 @@ class McpService:
         self.USER_MCP_FILE = _get_user_claude_json()
         self.SETTINGS_FILE = self.CLAUDE_DIR / "settings.json"
 
-        # Project scope paths
-        self.project_dir = project_dir
-        if project_dir:
-            self.LOCAL_MCP_FILE = project_dir / ".claude" / ".mcp.json"
-            self.PROJECT_MCP_FILE = project_dir / ".mcp.json"
+        # Project scope paths. Coerce to Path defensively: callers sometimes
+        # hand us a directory as a plain string, and `str / ".claude"` would
+        # otherwise blow up with a cryptic "unsupported operand type(s) for /".
+        self.project_dir = Path(project_dir) if project_dir else None
+        if self.project_dir:
+            self.LOCAL_MCP_FILE = self.project_dir / ".claude" / ".mcp.json"
+            self.PROJECT_MCP_FILE = self.project_dir / ".mcp.json"
         else:
             self.LOCAL_MCP_FILE = None
             self.PROJECT_MCP_FILE = None

@@ -238,6 +238,7 @@ def get_app_config_tool_names(is_admin: bool = True) -> List[str]:
 def create_app_config_server(
     is_admin: bool = False,
     project_id: Optional[str] = None,
+    project_dir: Optional[str] = None,
 ) -> Optional[Any]:
     """
     Create the app-config SDK MCP server with all configuration tools.
@@ -245,7 +246,11 @@ def create_app_config_server(
     Args:
         is_admin: Whether the current session is an admin session.
                   Write tools check this at runtime.
-        project_id: Current project ID for project-scoped operations.
+        project_id: Current project *identifier* for project-scoped hook and
+                  automation queries.
+        project_dir: Current project *directory* (filesystem path) for the MCP
+                  server tools' LOCAL/PROJECT scope .mcp.json files. This is a
+                  path, not an identifier — do not pass project_id here.
 
     Returns:
         McpSdkServerConfig from create_sdk_mcp_server(), or None on failure.
@@ -260,7 +265,7 @@ def create_app_config_server(
     all_tools.extend(_create_discovery_tools())
     all_tools.extend(_create_hook_tools(is_admin, project_id))
     all_tools.extend(_create_automation_tools(is_admin, project_id))
-    all_tools.extend(_create_mcp_tools(is_admin, project_id))
+    all_tools.extend(_create_mcp_tools(is_admin, project_dir))
     all_tools.extend(_create_profile_tools(is_admin))
     all_tools.extend(_create_connector_tools(is_admin))
     all_tools.extend(_create_subagent_tools(is_admin))
