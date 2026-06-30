@@ -270,6 +270,24 @@ def _user_entry_text(content: Any) -> str:
     return ""
 
 
+def _is_genuine_user_prompt_content(content: Any) -> bool:
+    """True if a user message's content is a genuine human prompt.
+
+    Excludes tool_result echoes (role=user content carrying a ``tool_result``
+    block) and SDK command / system-reminder wrappers (rendered text starts
+    with ``<``), and requires some text. Shared by the store-side uuid extractor
+    and the live-side ordinal stamper so both count the *same* user bubbles —
+    otherwise their counts disagree and the stamper's count guard skips,
+    leaving just-sent prompts without a rewind uuid.
+    """
+    if isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    ):
+        return False
+    text = _user_entry_text(content)
+    return bool(text) and not text.startswith("<")
+
+
 def _extract_store_rewind_uuids(
     entries: Sequence[Mapping[str, Any]]
 ) -> Tuple[List[str], List[str]]:
@@ -304,14 +322,7 @@ def _extract_store_rewind_uuids(
             # what makes the count line up with the live user text bubbles.
             if entry.get("isMeta") or entry.get("isSidechain"):
                 continue
-            if isinstance(content, list):
-                if any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in content
-                ):
-                    continue
-            text = _user_entry_text(content)
-            if not text or text.startswith("<"):
+            if not _is_genuine_user_prompt_content(content):
                 continue
             user_uuids.append(uuid_)
         elif etype == "assistant" and role == "assistant":
@@ -1534,8 +1545,14 @@ class LiveSessionStore:
         prompt whose text starts with "<") that role is left for the next reload
         to resolve from the store.
         """
+        # Match user prompts by content, not by m.type: prompts seeded from a
+        # prior turn's history arrive with type=None (parse_session_history_via_store
+        # emits genuine prompts that way), while freshly added prompts are
+        # type="text". Using the same genuine-prompt predicate as the store-side
+        # extractor keeps the two counts aligned so the guard below doesn't skip.
         live_user = [
-            m for m in session.messages if m.role == "user" and m.type == "text"
+            m for m in session.messages
+            if m.role == "user" and _is_genuine_user_prompt_content(m.content)
         ]
         live_assistant = [
             m for m in session.messages if m.role == "assistant" and m.type == "text"
