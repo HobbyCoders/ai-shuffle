@@ -288,17 +288,6 @@ def _is_genuine_user_prompt_content(content: Any) -> bool:
     return bool(text) and not text.startswith("<")
 
 
-def _rewind_diag(msg: str) -> None:
-    """TEMP diagnostic: append a line to a fixed file so we can observe the live
-    uuid-backfill at runtime regardless of how the backend's stdout/stderr were
-    wired. Best-effort; remove once the rewind backfill is confirmed working."""
-    try:
-        with open(r"D:\Projects\ai-shuffle\rewind_diag.log", "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
-
-
 def _extract_store_rewind_uuids(
     entries: Sequence[Mapping[str, Any]]
 ) -> Tuple[List[str], List[str]]:
@@ -1569,16 +1558,6 @@ class LiveSessionStore:
             m for m in session.messages if m.role == "assistant" and m.type == "text"
         ]
 
-        _rewind_diag(
-            "[stamp] live_user=%d (%s) store_user=%d live_asst=%d store_asst=%d"
-            % (
-                len(live_user),
-                [str(m.content)[:14] for m in live_user],
-                len(user_uuids),
-                len(live_assistant),
-                len(assistant_uuids),
-            )
-        )
         if len(live_user) == len(user_uuids):
             for msg, uuid_ in zip(live_user, user_uuids):
                 if not msg.uuid:
@@ -1600,7 +1579,6 @@ class LiveSessionStore:
                 len(live_user),
                 len(user_uuids),
             )
-            _rewind_diag("[stamp] user count mismatch — stamping last only")
             if not live_user[-1].uuid:
                 live_user[-1].uuid = user_uuids[-1]
 
@@ -1652,18 +1630,6 @@ class LiveSessionStore:
         Best-effort and defensive: any failure leaves the messages as-is (they
         still get their uuids on the next reload from the store).
         """
-        _rewind_diag(
-            "[backfill] ENTER local_sid=%s msgs=%d roster=%s"
-            % (
-                session.session_id,
-                len(session.messages),
-                " | ".join(
-                    "%s/%s/%s/%r"
-                    % (m.role, m.type, (m.uuid or "-")[:8], str(m.content)[:18])
-                    for m in session.messages
-                ),
-            )
-        )
         sdk_session_id: Optional[str] = None
         try:
             from app.db import database
@@ -1677,9 +1643,6 @@ class LiveSessionStore:
                 session.session_id,
                 exc_info=True,
             )
-            _rewind_diag("[backfill] get_session FAILED for %s" % session.session_id)
-
-        _rewind_diag("[backfill] sdk_session_id=%s" % sdk_session_id)
 
         if sdk_session_id:
             entries = None
@@ -1698,33 +1661,15 @@ class LiveSessionStore:
                     sdk_session_id,
                     exc_info=True,
                 )
-                _rewind_diag("[backfill] store load FAILED for %s" % sdk_session_id)
 
-            _rewind_diag(
-                "[backfill] entries=%d" % (len(entries) if entries else 0)
-            )
             if entries:
                 user_uuids, assistant_uuids = _extract_store_rewind_uuids(entries)
-                _rewind_diag(
-                    "[backfill] user_uuids=%s asst_uuids=%s"
-                    % ([u[:8] for u in user_uuids], [a[:8] for a in assistant_uuids])
-                )
                 self._stamp_uuids_by_ordinal(session, user_uuids, assistant_uuids)
 
         # Always apply the metadata override last so the current turn's final
         # assistant message is rewindable even if the store read was empty or
         # the final entry has not been mirrored yet.
         self._stamp_last_assistant_uuid(session, metadata)
-        _rewind_diag(
-            "[backfill] EXIT roster=%s"
-            % (
-                " | ".join(
-                    "%s/%s/%s"
-                    % (m.role, m.type, (m.uuid or "-")[:8])
-                    for m in session.messages
-                )
-            )
-        )
 
     async def end_streaming(
         self,

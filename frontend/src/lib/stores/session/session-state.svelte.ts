@@ -115,6 +115,18 @@ function compareMessage(incoming: ChatMessage, existing: ChatMessage | undefined
 		existing.toolStatus === incoming.toolStatus &&
 		existing.thinkingTokens === incoming.thinkingTokens
 	) {
+		// A just-sent user prompt is delivered first WITHOUT a jsonlUuid (the
+		// post-turn backfill that stamps the transcript uuid hasn't run yet); a
+		// later poll re-delivers the SAME message WITH the uuid. Since the
+		// equality check above ignores jsonlUuid, returning `existing` here would
+		// drop that newly-arrived uuid — the "rewind blocked until reload" bug
+		// (MessageActions sees messageUuid == null and refuses, "missing its
+		// checkpoint id"). Carry the uuid onto a fresh object so it propagates to
+		// session-init's merge. Only fill when missing so a settled message keeps
+		// its stable reference (no churn) on later polls.
+		if (incoming.jsonlUuid && !existing.jsonlUuid) {
+			return { ...existing, jsonlUuid: incoming.jsonlUuid };
+		}
 		return existing;
 	}
 	// Content changed but same message — preserve ID for DOM stability

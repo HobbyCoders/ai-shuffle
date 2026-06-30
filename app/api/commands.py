@@ -32,6 +32,7 @@ from app.core.pg_session_store import (
     truncate_session_store_to_checkpoint,
 )
 from app.core.rewind_db_sync import resolve_rewind_anchor, apply_rewind_delete
+from app.core.jsonl_parser import invalidate_parse_cache
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
 from app.core.models import (
@@ -701,6 +702,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             # load_session reads truncated data instead of serving pre-rewind
             # data from memory.
             await live_session_store.cleanup_ended_session(session_id)
+            # Also drop the cached store-parse for this transcript. The store
+            # parse cache (``_store_parse_cache``, keyed by ``sdk_session_id``)
+            # has no on-disk mtime to self-invalidate, so once the live session
+            # is cleaned up a fresh ``/live`` cold-load re-serves the PRE-rewind
+            # transcript verbatim from cache even though the Postgres store is now
+            # truncated — the rewound messages reappear on reload (sub-bug #2:
+            # "chat doesn't reflect revert"). Invalidating forces the next read to
+            # re-parse the truncated store. Also clears the JSONL ``_parse_cache``,
+            # correct after the on-disk transcript truncation above.
+            invalidate_parse_cache(sdk_session_id)
 
     # Determine overall success
     # Chat rewind is the primary operation - if it succeeds, the operation is successful
