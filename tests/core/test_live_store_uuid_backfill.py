@@ -181,15 +181,33 @@ class TestStampUuidsByOrdinal:
         assert session.messages[0].uuid == "seeded-u1"
         assert session.messages[1].uuid == "u2"
 
-    def test_user_count_mismatch_skips_stamping(self):
-        """Guard against wrong-target rewind: unequal counts → no user stamp."""
+    def test_user_count_mismatch_stamps_only_last_prompt(self):
+        """On a count mismatch the just-sent prompt must still become rewindable.
+
+        The live snapshot always ENDS with this turn's just-sent prompt, and the
+        store's last user uuid is that same prompt — so the last position is the
+        one we can stamp without risk of a wrong target. Earlier prompts are left
+        for the next full load (store-parse) to resolve. This supersedes the old
+        over-conservative "mismatch → stamp nothing" behavior, which was the very
+        thing that left the just-sent message un-rewindable in edge cases.
+        """
         session = LiveSession(session_id="s1", messages=[
             _live_user("m1", "hello 1"),
             _live_user("m2", "hello 2"),
         ])
-        # Only one store uuid but two live user messages → mismatch → skip.
+        # Only one store uuid but two live user messages → mismatch.
         self.store._stamp_uuids_by_ordinal(session, ["u1"], [])
-        assert [m.uuid for m in session.messages] == [None, None]
+        # Last (just-sent) prompt gets the last store uuid; earlier left None.
+        assert [m.uuid for m in session.messages] == [None, "u1"]
+
+    def test_user_count_mismatch_does_not_clobber_seeded_last(self):
+        """A correct uuid already on the last prompt is never overwritten."""
+        session = LiveSession(session_id="s1", messages=[
+            _live_user("m1", "hello 1"),
+            _live_user("m2", "hello 2", uuid="already"),
+        ])
+        self.store._stamp_uuids_by_ordinal(session, ["u1"], [])
+        assert [m.uuid for m in session.messages] == [None, "already"]
 
     def test_stamps_seeded_user_with_none_type(self):
         """Root cause of the persistent rewind bug: a user prompt seeded from a
