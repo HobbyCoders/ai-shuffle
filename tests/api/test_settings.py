@@ -71,7 +71,7 @@ class TestGetDecryptedApiKey:
 
     def test_get_decrypted_api_key_not_set(self):
         """Should return None if key not set."""
-        with patch("app.api.settings.database") as mock_db:
+        with patch("app.api.settings_crypto.database") as mock_db:
             mock_db.get_system_setting.return_value = None
             from app.api.settings import get_decrypted_api_key
             result = get_decrypted_api_key("openai_api_key")
@@ -79,8 +79,8 @@ class TestGetDecryptedApiKey:
 
     def test_get_decrypted_api_key_plaintext(self):
         """Should return plaintext key as-is."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_db.get_system_setting.return_value = "sk-plaintext-key"
                 mock_enc.is_encrypted.return_value = False
                 from app.api.settings import get_decrypted_api_key
@@ -89,8 +89,8 @@ class TestGetDecryptedApiKey:
 
     def test_get_decrypted_api_key_encrypted(self):
         """Should decrypt encrypted key."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_db.get_system_setting.return_value = "encrypted:sk-secret-key"
                 mock_enc.is_encrypted.return_value = True
                 mock_enc.is_encryption_ready.return_value = True
@@ -101,8 +101,8 @@ class TestGetDecryptedApiKey:
 
     def test_get_decrypted_api_key_encryption_not_ready(self):
         """Should return None if encryption not ready."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_db.get_system_setting.return_value = "encrypted:sk-secret-key"
                 mock_enc.is_encrypted.return_value = True
                 mock_enc.is_encryption_ready.return_value = False
@@ -112,8 +112,8 @@ class TestGetDecryptedApiKey:
 
     def test_get_decrypted_api_key_decryption_error(self):
         """Should return None if decryption fails."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_db.get_system_setting.return_value = "encrypted:bad-data"
                 mock_enc.is_encrypted.return_value = True
                 mock_enc.is_encryption_ready.return_value = True
@@ -128,8 +128,8 @@ class TestSetEncryptedApiKey:
 
     def test_set_encrypted_api_key_with_encryption(self):
         """Should encrypt and store key when encryption ready."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_enc.is_encryption_ready.return_value = True
                 mock_enc.encrypt_value.return_value = "encrypted:sk-key"
                 from app.api.settings import set_encrypted_api_key
@@ -139,8 +139,8 @@ class TestSetEncryptedApiKey:
 
     def test_set_encrypted_api_key_without_encryption(self):
         """Should store plaintext when encryption not ready."""
-        with patch("app.api.settings.database") as mock_db:
-            with patch("app.api.settings.encryption") as mock_enc:
+        with patch("app.api.settings_crypto.database") as mock_db:
+            with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_enc.is_encryption_ready.return_value = False
                 from app.api.settings import set_encrypted_api_key
                 set_encrypted_api_key("openai_api_key", "sk-key")
@@ -194,19 +194,9 @@ class TestModuleImports:
         from app.api.settings import router
         assert router is not None
 
-    def test_image_models_defined(self):
-        """IMAGE_MODELS should be defined as a dict."""
-        from app.api.settings import IMAGE_MODELS
-        assert IMAGE_MODELS is not None
-        assert isinstance(IMAGE_MODELS, dict)
-        assert len(IMAGE_MODELS) > 0
-
-    def test_video_models_defined(self):
-        """VIDEO_MODELS should be defined as a dict."""
-        from app.api.settings import VIDEO_MODELS
-        assert VIDEO_MODELS is not None
-        assert isinstance(VIDEO_MODELS, dict)
-        assert len(VIDEO_MODELS) > 0
+    # NOTE: IMAGE_MODELS / VIDEO_MODELS static catalogs were removed when the app
+    # consolidated to FAL providers with per-model settings (#175). Image/video
+    # models are no longer a backend constant, so those import tests were dropped.
 
     def test_tts_models_defined(self):
         """TTS_MODELS should be defined as a dict."""
@@ -226,48 +216,14 @@ class TestModuleImports:
         """CREDENTIAL_POLICY_INFO should be defined."""
         from app.api.settings import CREDENTIAL_POLICY_INFO
         assert CREDENTIAL_POLICY_INFO is not None
-        assert "openai_api_key" in CREDENTIAL_POLICY_INFO
+        # Consolidated to fal.ai for all AI tools; github_pat for repo access.
+        assert "fal_api_key" in CREDENTIAL_POLICY_INFO
 
 
-class TestImageModels:
-    """Test IMAGE_MODELS constant (dict format)."""
-
-    def test_has_gemini_models(self):
-        """Should include Gemini image models."""
-        from app.api.settings import IMAGE_MODELS
-        gemini_models = [k for k in IMAGE_MODELS.keys() if "gemini" in k]
-        assert len(gemini_models) > 0
-
-    def test_models_have_required_fields(self):
-        """All models should have required fields."""
-        from app.api.settings import IMAGE_MODELS
-        for model_id, model_info in IMAGE_MODELS.items():
-            assert "name" in model_info
-            assert "provider" in model_info
-
-    def test_models_have_capabilities(self):
-        """Models should have capabilities field."""
-        from app.api.settings import IMAGE_MODELS
-        for model_id, model_info in IMAGE_MODELS.items():
-            assert "capabilities" in model_info
-            assert isinstance(model_info["capabilities"], list)
-
-
-class TestVideoModels:
-    """Test VIDEO_MODELS constant (dict format)."""
-
-    def test_has_veo_models(self):
-        """Should include Veo video models."""
-        from app.api.settings import VIDEO_MODELS
-        veo_models = [k for k in VIDEO_MODELS.keys() if "veo" in k]
-        assert len(veo_models) > 0
-
-    def test_models_have_required_fields(self):
-        """All video models should have required fields."""
-        from app.api.settings import VIDEO_MODELS
-        for model_id, model_info in VIDEO_MODELS.items():
-            assert "name" in model_info
-            assert "provider" in model_info
+# NOTE: TestImageModels / TestVideoModels removed — the IMAGE_MODELS / VIDEO_MODELS
+# static catalogs no longer exist. The app consolidated image/video generation onto
+# FAL providers with per-model settings (#175); model metadata is no longer a
+# backend constant, so there is nothing here to assert against.
 
 
 class TestTTSModels:
@@ -305,15 +261,15 @@ class TestSTTModels:
 class TestCredentialPolicyInfo:
     """Test CREDENTIAL_POLICY_INFO constant."""
 
-    def test_has_openai_credential(self):
-        """Should have openai_api_key credential."""
+    def test_has_fal_credential(self):
+        """Should have fal_api_key credential (drives all AI tools)."""
         from app.api.settings import CREDENTIAL_POLICY_INFO
-        assert "openai_api_key" in CREDENTIAL_POLICY_INFO
+        assert "fal_api_key" in CREDENTIAL_POLICY_INFO
 
-    def test_has_gemini_credential(self):
-        """Should have gemini_api_key credential."""
+    def test_has_github_credential(self):
+        """Should have github_pat credential (repo access)."""
         from app.api.settings import CREDENTIAL_POLICY_INFO
-        assert "gemini_api_key" in CREDENTIAL_POLICY_INFO
+        assert "github_pat" in CREDENTIAL_POLICY_INFO
 
     def test_credential_has_required_fields(self):
         """Each credential should have required fields."""
@@ -323,18 +279,8 @@ class TestCredentialPolicyInfo:
             assert "description" in info
 
 
-# =============================================================================
-# Pydantic Model Tests
-# =============================================================================
-
-class TestPydanticModels:
-    """Test Pydantic request/response models."""
-
-    def test_openai_key_request_model(self):
-        """OpenAIKeyRequest should validate correctly."""
-        from app.api.settings import OpenAIKeyRequest
-        req = OpenAIKeyRequest(api_key="sk-test123")
-        assert req.api_key == "sk-test123"
+# NOTE: TestPydanticModels removed — OpenAIKeyRequest no longer exists. OpenAI-specific
+# key handling was replaced by the unified fal.ai credential flow (#175).
 
 
 # =============================================================================
@@ -345,39 +291,19 @@ class TestModelValidation:
     """Test model validation helpers."""
 
     def test_valid_tts_models(self):
-        """Should identify valid TTS models."""
+        """Should identify valid TTS models (fal.ai identifiers post-consolidation)."""
         from app.api.settings import TTS_MODELS
         valid_ids = set(TTS_MODELS.keys())
-        assert "tts-1" in valid_ids or "gpt-4o-mini-tts" in valid_ids
-
-    def test_valid_image_models(self):
-        """Should identify valid image models."""
-        from app.api.settings import IMAGE_MODELS
-        valid_ids = set(IMAGE_MODELS.keys())
-        # Should have at least one model
         assert len(valid_ids) > 0
+        # After the FAL consolidation (#175) every TTS model is a fal.ai identifier.
+        assert all(model_id.startswith("fal-ai/") for model_id in valid_ids)
 
-    def test_valid_video_models(self):
-        """Should identify valid video models."""
-        from app.api.settings import VIDEO_MODELS
-        valid_ids = set(VIDEO_MODELS.keys())
-        # Should have at least one model
-        assert len(valid_ids) > 0
+    # Image/video model validation removed with the IMAGE_MODELS / VIDEO_MODELS
+    # catalogs (FAL consolidation, #175).
 
 
-# =============================================================================
-# Video Provider Tests
-# =============================================================================
-
-class TestVideoProviders:
-    """Test video provider constants."""
-
-    def test_valid_video_providers(self):
-        """Should have valid video providers defined."""
-        from app.api.settings import VIDEO_MODELS
-        providers = {info["provider"] for info in VIDEO_MODELS.values()}
-        # Should have at least one provider
-        assert len(providers) > 0
+# NOTE: TestVideoProviders removed — provider metadata derived from VIDEO_MODELS,
+# which no longer exists (FAL consolidation, #175).
 
 
 # =============================================================================
@@ -398,22 +324,9 @@ class TestCredentialTypes:
 # Internal Config Endpoint Logic Tests
 # =============================================================================
 
-class TestInternalConfigLogic:
-    """Test internal configuration endpoint logic."""
-
-    def test_image_api_key_selection_logic(self):
-        """Test image API key selection based on provider."""
-        from app.api.settings import IMAGE_MODELS
-        google_models = [k for k, v in IMAGE_MODELS.items() if "google" in v.get("provider", "")]
-        # Google providers should exist
-        assert len(google_models) > 0
-
-    def test_video_api_key_selection_logic(self):
-        """Test video API key selection based on provider."""
-        from app.api.settings import VIDEO_MODELS
-        providers = {v["provider"] for v in VIDEO_MODELS.values()}
-        # Should have providers defined
-        assert len(providers) > 0
+# NOTE: TestInternalConfigLogic removed — image/video API-key selection was driven
+# by the IMAGE_MODELS / VIDEO_MODELS provider metadata, which no longer exists. Under
+# the FAL consolidation (#175) all AI tools share the single fal_api_key credential.
 
 
 # =============================================================================
@@ -480,24 +393,5 @@ class TestOpenAIKeyValidation:
             assert not key.startswith("sk-") or key == ""
 
 
-# =============================================================================
-# Image Generation Provider Tests
-# =============================================================================
-
-class TestImageProviderValidation:
-    """Test image generation provider validation."""
-
-    def test_google_provider_variants(self):
-        """Should support Google provider variants."""
-        from app.api.settings import IMAGE_MODELS
-        google_providers = {v["provider"] for v in IMAGE_MODELS.values() if "google" in v.get("provider", "").lower()}
-        # Google providers should exist
-        assert len(google_providers) > 0
-
-    def test_provider_model_consistency(self):
-        """Provider in model should match model requirements."""
-        from app.api.settings import IMAGE_MODELS
-        for model_id, model_info in IMAGE_MODELS.items():
-            provider = model_info.get("provider", "")
-            # Models should have provider
-            assert provider != ""
+# NOTE: TestImageProviderValidation removed — image provider validation was based on
+# the IMAGE_MODELS catalog, which no longer exists (FAL consolidation, #175).
