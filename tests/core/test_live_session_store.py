@@ -1324,3 +1324,140 @@ class TestDiscardEmptyUserTurn:
         discarded = await store.discard_empty_user_turn("session-1")
 
         assert discarded is None
+
+
+# =============================================================================
+# Truncate After UUID (rewind trim for refused-cleanup live sessions) Tests
+# =============================================================================
+
+class TestTruncateAfterUuid:
+    """Tests for truncate_after_uuid — trims a surviving in-memory snapshot at a
+    rewind checkpoint when cleanup_ended_session refused to drop the session
+    (streaming / team members / parked on background work). Without it the
+    longer pre-rewind snapshot wins the /live "longer wins" heal and rewind
+    visually no-ops. Mirrors compute_rewind_keep_count semantics over the
+    rendered live messages.
+    """
+
+    @staticmethod
+    async def _seed(store, messages):
+        await store.start_streaming("session-1", initial_messages=messages)
+        # Simulate an ended-but-not-cleaned session (the RC3 scenario).
+        session = store.get_session("session-1")
+        session.is_streaming = False
+        return session
+
+    @pytest.mark.asyncio
+    async def test_user_target_no_response_drops_target_and_after(self, store):
+        """User target, include_response=False: drop the target prompt and all after."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+            {"id": "m4", "role": "assistant", "type": "text", "content": "reply2", "uuid": "a2"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u2", include_response=False, target_role="user"
+        )
+
+        assert removed is True
+        session = store.get_session("session-1")
+        assert [m.uuid for m in session.messages] == ["u1", "a1"]
+        assert session.needs_full_refresh is True
+
+    @pytest.mark.asyncio
+    async def test_user_target_include_response_keeps_reply(self, store):
+        """User target, include_response=True: keep the target + its reply, drop the next turn."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+            {"id": "m4", "role": "assistant", "type": "text", "content": "reply2", "uuid": "a2"},
+            {"id": "m5", "role": "user", "type": "text", "content": "third", "uuid": "u3"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u1", include_response=True, target_role="user"
+        )
+
+        assert removed is True
+        session = store.get_session("session-1")
+        # Kept up to (not including) the NEXT real user prompt (u2).
+        assert [m.uuid for m in session.messages] == ["u1", "a1"]
+
+    @pytest.mark.asyncio
+    async def test_assistant_target_drops_next_turn_onward(self, store):
+        """Assistant target: keep the assistant and everything before, drop from next user prompt."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="a1", include_response=False, target_role="assistant"
+        )
+
+        assert removed is True
+        session = store.get_session("session-1")
+        assert [m.uuid for m in session.messages] == ["u1", "a1"]
+
+    @pytest.mark.asyncio
+    async def test_target_is_tail_is_noop(self, store):
+        """Target already at the tail (include_response, nothing after): no removal."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u1", include_response=True, target_role="user"
+        )
+
+        assert removed is False
+        session = store.get_session("session-1")
+        assert [m.uuid for m in session.messages] == ["u1", "a1"]
+
+    @pytest.mark.asyncio
+    async def test_skips_task_notification_when_finding_next_user(self, store):
+        """A <task-notification> callback is not a real prompt — trim past it to the next real user."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text",
+             "content": "<task-notification>agent done</task-notification>", "uuid": "n1"},
+            {"id": "m4", "role": "assistant", "type": "text", "content": "reply2", "uuid": "a2"},
+            {"id": "m5", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u1", include_response=True, target_role="user"
+        )
+
+        assert removed is True
+        session = store.get_session("session-1")
+        # Kept through the notification + its reply; dropped from the next REAL prompt (u2).
+        assert [m.uuid for m in session.messages] == ["u1", "a1", "n1", "a2"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_target_is_noop(self, store):
+        """A target uuid absent from the live messages leaves them untouched."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="nope", include_response=False, target_role="user"
+        )
+
+        assert removed is False
+        assert len(store.get_session("session-1").messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_session_is_noop(self, store):
+        """Trimming a nonexistent session returns False and does not raise."""
+        removed = await store.truncate_after_uuid(
+            "nonexistent", target_uuid="u1", include_response=False, target_role="user"
+        )
+        assert removed is False

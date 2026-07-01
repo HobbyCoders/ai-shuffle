@@ -198,10 +198,17 @@ class MessageResolver:
                     def _store_loader(sid: str, subpath: Optional[str] = None) -> list:
                         return _load_entries_by_session_id_sync(sid, subpath)
 
+                    # use_cache=False: the turn-start seed must NOT inherit a
+                    # stale _store_parse_cache. After a rewind the cache is
+                    # invalidated, but a poisoned seed here (from before the fix)
+                    # would otherwise get reseeded forever via handle_done's
+                    # "fresh >= seed" guard. Turn start runs once per turn, so a
+                    # fresh store parse here is an acceptable cost.
                     messages, _usage = parse_session_history_from_store(
                         sdk_session_id,
                         working_dir or _default_working_dir(),
                         _store_loader,
+                        use_cache=False,
                     )
                     return messages
                 except Exception as e:

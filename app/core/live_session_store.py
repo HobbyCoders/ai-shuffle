@@ -1796,6 +1796,106 @@ class LiveSessionStore:
             )
             return discarded
 
+    async def truncate_after_uuid(
+        self,
+        session_id: str,
+        target_uuid: str,
+        include_response: bool,
+        target_role: str,
+    ) -> bool:
+        """Trim an in-memory session's messages at a rewind checkpoint.
+
+        Used by ``execute_rewind`` when ``cleanup_ended_session`` refuses to drop
+        the session (still streaming, active team members, or a parked session
+        with active background work). The surviving snapshot still holds the
+        post-checkpoint messages and would win the "longer wins" heal on the next
+        ``/live`` read (see ``sessions.py``), visually no-opping the rewind. Cut
+        it here at the SAME point the store/JSONL were cut so the snapshot matches
+        the truncated transcript.
+
+        Mirrors :func:`app.core.jsonl_rewind.compute_rewind_keep_count` semantics
+        over the rendered live messages (which carry the transcript ``uuid`` on
+        rewindable positions):
+
+        - ``target_role == 'assistant'`` or ``include_response``: keep the target
+          and its reply; drop from the next real user prompt onward.
+        - user target, ``include_response=False``: drop the target and everything
+          after it.
+
+        A "real user prompt" is a ``role == 'user'`` text message that is not a
+        ``<task-notification>`` callback — tool results live on the tool_use
+        message, never as standalone user messages. Returns True if any messages
+        were removed.
+        """
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session or not session.messages:
+                return False
+
+            target_index = None
+            for i, msg in enumerate(session.messages):
+                if msg.uuid == target_uuid:
+                    target_index = i
+                    break
+            if target_index is None:
+                logger.debug(
+                    "truncate_after_uuid: target %s not in live messages for %s",
+                    target_uuid,
+                    session_id,
+                )
+                return False
+
+            if target_role == "assistant" or include_response:
+                keep_count = self._next_real_user_message_index(
+                    session.messages, target_index
+                )
+                if keep_count is None:
+                    # Target is already the tail — nothing after it to remove.
+                    return False
+            else:
+                keep_count = target_index
+
+            if keep_count >= len(session.messages):
+                return False
+
+            removed = len(session.messages) - keep_count
+            del session.messages[keep_count:]
+            # Keep the delta-poll bookkeeping consistent so the removal reaches
+            # the frontend as a clean full snapshot rather than a stale delta.
+            if session.initial_message_count > keep_count:
+                session.initial_message_count = keep_count
+            session.needs_full_refresh = True
+            self._increment_update_id(session)
+            logger.info(
+                "truncate_after_uuid: trimmed %d message(s) from live session %s "
+                "at checkpoint %s (kept %d)",
+                removed,
+                session_id,
+                target_uuid,
+                keep_count,
+            )
+            return True
+
+    @staticmethod
+    def _next_real_user_message_index(
+        messages: List["LiveMessage"], start_index: int
+    ) -> Optional[int]:
+        """Index of the next genuine user prompt after ``start_index``.
+
+        Mirrors :func:`app.core.jsonl_rewind._next_real_user_index` over rendered
+        live messages: skips ``<task-notification>`` callbacks (background agent
+        completions, not human turns). Returns None when no later prompt exists.
+        """
+        for i in range(start_index + 1, len(messages)):
+            msg = messages[i]
+            if (
+                msg.role == "user"
+                and msg.type == "text"
+                and "<task-notification>" not in msg.content
+            ):
+                return i
+        return None
+
     async def cleanup_ended_session(self, session_id: str, *, force: bool = False) -> bool:
         """
         Remove an ended session from memory.

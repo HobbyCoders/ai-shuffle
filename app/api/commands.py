@@ -697,10 +697,30 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             # Report a non-zero count even when only the store was truncated.
             if not messages_removed and store_removed:
                 messages_removed = store_removed
+            # Invalidate the parse caches keyed by sdk_session_id. The store-backed
+            # read path (postgres_only) serves parse_session_history_from_store
+            # verbatim from _store_parse_cache, which has NO mtime/version check —
+            # a warm pre-rewind transcript (reseeded at every turn end) would be
+            # served on the next reload, so rewind "succeeds" but the message
+            # stays in chat. Also drops the mtime-validated JSONL cache so
+            # filesystem-mode reads re-parse the truncated file.
+            from app.core.jsonl_parser import invalidate_parse_cache
+            invalidate_parse_cache(sdk_session_id)
             # Clear stale messages from live_session_store so the next
             # load_session reads truncated data instead of serving pre-rewind
-            # data from memory.
-            await live_session_store.cleanup_ended_session(session_id)
+            # data from memory. When cleanup is refused (streaming/team members/
+            # active background task — e.g. a parked session), the surviving
+            # in-memory snapshot still holds the post-checkpoint messages and
+            # would win the "longer wins" heal on reload, visually no-opping the
+            # rewind. Trim it in place at the same checkpoint instead.
+            cleaned = await live_session_store.cleanup_ended_session(session_id)
+            if not cleaned:
+                await live_session_store.truncate_after_uuid(
+                    session_id=session_id,
+                    target_uuid=request.target_uuid,
+                    include_response=request.include_response,
+                    target_role=request.target_role,
+                )
 
     # Determine overall success
     # Chat rewind is the primary operation - if it succeeds, the operation is successful
