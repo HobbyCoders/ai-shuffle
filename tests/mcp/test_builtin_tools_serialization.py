@@ -48,3 +48,23 @@ def test_ok_plain_payload_still_works():
     """No regression for the common all-primitive payload."""
     body = _decode(_ok({"count": 0, "crons": []}))
     assert body == {"success": True, "count": 0, "crons": []}
+
+
+def test_ai_tools_result_serializes_datetime():
+    """ai_tools_sdk._tool_result shares the same bare-json.dumps failure class."""
+    from app.mcp.ai_tools_sdk import _tool_result
+
+    dt = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
+    body = _decode(_tool_result({"success": True, "created_at": dt}))
+    assert body["success"] is True
+    assert body["created_at"].startswith("2026-03-04T05:06:07")
+
+
+def test_connector_tools_result_serializes_datetime():
+    """connector_tools_sdk._tool_result shares the same bare-json.dumps failure class."""
+    from app.mcp.connector_tools_sdk import _tool_result
+
+    dt = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
+    body = _decode(_tool_result({"success": True, "updated_at": dt}))
+    assert body["success"] is True
+    assert body["updated_at"].startswith("2026-03-04T05:06:07")

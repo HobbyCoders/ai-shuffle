@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from mcp.types import ToolAnnotations
 
+from app.mcp.config_helpers import _json_default
+
 logger = logging.getLogger(__name__)
 
 # Prevent SDK from silently truncating large connector tool results (>50K default).
@@ -21,8 +23,13 @@ _CONNECTOR_ANNOTATIONS = ToolAnnotations(maxResultSizeChars=200_000)
 
 
 def _tool_result(result: dict) -> dict:
-    """Wrap a result dict in the MCP tool response format."""
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    """Wrap a result dict in the MCP tool response format.
+
+    Uses ``_json_default`` so datetime/date values in results ISO-normalize
+    instead of crashing the tool with 'Object of type datetime is not JSON
+    serializable' (same failure class as the CronList crash).
+    """
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=_json_default)}]}
 
 
 def create_connector_tools_server() -> Optional[Any]:

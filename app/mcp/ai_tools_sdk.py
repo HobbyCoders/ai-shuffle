@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from claude_agent_sdk import tool, create_sdk_mcp_server
 from mcp.types import ToolAnnotations
 
+from app.mcp.config_helpers import _json_default
 from app.mcp.node_worker import NodeWorker
 from app.mcp.sdk_compat import patch_sdk_server
 
@@ -27,8 +28,13 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def _tool_result(result: dict) -> dict:
-    """Wrap a result dict in the MCP tool response format."""
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    """Wrap a result dict in the MCP tool response format.
+
+    Uses ``_json_default`` so datetime/date values in results ISO-normalize
+    instead of crashing the tool with 'Object of type datetime is not JSON
+    serializable' (same failure class as the CronList crash).
+    """
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=_json_default)}]}
 
 
 # Annotation for tools that may return large results (base64 previews, lengthy metadata).
