@@ -348,8 +348,13 @@ export const appData = {
 	},
 
 	async createProject(data: { id: string; name: string; description?: string; path?: string }) {
-		await api.post('/projects', data);
+		// Return the server's created Project: the backend can rewrite the `id`
+		// (auto-suffix on a cross-install collision), so callers must key off the
+		// server-assigned id rather than the requested one, otherwise selecting
+		// the new project resolves to nothing.
+		const created = await api.post<Project>('/projects', data);
 		await appData.loadProjects();
+		return created;
 	},
 
 	async updateProject(projectId: string, data: { name?: string; description?: string; path?: string }) {

@@ -1418,7 +1418,7 @@ def add_sync_log(
         cursor.execute(
             sql,
             (session_id, event_type, entity_type, entity_id,
-             json.dumps(data) if data else None, now)
+             json.dumps(data, default=str) if data else None, now)
         )
         lastrowid = cursor.fetchone()["id"]
         return {

@@ -80,13 +80,16 @@
 		addError = null;
 
 		try {
-			await appData.createProject({
+			const created = await appData.createProject({
 				id: projectId.trim(),
 				name: projectName.trim(),
 				path: projectPath.trim()
 			});
 			onClose();
-			onCreated?.(projectId.trim());
+			// Use the server-assigned id — the backend may rewrite it (auto-suffix
+			// on a cross-install id collision), so passing the requested id would
+			// select a project that GET /projects never returns.
+			onCreated?.(created.id);
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			addError = err.detail || err.message || 'Failed to add project';

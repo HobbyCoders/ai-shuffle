@@ -23,6 +23,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+from app.mcp.config_helpers import _json_default
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,15 +33,20 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a successful tool result for the SDK MCP envelope."""
+    """Format a successful tool result for the SDK MCP envelope.
+
+    Uses ``_json_default`` so DB-sourced datetime/date values (e.g. an
+    automation's ``last_run_at``) ISO-normalize instead of crashing the tool
+    with 'Object of type datetime is not JSON serializable'.
+    """
     import json as _json
-    return {"content": [{"type": "text", "text": _json.dumps({"success": True, **payload})}]}
+    return {"content": [{"type": "text", "text": _json.dumps({"success": True, **payload}, default=_json_default)}]}
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
     """Format an error tool result for the SDK MCP envelope."""
     import json as _json
-    return {"content": [{"type": "text", "text": _json.dumps({"success": False, "error": message, **extra})}]}
+    return {"content": [{"type": "text", "text": _json.dumps({"success": False, "error": message, **extra}, default=_json_default)}]}
 
 
 # ============================================================================
