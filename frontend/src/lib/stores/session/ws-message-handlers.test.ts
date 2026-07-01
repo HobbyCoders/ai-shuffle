@@ -17,8 +17,9 @@ import type { ActiveSessionState } from '../active-session';
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
 vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
 // The unified notification funnel: assert the handler feeds server events into
-// the store via `notify.ingest`, rather than rendering them itself.
-vi.mock('../notifications', () => ({ notify: { ingest: vi.fn() } }));
+// the store via `notify.ingest`, rather than rendering them itself. `notify.error`
+// is used by the failed-answer-relay path to toast the user.
+vi.mock('../notifications', () => ({ notify: { ingest: vi.fn(), error: vi.fn() } }));
 
 import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
@@ -945,6 +946,150 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(updated?.length).toBe(1);
+		});
+
+		it('leaves the open modal untouched on a stale reply (cluster relay failed)', () => {
+			// Cross-install bug: on every reconnect/session-switch the client resyncs
+			// via get_pending_questions. If the relay to the owning install fails, the
+			// backend replies `stale: true` with a non-authoritative (empty) list.
+			// Replacing pendingQuestions with it would wipe a locally-open question
+			// modal and its in-progress answer. The handler must skip the replace.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingQuestions = [
+				{
+					session_id: 'session-1',
+					request_id: 'q-open',
+					tool_use_id: 'tool-1',
+					questions: [],
+				} as never,
+			];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'pending_questions',
+				session_id: 'session-1',
+				questions: [], // non-authoritative fallback
+				stale: true,
+			});
+
+			// No state write at all — the modal (and its in-progress answer) survives.
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('an authoritative empty reply (no marker) STILL clears the modal', () => {
+			// The deliberate stale-modal-clearing path: a SUCCESSFUL relay with zero
+			// questions omits the marker and must replace (empty out) pendingQuestions.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingQuestions = [
+				{
+					session_id: 'session-1',
+					request_id: 'q-open',
+					tool_use_id: 'tool-1',
+					questions: [],
+				} as never,
+			];
+
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					updated = result.pendingQuestions as unknown[];
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'pending_questions',
+				session_id: 'session-1',
+				questions: [], // authoritative empty — no `stale` marker
+			});
+
+			expect(updated?.length).toBe(0);
+		});
+	});
+
+	describe('user_question_response_ack handler (relay success/failure)', () => {
+		beforeEach(() => {
+			(notify.error as ReturnType<typeof vi.fn>).mockClear();
+		});
+
+		function stateWithOpenQuestion() {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingQuestions = [
+				{ session_id: 'session-1', request_id: 'q-1', tool_use_id: 'tool-1', questions: [] } as never,
+			];
+			return state;
+		}
+
+		it('removes the question on a successful ack', () => {
+			const state = stateWithOpenQuestion();
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { updated = fn(state).pendingQuestions as unknown[]; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question_response_ack',
+				session_id: 'session-1',
+				request_id: 'q-1',
+				success: true,
+			});
+
+			expect(updated).toEqual([]);
+			expect(notify.error).not.toHaveBeenCalled();
+		});
+
+		it('keeps the question AND toasts an error on a failed relay (success:false)', () => {
+			// Cross-install bug: a failed answer relay (owner install offline) was acked
+			// with success:false, but the handler removed the question anyway — dismissing
+			// the modal as if answered while the owning waiter kept blocking (answer lost).
+			// The fix keeps the modal up (removal is ONLY here) and surfaces the failure so
+			// the user can retry.
+			const state = stateWithOpenQuestion();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question_response_ack',
+				session_id: 'session-1',
+				request_id: 'q-1',
+				success: false,
+			});
+
+			// Modal preserved: NO removal write happened.
+			expect(deps.update).not.toHaveBeenCalled();
+			// User is told the delivery failed.
+			expect(notify.error).toHaveBeenCalledTimes(1);
+			expect((notify.error as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/deliver your answer/i);
+		});
+
+		it('user_question_timeout still removes unconditionally (no success field)', () => {
+			// The timeout type SHARES this handler and carries no success field. It must
+			// keep removing the question (the turn ended) and must NOT toast a relay error.
+			const state = stateWithOpenQuestion();
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { updated = fn(state).pendingQuestions as unknown[]; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question_timeout',
+				session_id: 'session-1',
+				request_id: 'q-1',
+			});
+
+			expect(updated).toEqual([]);
+			expect(notify.error).not.toHaveBeenCalled();
 		});
 	});
 

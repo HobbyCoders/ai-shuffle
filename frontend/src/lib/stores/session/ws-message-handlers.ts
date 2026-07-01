@@ -1163,6 +1163,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const responseSessionId = data.session_id as string | undefined;
 				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
+				// A cross-install answer relay can FAIL (owner install offline) — the
+				// backend signals this on the ack with `success: false`. Removal of the
+				// question happens ONLY here, so dismissing on a failed relay would drop
+				// the answer while the owning waiter keeps blocking. Instead keep the
+				// modal up so the user can retry, and surface the failure. Note the
+				// shared `user_question_timeout` type carries NO success field, so it
+				// (and any legacy ack without the field) still removes unconditionally.
+				if (data.type === 'user_question_response_ack' && data.success === false) {
+					notify.error(
+						"Couldn't deliver your answer — the owning device is unreachable. Try again.",
+						{ category: 'user-question-relay-error', session_id: responseSessionId }
+					);
+					break;
+				}
 				update(s => ({
 					...s,
 					pendingQuestions: s.pendingQuestions.filter(q => q.request_id !== requestId),
@@ -1172,6 +1186,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'pending_questions': {
 				const pendingSessionId = data.session_id as string | undefined;
+				// A cross-install relay-read failure replies with `stale: true` and a
+				// non-authoritative (local, empty) list. Replacing pendingQuestions with
+				// it would wipe a locally-open question modal (losing in-progress
+				// answers) on every reconnect/switch resync. Leave state untouched; a
+				// later authoritative reply (no marker) reconciles. A successful relay,
+				// even with zero questions, is authoritative and still clears stale
+				// modals — that omits the marker so it flows through below.
+				if (data.stale === true) {
+					console.debug('[ws] ignoring stale pending_questions (relay to owner failed)');
+					break;
+				}
 				const questions = mapUserQuestions(
 					(data.questions as UserQuestionRequest[] | undefined) ?? [],
 					pendingSessionId

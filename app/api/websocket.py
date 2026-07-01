@@ -1827,24 +1827,39 @@ async def chat_websocket(
                             # Cross-install session: the pending question lives in
                             # the OWNING install's in-memory handler, so the local
                             # handler is always empty here. Relay the read to the
-                            # owner (best-effort — fall back to the local empty set
-                            # if it is offline so we still reply and clear any stale
-                            # modal). Mirrors the queue_message relay pattern.
+                            # owner. A SUCCESSFUL relay (even with zero questions) is
+                            # authoritative and must clear any stale modal. But a
+                            # FAILED relay (owner offline / error) leaves us with the
+                            # local empty set, which is NOT authoritative — replying
+                            # with a bare empty list would let the frontend wipe a
+                            # locally-open question modal (and its in-progress answer)
+                            # on every reconnect/switch resync. So on relay failure we
+                            # flag the reply `stale` and keep the questions we have;
+                            # the frontend leaves its modal untouched when it sees the
+                            # marker. Mirrors the queue_message relay pattern.
                             pending = user_question_handler.get_pending_questions(current_session_id)
+                            stale = False
                             cloud_sess = await run_sync(database.get_session, current_session_id)
                             from app.core import cloud_relay
                             if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                                 try:
                                     pending = await cloud_relay.relay_get_pending_questions(cloud_sess)
                                 except cloud_relay.InstallOffline as e:
+                                    stale = True
                                     logger.debug(f"Cluster relay_get_pending_questions offline for {current_session_id}: {e}")
                                 except Exception as e:  # noqa: BLE001
+                                    stale = True
                                     logger.warning(f"Cluster relay_get_pending_questions failed for {current_session_id}: {e}")
-                            await send_json({
+                            reply = {
                                 "type": "pending_questions",
                                 "session_id": current_session_id,
                                 "questions": pending
-                            })
+                            }
+                            # Only mark a FAILED relay. A success (even empty) omits
+                            # the key so old clients keep clearing stale modals.
+                            if stale:
+                                reply["stale"] = True
+                            await send_json(reply)
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response
