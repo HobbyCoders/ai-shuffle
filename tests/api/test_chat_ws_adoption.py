@@ -94,8 +94,11 @@ def _run_query_patches(created):
     db = stack.enter_context(patch.object(cwh, "database"))
     db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
 
+    # Call through like the real run_sync (thread-offload) does: run_query now
+    # routes resolve_for_streaming_init through run_sync, so a None-returning
+    # fake would feed len(None) into the seed path.
     async def _fake_run_sync(fn, *a, **k):
-        return None
+        return fn(*a, **k)
 
     stack.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
 
