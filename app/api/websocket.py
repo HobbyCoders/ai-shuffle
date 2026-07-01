@@ -1726,11 +1726,30 @@ async def chat_websocket(
                         answers = data.get("answers", {})
 
                         if response_session_id and request_id and answers:
-                            result = await user_question_handler.respond(
-                                request_id=request_id,
-                                session_id=response_session_id,
-                                answers=answers
-                            )
+                            # Cross-install session: the pending question and its
+                            # awaiting coroutine live on the OWNING install, so
+                            # responding locally would just log "no pending question".
+                            # Relay the answer to the owner to unblock its waiter.
+                            # Mirrors the queue_message relay pattern.
+                            cloud_sess = await run_sync(database.get_session, response_session_id)
+                            from app.core import cloud_relay
+                            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                                result = False
+                                try:
+                                    await cloud_relay.relay_question_response(
+                                        cloud_sess, request_id, answers
+                                    )
+                                    result = True
+                                except cloud_relay.InstallOffline as e:
+                                    logger.debug(f"Cluster relay_question_response offline for {response_session_id}: {e}")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"Cluster relay_question_response failed for {response_session_id}: {e}")
+                            else:
+                                result = await user_question_handler.respond(
+                                    request_id=request_id,
+                                    session_id=response_session_id,
+                                    answers=answers
+                                )
                             logger.debug(f"User question response processed: {request_id} -> {result}")
 
                             await send_json({
@@ -1748,7 +1767,22 @@ async def chat_websocket(
                     elif msg_type == "get_pending_questions":
                         # Get pending user questions for current session
                         if current_session_id:
+                            # Cross-install session: the pending question lives in
+                            # the OWNING install's in-memory handler, so the local
+                            # handler is always empty here. Relay the read to the
+                            # owner (best-effort — fall back to the local empty set
+                            # if it is offline so we still reply and clear any stale
+                            # modal). Mirrors the queue_message relay pattern.
                             pending = user_question_handler.get_pending_questions(current_session_id)
+                            cloud_sess = await run_sync(database.get_session, current_session_id)
+                            from app.core import cloud_relay
+                            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                                try:
+                                    pending = await cloud_relay.relay_get_pending_questions(cloud_sess)
+                                except cloud_relay.InstallOffline as e:
+                                    logger.debug(f"Cluster relay_get_pending_questions offline for {current_session_id}: {e}")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"Cluster relay_get_pending_questions failed for {current_session_id}: {e}")
                             await send_json({
                                 "type": "pending_questions",
                                 "session_id": current_session_id,

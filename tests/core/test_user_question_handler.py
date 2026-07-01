@@ -129,6 +129,110 @@ class TestRequestAnswers(TestUserQuestionHandler):
         assert call_args["questions"] == sample_questions
 
     @pytest.mark.asyncio
+    async def test_request_answers_fans_out_to_watchers(self, handler, sample_questions, mock_broadcast):
+        """The same user_question payload is ALSO fanned to session watchers.
+
+        The origin broadcast reaches only the socket that owns the query. On a
+        headless / dead-on-reconnect / other-device turn that is nobody, so the
+        fanout is the delivery path that actually reaches a live viewer.
+        """
+        fanout = AsyncMock()
+
+        async def respond_quickly():
+            await asyncio.sleep(0.01)
+            await handler.respond("req-123", "session-1", {"Approval": "yes"})
+
+        asyncio.create_task(respond_quickly())
+
+        await handler.request_answers(
+            request_id="req-123",
+            tool_use_id="tool-456",
+            session_id="session-1",
+            questions=sample_questions,
+            broadcast_func=mock_broadcast,
+            fanout_func=fanout,
+        )
+
+        # Fanout received the identical user_question payload as the origin socket.
+        fanout.assert_awaited_once()
+        origin_payload = mock_broadcast.call_args[0][0]
+        fanout_payload = fanout.call_args[0][0]
+        assert fanout_payload == origin_payload
+        assert fanout_payload["type"] == "user_question"
+        assert fanout_payload["request_id"] == "req-123"
+
+    @pytest.mark.asyncio
+    async def test_request_answers_dead_socket_still_fans_and_is_discoverable(self, handler, sample_questions):
+        """On a dead/headless origin socket (broadcast returns False), the question
+        is STILL fanned to watchers and remains discoverable via get_pending_questions."""
+        # Origin socket reports non-delivery (dead / headless-honest).
+        dead_broadcast = AsyncMock(return_value=False)
+        fanout = AsyncMock()
+
+        async def check_and_respond():
+            await asyncio.sleep(0.01)
+            # The question is discoverable even though the origin socket "failed".
+            pending = handler.get_pending_questions("session-1")
+            assert len(pending) == 1
+            assert pending[0]["request_id"] == "req-123"
+            await handler.respond("req-123", "session-1", {"answer": "ok"})
+
+        asyncio.create_task(check_and_respond())
+
+        result = await handler.request_answers(
+            request_id="req-123",
+            tool_use_id="tool-456",
+            session_id="session-1",
+            questions=sample_questions,
+            broadcast_func=dead_broadcast,
+            fanout_func=fanout,
+        )
+
+        assert result == {"answer": "ok"}
+        fanout.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_request_answers_fanout_failure_never_breaks_flow(self, handler, sample_questions, mock_broadcast):
+        """A raising fanout is swallowed — the question flow must not break."""
+        fanout = AsyncMock(side_effect=RuntimeError("no watchers reachable"))
+
+        async def respond_quickly():
+            await asyncio.sleep(0.01)
+            await handler.respond("req-123", "session-1", {"answer": "ok"})
+
+        asyncio.create_task(respond_quickly())
+
+        result = await handler.request_answers(
+            request_id="req-123",
+            tool_use_id="tool-456",
+            session_id="session-1",
+            questions=sample_questions,
+            broadcast_func=mock_broadcast,
+            fanout_func=fanout,
+        )
+
+        assert result == {"answer": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_request_answers_no_fanout_func_is_backward_compatible(self, handler, sample_questions, mock_broadcast):
+        """fanout_func is optional — omitting it preserves the old behavior."""
+        async def respond_quickly():
+            await asyncio.sleep(0.01)
+            await handler.respond("req-123", "session-1", {"answer": "ok"})
+
+        asyncio.create_task(respond_quickly())
+
+        result = await handler.request_answers(
+            request_id="req-123",
+            tool_use_id="tool-456",
+            session_id="session-1",
+            questions=sample_questions,
+            broadcast_func=mock_broadcast,
+        )
+
+        assert result == {"answer": "ok"}
+
+    @pytest.mark.asyncio
     async def test_request_answers_returns_user_response(self, handler, sample_questions, mock_broadcast):
         """request_answers should return user's answers."""
         answers = {"Approval": "yes", "Options": ["A", "C"]}

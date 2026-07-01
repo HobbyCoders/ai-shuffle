@@ -409,10 +409,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// If session is streaming, start the poller for ongoing updates
 			if (pollData.isStreaming) {
 				sessionPoller.startStreaming(sessionId);
-				// Request pending permissions/questions via WS
-				wsSend({ type: 'get_pending_permissions' });
-				wsSend({ type: 'get_pending_questions' });
 			}
+			// Request pending permissions/questions via WS UNCONDITIONALLY (not gated
+			// on isStreaming): a session parked on a permission/question reports
+			// isStreaming=false, so gating on it would hide the modal on switch until
+			// a reconnect. Mirrors active-session onConnected. The pending_* replies
+			// REPLACE by request_id, so re-requesting never double-shows a modal.
+			wsSend({ type: 'get_pending_permissions' });
+			wsSend({ type: 'get_pending_questions' });
 		} else {
 			// loadSession failed (HTTP error, timeout, network error).
 			// Set error state so the UI shows an error banner instead of

@@ -1165,8 +1165,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const attnSessionId = data.session_id as string | undefined;
 				const count = (data.count as number | undefined) ?? 0;
 				// The active session surfaces the prompt through its own modal, not a
-				// background dot — don't double-signal it. Clears (count 0) still apply.
-				if (count > 0 && attnSessionId === getState().sessionId) break;
+				// background dot. But session_attention is the ONE signal that always
+				// reaches us: the per-socket user_question/permission_request event is
+				// lost whenever its origin socket died (reconnect mid-turn rebinds
+				// broadcast_func nowhere), the turn is headless, or it originated on
+				// another device/install. So rather than blindly ignore it, use it as a
+				// resync trigger — ask the server to replay the pending queues for the
+				// active session. The pending_permissions/pending_questions replies
+				// REPLACE by request_id, so re-requesting never double-shows a modal.
+				if (count > 0 && attnSessionId === getState().sessionId) {
+					const cs = getState();
+					if (!cs.pendingPermissions || cs.pendingPermissions.length === 0) {
+						wsSend({ type: 'get_pending_permissions' });
+					}
+					if (!cs.pendingQuestions || cs.pendingQuestions.length === 0) {
+						wsSend({ type: 'get_pending_questions' });
+					}
+					break;
+				}
 				setNeedsAttention(attnSessionId, count);
 				break;
 			}

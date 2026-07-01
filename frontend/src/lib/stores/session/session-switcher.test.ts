@@ -109,7 +109,7 @@ function makeSwitcher(initial: ActiveSessionState) {
 	};
 
 	const switcher = createSessionSwitcher(deps);
-	return { switcher, getState, ephemeralStore };
+	return { switcher, getState, ephemeralStore, deps };
 }
 
 describe('session-switcher · switchSession isolation', () => {
@@ -207,5 +207,23 @@ describe('session-switcher · switchSession isolation', () => {
 		expect(ephemeralStore.get('session-A')?.draft).toBe('unsent A text');
 		// And the target session shows its own (empty) draft, not A's.
 		expect(getState().draft).toBe('');
+	});
+
+	it('requests pending questions/permissions on switch even when NOT streaming', async () => {
+		// A session parked on an AskUserQuestion/permission reports isStreaming=false.
+		// Gating the resync on isStreaming (the old bug) hid the modal on switch. The
+		// resync must fire unconditionally so the parked prompt surfaces immediately.
+		const { switcher, deps } = makeSwitcher(fullState());
+		// makeSwitcher's loadSession already returns isStreaming: false.
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(deps.wsSend).toHaveBeenCalledWith(
+			expect.objectContaining({ type: 'get_pending_questions' })
+		);
+		expect(deps.wsSend).toHaveBeenCalledWith(
+			expect.objectContaining({ type: 'get_pending_permissions' })
+		);
 	});
 });

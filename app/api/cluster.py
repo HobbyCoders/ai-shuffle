@@ -190,6 +190,68 @@ async def cluster_interrupt(
     return {"ok": True, "interrupted": interrupted}
 
 
+@router.get("/sessions/{session_id}/pending_questions")
+async def cluster_pending_questions(
+    session_id: str,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Return the pending AskUserQuestion requests for a session this install owns.
+
+    A pending question lives ONLY in the owning install's in-memory
+    ``user_question_handler`` — a viewer install's local handler is always empty
+    for a remote session. A controlling install relays ``get_pending_questions``
+    here so a user driving the session from another install can still see (and
+    then answer) the prompt. Keyed by the *shared* session id.
+    """
+    from app.core.user_question_handler import user_question_handler
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session_id": session_id,
+        "questions": user_question_handler.get_pending_questions(session_id),
+    }
+
+
+class ClusterQuestionResponseRequest(BaseModel):
+    """A peer install relaying a user's AskUserQuestion answer for a session we own."""
+    request_id: str
+    answers: Dict[str, Any]
+
+
+@router.post("/sessions/{session_id}/question_response")
+async def cluster_question_response(
+    session_id: str,
+    body: ClusterQuestionResponseRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Deliver a user's AskUserQuestion answer to a session this install owns.
+
+    The pending question and the coroutine awaiting it live here (the owner); the
+    answer arrived on a device connected to a *different* install, which relays it
+    to us. Resolving it unblocks the owner's ``request_answers`` waiter. Keyed by
+    the *shared* session id.
+    """
+    from app.core.user_question_handler import user_question_handler
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    ok = await user_question_handler.respond(
+        request_id=body.request_id,
+        session_id=session_id,
+        answers=body.answers,
+    )
+    logger.info(
+        "Cluster question_response from install %s on session %s -> %s",
+        install_id or "?", session_id, ok,
+    )
+    return {"ok": ok, "session_id": session_id, "request_id": body.request_id}
+
+
 @router.get("/sessions/{session_id}/live")
 async def cluster_live(
     request: Request,

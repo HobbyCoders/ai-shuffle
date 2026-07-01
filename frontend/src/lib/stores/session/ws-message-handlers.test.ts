@@ -863,15 +863,58 @@ describe('ws-message-handlers', () => {
 			expect(applyAttention(new Map()).get('session-bg')).toBe(2);
 		});
 
-		it('does not raise a background dot for the active session (modal handles it)', () => {
+		it('resyncs pending queues for the active session instead of raising a dot', () => {
+			// session_attention for the ACTIVE session must NOT raise a background
+			// dot (the modal owns the surface) but MUST trigger a resync: it is the
+			// one signal that survives a dead origin socket / headless / other-device
+			// question, where the per-socket user_question event never arrived.
 			const state = mockState();
 			state.sessionId = 'session-1';
+			state.pendingPermissions = [];
+			state.pendingQuestions = [];
 			deps = createMockDeps({ getState: vi.fn(() => state) });
 			handlers = createMessageHandlers(deps);
 
 			handlers.handleMessage({ type: 'session_attention', session_id: 'session-1', count: 1 });
 
 			expect(deps.backgroundPermissions.update).not.toHaveBeenCalled();
+			expect(deps.wsSend).toHaveBeenCalledWith(
+				expect.objectContaining({ type: 'get_pending_questions' })
+			);
+			expect(deps.wsSend).toHaveBeenCalledWith(
+				expect.objectContaining({ type: 'get_pending_permissions' })
+			);
+		});
+
+		it('resync + pending_questions reply populates the active modal', () => {
+			// End-to-end recovery: attention → resync request → server reply lands a
+			// question into pendingQuestions so the modal (pendingQuestions.length>0)
+			// renders even though the live user_question event was lost.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [];
+			state.pendingQuestions = [];
+
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_attention', session_id: 'session-1', count: 1 });
+			expect(deps.wsSend).toHaveBeenCalledWith(
+				expect.objectContaining({ type: 'get_pending_questions' })
+			);
+
+			handlers.handleMessage({
+				type: 'pending_questions',
+				session_id: 'session-1',
+				questions: [{ request_id: 'q-1', tool_use_id: 'tool-1', questions: [] }],
+			});
+
+			expect(applied?.pendingQuestions).toHaveLength(1);
+			expect(applied?.pendingQuestions[0].request_id).toBe('q-1');
 		});
 
 		it('clears attention on count 0 even for the active session', () => {

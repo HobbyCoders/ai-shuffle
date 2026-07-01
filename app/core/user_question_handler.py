@@ -44,7 +44,8 @@ class UserQuestionHandler:
         tool_use_id: str,
         session_id: str,
         questions: List[Dict[str, Any]],
-        broadcast_func: callable
+        broadcast_func: callable,
+        fanout_func: Optional[callable] = None
     ) -> Dict[str, Any]:
         """
         Request answers from the user for a set of questions.
@@ -54,7 +55,15 @@ class UserQuestionHandler:
             tool_use_id: The tool use ID from the SDK
             session_id: The chat session ID
             questions: List of question objects with question, header, options, multiSelect
-            broadcast_func: Async function to broadcast to WebSocket
+            broadcast_func: Async function to broadcast to WebSocket (origin socket)
+            fanout_func: Optional async function to ALSO deliver the same question
+                payload to every device watching this session (via the sync engine).
+                The origin ``broadcast_func`` only reaches the one socket that owns
+                this query — which is nobody on a headless turn, a dead-on-reconnect
+                socket, or when the question originated on another device/install.
+                The fanout is the recovery path; the frontend dedupes by request_id
+                so a device that got both the direct event and the fanout renders
+                the modal once.
 
         Returns:
             Dict with user's answers
@@ -79,13 +88,14 @@ class UserQuestionHandler:
         # streaming heartbeat advertises the pending count. But log it loudly,
         # because a silently-undelivered question used to look identical to a
         # working one while the user waited.
-        delivered = await broadcast_func({
+        question_payload = {
             "type": "user_question",
             "session_id": session_id,
             "request_id": request_id,
             "tool_use_id": tool_use_id,
             "questions": questions
-        })
+        }
+        delivered = await broadcast_func(question_payload)
 
         if delivered is False:
             logger.warning(
@@ -94,6 +104,22 @@ class UserQuestionHandler:
             )
         else:
             logger.debug(f"User question request sent: {request_id} with {len(questions)} questions")
+
+        # Fan the SAME payload out to every device watching this session. The origin
+        # broadcast above reaches only the socket that owns this query — nobody on a
+        # headless turn, a socket that died on reconnect, or a query that originated
+        # on another device/install. This is the delivery path that actually reaches
+        # a live viewer in those cases. Best-effort: it must never delay or break the
+        # question flow (the user is already waiting), and the frontend dedupes by
+        # request_id so a device that also got the direct event renders one modal.
+        if fanout_func is not None:
+            try:
+                await fanout_func(question_payload)
+            except Exception:
+                logger.debug(
+                    f"User question {request_id} fanout to session watchers failed",
+                    exc_info=True,
+                )
 
         # Notify watching mobile devices that input is needed (best-effort,
         # non-blocking — must never delay or break the question flow).

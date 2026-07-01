@@ -1559,6 +1559,17 @@ async def stream_to_websocket(
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
+                    # Fan the question to every device watching this session, not
+                    # just the origin socket. The origin _broadcast reaches only the
+                    # tab that owns this query — nobody on a headless turn, a socket
+                    # that died on reconnect, or a query driven from another device.
+                    # Mirrors how _bump_attention fans session_attention to all the
+                    # user's devices; the frontend dedupes by request_id.
+                    async def _fanout_question(payload):
+                        if not _user_id:
+                            return
+                        await sync_engine.broadcast_user_question(_user_id, payload)
+
                     await _bump_attention(1, "question")
                     try:
                         answers = await user_question_handler.request_answers(
@@ -1566,7 +1577,8 @@ async def stream_to_websocket(
                             tool_use_id=_ctx_tool_use_id or request_id,
                             session_id=_sid,
                             questions=questions,
-                            broadcast_func=_broadcast
+                            broadcast_func=_broadcast,
+                            fanout_func=_fanout_question
                         )
                     finally:
                         # Decrement whether the question was answered, timed out, or

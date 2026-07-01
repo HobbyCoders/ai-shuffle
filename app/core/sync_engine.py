@@ -847,6 +847,28 @@ class SyncEngine:
             source_device_id=source_device_id,
         )
 
+    async def broadcast_user_question(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Fan an AskUserQuestion payload out to every one of a user's devices.
+
+        The per-query origin socket only reaches the tab that owns the query —
+        which is nobody on a headless turn, a socket that died on reconnect, or a
+        query driven from another device. Fanning the SAME ``user_question``
+        payload to every device (the frontend dedupes by request_id) makes the
+        modal reach a live viewer in those cases. Mirrors
+        ``broadcast_session_attention``; the payload already carries its own
+        ``type``/``session_id`` so it routes correctly on the client.
+        """
+        await self._broadcast_user_message(
+            user_id,
+            payload,
+            source_device_id=source_device_id,
+        )
+
     async def broadcast_user_session_created(
         self,
         user_id: str,

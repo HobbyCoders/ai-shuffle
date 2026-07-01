@@ -210,6 +210,54 @@ async def relay_queue_message(
     _raise_for_status(resp, "cluster queue_message")
 
 
+async def relay_get_pending_questions(
+    session: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    """Fetch the owning install's pending AskUserQuestion requests for a session.
+
+    A pending question lives only in the owner's in-memory handler, so a viewer
+    install's local ``get_pending_questions`` is always empty for a remote
+    session. Relay the read to the owner so the viewer can surface the modal.
+    """
+    base_url, sid = resolve_target(session)
+    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+        try:
+            resp = await client.get(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/pending_questions",
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster pending_questions")
+    body = resp.json()
+    return body.get("questions", []) if isinstance(body, dict) else []
+
+
+async def relay_question_response(
+    session: Dict[str, Any],
+    request_id: str,
+    answers: Dict[str, Any],
+) -> None:
+    """Relay a user's AskUserQuestion answer to the install that owns the session.
+
+    The pending question and its awaiting coroutine live on the owner; the answer
+    arrived on a device connected to this install, so we forward it there to
+    unblock the owner's ``request_answers`` waiter.
+    """
+    base_url, sid = resolve_target(session)
+    payload = {"request_id": request_id, "answers": answers}
+    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/question_response",
+                json=payload,
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster question_response")
+
+
 async def relay_interrupt(session: Dict[str, Any]) -> None:
     """Relay an interrupt/stop to the install that owns the session."""
     base_url, sid = resolve_target(session)
