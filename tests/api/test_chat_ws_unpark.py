@@ -128,6 +128,10 @@ def _run_query_patches(handler, fake_stream, created):
     db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
 
     async def _fake_run_sync(fn, *a, **k):
+        # run_query routes resolve_for_streaming_init through run_sync (thread
+        # offload) — call through so the seed gets its list.
+        if fn is mr.resolve_for_streaming_init:
+            return fn(*a, **k)
         # add_session_message / pop_next_queued_message etc. — return falsy so the
         # queue path is a no-op.
         return None

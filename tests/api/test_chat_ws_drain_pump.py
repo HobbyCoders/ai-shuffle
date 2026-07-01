@@ -459,6 +459,12 @@ def _run_query_patches(handler, fake_stream):
     db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
 
     async def _fake_run_sync(fn, *a, **k):
+        # run_query routes resolve_for_streaming_init through run_sync (thread
+        # offload) — call through so the seed gets its list. Everything else
+        # (queue pops / db writes) stays a falsy no-op so the drain path under
+        # test is driven only by the explicit mocks below.
+        if fn is mr.resolve_for_streaming_init:
+            return fn(*a, **k)
         return None
 
     stack.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))

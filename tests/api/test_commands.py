@@ -1113,7 +1113,13 @@ class TestExecuteRewindInvalidatesParseCache:
             {"id": "m2", "role": "assistant", "type": "text", "content": "reply"},
             {"id": "m3", "role": "user", "type": "text", "content": "SECOND (to be rewound away)"},
         ]
-        jsonl_parser.pre_seed_parse_cache(sdk_sid, pre_rewind, {}, "/workspace")
+        # pre_seed refuses to write an UNSTAMPED entry (it would be untrusted on
+        # read), so supply the (count, max_id) store version the reseed would
+        # resolve from the DB.
+        jsonl_parser.pre_seed_parse_cache(
+            sdk_sid, pre_rewind, {}, "/workspace",
+            store_version_loader=lambda _sid: (3, 42),
+        )
 
         # Sanity: the cache is primed and would serve the pre-rewind transcript.
         with jsonl_parser._store_parse_cache_lock:
