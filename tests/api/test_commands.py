@@ -23,15 +23,28 @@ from typing import Optional
 
 @pytest.fixture
 def mock_database():
-    """Mock the database module for command tests."""
-    with patch("app.api.commands.database") as mock_db:
+    """Mock the database module for command tests.
+
+    get_working_dir_for_project now delegates to app.api.common.resolve_project_path,
+    which reads app.api.common.database — patch both to the same mock so the DB
+    lookups the helper makes are observable and never hit a real pool.
+    """
+    with patch("app.api.commands.database") as mock_db, \
+            patch("app.api.common.database", mock_db):
         yield mock_db
 
 
 @pytest.fixture
 def mock_settings():
-    """Mock the settings module."""
-    with patch("app.api.commands.settings") as mock_settings:
+    """Mock the settings module.
+
+    Path resolution spans app.api.commands (workspace fallback), app.api.common
+    (resolve_project_path fallback) and app.core.project_utils (working-dir
+    composition). Patch settings in all three so one fixture governs it.
+    """
+    with patch("app.api.commands.settings") as mock_settings, \
+            patch("app.api.common.settings", mock_settings), \
+            patch("app.core.project_utils.settings", mock_settings):
         mock_settings.workspace_dir = MagicMock()
         mock_settings.workspace_dir.__truediv__ = lambda self, x: MagicMock(__str__=lambda s: f"/workspace/{x}")
         yield mock_settings
@@ -821,7 +834,13 @@ class TestExecuteRewindDbSync:
     """
     After the JSONL file is truncated, ``execute_rewind`` must also truncate
     the ``session_messages`` rows in the database so the two stores stay in
-    sync. These tests drive the new plumbing.
+    sync. The DB truncation is now a two-step helper pair on
+    ``app.api.commands``: ``resolve_rewind_anchor`` maps the target uuid to a DB
+    anchor row id, then ``apply_rewind_delete`` purges rows after that anchor.
+    (Both replaced the old direct ``database.delete_session_messages_after_jsonl_uuid``.)
+    These tests drive that plumbing in disabled/mirror mode — mock_settings is a
+    MagicMock, so ``session_store_mode`` is not ``postgres_only`` and the JSONL +
+    DB path (not the store cutover) runs.
     """
 
     @pytest.mark.asyncio
@@ -845,8 +864,6 @@ class TestExecuteRewindDbSync:
             messages_removed=4,
             remaining_user_turns=1,
         )
-        # The new helper must be a MagicMock we can assert on.
-        mock_database.delete_session_messages_after_jsonl_uuid.return_value = 4
 
         request = RewindRequestV2(
             target_uuid="uuid-target",
@@ -855,19 +872,20 @@ class TestExecuteRewindDbSync:
             target_role="user",
         )
 
-        response = await execute_rewind("session-1", request)
+        with patch("app.api.commands.resolve_rewind_anchor", return_value=42) as mock_anchor, \
+                patch("app.api.commands.apply_rewind_delete", return_value=4) as mock_delete:
+            response = await execute_rewind("session-1", request)
 
         assert response.success is True
-        mock_database.delete_session_messages_after_jsonl_uuid.assert_called_once()
-        call_kwargs = mock_database.delete_session_messages_after_jsonl_uuid.call_args
-        # Accept kwargs or positional — normalise.
-        bound = call_kwargs.kwargs if call_kwargs.kwargs else {
-            "session_id": call_kwargs.args[0],
-            "target_uuid": call_kwargs.args[1],
-            "include_response": call_kwargs.args[2] if len(call_kwargs.args) > 2 else False,
-        }
+        # target uuid is resolved to a DB anchor id first...
+        mock_anchor.assert_called_once()
+        assert mock_anchor.call_args.kwargs["session_id"] == "session-1"
+        assert mock_anchor.call_args.kwargs["target_uuid"] == "uuid-target"
+        # ...then rows after the anchor are deleted.
+        mock_delete.assert_called_once()
+        bound = mock_delete.call_args.kwargs
         assert bound["session_id"] == "session-1"
-        assert bound["target_uuid"] == "uuid-target"
+        assert bound["anchor_id"] == 42
         assert bound["include_response"] is True
 
     @pytest.mark.asyncio
@@ -899,10 +917,12 @@ class TestExecuteRewindDbSync:
             include_response=False,
         )
 
-        response = await execute_rewind("session-1", request)
+        with patch("app.api.commands.resolve_rewind_anchor", return_value=42), \
+                patch("app.api.commands.apply_rewind_delete", return_value=0) as mock_delete:
+            response = await execute_rewind("session-1", request)
 
         assert response.success is False
-        mock_database.delete_session_messages_after_jsonl_uuid.assert_not_called()
+        mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_rewind_passes_include_response_false_to_db_delete(
@@ -925,7 +945,6 @@ class TestExecuteRewindDbSync:
             messages_removed=2,
             remaining_user_turns=1,
         )
-        mock_database.delete_session_messages_after_jsonl_uuid.return_value = 2
 
         request = RewindRequestV2(
             target_uuid="uuid-target",
@@ -934,15 +953,11 @@ class TestExecuteRewindDbSync:
             target_role="user",
         )
 
-        await execute_rewind("session-1", request)
+        with patch("app.api.commands.resolve_rewind_anchor", return_value=7), \
+                patch("app.api.commands.apply_rewind_delete", return_value=2) as mock_delete:
+            await execute_rewind("session-1", request)
 
-        call = mock_database.delete_session_messages_after_jsonl_uuid.call_args
-        bound = call.kwargs if call.kwargs else {
-            "session_id": call.args[0],
-            "target_uuid": call.args[1],
-            "include_response": call.args[2] if len(call.args) > 2 else False,
-        }
-        assert bound["include_response"] is False
+        assert mock_delete.call_args.kwargs["include_response"] is False
 
     @pytest.mark.asyncio
     async def test_rewind_skipped_when_restore_chat_false(
@@ -965,10 +980,12 @@ class TestExecuteRewindDbSync:
             restore_files=False,
         )
 
-        await execute_rewind("session-1", request)
+        with patch("app.api.commands.resolve_rewind_anchor", return_value=42), \
+                patch("app.api.commands.apply_rewind_delete", return_value=0) as mock_delete:
+            await execute_rewind("session-1", request)
 
         mock_jsonl_rewind_service.truncate_to_checkpoint.assert_not_called()
-        mock_database.delete_session_messages_after_jsonl_uuid.assert_not_called()
+        mock_delete.assert_not_called()
 
 
 class TestExecuteRewindPostgresOnly:
