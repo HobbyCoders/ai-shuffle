@@ -525,6 +525,12 @@ class SessionPoller {
 		const isStreaming = data.is_streaming as boolean;
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
 		const initialMessageCount = (data.initial_message_count as number) || 0;
+		// Why this one-shot full refresh happened, when the backend knows. Only
+		// `"rewind"` is meaningful to the merge: a rewind trim (truncate_after_uuid)
+		// that lands while the session is still streaming produces a full snapshot
+		// that DELIBERATELY drops the trimmed tail — the union-merge below must NOT
+		// resurrect it. Absent (compaction refreshes, ordinary polls) → merge runs.
+		const fullRefreshReason = (data.full_refresh_reason as string | undefined) ?? undefined;
 
 		// Active background tasks (sub-agents + shell subprocesses). Always present
 		// on a fresh backend; tolerate a missing field gracefully (treat as []).
@@ -583,7 +589,7 @@ class SessionPoller {
 			const streamingIds = new Set(streamingMessages.map(m => m.id));
 			const safeExisting = existingMessages.filter(m => !streamingIds.has(m.id));
 			messages = [...safeExisting, ...streamingMessages];
-		} else if (isStreaming && existingMessages && existingMessages.length > 0) {
+		} else if (isStreaming && existingMessages && existingMessages.length > 0 && fullRefreshReason !== 'rewind') {
 			// FULL REPLACE (initialMessageCount === 0) WHILE STREAMING — the
 			// compaction-refresh safety net.
 			//
@@ -597,18 +603,77 @@ class SessionPoller {
 			// merge (it rescues only client-only system + optimistic user-* ids).
 			//
 			// Union-merge instead: keep the existing rendered messages the incoming
-			// snapshot is MISSING (by id) AHEAD of the snapshot's messages, so a
+			// snapshot is MISSING AHEAD of / interleaved with the snapshot, so a
 			// short snapshot can only ADD, never DROP. Claim-once by id mirrors
 			// Phase 1's semantics.
 			//
-			// GATED TO STREAMING POLLS: a rewind's full refresh (live-store trim →
-			// needs_full_refresh) lands on an ENDED session (is_streaming=false), so
-			// this branch never fires for it — a legitimately-removed message is not
-			// resurrected. Delta polls (initialMessageCount > 0) take the branches
-			// above; only the compaction/end full-replace reaches here.
+			// GATED AGAINST REWIND: a rewind trim (truncate_after_uuid) that lands
+			// WHILE streaming also produces a full snapshot with
+			// initial_message_count=0 — but that snapshot deliberately DROPS the
+			// trimmed tail. Union-merging it would re-insert every trimmed message
+			// (id-match), visually no-oping the rewind. The backend tags exactly
+			// that refresh with full_refresh_reason:"rewind"; when present we fall
+			// through to the plain full-replace below so deletions propagate. An
+			// ENDED-session rewind (is_streaming=false) already skips this branch.
+			//
+			// ANCHORED INSERTION (not prepend-all): a message is "present in the
+			// snapshot" if its id OR its transcript uuid (jsonlUuid) matches — id
+			// families can switch between live-store ids (text-{12hex}) and parser
+			// ids (text-{uuid}-{n}) across polls, so a uuid match absorbs the same
+			// logical message as an UPDATE instead of duplicating it. Each
+			// contiguous run of existing messages the snapshot is missing is spliced
+			// immediately AFTER its nearest PRECEDING existing neighbor that IS
+			// present in the snapshot (preserving relative order). A run with no
+			// preceding anchor (empty/truncated seed) goes to the head. This mirrors
+			// session-init.ts's Phase-1 reconciliation and fixes the order scramble
+			// where a tail-truncated seed jumped the kept tail to the top of the chat.
 			const snapshotIds = new Set(streamingMessages.map(m => m.id));
-			const missingExisting = existingMessages.filter(m => m.id && !snapshotIds.has(m.id));
-			messages = [...missingExisting, ...streamingMessages];
+			const snapshotUuids = new Set(
+				streamingMessages.map(m => m.jsonlUuid).filter((u): u is string => !!u)
+			);
+			const inSnapshot = (m: ChatMessage): boolean =>
+				(!!m.id && snapshotIds.has(m.id)) || (!!m.jsonlUuid && snapshotUuids.has(m.jsonlUuid));
+
+			messages = [...streamingMessages];
+			// Batch each contiguous missing run and splice after its preceding
+			// present anchor (or head). We collect entries first (anchorId = id of
+			// the nearest preceding present existing msg, or null for head), then
+			// splice in a second pass keyed off the snapshot's current positions —
+			// matching the two-phase splice in session-init.ts so overlapping runs
+			// keep their relative order.
+			const missingEntries: Array<{ msg: ChatMessage; anchorId: string | null }> = [];
+			let lastPresentId: string | null = null;
+			for (const m of existingMessages) {
+				if (inSnapshot(m)) {
+					// Anchor subsequent missing messages to this present neighbor's
+					// snapshot id (id-match wins; else the snapshot msg sharing its uuid).
+					lastPresentId = snapshotIds.has(m.id)
+						? m.id
+						: (m.jsonlUuid
+							? streamingMessages.find(s => s.jsonlUuid === m.jsonlUuid)?.id ?? m.id
+							: m.id);
+					continue;
+				}
+				missingEntries.push({ msg: m, anchorId: lastPresentId });
+			}
+			if (missingEntries.length > 0) {
+				const idToIndex = new Map<string, number>();
+				for (let i = 0; i < messages.length; i++) {
+					if (messages[i].id) idToIndex.set(messages[i].id, i);
+				}
+				let offset = 0;
+				for (const { msg, anchorId } of missingEntries) {
+					let insertIdx: number;
+					if (anchorId && idToIndex.has(anchorId)) {
+						insertIdx = idToIndex.get(anchorId)! + 1 + offset;
+					} else {
+						insertIdx = 0 + offset;
+					}
+					insertIdx = Math.min(insertIdx, messages.length);
+					messages.splice(insertIdx, 0, msg);
+					offset++;
+				}
+			}
 		} else {
 			messages = streamingMessages;
 		}

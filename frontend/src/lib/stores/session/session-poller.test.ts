@@ -328,3 +328,267 @@ describe('session-poller · compaction full-replace safety net', () => {
 		expect(ids).not.toContain('tool-1');
 	});
 });
+
+describe('session-poller · rewind full-refresh honored while streaming', () => {
+	// Bug 1 (REWIND RESURRECTION): a rewind executed WHILE the session streams
+	// (backend truncate_after_uuid path) produces a full snapshot
+	// (initial_message_count=0) with is_streaming=true. The streaming union-merge
+	// branch would re-insert every rewind-trimmed message (matched by id only),
+	// visually no-oping the rewind. The backend now tags that one-shot full
+	// refresh with full_refresh_reason:"rewind". When present, the poller must
+	// SKIP the union-merge entirely and do a plain full replace so deletions
+	// propagate.
+	const SID = 'session-rewind-stream';
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SID);
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	function seedHistory() {
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				{ id: 'tool-1', role: 'assistant', type: 'tool_use', content: 'Using tool: Read', toolName: 'Read', toolId: 'tool-1', streaming: false },
+				{ id: 'text-2', role: 'assistant', type: 'text', content: 'more reply', streaming: false },
+			],
+			true, // isStreaming
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+	}
+
+	it('plain-replaces (trimmed messages GONE) on a streaming full-refresh tagged rewind', async () => {
+		seedHistory();
+
+		// Rewind-while-streaming: full snapshot, still streaming, carrying the
+		// rewind tag. The snapshot legitimately omits tool-1/text-2 (trimmed at
+		// the checkpoint). Those must NOT be resurrected by the union-merge.
+		fetchMock.mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				last_update_id: 9,
+				is_streaming: true,
+				initial_message_count: 0,
+				usage: {},
+				full_refresh_reason: 'rewind',
+				messages: [
+					{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+					{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				],
+			}),
+		} as unknown as Response);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		expect(ids).toEqual(['user-1', 'text-1']);
+		expect(ids).not.toContain('tool-1');
+		expect(ids).not.toContain('text-2');
+	});
+
+	it('still union-merges a streaming full-refresh WITHOUT the rewind tag (compaction)', async () => {
+		// Guard: the rewind gate must not swallow the compaction safety net. A
+		// full-refresh with no reason (or a non-rewind reason) keeps the
+		// history-preserving union-merge.
+		seedHistory();
+
+		fetchMock.mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				last_update_id: 9,
+				is_streaming: true,
+				initial_message_count: 0,
+				usage: {},
+				// no full_refresh_reason
+				messages: [
+					{ id: 'user-2', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'text-3', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			}),
+		} as unknown as Response);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		// Compaction net still preserves the pre-existing history.
+		expect(ids).toContain('text-1');
+		expect(ids).toContain('tool-1');
+		expect(ids).toContain('user-2');
+	});
+});
+
+describe('session-poller · anchored union-merge insertion order', () => {
+	// Bug 2 (ORDER SCRAMBLE): prepend-all is only correct when the kept messages
+	// are a fresh tail with no preceding anchor. For a TAIL-truncated seed —
+	// rendered [A,B,C,D] vs snapshot [A,B,user,partial] — prepend-all yields
+	// [C,D,A,B,user,partial]: the kept tail jumps to the TOP and stays there.
+	// Fix: anchored insertion — splice each contiguous missing run immediately
+	// AFTER its nearest preceding existing neighbor that IS present in the
+	// snapshot. Runs with no preceding anchor go to the head (empty-seed case).
+	const SID = 'session-anchor-merge';
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SID);
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	it('anchors a kept tail after its preceding snapshot neighbor (NOT at the head)', async () => {
+		// Rendered [A, B, C, D]; snapshot is a tail-truncated seed extended with
+		// the live turn: [A, B, user, partial]. C, D are missing from the
+		// snapshot and their preceding present neighbor is B → they must land
+		// right after B, before the new snapshot tail.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'A', role: 'user', type: 'text', content: 'A', streaming: false },
+				{ id: 'B', role: 'assistant', type: 'text', content: 'B', streaming: false },
+				{ id: 'C', role: 'assistant', type: 'tool_use', content: 'C', toolName: 'Read', toolId: 'C', streaming: false },
+				{ id: 'D', role: 'assistant', type: 'text', content: 'D', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				messages: [
+					{ id: 'A', role: 'user', type: 'text', content: 'A', streaming: false },
+					{ id: 'B', role: 'assistant', type: 'text', content: 'B', streaming: false },
+					{ id: 'user', role: 'user', type: 'text', content: 'new prompt', streaming: false },
+					{ id: 'partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		// Anchored: C,D spliced right after B; NOT jumped to the head.
+		expect(ids).toEqual(['A', 'B', 'C', 'D', 'user', 'partial']);
+	});
+
+	it('sends a kept run with no preceding anchor to the head (empty-seed case)', async () => {
+		// The snapshot shares NO earlier message with the rendered list, so the
+		// missing run has no preceding present neighbor → head (current behavior
+		// for the empty/truncated-seed compaction case must still hold).
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'old-1', role: 'assistant', type: 'text', content: 'old reply', streaming: false },
+				{ id: 'old-2', role: 'assistant', type: 'tool_use', content: 'old tool', toolName: 'Read', toolId: 'old-2', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				messages: [
+					{ id: 'new-user', role: 'user', type: 'text', content: 'prompt', streaming: false },
+					{ id: 'new-partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		// No preceding anchor → kept run stays at the head, ahead of the snapshot.
+		expect(ids).toEqual(['old-1', 'old-2', 'new-user', 'new-partial']);
+	});
+
+	it('treats a uuid match as present-in-snapshot so id-family shifts dedup instead of duplicate', async () => {
+		// The same logical message can carry different `id` families across
+		// polls (live-store id text-{12hex} vs parser id text-{uuid}-{n}) while
+		// sharing the transcript uuid. A uuid match must count as "present in
+		// snapshot" so the existing copy is dropped (absorbed as an update),
+		// not resurrected as a duplicate ahead of the snapshot.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'A', role: 'user', type: 'text', content: 'A', streaming: false },
+				// A message from a prior poll: convertServerMessage would have
+				// mapped the transcript uuid into jsonlUuid on the stored object.
+				{ id: 'text-oldid', role: 'assistant', type: 'text', content: 'shared reply', streaming: false, jsonlUuid: 'uuid-shared' },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				messages: [
+					{ id: 'A', role: 'user', type: 'text', content: 'A', streaming: false },
+					// Same uuid, DIFFERENT id family — this is the SAME message.
+					{ id: 'text-newid-0', role: 'assistant', type: 'text', content: 'shared reply', streaming: false, uuid: 'uuid-shared' },
+					{ id: 'partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const msgs = session!.messages;
+		// Dedup by uuid: the shared-uuid message appears exactly ONCE (absorbed as
+		// an update), not resurrected as a second card ahead of the snapshot.
+		// (The surviving id may be either family — applyServerState's
+		// preserveMessageIds keeps the prior id for DOM stability — so we assert on
+		// the uuid, not the id.)
+		expect(msgs.length).toBe(3);
+		const sharedByUuid = msgs.filter(m => m.jsonlUuid === 'uuid-shared');
+		expect(sharedByUuid.length).toBe(1);
+		// And crucially the tail order is preserved (no jump-to-head duplicate).
+		expect(msgs.map(m => m.content)).toEqual(['A', 'shared reply', 'partial']);
+	});
+});
