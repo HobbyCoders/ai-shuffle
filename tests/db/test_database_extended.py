@@ -5,49 +5,27 @@ These tests cover additional functions to increase coverage beyond the base test
 """
 
 import pytest
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
-from contextlib import contextmanager
-import sqlite3
+from datetime import datetime, timezone
 
 from app.db import database as db
 
 
-# Import fixtures from main test file
-from tests.db.test_database import _create_test_schema
-
-
 @pytest.fixture
 def test_db():
-    """Create an in-memory SQLite database for testing with full schema."""
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    cursor = conn.cursor()
-    _create_test_schema(cursor)
-    conn.commit()
+    """In-memory SQLite database built from the canonical PostgreSQL schema via
+    the test shim (see tests/db/test_database.py::test_db)."""
+    from tests.pg_shim import new_sqlite_connection
+    conn = new_sqlite_connection()
     yield conn
     conn.close()
 
 
 @pytest.fixture
 def mock_db(test_db):
-    """Patch database module to use test database."""
-    @contextmanager
-    def mock_get_db():
-        try:
-            yield test_db
-            test_db.commit()
-        except Exception:
-            test_db.rollback()
-            raise
-
-    def mock_get_connection():
-        return test_db
-
-    with patch.object(db, "get_connection", mock_get_connection):
-        with patch.object(db, "get_db", mock_get_db):
-            yield test_db
+    """Route the app DB layer through the shim-wrapped test connection."""
+    from tests.pg_shim import route_db_to
+    with route_db_to(test_db):
+        yield test_db
 
 
 @pytest.fixture
@@ -397,6 +375,11 @@ class TestSubagentExtended:
 class TestSessionSearchExtended:
     """Test extended session search operations."""
 
+    @pytest.mark.skip(
+        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
+        "Covered by integration tests against real Postgres."
+    )
     def test_search_sessions_with_limit(self, mock_db, setup_profile):
         """search_sessions should respect limit."""
         for i in range(5):

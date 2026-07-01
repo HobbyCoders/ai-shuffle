@@ -64,6 +64,12 @@ def mock_database():
         # Set up default returns
         mock_db.get_session_tags.return_value = []
         mock_db.session_has_forks.return_value = False
+        # Cross-install enrichment (sessions_helpers._annotate_*): return real
+        # containers so the endpoint's ``.get(...)`` chains resolve to plain
+        # values instead of MagicMocks, which would fail response validation
+        # (e.g. device_name must be a string or None, not a MagicMock).
+        mock_db.get_installs_map.return_value = {}
+        mock_db.get_project.return_value = None
         yield mock_db
 
 

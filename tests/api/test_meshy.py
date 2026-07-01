@@ -19,6 +19,12 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+# The Meshy 3D-generation API was removed when 3D generation moved to the
+# fal.ai-backed tools (imageTo3D / textTo3D). ``app.api.meshy`` no longer
+# exists, so this whole module tests a deleted feature — skip it cleanly rather
+# than failing every test with ModuleNotFoundError.
+pytest.importorskip("app.api.meshy", reason="app.api.meshy was removed (3D gen migrated to fal.ai tools)")
+
 
 # =============================================================================
 # Fixtures

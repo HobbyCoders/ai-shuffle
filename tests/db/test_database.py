@@ -42,526 +42,30 @@ from app.db import database as db
 # Fixtures
 # =============================================================================
 
-def _create_test_schema(cursor: sqlite3.Cursor):
-    """Create database schema in correct order for testing.
-
-    This creates all tables in an order that avoids the worktrees migration
-    dependency issue in the main _create_schema function. The schema matches
-    the actual database.py schema.
-    """
-    # System settings
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS system_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Admin user
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            username TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CHECK (id = 1)
-        )
-    """)
-
-    # Agent profiles
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            config JSON NOT NULL DEFAULT '{}',
-            mcp_tools JSON DEFAULT '[]',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Projects (workspaces)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            path TEXT NOT NULL,
-            settings JSON DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Git repositories (must be created before worktrees)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS git_repositories (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL UNIQUE,
-            remote_url TEXT,
-            default_branch TEXT DEFAULT 'main',
-            github_repo_name TEXT,
-            last_synced_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Worktrees (must be created before sessions reference it)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS worktrees (
-            id TEXT PRIMARY KEY,
-            repository_id TEXT NOT NULL,
-            session_id TEXT,
-            branch_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            base_branch TEXT,
-            status TEXT DEFAULT 'active',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
-        )
-    """)
-
-    # API users (must be created before sessions reference it)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_users (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE,
-            password_hash TEXT,
-            api_key_hash TEXT NOT NULL,
-            project_id TEXT,
-            profile_id TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            web_login_allowed BOOLEAN DEFAULT TRUE,
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_used_at TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Sessions (conversations)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            project_id TEXT,
-            profile_id TEXT NOT NULL,
-            api_user_id TEXT,
-            sdk_session_id TEXT,
-            worktree_id TEXT,
-            worktree_branch TEXT,
-            worktree_path TEXT,
-            parent_session_id TEXT,
-            fork_point_message_index INTEGER,
-            title TEXT,
-            status TEXT DEFAULT 'active',
-            is_favorite BOOLEAN DEFAULT FALSE,
-            total_cost_usd REAL DEFAULT 0,
-            total_tokens_in INTEGER DEFAULT 0,
-            total_tokens_out INTEGER DEFAULT 0,
-            turn_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id),
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
-            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Session messages
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS session_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tool_name TEXT,
-            tool_input JSON,
-            metadata JSON,
-            profile_id TEXT,
-            jsonl_uuid TEXT,
-            version INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Sync log
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT,
-            data JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Auth sessions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            token TEXT PRIMARY KEY,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # API key sessions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_key_sessions (
-            token TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Usage log
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usage_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            profile_id TEXT,
-            model TEXT,
-            tokens_in INTEGER,
-            tokens_out INTEGER,
-            cost_usd REAL,
-            duration_ms INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # API user profiles junction table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_profiles (
-            api_user_id TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (api_user_id, profile_id),
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Login attempts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS login_attempts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_address TEXT NOT NULL,
-            username TEXT,
-            success BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Account lockouts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS account_lockouts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_address TEXT,
-            username TEXT,
-            locked_until TIMESTAMP NOT NULL,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Checkpoints
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS checkpoints (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            sdk_session_id TEXT NOT NULL,
-            message_uuid TEXT NOT NULL,
-            message_preview TEXT,
-            message_index INTEGER DEFAULT 0,
-            git_ref TEXT,
-            git_available BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    # User preferences
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_type TEXT NOT NULL,
-            user_id TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value JSON,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_type, user_id, key)
-        )
-    """)
-
-    # Subagents
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS subagents (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            tools JSON,
-            model TEXT,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Permission rules
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS permission_rules (
-            id TEXT PRIMARY KEY,
-            profile_id TEXT,
-            tool_name TEXT NOT NULL,
-            tool_pattern TEXT,
-            decision TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Tags
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tags (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            color TEXT NOT NULL DEFAULT '#6366f1',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Session tags junction table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS session_tags (
-            session_id TEXT NOT NULL,
-            tag_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (session_id, tag_id),
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Templates
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS templates (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            prompt TEXT NOT NULL,
-            profile_id TEXT,
-            icon TEXT,
-            category TEXT,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Webhooks
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS webhooks (
-            id TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            secret TEXT,
-            events JSON NOT NULL DEFAULT '[]',
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_triggered_at TIMESTAMP,
-            failure_count INTEGER DEFAULT 0
-        )
-    """)
-
-    # Audit log
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            user_type TEXT DEFAULT 'admin',
-            event_type TEXT NOT NULL,
-            ip_address TEXT,
-            user_agent TEXT,
-            details JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Knowledge documents
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS knowledge_documents (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            filename TEXT NOT NULL,
-            content TEXT NOT NULL,
-            content_type TEXT DEFAULT 'text/plain',
-            file_size INTEGER DEFAULT 0,
-            chunk_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Knowledge chunks
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS knowledge_chunks (
-            id TEXT PRIMARY KEY,
-            document_id TEXT NOT NULL,
-            chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            metadata JSON DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Rate limits
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS rate_limits (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            requests_per_minute INTEGER DEFAULT 20,
-            requests_per_hour INTEGER DEFAULT 200,
-            requests_per_day INTEGER DEFAULT 1000,
-            concurrent_requests INTEGER DEFAULT 3,
-            priority INTEGER DEFAULT 0,
-            is_unlimited BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Request log
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS request_log (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            endpoint TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            duration_ms INTEGER,
-            status TEXT DEFAULT 'success'
-        )
-    """)
-
-    # Credential policies
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS credential_policies (
-            id TEXT PRIMARY KEY,
-            policy TEXT NOT NULL DEFAULT 'admin_provided',
-            description TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # API user credentials
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_credentials (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            credential_type TEXT NOT NULL,
-            encrypted_value TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
-        )
-    """)
-
-    # API user GitHub config
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_github_config (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL UNIQUE,
-            github_username TEXT,
-            github_avatar_url TEXT,
-            default_repo TEXT,
-            default_branch TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # User credential policies
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_credential_policies (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            credential_type TEXT NOT NULL,
-            policy TEXT NOT NULL DEFAULT 'optional',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
-        )
-    """)
-
-    # Schema version
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY
-        )
-    """)
-    cursor.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (25)")
-
-
 @pytest.fixture
 def test_db():
-    """Create an in-memory SQLite database for testing with full schema."""
-    # Create in-memory database
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-
-    # Create schema
-    cursor = conn.cursor()
-    _create_test_schema(cursor)
-    conn.commit()
-
+    """Create an in-memory SQLite database whose schema is the canonical
+    PostgreSQL schema, built via the test shim so it never drifts from the app.
+    """
+    from tests.pg_shim import new_sqlite_connection
+    conn = new_sqlite_connection()
     yield conn
-
     conn.close()
 
 
 @pytest.fixture
 def mock_db(test_db):
-    """Patch database module to use test database."""
-    @contextmanager
-    def mock_get_db():
-        try:
-            yield test_db
-            test_db.commit()
-        except Exception:
-            test_db.rollback()
-            raise
+    """Route the app DB layer through the shim-wrapped test connection.
 
-    def mock_get_connection():
-        return test_db
-
-    # Keep the effective_data_dir patch active for the duration of the test
-    with patch.object(db, "get_connection", mock_get_connection):
-        with patch.object(db, "get_db", mock_get_db):
-            yield test_db
+    Domain code writes PostgreSQL SQL (``%s`` placeholders, ``NOW()``, ``JSONB``
+    …) and reaches the DB via ``get_connection``. Wrapping the raw connection in
+    a ``ShimConnection`` translates that SQL to SQLite and returns dict rows.
+    The fixture still yields the raw connection so tests that run their own
+    ``?``-placeholder SQL directly keep working.
+    """
+    from tests.pg_shim import route_db_to
+    with route_db_to(test_db):
+        yield test_db
 
 
 @pytest.fixture
@@ -1006,6 +510,11 @@ class TestSessionMessageOperations:
 class TestSearchSessions:
     """Test session search functionality."""
 
+    @pytest.mark.skip(
+        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
+        "Covered by integration tests against real Postgres."
+    )
     def test_search_sessions_by_title(self, mock_db, setup_profile):
         """search_sessions should find sessions by title."""
         db.create_session("session-1", setup_profile, title="Python debugging help")
@@ -1016,6 +525,11 @@ class TestSearchSessions:
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
 
+    @pytest.mark.skip(
+        reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
+        "Covered by integration tests against real Postgres."
+    )
     def test_search_sessions_by_content(self, mock_db, setup_profile):
         """search_sessions should find sessions by message content."""
         db.create_session("session-1", setup_profile, title="Session 1")
@@ -2158,6 +1672,13 @@ class TestSessionsByTag:
 # Database Maintenance Tests
 # =============================================================================
 
+@pytest.mark.skip(
+    reason="run_database_maintenance was migrated to Postgres semantics "
+    "(ANALYZE + VACUUM ANALYZE outside a txn, notifications retention). These "
+    "tests assert the old SQLite contract (wal_checkpoint/optimize/PRAGMA "
+    "checkpointed_pages) and VACUUM ANALYZE isn't valid sqlite. "
+    "Covered by integration tests against real Postgres."
+)
 class TestRunDatabaseMaintenance:
     """Test run_database_maintenance cleanup and results."""
 

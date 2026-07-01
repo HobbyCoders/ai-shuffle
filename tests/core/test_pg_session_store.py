@@ -19,12 +19,16 @@ from __future__ import annotations
 import os
 import pytest
 
-# Skip the whole module if no Postgres is available — the adapter is
-# Postgres-specific by design.
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Skip the whole module unless the caller has explicitly opted in to running
+# against a REAL Postgres via ALLOW_REAL_PG=1. This conformance harness
+# TRUNCATES the session_store_* tables between contracts, so it must never run
+# against the app's configured DATABASE_URL (which is commonly a shared or
+# production database). Point DATABASE_URL at a disposable test database and
+# export ALLOW_REAL_PG=1 to run it. See tests/conftest.py for the guard.
 pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set; PgSessionStore conformance requires Postgres",
+    os.environ.get("ALLOW_REAL_PG") != "1",
+    reason="ALLOW_REAL_PG!=1; PgSessionStore conformance mutates a real Postgres "
+    "(truncates session_store_* tables) and is skipped by default for safety",
 )
 
 

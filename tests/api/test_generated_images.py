@@ -182,6 +182,10 @@ class TestGetImageByPathEndpoint:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         with patch("app.api.generated_images.settings") as mock_settings:
             mock_settings.effective_workspace_dir = temp_dir
@@ -458,6 +462,10 @@ class TestGetGeneratedImageByFilenameEndpoint:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         yield TestClient(app), temp_dir
 
@@ -620,6 +628,10 @@ class TestListGeneratedImagesEndpoint:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         yield TestClient(app), temp_dir
 
@@ -830,6 +842,10 @@ class TestEdgeCases:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         yield TestClient(app), temp_dir
 
@@ -980,6 +996,10 @@ class TestSecurityByPath:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         yield TestClient(app), temp_dir
 
@@ -1031,6 +1051,10 @@ class TestSecurityByFilename:
         # Create a minimal test app
         app = FastAPI()
         app.include_router(router)
+        # The router's endpoints require auth (Depends(require_auth)); override
+        # it so the test app is reachable without a real session cookie.
+        from app.api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
 
         yield TestClient(app), temp_dir
 

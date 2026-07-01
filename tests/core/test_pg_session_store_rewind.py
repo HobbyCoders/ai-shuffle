@@ -20,10 +20,14 @@ import os
 
 import pytest
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Skipped by default: this module opens a REAL Postgres pool and truncates
+# session-store tables, so it must never run against the app's configured
+# DATABASE_URL (commonly shared/production). Opt in with ALLOW_REAL_PG=1 against
+# a disposable test database. See tests/conftest.py for the import-time guard.
 pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set; session-store truncation requires Postgres",
+    os.environ.get("ALLOW_REAL_PG") != "1",
+    reason="ALLOW_REAL_PG!=1; session-store truncation mutates a real Postgres "
+    "and is skipped by default for safety",
 )
 
 

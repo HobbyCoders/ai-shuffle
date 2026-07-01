@@ -33,8 +33,12 @@ def files_app():
     This avoids loading the full app with its lifespan/migrations.
     """
     from app.api.shared_files import router
+    from app.api.auth import require_auth
     app = FastAPI()
     app.include_router(router)
+    # Endpoints require auth (Depends(require_auth)); override so the router is
+    # reachable in tests without a real session cookie.
+    app.dependency_overrides[require_auth] = lambda: "test-session-token"
     return app
 
 
