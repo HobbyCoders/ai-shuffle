@@ -83,6 +83,7 @@ class SessionSearchResult(TypedDict):
     api_user_id: Optional[str]
     title: Optional[str]
     status: str
+    is_favorite: bool
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
@@ -1218,7 +1219,7 @@ def search_sessions(
         WITH title_matches AS (
             SELECT
                 s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
-                s.status, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
                 s.turn_count, s.created_at, s.updated_at,
                 'title' as match_type,
                 s.title as match_snippet,
@@ -1230,7 +1231,7 @@ def search_sessions(
         content_matches AS (
             SELECT DISTINCT ON (s.id)
                 s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
-                s.status, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
                 s.turn_count, s.created_at, s.updated_at,
                 'content' as match_type,
                 ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),

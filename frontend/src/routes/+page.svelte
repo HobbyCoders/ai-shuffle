@@ -160,6 +160,11 @@
 	 */
 	function handleOpenSessions() {
 		layout.openBoard();
+		// Pull fresh sessions so cross-install mutations (favorites starred on
+		// another install) show up the moment the board opens, not just on next
+		// focus. Debounced via _refreshBoard so a rapid open/close/open doesn't
+		// stampede the API.
+		_refreshBoard();
 	}
 
 	// ============================================
@@ -167,9 +172,32 @@
 	// ============================================
 
 	let visibilityChangeHandler: (() => void) | null = null;
+	let focusHandler: (() => void) | null = null;
 	let cleanupGlobalStt: (() => void) | null = null;
 	let swMessageHandler: ((event: MessageEvent) => void) | null = null;
 	let openSessionEventHandler: ((event: Event) => void) | null = null;
+
+	// Cross-install freshness: favorites (and other mutations) land in the shared
+	// DB from OTHER installs, but our board only reloads on mount + local mutations
+	// — so an open board goes stale. Refresh it when the board becomes visible /
+	// the window regains focus. Debounced so rapid focus flaps (alt-tabbing) don't
+	// stampede the API.
+	let _lastBoardRefresh = 0;
+	const BOARD_REFRESH_MIN_INTERVAL_MS = 4000;
+	function _refreshBoard() {
+		const now = Date.now();
+		if (now - _lastBoardRefresh < BOARD_REFRESH_MIN_INTERVAL_MS) return;
+		_lastBoardRefresh = now;
+		// Respect the current tag filter (mirrors the other loadSessions callers).
+		void appData.loadSessions($sessionsTagFilter);
+	}
+	function refreshBoardIfVisible() {
+		// Only when the sessions board is the active view — no point refetching the
+		// list while the user is deep in a chat. (handleOpenSessions calls
+		// _refreshBoard directly since it navigates TO the board this same tick.)
+		if ($activeView?.type !== 'board') return;
+		_refreshBoard();
+	}
 
 	onMount(async () => {
 		if (!$isAuthenticated) {
@@ -186,6 +214,9 @@
 			appData.loadApiUserSessions(),
 			loadAllTags()
 		]);
+		// Sessions were just loaded — seed the board-refresh debounce so the first
+		// board render / focus event doesn't immediately refetch the same list.
+		_lastBoardRefresh = Date.now();
 
 		// Persisted profile may point to an ID that no longer exists
 		// (deleted on another device / tab). Reconcile against the freshly
@@ -251,13 +282,18 @@
 		}
 		window.addEventListener('open-session', openSessionEventHandler);
 
-		// Sync from server when window regains focus
+		// Sync from server when window regains focus / the tab becomes visible.
+		// Keeps the sessions board fresh with cross-install mutations (e.g. a
+		// favorite starred on another install) that our board otherwise never
+		// picks up until a manual reload.
 		visibilityChangeHandler = () => {
 			if (document.visibilityState === 'visible') {
-				// Could sync layout state from server here
+				refreshBoardIfVisible();
 			}
 		};
 		document.addEventListener('visibilitychange', visibilityChangeHandler);
+		focusHandler = () => refreshBoardIfVisible();
+		window.addEventListener('focus', focusHandler);
 
 		// Register keyboard shortcuts
 		shortcutRegistrations = [
@@ -347,6 +383,9 @@
 		if (typeof window !== 'undefined') {
 			if (visibilityChangeHandler) {
 				document.removeEventListener('visibilitychange', visibilityChangeHandler);
+			}
+			if (focusHandler) {
+				window.removeEventListener('focus', focusHandler);
 			}
 			if (swMessageHandler && 'serviceWorker' in navigator) {
 				navigator.serviceWorker.removeEventListener('message', swMessageHandler);

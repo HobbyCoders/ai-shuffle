@@ -166,6 +166,13 @@ export interface ActiveSessionState {
 	 *  false when a remote session's /live response is served from shared-DB
 	 *  history because the owner is offline — the chat is read-only then. */
 	remoteControllable: boolean;
+	/** Cross-install (cloud) sessions: a short, human-readable reason the owning
+	 *  device could not be reached for live control (e.g. "device is unreachable",
+	 *  "authentication rejected by device"). Present only when the /live relay
+	 *  actively FAILED (registry-online owner but unreachable / peer-error), so the
+	 *  read-only banner can explain WHY. undefined for a cleanly-offline owner
+	 *  (plain "view only") and for controllable sessions. */
+	relayError: string | undefined;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -248,6 +255,7 @@ function defaultState(): ActiveSessionState {
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
+		relayError: undefined,
 	};
 }
 
@@ -291,6 +299,7 @@ const internal: InternalMutableState = {
 	pendingTools: new Set(),
 	interruptPending: false,
 	awaitingNewSession: false,
+	pendingRequestId: null,
 	stopRequestedBeforeSession: false,
 	worktreeCreationGeneration: 0,
 	worktreeCreateAbort: null,

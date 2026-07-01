@@ -15,6 +15,7 @@ import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId } from '../device-id';
+import { appData } from '../app-data.svelte';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -338,6 +339,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Reset to controllable; the first poll (onPollApplied) flips it false
 				// only if the target is a remote session whose owner is offline.
 				remoteControllable: true,
+				// Clear any stale relay-error reason from the leaving session; the
+				// first poll re-stamps it if the target's owner is unreachable.
+				relayError: undefined,
 				// Per-session runtime state — MUST be reset on every switch so the
 			// leaving session's values never bleed into the target. These mirror
 			// the resets in newChat()/defaultState(); omitting them caused e.g. the
@@ -421,9 +425,23 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// loadSession failed (HTTP error, timeout, network error).
 			// Set error state so the UI shows an error banner instead of
 			// appearing frozen in a loading limbo.
+			//
+			// A REMOTE session (owned by another install) failing to load almost
+			// always means the owning device is unreachable — the shared-DB history
+			// path normally keeps it openable, so a hard null here is a reach
+			// failure, NOT "start a new chat". Tailor the message so the user knows
+			// to retry rather than abandon the (cluster-shared) session.
+			const row = appData.current.sessions.find((x) => x.id === sessionId);
+			const isRemote = !!(row && row.is_remote);
+			const deviceName = row?.device_name;
+			const errorMsg = isRemote
+				? deviceName
+					? `Could not reach ${deviceName} — try again`
+					: 'Could not reach the owning device — try again'
+				: 'Failed to load session. Try starting a new chat.';
 			update(s => ({
 				...s,
-				error: 'Failed to load session. Try starting a new chat.',
+				error: errorMsg,
 				contextUsed: 0,
 			}));
 		}

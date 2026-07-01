@@ -167,3 +167,99 @@ async def test_cloud_relay_304_when_owner_idle():
 
     assert isinstance(result, Response)
     assert result.status_code == 304
+
+
+# =============================================================================
+# Relay FAILURE degradation (B2): when a remote session's owner is registry-
+# online but the /live relay itself fails, get_live_session must degrade to
+# read-only shared-DB history AND stamp session_meta.relay_error with a short,
+# secret-free reason so the UI can explain WHY control is unavailable — instead
+# of the ambiguous plain "device offline" (or, worse, a hard load error).
+#
+# These drive the delta-poll branch (since_update_id > 0 + a live-store snapshot)
+# so the degraded response returns with session_meta attached without needing the
+# full DB/JSONL message-loader path mocked.
+# =============================================================================
+
+async def _relay_failure_result(relay_exc):
+    """Run get_live_session for a remote session whose relay_live raises, routed
+    through the delta-poll live-store branch that attaches session_meta."""
+    session_id = "b2-remote-unreachable"
+    session = {"id": session_id, "title": "Remote"}
+    snapshot = {
+        "session_id": session_id,
+        "is_streaming": False,
+        "last_update_id": 7,
+        "messages": [],
+    }
+    with patch("app.api.sessions.require_session", new=AsyncMock(return_value=session)), \
+         patch("app.api.sessions.enrich_session_worktree_meta", new=MagicMock(return_value={})), \
+         patch("app.core.cloud_relay.is_remote_session", new=MagicMock(return_value=True)), \
+         patch("app.core.cloud_relay.relay_live", new=AsyncMock(side_effect=relay_exc)), \
+         patch.object(task_registry, "get_visible", return_value=[]), \
+         patch.object(task_registry, "is_unpark_pending", return_value=False), \
+         patch.object(live_session_store, "has_session", return_value=True), \
+         patch.object(live_session_store, "is_streaming", return_value=False), \
+         patch.object(live_session_store, "get_session_since", return_value=dict(snapshot)):
+        return await get_live_session(
+            request=MagicMock(), session_id=session_id,
+            since_update_id=5, token="tok",
+        )
+
+
+async def test_relay_offline_stamps_relay_error_and_degrades():
+    """InstallOffline (owner offline/view-only) → view-only meta + relay_error."""
+    from app.core import cloud_relay
+
+    result = await _relay_failure_result(cloud_relay.InstallOffline("Device 'Laptop' is offline"))
+
+    assert isinstance(result, dict)
+    meta = result["session_meta"]
+    assert meta["execution_mode"] == "cloud"
+    assert meta["device_online"] is False
+    assert meta["controllable"] is False
+    # The InstallOffline message is already user-safe (device name only).
+    assert meta["relay_error"] == "Device 'Laptop' is offline"
+
+
+async def test_relay_peer_auth_error_stamps_categorized_reason():
+    """A peer 403 (cluster-secret mismatch) → 'authentication rejected' reason,
+    never the raw peer body / URL."""
+    from app.core import cloud_relay
+
+    exc = cloud_relay.CloudRelayError(
+        "Peer install cluster live failed (403): secret-xyz",
+        status_code=403,
+        detail="secret-xyz",
+    )
+    result = await _relay_failure_result(exc)
+
+    assert isinstance(result, dict)
+    meta = result["session_meta"]
+    assert meta["controllable"] is False
+    assert meta["relay_error"] == "authentication rejected by device"
+    # No secrets/detail leaked into the surfaced reason.
+    assert "secret-xyz" not in meta["relay_error"]
+
+
+async def test_relay_peer_5xx_error_stamps_status_reason():
+    """A peer 502 → a categorized 'device returned an error (502)' reason."""
+    from app.core import cloud_relay
+
+    exc = cloud_relay.CloudRelayError("boom", status_code=502, detail="bad gateway")
+    result = await _relay_failure_result(exc)
+
+    meta = result["session_meta"]
+    assert meta["relay_error"] == "device returned an error (502)"
+
+
+async def test_relay_transport_error_stamps_unreachable_reason():
+    """A CloudRelayError with no status_code (non-JSON body / timeout wrapper) →
+    'device is unreachable'."""
+    from app.core import cloud_relay
+
+    exc = cloud_relay.CloudRelayError("Peer install cluster live returned non-JSON body")
+    result = await _relay_failure_result(exc)
+
+    meta = result["session_meta"]
+    assert meta["relay_error"] == "device is unreachable"

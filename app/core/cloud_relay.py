@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 INTAKE_TIMEOUT = 180.0
 CONTROL_TIMEOUT = 30.0
 UPLOAD_TIMEOUT = 120.0
+# Live-relay timeout: the frontend's loadSession aborts at POLL_TIMEOUT_MS (15s),
+# so the live relay MUST fail faster than that or the backend is still waiting
+# when the client gives up — leaving the user with the generic "failed to load"
+# and NO history even though the degraded shared-DB fallback would have worked.
+# Keep this comfortably under the client abort so the read-only fallback always
+# wins the race when the owner is registry-online but unreachable.
+LIVE_RELAY_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 
 
 class CloudRelayError(Exception):
@@ -282,7 +289,11 @@ async def relay_live(
     ``(304, None)`` so the caller can pass it straight through to the poller.
     """
     base_url, sid = resolve_target(session)
-    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+    # Use the shorter LIVE_RELAY_TIMEOUT (not CONTROL_TIMEOUT) so an unreachable
+    # owner fails here BEFORE the frontend's 15s loadSession abort — otherwise the
+    # backend is still waiting when the client gives up and the user sees the
+    # generic load error with no history instead of the read-only fallback.
+    async with httpx.AsyncClient(timeout=LIVE_RELAY_TIMEOUT) as client:
         try:
             resp = await client.get(
                 f"{base_url}/api/v1/cluster/sessions/{sid}/live",

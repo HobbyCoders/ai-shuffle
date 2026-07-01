@@ -16,6 +16,7 @@ import type { ChatMessage, Task } from '../types';
 import type { SessionUsage } from './session-state';
 import type { PollAppliedData } from './session-poller';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
+import { notify } from '../notifications';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -31,6 +32,7 @@ export interface SessionInitDeps {
 	sessionPoller: {
 		onPollApplied: (cb: (sessionId: string, data: PollAppliedData) => void) => void;
 		onStreamEnd: (cb: (sessionId: string, usage: SessionUsage) => void) => void;
+		onPollError: (cb: (sessionId: string, consecutiveErrors: number, error: unknown) => void) => void;
 		setInterruptGuard?: (cb: (sessionId: string) => boolean) => void;
 		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
 		startStreaming: (sessionId: string) => void;
@@ -439,6 +441,13 @@ export function createSessionInit(deps: SessionInitDeps) {
 		disconnect: disconnectFn, persistSession, persistTimer,
 	} = deps;
 
+	// Sessions for which we've already surfaced a "polling keeps failing" toast.
+	// The poller fires onPollError on EVERY poll at/after the consecutive-error
+	// threshold, so without this guard a wedged session would spam a toast every
+	// tick. Cleared on the next successful poll-apply so a later failure episode
+	// re-notifies once.
+	const _pollErrorNotified = new Set<string>();
+
 	// ─── Poll callback ───────────────────────────────────────────────
 	// Direct callback from the poller → activeSession, replacing the old bridge
 	// subscription pattern. One _update() call per poll cycle — no double-update
@@ -460,6 +469,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 				console.debug(`[PollCB] skipped: poll for ${sessionId} but active is ${_state.sessionId}`);
 				return;
 			}
+
+			// A poll succeeded — reset the poll-error notify guard so a future error
+			// episode surfaces one fresh toast (see setupOnPollError).
+			_pollErrorNotified.delete(sessionId);
 
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
@@ -534,6 +547,17 @@ export function createSessionInit(deps: SessionInitDeps) {
 				const controllable = meta.controllable !== false;
 				if (controllable !== _state.remoteControllable) {
 					metaDelta.remoteControllable = controllable;
+				}
+				// Reason the owner couldn't be reached (registry-online but the /live
+				// relay failed). `relay_error` isn't in the SessionMeta type (owned by
+				// the poller module) but survives on the raw response — read it via a
+				// narrow cast. Clear it whenever the session is controllable again so a
+				// recovered device drops the stale "could not reach" banner.
+				const relayError = controllable
+					? undefined
+					: (meta as { relay_error?: string }).relay_error;
+				if (relayError !== _state.relayError) {
+					metaDelta.relayError = relayError;
 				}
 			}
 			const metaHasUpdate = Object.keys(metaDelta).length > 0;
@@ -765,11 +789,30 @@ export function createSessionInit(deps: SessionInitDeps) {
 		});
 	}
 
+	// ─── onPollError callback ────────────────────────────────────────
+	function setupOnPollError() {
+		sessionPoller.onPollError((sessionId, consecutiveErrors) => {
+			// Only surface errors for the session the user is actually looking at —
+			// a background session's poll failing shouldn't toast.
+			if (sessionId !== getState().sessionId) return;
+			// Non-spammy: one toast per failure episode (reset on the next good poll).
+			if (_pollErrorNotified.has(sessionId)) return;
+			_pollErrorNotified.add(sessionId);
+
+			console.warn(`[ActiveSession] poll errors for ${sessionId} (${consecutiveErrors} consecutive)`);
+			notify.error(
+				"Lost connection to this chat — it may be out of date. It'll refresh automatically when the connection recovers.",
+				{ category: 'session-poll-error', session_id: sessionId }
+			);
+		});
+	}
+
 	// ─── init ────────────────────────────────────────────────────────
 
 	async function init() {
 		const initGen = bumpInitGeneration();
 		setupOnStreamEnd();
+		setupOnPollError();
 		setupPollCallback();
 
 		const skipRestore = getSkipRestore();

@@ -581,6 +581,26 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     return session
 
 
+def _describe_relay_error(err: Exception) -> str:
+    """Map a live-relay failure to a short, human-readable, secret-free reason.
+
+    Used to stamp ``session_meta.relay_error`` when the owning install is
+    registry-online but the relay itself fails, so the UI can explain WHY control
+    is unavailable. Never includes URLs, secrets, or raw peer bodies — just a
+    coarse category derived from the error's ``status_code`` when present.
+    (InstallOffline is handled by the caller; this maps the peer-error and
+    transport-failure CloudRelayError cases.)
+    """
+    status = getattr(err, "status_code", None)
+    if status in (401, 403):
+        return "authentication rejected by device"
+    if status is not None:
+        return f"device returned an error ({status})"
+    # No HTTP status → transport-level failure (timeout / connection refused) or a
+    # non-JSON body from a proxy sitting in front of the peer.
+    return "device is unreachable"
+
+
 @router.get("/{session_id}/live")
 async def get_live_session(
     request: Request,
@@ -639,18 +659,32 @@ async def get_live_session(
     # instead of an unopenable error / 503 poll spam.
     from app.core import cloud_relay
     remote_unreachable = False
+    relay_error: Optional[str] = None
     if cloud_relay.is_remote_session(session):
         try:
             code, data = await cloud_relay.relay_live(session, since_update_id)
-        except cloud_relay.CloudRelayError as e:
-            # InstallOffline subclasses CloudRelayError — both mean "can't reach
-            # the owner right now". Degrade to read-only shared-DB history rather
-            # than 503 so the chat stays openable.
+        except cloud_relay.InstallOffline as e:
+            # Owner is offline/unregistered/view-only per the registry — a clean,
+            # expected "not reachable" state. The message is already user-safe
+            # (device name only, no URLs/secrets). Degrade to read-only history.
             logger.debug(
                 "Cluster live unavailable for %s: %s — serving shared-DB history",
                 session_id, e,
             )
             remote_unreachable = True
+            relay_error = str(e)
+        except cloud_relay.CloudRelayError as e:
+            # Owner is registry-online but the relay itself failed: a peer HTTP
+            # error (auth mismatch, 5xx), a non-JSON body, or a connect/read
+            # timeout wrapped as a transport error. Degrade to read-only history
+            # rather than 503 so the chat stays openable, and surface a short,
+            # secret-free reason so the UI can say WHY control is unavailable.
+            logger.debug(
+                "Cluster live relay failed for %s: %s — serving shared-DB history",
+                session_id, e,
+            )
+            remote_unreachable = True
+            relay_error = _describe_relay_error(e)
         except Exception as e:  # noqa: BLE001
             # Belt-and-suspenders: any UNEXPECTED relay failure (bad JSON, DB
             # hiccup reading the registry/secret, etc.) must NOT 500 the load.
@@ -661,6 +695,7 @@ async def get_live_session(
                 session_id, e,
             )
             remote_unreachable = True
+            relay_error = "unexpected error reaching device"
         else:
             if code == 304 or data is None:
                 return Response(status_code=304)
@@ -712,6 +747,11 @@ async def get_live_session(
         session_meta["execution_mode"] = "cloud"
         session_meta["device_online"] = False
         session_meta["controllable"] = False
+        # Short, secret-free reason WHY the owning device couldn't be reached, so
+        # the UI can say "Could not reach <device> — showing read-only history
+        # (<reason>)" instead of the ambiguous plain "Device offline — view only".
+        if relay_error:
+            session_meta["relay_error"] = relay_error
 
     # Check if session is in the live store.
     #

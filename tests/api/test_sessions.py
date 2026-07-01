@@ -420,6 +420,34 @@ class TestSearchSessions:
         assert len(data) == 1
         mock_database.search_sessions.assert_called_once()
 
+    def test_search_sessions_returns_is_favorite(self, client, mock_database):
+        """Regression: a favorited session must surface is_favorite=True through
+        the search endpoint. The DB layer's search_sessions CTEs previously
+        omitted is_favorite from their SELECT lists, so the API response model
+        defaulted it to False and starred sessions rendered unstarred in search
+        results (cross-install favorites bug). This guards the response-model
+        contract; the SQL-column fix is exercised by the DB layer against
+        Postgres (no reachable PG in this sandbox — see report)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "fav-session",
+                "title": "Starred chat",
+                "profile_id": "default",
+                "status": "active",
+                "is_favorite": True,
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "title",
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=starred")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["is_favorite"] is True
+
     def test_search_sessions_with_filters(self, client, mock_database):
         """Should search with project and profile filters."""
         mock_database.search_sessions.return_value = []

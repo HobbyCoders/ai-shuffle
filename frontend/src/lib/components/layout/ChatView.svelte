@@ -145,10 +145,17 @@
 		<div class="chat-column">
 			<div class="message-area-wrapper">
 				{#if $activeSession.sessionId && $activeSession.remoteControllable === false}
-					<!-- Cross-install (cloud) session whose owning device is offline:
+					<!-- Cross-install (cloud) session whose owning device isn't reachable:
 					     history is still readable from the shared DB, but live control
-					     can't reach it right now. Non-blocking, view-only notice. -->
-					<Banner severity="warning" message="Device offline — view only. You can read this chat, but can't send until the device reconnects." />
+					     can't reach it right now. Non-blocking, view-only notice.
+					     When the /live relay actively FAILED (owner registry-online but
+					     unreachable / peer-error), `relayError` carries a short reason —
+					     surface it so the user knows WHY, vs. a plain "offline". -->
+					{#if $activeSession.relayError}
+						<Banner severity="warning" message={`Could not reach the device — showing read-only history (${$activeSession.relayError}). You can read this chat, but can't send until it reconnects.`} />
+					{:else}
+						<Banner severity="warning" message="Device offline — view only. You can read this chat, but can't send until the device reconnects." />
+					{/if}
 				{/if}
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />
