@@ -132,8 +132,16 @@ def mock_request_queue():
 
 @pytest.fixture
 def admin_session_cookie():
-    """Return a session cookie value for admin."""
-    return "test-admin-session-token"
+    """Return a session cookie value for admin.
+
+    Admin endpoints now gate on the centralized ``app.api.auth.require_admin``,
+    which validates the ``session`` cookie via ``auth_service.validate_session``
+    (no longer ``database.get_auth_session``). Patch it to accept this token so
+    any test that sends this cookie is treated as an authenticated admin.
+    """
+    token = "test-admin-session-token"
+    with patch("app.api.auth.auth_service.validate_session", return_value=True):
+        yield token
 
 
 @pytest.fixture
@@ -464,47 +472,54 @@ class TestGetCurrentUser:
 
 
 class TestRequireAdmin:
-    """Test require_admin authentication helper."""
+    """Test the require_admin authentication helper.
 
-    @pytest.mark.asyncio
-    async def test_require_admin_no_session(self, mock_database):
-        """require_admin should raise 401 when no session cookie."""
+    require_admin is now the centralized ``app.api.auth.require_admin``: a
+    *synchronous* dependency taking a ``Request``. It reads the ``session``
+    cookie via ``get_session_token`` and validates it with
+    ``auth_service.validate_session`` (not ``database.get_auth_session``),
+    returning the token on success or raising 403 otherwise.
+    """
+
+    @staticmethod
+    def _request(session=None):
+        from types import SimpleNamespace
+        cookies = {"session": session} if session is not None else {}
+        return SimpleNamespace(cookies=cookies, state=SimpleNamespace())
+
+    def test_require_admin_no_session(self, mock_database):
+        """require_admin should raise 403 when no session cookie is present."""
         from app.api.rate_limits import require_admin
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await require_admin(None)
+            require_admin(self._request(session=None))
 
-        assert exc_info.value.status_code == 401
-        assert "Authentication required" in exc_info.value.detail
+        assert exc_info.value.status_code == 403
+        assert "Admin access required" in exc_info.value.detail
 
-    @pytest.mark.asyncio
-    async def test_require_admin_invalid_session(self, mock_database):
-        """require_admin should raise 401 for invalid session."""
+    def test_require_admin_invalid_session(self, mock_database):
+        """require_admin should raise 403 when the session fails validation."""
         from app.api.rate_limits import require_admin
         from fastapi import HTTPException
 
-        mock_database.get_auth_session.return_value = None
+        with patch("app.api.auth.auth_service.validate_session", return_value=False):
+            with pytest.raises(HTTPException) as exc_info:
+                require_admin(self._request(session="invalid-session"))
 
-        with pytest.raises(HTTPException) as exc_info:
-            await require_admin("invalid-session")
+        assert exc_info.value.status_code == 403
+        assert "Admin access required" in exc_info.value.detail
 
-        assert exc_info.value.status_code == 401
-        assert "Invalid session" in exc_info.value.detail
-
-    @pytest.mark.asyncio
-    async def test_require_admin_valid_session(self, mock_database):
-        """require_admin should return True for valid session."""
+    def test_require_admin_valid_session(self, mock_database):
+        """require_admin should return the token and flag admin for a valid session."""
         from app.api.rate_limits import require_admin
 
-        mock_database.get_auth_session.return_value = {
-            "id": "session-id",
-            "token": "valid-token"
-        }
+        request = self._request(session="valid-token")
+        with patch("app.api.auth.auth_service.validate_session", return_value=True):
+            result = require_admin(request)
 
-        result = await require_admin("valid-token")
-
-        assert result is True
+        assert result == "valid-token"
+        assert request.state.is_admin is True
 
 
 # =============================================================================
@@ -660,7 +675,7 @@ class TestListRateLimitConfigs:
             with TestClient(app) as client:
                 response = client.get("/api/v1/rate-limits/config")
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_list_configs_authenticated(self, mock_database, admin_session_cookie):
         """Should return list of configs for admin."""
@@ -728,7 +743,7 @@ class TestCreateRateLimitConfig:
                 with TestClient(app) as client:
                     response = client.post("/api/v1/rate-limits/config", json={})
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_create_config_default_values(self, mock_database, mock_rate_limiter, admin_session_cookie):
         """Should create config with default values."""
@@ -892,7 +907,7 @@ class TestUpdateRateLimitConfig:
                         json={"requests_per_minute": 50}
                     )
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_update_config_not_found(self, mock_database, mock_rate_limiter, admin_session_cookie):
         """Should return 404 when config not found."""
@@ -990,7 +1005,7 @@ class TestDeleteRateLimitConfig:
                 with TestClient(app) as client:
                     response = client.delete("/api/v1/rate-limits/config/test-id")
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_delete_config_not_found(self, mock_database, mock_rate_limiter, admin_session_cookie):
         """Should return 404 when config not found."""
@@ -1043,7 +1058,7 @@ class TestGetDefaultLimits:
             with TestClient(app) as client:
                 response = client.get("/api/v1/rate-limits/config/defaults")
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_get_defaults_success(self, mock_database, admin_session_cookie):
         """Should return default rate limit values."""
@@ -1082,7 +1097,7 @@ class TestGetQueueAdminInfo:
                 with TestClient(app) as client:
                     response = client.get("/api/v1/rate-limits/queue/admin")
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_get_queue_admin_success(self, mock_database, mock_request_queue, admin_session_cookie):
         """Should return queue statistics for admin."""
@@ -1122,7 +1137,7 @@ class TestClearQueue:
                 with TestClient(app) as client:
                     response = client.post("/api/v1/rate-limits/queue/clear")
 
-        assert response.status_code == 401
+        assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
 
     def test_clear_queue_success(self, mock_database, mock_request_queue, admin_session_cookie):
         """Should clear queue and return 204."""
