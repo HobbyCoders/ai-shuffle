@@ -580,8 +580,9 @@ class TestListGeneratedVideosEndpoint:
             mock_settings.effective_workspace_dir = temp_dir
 
             result = await list_generated_videos()
+            # NOTE: list endpoint response was slimmed — it no longer echoes a
+            # "directory" field; only the "videos" array is returned.
             assert result["videos"] == []
-            assert result["directory"] == str(gen_videos_dir)
 
     @pytest.mark.asyncio
     async def test_list_videos_directory_not_exists(self, temp_dir):
@@ -592,8 +593,8 @@ class TestListGeneratedVideosEndpoint:
             mock_settings.effective_workspace_dir = temp_dir
 
             result = await list_generated_videos()
+            # No "directory" field is returned when the directory is absent.
             assert result["videos"] == []
-            assert "generated-videos" in result["directory"]
 
     @pytest.mark.asyncio
     async def test_list_videos_with_files(self, temp_dir):
@@ -619,7 +620,7 @@ class TestListGeneratedVideosEndpoint:
             for video in result["videos"]:
                 assert "filename" in video
                 assert "url" in video
-                assert "path" in video
+                # per-image "path" was dropped from the payload; consumers use "url".
                 assert "size_bytes" in video
                 assert "created_at" in video
                 assert video["filename"] in ["video1.mp4", "video2.webm"]

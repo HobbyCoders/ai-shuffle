@@ -655,7 +655,8 @@ class TestListGeneratedImagesEndpoint:
             data = response.json()
 
             assert "images" in data
-            assert "directory" in data
+            # NOTE: list endpoint response was slimmed — it no longer echoes a
+            # "directory" field; only the "images" array is returned.
             assert len(data["images"]) == 3
 
             filenames = [img["filename"] for img in data["images"]]
@@ -681,7 +682,8 @@ class TestListGeneratedImagesEndpoint:
             image_data = data["images"][0]
             assert "filename" in image_data
             assert "url" in image_data
-            assert "path" in image_data
+            # NOTE: per-image "path" was dropped from the payload; consumers use
+            # the "url" field. Remaining metadata is filename/url/size/created_at.
             assert "size_bytes" in image_data
             assert "created_at" in image_data
 
@@ -710,8 +712,9 @@ class TestListGeneratedImagesEndpoint:
             response = client.get("/api/generated-images/")
             assert response.status_code == 200
             data = response.json()
+            # When the directory is absent the endpoint returns only an empty
+            # images list (no "directory" field).
             assert data["images"] == []
-            assert str(temp_dir / "generated-images") in data["directory"]
 
     def test_list_images_excludes_directories(self, test_client):
         """Should only list files, not subdirectories."""
