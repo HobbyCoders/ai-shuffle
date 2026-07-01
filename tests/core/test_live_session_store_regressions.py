@@ -122,6 +122,24 @@ class TestCompactionBoundary:
         session = store_with_history.get_session("s1")
         assert session.needs_full_refresh is False
 
+    async def test_compaction_full_refresh_carries_no_reason(self, store_with_history):
+        """A COMPACTION full refresh must stay unattributed — full_refresh_reason
+        is a rewind-only tag (BUG 1). If compaction leaked a reason, the frontend
+        would suppress its union-merge on a legitimate compaction snapshot."""
+        session = store_with_history.get_session("s1")
+        update_id_before = session.last_update_id
+
+        await store_with_history.add_system_message(
+            "s1", content="Compacted", subtype="compact_boundary",
+        )
+        # The compaction setter must not attribute the refresh.
+        assert session.full_refresh_reason is None
+
+        result = store_with_history.get_session_since("s1", update_id_before)
+        assert result["initial_message_count"] == 0
+        # No reason key on a compaction snapshot (only set when non-None).
+        assert "full_refresh_reason" not in result
+
     async def test_delta_poll_skips_history_messages(self, store_with_history):
         """Normal delta polls should skip history messages (optimization).
 
@@ -1162,6 +1180,170 @@ class TestSeedHealAgainstDurableTranscript:
             healed = mr.heal_seed_against_store(list(snapshot), "sdk-1", "/workspace")
         parse_mock.assert_not_called()
         assert healed == snapshot
+
+    def test_empty_seed_heals_to_durable(self, monkeypatch):
+        """An empty seed (store-parse swallowed to [] / NULL sdk turn) always
+        heals to the durable transcript — nothing to anchor against."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(_DURABLE_TRANSCRIPT), {}),
+        ):
+            healed = mr.heal_seed_against_store([], "sdk-1", "/workspace")
+
+        assert [m["id"] for m in healed] == [m["id"] for m in _DURABLE_TRANSCRIPT]
+
+
+# =============================================================================
+# BUG 2: heal_seed_against_store "longer wins" destroys preserved interrupted
+# tails.
+#
+# The live buffer coalesces a streamed turn's text into ONE message; the store
+# parse emits one row PER text block per assistant message (text-{uuid}-{n})
+# plus system-ish user rows the buffer never held. So after interrupt_for_query
+# the durable transcript can be numerically LONGER while MISSING the interrupted
+# turn's unflushed tail that end_streaming deliberately preserved in memory. A
+# bare longer-wins destroys that tail (and the id-family switch duplicates cards
+# client-side). Fix: anchored superset — durable may only win when it is longer
+# AND carries the LAST transcript uuid the snapshot holds.
+# =============================================================================
+
+
+class TestSeedHealAnchoredSuperset:
+    """The heal is anchored on the snapshot's last transcript uuid — 'longer'
+    alone is not enough to let the durable transcript win."""
+
+    def test_longer_durable_missing_anchor_keeps_seed(self, monkeypatch):
+        """Durable is longer (finer per-block rows) but does NOT contain the
+        snapshot's anchor uuid — it is missing the interrupted tail. The seed
+        must win to preserve that tail and avoid duplicate cards."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        # Snapshot: end_streaming backfilled transcript uuids onto the coalesced
+        # live turn, INCLUDING the interrupted tail (text-live, uuid a-tail).
+        snapshot = [
+            {"id": "user-live", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-live", "role": "assistant", "type": "text",
+             "content": "Partial interrupted answer", "uuid": "a-tail"},
+        ]
+        # Durable is LONGER (one row per text block + an extra system-ish user
+        # row) but is from the PRE-interrupt turn — it never saw a-tail.
+        durable = [
+            {"id": "user-hist", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-abc-0", "role": "assistant", "type": "text",
+             "content": "Block 0", "uuid": "abc"},
+            {"id": "text-abc-1", "role": "assistant", "type": "text",
+             "content": "Block 1", "uuid": "abc"},
+            {"id": "sys-user", "role": "user", "type": "text",
+             "content": "<system reminder>", "uuid": "sys"},
+        ]
+        assert len(durable) > len(snapshot)
+
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(durable), {}),
+        ):
+            healed = mr.heal_seed_against_store(list(snapshot), "sdk-1", "/workspace")
+
+        assert [m["id"] for m in healed] == [m["id"] for m in snapshot], (
+            "durable missing the snapshot anchor must NOT clobber the interrupted tail"
+        )
+
+    def test_longer_durable_with_anchor_wins(self, monkeypatch):
+        """Durable is longer AND carries the snapshot's anchor uuid — it is a
+        genuine superset (fully-flushed turn), so it wins as before."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        snapshot = [
+            {"id": "user-live", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-live", "role": "assistant", "type": "text",
+             "content": "Answer", "uuid": "a-done"},
+        ]
+        # Durable contains the anchor a-done AND more (a later tool row) — a real
+        # superset the mirror flushed after the snapshot was captured.
+        durable = [
+            {"id": "user-hist", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-a-done-0", "role": "assistant", "type": "text",
+             "content": "Answer", "uuid": "a-done"},
+            {"id": "tool-later", "role": "assistant", "type": "tool_use",
+             "content": "Using tool: Read", "uuid": "t-later"},
+        ]
+        assert len(durable) > len(snapshot)
+
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(durable), {}),
+        ):
+            healed = mr.heal_seed_against_store(list(snapshot), "sdk-1", "/workspace")
+
+        assert [m["id"] for m in healed] == [m["id"] for m in durable], (
+            "durable containing the anchor is a superset and must win"
+        )
+
+    def test_no_anchor_uuids_falls_back_to_longer_wins(self, monkeypatch):
+        """A snapshot with NO transcript uuids (crash-truncated tier-1 buffer,
+        backfill never ran) cannot be anchored — fall back to the original
+        longer-wins so the genuine crash-truncation heal still fires."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        # No uuid keys anywhere — matches the historical _DURABLE_TRANSCRIPT shape.
+        truncated_snapshot = [_DURABLE_TRANSCRIPT[0]]
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(_DURABLE_TRANSCRIPT), {}),
+        ):
+            healed = mr.heal_seed_against_store(
+                list(truncated_snapshot), "sdk-1", "/workspace"
+            )
+
+        assert [m["id"] for m in healed] == [m["id"] for m in _DURABLE_TRANSCRIPT], (
+            "uuid-less snapshot must fall back to longer-wins crash-truncation heal"
+        )
+
+    def test_equal_length_keeps_seed_even_with_anchor(self, monkeypatch):
+        """When durable is not strictly longer, the seed wins outright — the
+        anchor check only gates the longer-durable case."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        snapshot = [
+            {"id": "user-live", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-live", "role": "assistant", "type": "text",
+             "content": "Answer", "uuid": "a-done"},
+        ]
+        durable = [
+            {"id": "user-hist", "role": "user", "type": "text",
+             "content": "Do it", "uuid": "u-req"},
+            {"id": "text-a-done-0", "role": "assistant", "type": "text",
+             "content": "Answer", "uuid": "a-done"},
+        ]
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(durable), {}),
+        ):
+            healed = mr.heal_seed_against_store(list(snapshot), "sdk-1", "/workspace")
+
+        assert [m["id"] for m in healed] == [m["id"] for m in snapshot]
 
 
 class TestCompactionSnapshotContainsSeededHistory:

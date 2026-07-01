@@ -1461,3 +1461,70 @@ class TestTruncateAfterUuid:
             "nonexistent", target_uuid="u1", include_response=False, target_role="user"
         )
         assert removed is False
+
+    @pytest.mark.asyncio
+    async def test_trim_tags_full_refresh_reason_rewind(self, store):
+        """A successful trim must attribute the full refresh as 'rewind' so the
+        client can distinguish it from a compaction full-replace (BUG 1). Without
+        the reason, the frontend's compaction union-merge resurrects the trimmed
+        messages."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u2", include_response=False, target_role="user"
+        )
+
+        assert removed is True
+        session = store.get_session("session-1")
+        assert session.needs_full_refresh is True
+        assert session.full_refresh_reason == "rewind"
+
+    @pytest.mark.asyncio
+    async def test_noop_trim_does_not_tag_reason(self, store):
+        """A trim that removes nothing (target already the tail) must NOT tag a
+        rewind reason — no full refresh was scheduled."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+        ])
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u1", include_response=True, target_role="user"
+        )
+
+        assert removed is False
+        session = store.get_session("session-1")
+        assert session.full_refresh_reason is None
+
+    @pytest.mark.asyncio
+    async def test_get_session_since_surfaces_and_clears_rewind_reason(self, store):
+        """get_session_since must forward full_refresh_reason on the one-shot
+        full snapshot, then clear it alongside needs_full_refresh (BUG 1). The
+        field name 'full_refresh_reason' with value 'rewind' is a frontend
+        contract."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+        ])
+        since = store.get_session("session-1").last_update_id
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u2", include_response=False, target_role="user"
+        )
+        assert removed is True
+
+        result = store.get_session_since("session-1", since)
+        assert result is not None
+        assert result["full_refresh_reason"] == "rewind"
+        assert result["initial_message_count"] == 0
+
+        # Consumed: a second poll (no new updates) returns None, and the reason
+        # is cleared from the session so a later unrelated full refresh isn't
+        # mis-tagged.
+        assert store.get_session_since("session-1", result["last_update_id"]) is None
+        assert store.get_session("session-1").full_refresh_reason is None

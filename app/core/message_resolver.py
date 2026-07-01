@@ -391,6 +391,24 @@ def heal_seed_against_store(
     replace. When the seed is longer/equal (genuinely ahead of the not-yet-flushed
     mirror, or JSONL-mode) it wins, preserving tier-1 semantics.
 
+    "Longer" is NOT sufficient on its own, though. The two sources have a
+    systematic granularity mismatch: the live buffer coalesces a streamed turn's
+    text into ONE message, while the store parse emits one row per text block per
+    assistant message (``text-{uuid}-{n}``) plus system-ish user rows the buffer
+    never held. After ``interrupt_for_query`` the durable transcript can therefore
+    be numerically longer while MISSING the interrupted turn's unflushed tail that
+    ``end_streaming`` deliberately preserved in memory. A bare longer-wins would
+    destroy that tail (and the id-family switch would duplicate cards client-side).
+
+    So the heal is ANCHORED: the durable transcript may only win when it is longer
+    AND carries the snapshot's anchor uuid — the last message in the snapshot with
+    a truthy transcript uuid (populated by ``_backfill_message_uuids`` before
+    parking). Special cases:
+
+      * empty seed → durable wins (the store-parse-swallowed / NULL-sdk case),
+      * seed has NO transcript uuids at all → fall back to plain longer-wins
+        (preserves the genuine crash-truncation heal this function was built for).
+
     No-ops (returns ``initial_messages`` unchanged) outside postgres_only, without
     a usable ``sdk_session_id``, or when the store parse fails — a heal must never
     make the seed SHORTER than what the caller already resolved.
@@ -410,13 +428,77 @@ def heal_seed_against_store(
         # Parse failed — keep whatever the caller resolved (never shrink the seed).
         return initial_messages
 
-    if len(durable) > len(initial_messages):
+    # Empty seed → the durable transcript is unambiguously more complete (this is
+    # the store-parse-swallowed-to-[] / NULL-sdk-session case). Nothing to anchor.
+    if not initial_messages:
+        if durable:
+            logger.debug(
+                "heal_seed_against_store: empty seed — healing to durable "
+                "transcript (%d msgs)",
+                len(durable),
+            )
+            return durable
+        return initial_messages
+
+    if len(durable) <= len(initial_messages):
+        # Seed is already at least as long — never shrink it.
+        return initial_messages
+
+    # Durable is numerically longer, but "longer" is NOT sufficient on its own.
+    # The granularity between the two sources is systematically mismatched:
+    #
+    #   * the live buffer coalesces a streamed turn's text into ONE message
+    #     (append_text), while
+    #   * the store parse emits one row PER text block per assistant message
+    #     (text-{uuid}-{n}) plus system-ish user rows the buffer never held.
+    #
+    # So after interrupt_for_query, the durable transcript can be longer while
+    # MISSING the interrupted turn's unflushed tail that end_streaming
+    # deliberately preserved in memory. A bare "longer wins" would then destroy
+    # that tail and, via the id-family switch (parser text-{uuid}-{n} vs live
+    # text-{12hex}), spawn duplicate cards client-side.
+    #
+    # Guard: durable may only win if it is longer AND is a superset of the
+    # snapshot's tail — it must carry the LAST transcript uuid the snapshot holds
+    # (end_streaming's _backfill_message_uuids populates these before parking).
+    anchor_uuid = None
+    for msg in reversed(initial_messages):
+        uuid = msg.get("uuid")
+        if uuid:
+            anchor_uuid = uuid
+            break
+
+    if anchor_uuid is None:
+        # The snapshot carries NO transcript uuids at all (e.g. a crash-truncated
+        # tier-1 buffer whose backfill never ran). We cannot anchor, so fall back
+        # to the original longer-wins — this preserves the genuine crash-
+        # truncation heal this function was built for.
         logger.debug(
-            "heal_seed_against_store: durable store transcript (%d msgs) is more "
-            "complete than seed (%d msgs) — healing seed to durable transcript",
+            "heal_seed_against_store: seed has no anchor uuid — falling back to "
+            "longer-wins (durable %d > seed %d msgs)",
             len(durable), len(initial_messages),
         )
         return durable
+
+    durable_has_anchor = any(m.get("uuid") == anchor_uuid for m in durable)
+    if durable_has_anchor:
+        logger.debug(
+            "heal_seed_against_store: durable transcript (%d msgs) is longer and "
+            "contains the seed's anchor %s — healing seed to durable transcript",
+            len(durable), anchor_uuid,
+        )
+        return durable
+
+    # Durable is longer but does NOT contain the anchor: it is a DIFFERENT (and
+    # likely more coarsely/finely blocked) view that is missing the interrupted
+    # tail the snapshot preserved. Keep the seed to protect that tail and avoid
+    # the duplicate-card id-family switch.
+    logger.debug(
+        "heal_seed_against_store: durable transcript (%d msgs) is longer but "
+        "MISSING the seed's anchor %s — keeping seed (%d msgs) to preserve the "
+        "interrupted tail",
+        len(durable), anchor_uuid, len(initial_messages),
+    )
     return initial_messages
 
 

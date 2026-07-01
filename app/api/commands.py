@@ -715,12 +715,35 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             # rewind. Trim it in place at the same checkpoint instead.
             cleaned = await live_session_store.cleanup_ended_session(session_id)
             if not cleaned:
-                await live_session_store.truncate_after_uuid(
+                trimmed = await live_session_store.truncate_after_uuid(
                     session_id=session_id,
                     target_uuid=request.target_uuid,
                     include_response=request.include_response,
                     target_role=request.target_role,
                 )
+                if not trimmed:
+                    # The in-memory snapshot could not be trimmed — the target
+                    # uuid was not found in the live buffer (e.g. its
+                    # _backfill_message_uuids was skipped by the count-mismatch
+                    # guard, so the rewindable positions never got their transcript
+                    # uuids). The chat + store truncation already succeeded, so we
+                    # do NOT fail the rewind; but the surviving snapshot still holds
+                    # the trimmed messages and would win the "longer wins" heal on
+                    # reload, visually no-opping the rewind until the buffer expires.
+                    # Surface it so the outcome isn't silently reported as clean.
+                    logger.warning(
+                        "Rewind live-buffer trim missed: target %s not found in the "
+                        "live snapshot for session %s (cleanup was refused). The "
+                        "in-memory snapshot may shadow the truncated transcript until "
+                        "it expires.",
+                        request.target_uuid,
+                        session_id,
+                    )
+                    errors.append(
+                        "Live buffer trim skipped: rewind target not found in the "
+                        "in-memory snapshot; it may briefly reappear until the "
+                        "buffer expires"
+                    )
 
     # Determine overall success
     # Chat rewind is the primary operation - if it succeeds, the operation is successful

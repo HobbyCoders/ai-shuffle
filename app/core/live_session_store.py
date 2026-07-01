@@ -214,6 +214,14 @@ class LiveSession:
     # full snapshot instead of a stale delta merge.
     needs_full_refresh: bool = False
 
+    # Why the pending needs_full_refresh was raised, when it matters to the
+    # client. Compaction/end-streaming leave this None (an unattributed full
+    # snapshot). A rewind trim sets "rewind" so the frontend can tell a
+    # rewind-truncated snapshot apart from a compaction full-replace and NOT
+    # union-merge its now-trimmed extra messages back in. Consumed and cleared
+    # together with needs_full_refresh in get_session_since.
+    full_refresh_reason: Optional[str] = None
+
     # Currently active block type: 'thinking', 'text', 'tool_use', or None
     active_block_type: Optional[str] = None
 
@@ -1865,6 +1873,13 @@ class LiveSessionStore:
             if session.initial_message_count > keep_count:
                 session.initial_message_count = keep_count
             session.needs_full_refresh = True
+            # Attribute this one-shot full refresh so the client can distinguish
+            # it from a compaction full-replace. The compaction branch treats an
+            # unattributed full snapshot as an "impoverished seed" and union-
+            # merges its own extra messages back in — which would resurrect the
+            # very messages this rewind just trimmed. Tagging it "rewind" lets the
+            # frontend take the snapshot as authoritative instead.
+            session.full_refresh_reason = "rewind"
             self._increment_update_id(session)
             logger.info(
                 "truncate_after_uuid: trimmed %d message(s) from live session %s "
@@ -2107,9 +2122,16 @@ class LiveSessionStore:
             # Safe without async lock: this is a sync method in a single-threaded
             # asyncio context with no await points between check and clear.
             session.needs_full_refresh = False
+            # Consume the attribution alongside the flag. A rewind trim tags the
+            # refresh "rewind" so the client takes this snapshot as authoritative
+            # rather than union-merging its (now-trimmed) extra messages back in.
+            reason = session.full_refresh_reason
+            session.full_refresh_reason = None
             result = session.to_dict(delta_only=False)
             if result is not None:
                 result['initial_message_count'] = 0
+                if reason is not None:
+                    result['full_refresh_reason'] = reason
             return result
 
         # Delta polls: skip initial history messages (frontend already has them)

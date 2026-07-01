@@ -1243,6 +1243,81 @@ class TestExecuteRewindTrimsRefusedLiveSession:
             live_session_store._sessions.pop(session_id, None)
             live_session_store._session_locks.pop(session_id, None)
 
+    @pytest.mark.asyncio
+    async def test_refused_cleanup_trim_miss_surfaces_warning(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """BUG 3: when cleanup is refused AND the in-place trim MISSES (the target
+        uuid isn't in the live snapshot — e.g. _backfill_message_uuids was skipped
+        by its count-mismatch guard), the rewind must still SUCCEED (chat + store
+        truncation worked) but surface a warning instead of silently reporting a
+        clean rewind. The stale snapshot would otherwise win the "longer wins"
+        heal on reload and visually no-op the rewind."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+        from app.core.live_session_store import live_session_store, LiveMessage, LiveSession
+
+        session_id = "session-trim-miss"
+        sdk_sid = "sdk-session-trim-miss"
+        # Live session whose messages carry NO transcript uuids — backfill never
+        # ran (count-mismatch guard), so truncate_after_uuid cannot find the target.
+        live = LiveSession(session_id=session_id, is_streaming=False)
+        live.messages = [
+            LiveMessage(id="m1", role="user", type="text", content="first"),
+            LiveMessage(id="m2", role="assistant", type="text", content="reply-1"),
+            LiveMessage(id="m3", role="user", type="text", content="SECOND"),
+        ]
+        live_session_store._sessions[session_id] = live
+
+        from app.core.task_registry import task_registry
+
+        mock_settings.session_store_mode = "postgres_only"
+        mock_database.get_session.return_value = {
+            "id": session_id,
+            "sdk_session_id": sdk_sid,
+            "project_id": None,
+            "turn_count": 2,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=False,
+            message="JSONL not found",
+            chat_rewound=False,
+            messages_removed=0,
+            error="JSONL file not found",
+            remaining_user_turns=None,
+        )
+
+        try:
+            with patch(
+                "app.api.commands.truncate_session_store_to_checkpoint",
+                new=AsyncMock(return_value=2),
+            ), patch(
+                "app.api.commands.resolve_rewind_anchor", return_value=None
+            ), patch.object(
+                task_registry, "has_active_background_work", return_value=True
+            ):
+                request = RewindRequestV2(
+                    target_uuid="uuid-not-in-buffer",
+                    restore_chat=True,
+                    include_response=False,
+                    target_role="user",
+                )
+                response = await execute_rewind(session_id, request)
+
+            # Rewind still succeeds — chat + store truncation worked.
+            assert response.success is True
+            assert response.chat_rewound is True
+            # ...but the trim miss is surfaced (not silently reported clean).
+            assert response.error is not None
+            assert "Live buffer trim skipped" in response.error
+            # The snapshot is UNCHANGED (the trim couldn't find the target).
+            surviving = live_session_store._sessions.get(session_id)
+            assert surviving is not None
+            assert len(surviving.messages) == 3
+        finally:
+            live_session_store._sessions.pop(session_id, None)
+            live_session_store._session_locks.pop(session_id, None)
+
 
 # =============================================================================
 # Tests for legacy rewind endpoints
