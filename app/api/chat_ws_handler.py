@@ -2184,7 +2184,12 @@ class ChatWebSocketHandler:
         session_data = database.get_session(session_id)
         sdk_sid = session_data.get("sdk_session_id") if session_data else None
         w_dir = resolve_working_dir(session_data) if session_data else str(settings.workspace_dir)
-        initial_messages = message_resolver.resolve_for_streaming_init(session_id, sdk_sid, w_dir)
+        # Offload the (potentially uncached) seed transcript parse to a thread:
+        # resolve_for_streaming_init can do a full synchronous Postgres store read in
+        # postgres_only mode, which would otherwise block the event loop on every turn.
+        initial_messages = await run_sync(
+            message_resolver.resolve_for_streaming_init, session_id, sdk_sid, w_dir
+        )
         ctx.debug(logger, f"Loaded {len(initial_messages)} initial messages via MessageResolver")
 
         # Start live session with existing messages

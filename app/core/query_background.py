@@ -604,7 +604,12 @@ async def start_background_query(
     try:
         working_dir = resolve_working_dir(session)
         sdk_sid = session.get("sdk_session_id") if session else None
-        initial_messages = message_resolver.resolve_for_streaming_init(session_id, sdk_sid, working_dir)
+        # Offload the (potentially uncached) seed transcript parse to a thread:
+        # resolve_for_streaming_init can do a full synchronous Postgres store read in
+        # postgres_only mode, which would otherwise block the event loop on turn start.
+        initial_messages = await run_sync(
+            message_resolver.resolve_for_streaming_init, session_id, sdk_sid, working_dir
+        )
     except Exception:
         initial_messages = []
 
