@@ -55,8 +55,14 @@ def mock_database():
 
 @pytest.fixture
 def mock_api_user():
-    """Mock for get_api_user_from_request."""
-    with patch("app.api.projects.get_api_user_from_request") as mock:
+    """Mock for get_api_user_from_request.
+
+    check_project_access lives in app.api.common and reads the name from that
+    module's namespace, while list_projects calls the copy imported into
+    app.api.projects — patch both so a single fixture governs access checks.
+    """
+    with patch("app.api.projects.get_api_user_from_request") as mock, \
+         patch("app.api.common.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock
 
@@ -64,7 +70,11 @@ def mock_api_user():
 @pytest.fixture
 def app(mock_database, mock_settings, mock_api_user):
     """Create a FastAPI app with the projects router and mocked dependencies."""
-    with patch("app.api.projects.settings", mock_settings):
+    # Path composition happens in app.core.project_utils (get_project_working_dir*),
+    # which reads project_utils.settings.workspace_dir; projects.py also references
+    # settings.workspace_dir directly. Patch both so the temp workspace applies.
+    with patch("app.api.projects.settings", mock_settings), \
+         patch("app.core.project_utils.settings", mock_settings):
         app = FastAPI()
         app.include_router(router)
 
@@ -299,7 +309,7 @@ class TestCheckProjectAccess:
     def test_admin_has_full_access(self):
         """Admin user should have access to any project."""
         request = MagicMock()
-        with patch("app.api.projects.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = None  # Admin has no api_user
             # Should not raise
             check_project_access(request, "any-project")
@@ -307,7 +317,7 @@ class TestCheckProjectAccess:
     def test_api_user_with_matching_project(self):
         """API user should access their assigned project."""
         request = MagicMock()
-        with patch("app.api.projects.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "project_id": "test-project"
@@ -319,7 +329,7 @@ class TestCheckProjectAccess:
         """API user should be denied access to other projects."""
         from fastapi import HTTPException
         request = MagicMock()
-        with patch("app.api.projects.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "project_id": "project-a"
@@ -332,7 +342,7 @@ class TestCheckProjectAccess:
     def test_api_user_without_project_restriction(self):
         """API user without project_id should have full access."""
         request = MagicMock()
-        with patch("app.api.projects.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "project_id": None
@@ -1264,13 +1274,22 @@ class TestSyncWorktrees:
             assert data["cleaned_up"][0]["id"] == "wt-1"
 
     def test_sync_worktrees_project_not_found(self, client, mock_database):
-        """Should return 404 for non-existent project."""
+        """Missing project returns a safe default, not 404.
+
+        The frontend polls sync-worktrees while loading a chat card, and may hit
+        it before the project record exists during startup. The endpoint returns
+        WorktreeSyncResponse(is_git_repo=False, ...) with 200 to avoid noisy logs.
+        """
         mock_database.get_project.return_value = None
 
         response = client.post("/api/v1/projects/nonexistent/sync-worktrees")
 
-        assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_git_repo"] is False
+        assert data["active_worktrees"] == 0
+        assert data["cleaned_up"] == []
+        assert data["imported"] == 0
 
     def test_sync_worktrees_access_denied(self, client, mock_database, mock_api_user, sample_project):
         """API user should be denied access to other projects."""
