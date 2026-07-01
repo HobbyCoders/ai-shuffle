@@ -710,7 +710,7 @@ class TestCreatePull:
                 )
             ]
 
-            result = service.create_pull(
+            pr, error = service.create_pull(
                 repo="owner/repo",
                 title="Fix bug",
                 body="Description",
@@ -718,8 +718,9 @@ class TestCreatePull:
                 base="main"
             )
 
-            assert result is not None
-            assert result.number == 42
+            assert pr is not None
+            assert pr.number == 42
+            assert error is None
 
     def test_create_pull_failure(self, service, mock_completed_process):
         """Should return None on creation failure."""
@@ -729,7 +730,7 @@ class TestCreatePull:
                 stderr="Branch doesn't exist"
             )
 
-            result = service.create_pull(
+            pr, error = service.create_pull(
                 repo="owner/repo",
                 title="Fix bug",
                 body="Description",
@@ -737,7 +738,8 @@ class TestCreatePull:
                 base="main"
             )
 
-            assert result is None
+            assert pr is None
+            assert error  # failure detail is surfaced to the caller
 
     def test_create_pull_no_pr_url_in_output(self, service, mock_completed_process):
         """Should return None if PR URL not found in output."""
@@ -747,7 +749,7 @@ class TestCreatePull:
                 stdout="Created successfully but no URL\n"
             )
 
-            result = service.create_pull(
+            pr, error = service.create_pull(
                 repo="owner/repo",
                 title="Fix bug",
                 body="Description",
@@ -755,14 +757,15 @@ class TestCreatePull:
                 base="main"
             )
 
-            assert result is None
+            assert pr is None
+            assert error  # explains why no PR was returned
 
     def test_create_pull_exception(self, service):
         """Should return None on exception."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Network error")
 
-            result = service.create_pull(
+            pr, error = service.create_pull(
                 repo="owner/repo",
                 title="Fix bug",
                 body="Description",
@@ -770,7 +773,8 @@ class TestCreatePull:
                 base="main"
             )
 
-            assert result is None
+            assert pr is None
+            assert error  # exception detail surfaced to the caller
 
 
 class TestMergePull:
@@ -781,9 +785,10 @@ class TestMergePull:
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(returncode=0)
 
-            result = service.merge_pull("owner/repo", 42)
+            success, error = service.merge_pull("owner/repo", 42)
 
-            assert result is True
+            assert success is True
+            assert error is None
 
     def test_merge_with_squash(self, service, mock_completed_process):
         """Should use squash method when specified."""
@@ -813,18 +818,20 @@ class TestMergePull:
                 stderr="Merge conflict"
             )
 
-            result = service.merge_pull("owner/repo", 42)
+            success, error = service.merge_pull("owner/repo", 42)
 
-            assert result is False
+            assert success is False
+            assert error == "Merge conflict"
 
     def test_merge_exception(self, service):
         """Should return False on exception."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Error")
 
-            result = service.merge_pull("owner/repo", 42)
+            success, error = service.merge_pull("owner/repo", 42)
 
-            assert result is False
+            assert success is False
+            assert error  # exception detail surfaced to the caller
 
 
 class TestClosePull:
@@ -835,9 +842,10 @@ class TestClosePull:
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = mock_completed_process(returncode=0)
 
-            result = service.close_pull("owner/repo", 42)
+            success, error = service.close_pull("owner/repo", 42)
 
-            assert result is True
+            assert success is True
+            assert error is None
 
     def test_close_failure(self, service, mock_completed_process):
         """Should return False on close failure."""
@@ -847,18 +855,20 @@ class TestClosePull:
                 stderr="PR already closed"
             )
 
-            result = service.close_pull("owner/repo", 42)
+            success, error = service.close_pull("owner/repo", 42)
 
-            assert result is False
+            assert success is False
+            assert error == "PR already closed"
 
     def test_close_exception(self, service):
         """Should return False on exception."""
         with patch('subprocess.run') as mock_run:
             mock_run.side_effect = Exception("Error")
 
-            result = service.close_pull("owner/repo", 42)
+            success, error = service.close_pull("owner/repo", 42)
 
-            assert result is False
+            assert success is False
+            assert error  # exception detail surfaced to the caller
 
 
 # =============================================================================

@@ -133,6 +133,31 @@ def client(app, mock_git_service, mock_worktree_manager, mock_database, mock_set
             yield test_client
 
 
+@pytest.fixture(autouse=True)
+def _patch_shared_git_resolution(mock_database, mock_settings, mock_git_service):
+    """Route the refactored shared git helpers to the per-test mocks.
+
+    Git endpoints no longer read ``app.api.git.{database,settings,git_service}``
+    directly: project lookups now go through ``app.api.common.resolve_project_path``
+    (reads ``app.api.common.database``), path composition through
+    ``app.core.project_utils`` (reads its own module-level ``settings``), and the
+    repository-record helper lives in ``app.api.git_helpers`` (reads
+    ``git_helpers.git_service``). The inline ``app.api.git.*`` patches in each test
+    don't reach those modules, so patch them here for the whole suite, mirroring
+    the mock objects the tests already install on the endpoint modules.
+
+    Also clears the module-level ``_repo_record_cache`` (60s TTL) so a repo record
+    resolved in one test can't leak into the next.
+    """
+    from app.api import git_helpers as _gh
+    _gh._repo_record_cache.clear()
+    with patch("app.api.common.database", mock_database), \
+         patch("app.core.project_utils.settings", mock_settings), \
+         patch("app.api.git_helpers.git_service", mock_git_service):
+        yield
+    _gh._repo_record_cache.clear()
+
+
 @pytest.fixture
 def sample_project():
     """Sample project data."""
@@ -320,7 +345,13 @@ class TestGetGitStatus:
         assert data["default_branch"] == "main"
 
     def test_get_status_project_not_found(self, app, mock_database, mock_settings):
-        """Should return 404 for non-existent project."""
+        """Should return an empty (non-git) status, not 404, for a missing project.
+
+        The status endpoint intentionally resolves the project path with
+        ``allow_missing=True`` and returns ``is_git_repo=False`` when the record
+        doesn't exist yet, so the frontend poller can retry silently during the
+        startup race between polling and project creation (see git.py get_status).
+        """
         mock_database.get_project.return_value = None
 
         with (patch("app.api.git.database", mock_database),
@@ -331,8 +362,8 @@ class TestGetGitStatus:
                     client = TestClient(app)
                     response = client.get("/api/v1/projects/nonexistent/git/status")
 
-        assert response.status_code == 404
-        assert "Project not found" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["is_git_repo"] is False
 
     def test_get_status_not_a_git_repo(
         self, app, mock_database, mock_git_service, mock_settings, sample_project
@@ -463,8 +494,9 @@ class TestGetGitStatus:
                  patch("app.api.git_helpers.database", mock_database),
                  patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
-                # Set API user with different project access
-                with patch("app.api.git.get_api_user_from_request", return_value={
+                # Access control now lives in app.api.common.check_project_access,
+                # which reads app.api.common.get_api_user_from_request.
+                with patch("app.api.common.get_api_user_from_request", return_value={
                     "id": "api-user-id",
                     "project_id": "different-project-id"
                 }):

@@ -220,7 +220,7 @@ class TestCheckProjectAccess:
 
         mock_request = MagicMock(spec=Request)
 
-        with patch("app.api.github.get_api_user_from_request") as mock_get_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_get_user:
             mock_get_user.return_value = {"project_id": "test-project-id"}
 
             # Should not raise
@@ -233,7 +233,7 @@ class TestCheckProjectAccess:
 
         mock_request = MagicMock(spec=Request)
 
-        with patch("app.api.github.get_api_user_from_request") as mock_get_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_get_user:
             mock_get_user.return_value = {"project_id": "different-project-id"}
 
             with pytest.raises(HTTPException) as exc_info:
@@ -248,7 +248,7 @@ class TestCheckProjectAccess:
 
         mock_request = MagicMock(spec=Request)
 
-        with patch("app.api.github.get_api_user_from_request") as mock_get_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_get_user:
             mock_get_user.return_value = None
 
             # Should not raise when no api_user
@@ -260,7 +260,7 @@ class TestCheckProjectAccess:
 
         mock_request = MagicMock(spec=Request)
 
-        with patch("app.api.github.get_api_user_from_request") as mock_get_user:
+        with patch("app.api.common.get_api_user_from_request") as mock_get_user:
             mock_get_user.return_value = {"id": "user-id"}  # No project_id
 
             # Should not raise when api_user has no project_id restriction
@@ -268,7 +268,14 @@ class TestCheckProjectAccess:
 
 
 class TestGetProjectPath:
-    """Test get_project_path helper function."""
+    """Test get_project_path helper function.
+
+    ``get_project_path`` is now a thin wrapper around
+    ``app.api.common.resolve_project_path`` and takes ``(request, project_id)``.
+    Path resolution reads ``app.api.common.database`` and
+    ``app.core.project_utils.settings``; access control reads
+    ``app.api.common.get_api_user_from_request`` (patched to no restricted user).
+    """
 
     def test_returns_path_for_valid_project(self, mock_project_data):
         """Test get_project_path returns correct path."""
@@ -280,26 +287,29 @@ class TestGetProjectPath:
             project_path = workspace_path / mock_project_data["path"]
             project_path.mkdir(parents=True, exist_ok=True)
 
-            with patch("app.api.github.database") as mock_db:
+            mock_request = MagicMock(spec=Request)
+            with patch("app.api.common.database") as mock_db, \
+                 patch("app.core.project_utils.settings") as mock_settings, \
+                 patch("app.api.common.get_api_user_from_request", return_value=None):
                 mock_db.get_project.return_value = mock_project_data
+                mock_settings.workspace_dir = workspace_path
 
-                with patch("app.api.github.settings") as mock_settings:
-                    mock_settings.workspace_dir = workspace_path
+                result = get_project_path(mock_request, "test-project-id")
 
-                    result = get_project_path("test-project-id")
-
-                    assert result == str(project_path)
-                    mock_db.get_project.assert_called_once_with("test-project-id")
+                assert result == str(project_path)
+                mock_db.get_project.assert_called_once_with("test-project-id")
 
     def test_raises_404_for_nonexistent_project(self):
         """Test get_project_path raises 404 for non-existent project."""
         from app.api.github import get_project_path
 
-        with patch("app.api.github.database") as mock_db:
+        mock_request = MagicMock(spec=Request)
+        with patch("app.api.common.database") as mock_db, \
+             patch("app.api.common.get_api_user_from_request", return_value=None):
             mock_db.get_project.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
-                get_project_path("non-existent-project")
+                get_project_path(mock_request, "non-existent-project")
 
             assert exc_info.value.status_code == 404
             assert "Project not found" in exc_info.value.detail
@@ -313,17 +323,18 @@ class TestGetProjectPath:
             workspace_path = Path(tmpdir)
             # Don't create the project directory
 
-            with patch("app.api.github.database") as mock_db:
+            mock_request = MagicMock(spec=Request)
+            with patch("app.api.common.database") as mock_db, \
+                 patch("app.core.project_utils.settings") as mock_settings, \
+                 patch("app.api.common.get_api_user_from_request", return_value=None):
                 mock_db.get_project.return_value = mock_project_data
+                mock_settings.workspace_dir = workspace_path
 
-                with patch("app.api.github.settings") as mock_settings:
-                    mock_settings.workspace_dir = workspace_path
+                with pytest.raises(HTTPException) as exc_info:
+                    get_project_path(mock_request, "test-project-id")
 
-                    with pytest.raises(HTTPException) as exc_info:
-                        get_project_path("test-project-id")
-
-                    assert exc_info.value.status_code == 404
-                    assert "Project directory not found" in exc_info.value.detail
+                assert exc_info.value.status_code == 404
+                assert "Project directory not found" in exc_info.value.detail
 
 
 class TestGetRepoForProject:
@@ -339,18 +350,18 @@ class TestGetRepoForProject:
             project_path = workspace_path / mock_project_data["path"]
             project_path.mkdir(parents=True, exist_ok=True)
 
-            with patch("app.api.github.database") as mock_db:
+            mock_request = MagicMock(spec=Request)
+            with patch("app.api.common.database") as mock_db, \
+                 patch("app.core.project_utils.settings") as mock_settings, \
+                 patch("app.api.common.get_api_user_from_request", return_value=None), \
+                 patch("app.api.github.github_service") as mock_github:
                 mock_db.get_project.return_value = mock_project_data
+                mock_settings.workspace_dir = workspace_path
+                mock_github.get_repo_from_remote.return_value = "owner/repo"
 
-                with patch("app.api.github.settings") as mock_settings:
-                    mock_settings.workspace_dir = workspace_path
+                result = get_repo_for_project(mock_request, "test-project-id")
 
-                    with patch("app.api.github.github_service") as mock_github:
-                        mock_github.get_repo_from_remote.return_value = "owner/repo"
-
-                        result = get_repo_for_project("test-project-id")
-
-                        assert result == "owner/repo"
+                assert result == "owner/repo"
 
     def test_raises_400_when_no_remote(self, mock_project_data):
         """Test get_repo_for_project raises 400 when no GitHub remote."""
@@ -362,20 +373,20 @@ class TestGetRepoForProject:
             project_path = workspace_path / mock_project_data["path"]
             project_path.mkdir(parents=True, exist_ok=True)
 
-            with patch("app.api.github.database") as mock_db:
+            mock_request = MagicMock(spec=Request)
+            with patch("app.api.common.database") as mock_db, \
+                 patch("app.core.project_utils.settings") as mock_settings, \
+                 patch("app.api.common.get_api_user_from_request", return_value=None), \
+                 patch("app.api.github.github_service") as mock_github:
                 mock_db.get_project.return_value = mock_project_data
+                mock_settings.workspace_dir = workspace_path
+                mock_github.get_repo_from_remote.return_value = None
 
-                with patch("app.api.github.settings") as mock_settings:
-                    mock_settings.workspace_dir = workspace_path
+                with pytest.raises(HTTPException) as exc_info:
+                    get_repo_for_project(mock_request, "test-project-id")
 
-                    with patch("app.api.github.github_service") as mock_github:
-                        mock_github.get_repo_from_remote.return_value = None
-
-                        with pytest.raises(HTTPException) as exc_info:
-                            get_repo_for_project("test-project-id")
-
-                        assert exc_info.value.status_code == 400
-                        assert "Could not determine GitHub repository" in exc_info.value.detail
+                assert exc_info.value.status_code == 400
+                assert "Could not determine GitHub repository" in exc_info.value.detail
 
 
 class TestCheckGitHubAuth:
@@ -864,7 +875,7 @@ class TestCreatePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.create_pull.return_value = sample_pull_request
+                        mock_github.create_pull.return_value = (sample_pull_request, None)
 
                         result = await create_pull_request(
                             request=mock_request,
@@ -901,7 +912,7 @@ class TestCreatePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.create_pull.return_value = None
+                        mock_github.create_pull.return_value = (None, "gh pr create failed")
 
                         with pytest.raises(HTTPException) as exc_info:
                             await create_pull_request(
@@ -931,7 +942,7 @@ class TestMergePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.merge_pull.return_value = True
+                        mock_github.merge_pull.return_value = (True, None)
 
                         result = await merge_pull_request(
                             request=mock_request,
@@ -959,7 +970,7 @@ class TestMergePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.merge_pull.return_value = True
+                        mock_github.merge_pull.return_value = (True, None)
 
                         await merge_pull_request(
                             request=mock_request,
@@ -984,7 +995,7 @@ class TestMergePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.merge_pull.return_value = False
+                        mock_github.merge_pull.return_value = (False, "Merge conflict")
 
                         with pytest.raises(HTTPException) as exc_info:
                             await merge_pull_request(
@@ -1015,7 +1026,7 @@ class TestClosePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.close_pull.return_value = True
+                        mock_github.close_pull.return_value = (True, None)
 
                         result = await close_pull_request(
                             request=mock_request,
@@ -1041,7 +1052,7 @@ class TestClosePullRequestEndpoint:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.close_pull.return_value = False
+                        mock_github.close_pull.return_value = (False, "PR already closed")
 
                         with pytest.raises(HTTPException) as exc_info:
                             await close_pull_request(
@@ -1303,7 +1314,7 @@ class TestEdgeCases:
                     mock_get_repo.return_value = "owner/repo"
 
                     with patch("app.api.github.github_service") as mock_github:
-                        mock_github.merge_pull.return_value = True
+                        mock_github.merge_pull.return_value = (True, None)
 
                         result = await merge_pull_request(
                             request=mock_request,
