@@ -34,9 +34,13 @@ UPLOAD_TIMEOUT = 120.0
 # so the live relay MUST fail faster than that or the backend is still waiting
 # when the client gives up — leaving the user with the generic "failed to load"
 # and NO history even though the degraded shared-DB fallback would have worked.
-# Keep this comfortably under the client abort so the read-only fallback always
-# wins the race when the owner is registry-online but unreachable.
-LIVE_RELAY_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
+# Keep this under the client abort so the read-only fallback always wins the
+# race when the owner is registry-online but unreachable. The READ budget is
+# deliberately looser than connect: a slow read means the owner is alive and
+# doing real work (a cold-cache since=0 snapshot parse can take >8s on big
+# sessions — timing out there latches the session read-only until reload),
+# while connect failure identifies a truly-unreachable owner fast.
+LIVE_RELAY_TIMEOUT = httpx.Timeout(12.0, connect=4.0)
 
 
 class CloudRelayError(Exception):

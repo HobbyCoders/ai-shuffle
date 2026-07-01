@@ -220,7 +220,7 @@ async def chat_websocket(
         window_seconds=settings.ws_rate_limit_window_seconds,
     )
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None, deferred_delivery: bool = False):
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None, deferred_delivery: bool = False, request_id: Optional[str] = None):
         """Execute query and stream results directly to WebSocket.
 
         ``deferred_delivery`` marks a turn whose delivery does NOT depend on this
@@ -240,6 +240,14 @@ async def chat_websocket(
         unpark turns) we fall through and stream anyway: the live store +
         ``sync_engine`` broadcasts + polling deliver it to the reconnected /
         polling client regardless of this socket's state.
+
+        ``request_id`` is the client's NEW-session adoption token (see the query
+        branch below and ``chat_ws_handler.handle_query``). It is echoed in the
+        first ``start`` frame so the awaiting frontend adopts the minted session
+        ONLY on a match. It is threaded ONLY for the interactive new-session path —
+        server-initiated turns (queue drain, unpark follow-up) leave it ``None``, so
+        their ``start`` frame carries no token and can never be adopted as a foreign
+        session's awaiting new chat.
         """
         nonlocal current_session_id
 
@@ -492,7 +500,15 @@ async def chat_websocket(
         query_wall_start = time.monotonic()
         try:
             ctx.info(logger, f"Query start profile={profile_id} project={project_id}")
-            if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
+            # Echo the client's adoption token (interactive new-session path only) so
+            # the awaiting frontend accepts this start ONLY on a match. Server-
+            # initiated turns leave request_id None → no token → non-adoptable.
+            # Mirrors chat_ws_handler.run_query's start frame shape (key OMITTED when
+            # there is no token — never null).
+            start_frame: Dict[str, Any] = {"type": "start", "session_id": session_id, "message_id": message_id}
+            if request_id:
+                start_frame["request_id"] = request_id
+            if not await send_json(start_frame):
                 ctx.warning(logger, "Connection lost before query could start")
                 if deferred_delivery:
                     # The originating socket is gone — the client reloaded,
@@ -1087,6 +1103,14 @@ async def chat_websocket(
                         # socket may have dropped during the interrupt drain, so a failed
                         # start frame must NOT drop the message (see run_query).
                         is_interrupt_followup = bool(data.get("interrupt_followup"))
+                        # Client-generated adoption token for a NEW-session query. Echoed
+                        # back in both the ``session_created`` and the first ``start``
+                        # frame so the frontend can authenticate that the minted session
+                        # is genuinely the one it asked for — not a foreign session's
+                        # server-initiated turn (unpark / queue drain) surfacing on the
+                        # shared device socket during its awaiting window. Only meaningful
+                        # for a new session (session_id is None); ignored otherwise.
+                        request_id = data.get("request_id")
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -1178,12 +1202,18 @@ async def chat_websocket(
                                 worktree_branch=wt_branch,
                                 worktree_path=wt_path
                             )
-                            # Immediately notify frontend of new session_id so it persists on refresh
-                            await send_json({
+                            # Immediately notify frontend of new session_id so it persists on refresh.
+                            # Echo the client's adoption token so the awaiting frontend accepts
+                            # this session_created ONLY if it matches — authenticating new-session
+                            # adoption. Mirrors chat_ws_handler (key OMITTED when no token).
+                            session_created_frame = {
                                 "type": "session_created",
                                 "session_id": session_id,
                                 "worktree_id": worktree_id  # Include worktree_id in response
-                            })
+                            }
+                            if request_id:
+                                session_created_frame["request_id"] = request_id
+                            await send_json(session_created_frame)
 
                             # Notify other devices so their side panels show the new session
                             await sync_engine.broadcast_user_session_created(
@@ -1255,8 +1285,11 @@ async def chat_websocket(
                         # Start new query task
                         # Note: broadcast_stream_start is called inside run_query when actual
                         # streaming begins. This prevents stuck streaming state if query fails early.
+                        # Pass the adoption token ONLY for a brand-new session so the first
+                        # `start` frame echoes it (authenticating adoption). An existing-session
+                        # query needs no token — the frontend routes its start by known session_id.
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id, deferred_delivery=is_interrupt_followup)
+                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id, deferred_delivery=is_interrupt_followup, request_id=(request_id if is_new_session else None))
                         )
                         async with _active_sessions_lock:
                             _active_chat_sessions[session_id] = query_task
