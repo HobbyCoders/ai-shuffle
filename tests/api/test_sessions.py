@@ -54,13 +54,18 @@ def mock_database():
     """Mock database module.
 
     The sessions router is split across several modules (`sessions`,
-    `sessions_helpers`, `sessions_export`), each with its own `database`
+    `sessions_helpers`, `sessions_export`, `sessions_fork`,
+    `sessions_worktree`, `sessions_cloud`), each with its own `database`
     import. Patch all of them to the same mock so helpers like
-    `require_session` resolve through the mock instead of a real pool.
+    `require_session` and the fork/worktree endpoints resolve through the
+    mock instead of a real pool.
     """
     with patch("app.api.sessions.database") as mock_db, \
             patch("app.api.sessions_helpers.database", mock_db), \
-            patch("app.api.sessions_export.database", mock_db):
+            patch("app.api.sessions_export.database", mock_db), \
+            patch("app.api.sessions_fork.database", mock_db), \
+            patch("app.api.sessions_worktree.database", mock_db), \
+            patch("app.api.sessions_cloud.database", mock_db):
         # Set up default returns
         mock_db.get_session_tags.return_value = []
         mock_db.session_has_forks.return_value = False
@@ -75,8 +80,18 @@ def mock_database():
 
 @pytest.fixture
 def mock_api_user():
-    """Mock for get_api_user_from_request."""
-    with patch("app.api.sessions.get_api_user_from_request") as mock:
+    """Mock for get_api_user_from_request.
+
+    Each sessions sub-module imports its own copy of the name, and
+    check_session_access reads it from sessions_helpers. Patch every module
+    to the same mock so one fixture governs access across all endpoints.
+    """
+    with patch("app.api.sessions.get_api_user_from_request") as mock, \
+            patch("app.api.sessions_helpers.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_fork.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_worktree.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_cloud.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_export.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock
 
@@ -192,7 +207,7 @@ class TestCheckSessionAccess:
     def test_admin_has_full_access(self):
         """Admin user should have access to any session."""
         request = MagicMock()
-        with patch("app.api.sessions.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = None  # Admin has no api_user
             # Should not raise
             check_session_access(request, {"id": "any-session", "project_id": "any-project"})
@@ -200,7 +215,7 @@ class TestCheckSessionAccess:
     def test_api_user_with_matching_project(self):
         """API user should access sessions in their assigned project."""
         request = MagicMock()
-        with patch("app.api.sessions.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "project_id": "test-project"
@@ -211,7 +226,7 @@ class TestCheckSessionAccess:
     def test_api_user_denied_other_project(self):
         """API user should be denied access to sessions in other projects."""
         request = MagicMock()
-        with patch("app.api.sessions.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "project_id": "project-a"
@@ -224,7 +239,7 @@ class TestCheckSessionAccess:
     def test_api_user_with_matching_profile(self):
         """API user should access sessions with their assigned profile."""
         request = MagicMock()
-        with patch("app.api.sessions.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "profile_id": "test-profile"
@@ -235,7 +250,7 @@ class TestCheckSessionAccess:
     def test_api_user_denied_other_profile(self):
         """API user should be denied access to sessions with other profiles."""
         request = MagicMock()
-        with patch("app.api.sessions.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
             mock_api_user.return_value = {
                 "id": "user-1",
                 "profile_id": "profile-a"
@@ -250,24 +265,41 @@ class TestEnrichSessionsWithTags:
     """Test session enrichment utility."""
 
     def test_enriches_sessions_with_tags(self, mock_database):
-        """Should add tags and has_forks to sessions."""
-        mock_database.get_session_tags.return_value = [{"id": "tag-1", "name": "Bug"}]
-        mock_database.session_has_forks.return_value = True
+        """Should add tags and has_forks to sessions via batch lookups.
 
-        sessions = [{"id": "session-1"}, {"id": "session-2"}]
-        result = enrich_sessions_with_tags(sessions)
+        Enrichment now uses batch queries (get_tags_for_sessions /
+        get_fork_info_for_sessions — 2 queries total) instead of per-session
+        round-trips, so mock those helpers rather than the old per-session
+        database.get_session_tags / session_has_forks calls.
+        """
+        tags_by_session = {
+            "session-1": [{"id": "tag-1", "name": "Bug"}],
+            "session-2": [{"id": "tag-1", "name": "Bug"}],
+        }
+        fork_by_session = {
+            "session-1": {"has_forks": True},
+            "session-2": {"has_forks": True},
+        }
+        with patch("app.api.sessions_helpers.get_tags_for_sessions",
+                   return_value=tags_by_session) as mock_tags, \
+                patch("app.api.sessions_helpers.get_fork_info_for_sessions",
+                      return_value=fork_by_session) as mock_forks:
+            sessions = [{"id": "session-1"}, {"id": "session-2"}]
+            result = enrich_sessions_with_tags(sessions)
 
         assert len(result) == 2
         assert result[0]["tags"] == [{"id": "tag-1", "name": "Bug"}]
         assert result[0]["has_forks"] is True
-        assert mock_database.get_session_tags.call_count == 2
-        assert mock_database.session_has_forks.call_count == 2
+        # One batched query for all sessions, not one per session.
+        mock_tags.assert_called_once_with(["session-1", "session-2"])
+        mock_forks.assert_called_once_with(["session-1", "session-2"])
 
     def test_handles_empty_list(self, mock_database):
         """Should handle empty session list."""
-        result = enrich_sessions_with_tags([])
+        with patch("app.api.sessions_helpers.get_tags_for_sessions") as mock_tags:
+            result = enrich_sessions_with_tags([])
         assert result == []
-        mock_database.get_session_tags.assert_not_called()
+        mock_tags.assert_not_called()
 
 
 # =============================================================================
@@ -559,7 +591,15 @@ class TestGetSession:
         assert data["id"] == "test-session-id"
 
     def test_get_session_with_jsonl_messages(self, client, mock_database, sample_session):
-        """Should load messages from JSONL file when available."""
+        """Should load messages from the JSONL parser in mirror/disabled mode.
+
+        Pins session_store_mode='disabled' so the read path uses the JSONL parser
+        (the postgres_only cutover uses parse_session_history_via_store instead).
+        The ambient SESSION_STORE_MODE env can be 'postgres_only' in a deployment
+        sandbox, so the mode is set explicitly rather than relied upon. Pool-touching
+        helpers (resolve_working_dir, cost_utils) are patched to stay off Postgres.
+        """
+        from app.core.config import settings
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
 
@@ -568,7 +608,11 @@ class TestGetSession:
             {"id": 2, "role": "assistant", "content": "Hi there!", "type": "text", "metadata": {}}
         ]
 
-        with patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
+        with patch.object(settings, "session_store_mode", "disabled"), \
+                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
             mock_parse.return_value = (jsonl_messages, {
                 "cache_creation_tokens": 100,
                 "cache_read_tokens": 50,
@@ -584,14 +628,23 @@ class TestGetSession:
         assert len(data["messages"]) == 2
 
     def test_get_session_falls_back_to_database(self, client, mock_database, sample_session):
-        """Should fall back to database messages when JSONL fails."""
+        """Should fall back to database messages when there is no JSONL sdk id.
+
+        The legacy DB fallback (Fallback 3) only runs in mirror/disabled mode; the
+        postgres_only cutover is a hard-cut that never falls through to the
+        session_messages table. Pin the mode so the ambient SESSION_STORE_MODE env
+        does not suppress the fallback under test.
+        """
+        from app.core.config import settings
         sample_session["sdk_session_id"] = None
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
             {"id": 1, "role": "user", "content": "Hello", "tool_name": None}
         ]
 
-        response = client.get("/api/v1/sessions/test-session-id")
+        with patch.object(settings, "session_store_mode", "disabled"), \
+                patch("app.core.cost_utils.attach_cost_metadata"):
+            response = client.get("/api/v1/sessions/test-session-id")
 
         assert response.status_code == 200
         data = response.json()
@@ -1503,3 +1556,4 @@ class TestSessionId:
         import uuid
         ids = [str(uuid.uuid4()) for _ in range(100)]
         assert len(set(ids)) == 100
+
