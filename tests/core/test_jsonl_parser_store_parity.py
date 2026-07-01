@@ -272,8 +272,14 @@ def test_store_cache_is_separate_namespace():
     jp.invalidate_parse_cache()
     store_loader = _store_loader_for(entries, {})
 
+    # A version stamp is required for the store cache to be written (there is no
+    # live Postgres here); inject a stable (count, max_id) loader.
     jp.parse_session_history_from_store(
-        session_id, "/workspace", store_loader, use_cache=True
+        session_id,
+        "/workspace",
+        store_loader,
+        use_cache=True,
+        store_version_loader=lambda _sid: (1, 1),
     )
 
     assert session_id in jp._store_parse_cache

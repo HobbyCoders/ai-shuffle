@@ -84,6 +84,17 @@ def _counting_loader(entries):
     return _loader, calls
 
 
+def _stable_version_loader():
+    """A store version loader returning a fixed (count, max_id).
+
+    The store cache is only written when a version can be stamped, and validated
+    against the same version on read; a constant loader models "the store did not
+    change between prime and read" — the coherence property these tests assert.
+    There is no live Postgres in this env, so the DB helper cannot be used.
+    """
+    return lambda _sid: (2, 2)
+
+
 @contextlib.contextmanager
 def _projects_with_jsonl(session_id, entries):
     """Patch settings so ``get_session_jsonl_path`` FINDS a JSONL for session_id.
@@ -129,24 +140,30 @@ def test_pre_seed_refreshes_store_parse_cache_with_jsonl():
     assert len(post_msgs) == 4
 
     pre_loader, pre_calls = _counting_loader(pre)
+    version_loader = _stable_version_loader()
 
     # 1. Stream START seed primes the store cache with the PRE-turn transcript.
     seeded, _ = jp.parse_session_history_from_store(
-        sid, "/workspace", pre_loader, use_cache=True
+        sid, "/workspace", pre_loader, use_cache=True,
+        store_version_loader=version_loader,
     )
     assert len(seeded) == 2
     assert pre_calls["n"] == 1  # cache miss -> loader ran
 
     # 2. Stream END pre-seed, with a JSONL file present (the buggy branch).
     with _projects_with_jsonl(sid, post):
-        ok = jp.pre_seed_parse_cache(sid, post_msgs, post_usage, working_dir="/workspace")
+        ok = jp.pre_seed_parse_cache(
+            sid, post_msgs, post_usage, working_dir="/workspace",
+            store_version_loader=version_loader,
+        )
     assert ok is True
 
     # 3. Next read (same PRE-turn loader) must serve the REFRESHED post-turn
     #    transcript from the store cache, NOT re-run the now-stale loader.
     pre_calls["n"] = 0
     served, _ = jp.parse_session_history_from_store(
-        sid, "/workspace", pre_loader, use_cache=True
+        sid, "/workspace", pre_loader, use_cache=True,
+        store_version_loader=version_loader,
     )
     assert pre_calls["n"] == 0, "expected a store-cache hit; loader should not run"
     assert served == post_msgs, "stale store cache: post-turn exchange missing (the bug)"
@@ -163,15 +180,20 @@ def test_pre_seed_seeds_store_cache_without_jsonl():
     )
     assert len(msgs) == 2
 
+    version_loader = _stable_version_loader()
     with _projects_empty():
-        ok = jp.pre_seed_parse_cache(sid, msgs, usage, working_dir="/workspace")
+        ok = jp.pre_seed_parse_cache(
+            sid, msgs, usage, working_dir="/workspace",
+            store_version_loader=version_loader,
+        )
     assert ok is True, "store cache must be seeded even when no JSONL file exists"
 
     # A subsequent read hits the seeded store cache; a sentinel loader carrying
     # DIFFERENT data must not be consulted.
     sentinel_loader, sentinel_calls = _counting_loader(_entries([("X", "SENTINEL")]))
     served, _ = jp.parse_session_history_from_store(
-        sid, "/workspace", sentinel_loader, use_cache=True
+        sid, "/workspace", sentinel_loader, use_cache=True,
+        store_version_loader=version_loader,
     )
     assert sentinel_calls["n"] == 0, "expected a store-cache hit; loader should not run"
     assert len(served) == 2

@@ -142,14 +142,25 @@ def parse_session_history_via_store(
     """
     from app.core.pg_session_store import (
         _load_entries_by_session_id_sync,
+        _store_version_by_session_id_sync,
     )
     from app.core.jsonl_parser import parse_session_history_from_store
 
     def _store_loader(session_id: str, subpath: Optional[str] = None) -> list:
         return _load_entries_by_session_id_sync(session_id, subpath)
 
+    def _store_version_loader(session_id: str) -> tuple[int, int]:
+        # Cheap (count, max_id) stamp so a cached parse from before a rewind on
+        # THIS or another install (shared Postgres) is dropped on read rather
+        # than served verbatim — the cross-install "rewind still broken" bug.
+        return _store_version_by_session_id_sync(session_id)
+
     return parse_session_history_from_store(
-        sdk_session_id, working_dir, _store_loader, use_cache=use_cache
+        sdk_session_id,
+        working_dir,
+        _store_loader,
+        use_cache=use_cache,
+        store_version_loader=_store_version_loader,
     )
 
 

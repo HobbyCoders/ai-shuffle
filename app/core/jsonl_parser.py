@@ -733,6 +733,46 @@ def parse_session_history(
     return messages, usage_data
 
 
+def _resolve_store_version(
+    sdk_session_id: str,
+    store_version_loader=None,
+):
+    """Fetch the cheap ``(count, max_id)`` store version stamp for a session.
+
+    Used to validate ``_store_parse_cache`` entries on read and to stamp them on
+    write. ``session_store_entries`` is an append-only log, so this pair changes
+    on ANY insert (a new turn) and ANY delete (a rewind) — the exact mutations
+    that must invalidate a cached postgres_only transcript parse, INCLUDING a
+    rewind performed on a DIFFERENT install sharing the same Postgres.
+
+    ``store_version_loader`` (``loader(session_id) -> (count, max_id)``) is
+    injected by callers/tests; when absent we lazily import the sync DB helper
+    ``_store_version_by_session_id_sync``. Returns ``None`` if no version can be
+    resolved (loader raised, or the DB is unavailable) — the caller then declines
+    to trust/write a stamp so a fresh parse is served, which is the safe default.
+    """
+    try:
+        if store_version_loader is not None:
+            version = store_version_loader(sdk_session_id)
+        else:
+            from app.core.pg_session_store import (
+                _store_version_by_session_id_sync,
+            )
+
+            version = _store_version_by_session_id_sync(sdk_session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "Store version probe failed for %s: %s; skipping cache validation",
+            sdk_session_id,
+            e,
+        )
+        return None
+    if version is None:
+        return None
+    # Normalize to a plain hashable tuple so equality is by value.
+    return (int(version[0]), int(version[1]))
+
+
 def invalidate_parse_cache(sdk_session_id: str = None) -> None:
     """
     Invalidate cached parse results.
@@ -765,7 +805,8 @@ def pre_seed_parse_cache(
     sdk_session_id: str,
     messages: List[Dict[str, Any]],
     usage_data: Dict[str, Any],
-    working_dir: str = "/workspace"
+    working_dir: str = "/workspace",
+    store_version_loader=None,
 ) -> bool:
     """
     Pre-seed the parse cache with messages from the live session store.
@@ -810,11 +851,26 @@ def pre_seed_parse_cache(
     # process restarts. Overwrite it with the post-turn transcript so store
     # reads stay coherent after every turn. Done independently of JSONL presence
     # — postgres_only machines may have no local JSONL file at all.
+    #
+    # Stamp the entry with the store's current (count, max_id) version so the
+    # READ path can validate it — matching the write in
+    # parse_session_history_from_store. If the version can't be resolved we must
+    # NOT leave an unstamped/stale entry behind (it would be served verbatim by a
+    # pre-stamp reader on other installs, or dropped-then-reparsed here); DROP any
+    # existing entry instead so the next read re-parses cleanly.
+    store_version = _resolve_store_version(sdk_session_id, store_version_loader)
     with _store_parse_cache_lock:
-        _store_parse_cache[sdk_session_id] = (messages_json, usage_json)
-        _store_parse_cache.move_to_end(sdk_session_id)
-        while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
-            _store_parse_cache.popitem(last=False)
+        if store_version is not None:
+            _store_parse_cache[sdk_session_id] = (
+                messages_json,
+                usage_json,
+                store_version,
+            )
+            _store_parse_cache.move_to_end(sdk_session_id)
+            while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
+                _store_parse_cache.popitem(last=False)
+        else:
+            _store_parse_cache.pop(sdk_session_id, None)
 
     # JSONL cache namespace (legacy / non-postgres_only reads): validated by the
     # JSONL file's mtime + size, so it needs a real file to stamp the entry.
@@ -1621,6 +1677,7 @@ def parse_session_history_from_store(
     store_loader,
     *,
     use_cache: bool = True,
+    store_version_loader=None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Parse a session's transcript from the Postgres session store.
 
@@ -1644,17 +1701,47 @@ def parse_session_history_from_store(
             raw ``entry`` dicts ordered by id ASC.
         use_cache: When True (default) use the dedicated ``_store_parse_cache``
             namespace (kept separate from the JSONL cache).
+        store_version_loader: Optional ``loader(session_id) -> (count, max_id)``
+            returning the cheap store version stamp. When omitted the sync DB
+            helper ``_store_version_by_session_id_sync`` is used. Injected by
+            tests to avoid a live Postgres, and by callers that already hold a
+            store handle.
 
     Returns:
         Tuple of (messages, usage_data) — see :func:`_transform_entries`.
+
+    Cache validity note: ``_store_parse_cache`` has no on-disk mtime to
+    self-invalidate, so each entry is stamped with the store's ``(count,
+    max_id)`` version captured at parse time and re-validated on read. Because
+    ``session_store_entries`` is an append-only log SHARED across installs via
+    Postgres, this pair changes on any insert (a new turn) or delete (a rewind)
+    — including a rewind performed on a DIFFERENT install. Install B therefore
+    stops serving a pre-rewind transcript on the very next read instead of only
+    after LRU eviction / restart (the cross-install "rewind still broken" bug).
+    Entries primed before stamping existed (legacy 2-tuples) are treated stale.
     """
+    # Resolve the current store version ONCE per call. Reused to (a) validate a
+    # cache hit and (b) stamp a fresh write, so both see the same snapshot.
+    current_version = None
     if use_cache:
+        current_version = _resolve_store_version(sdk_session_id, store_version_loader)
         with _store_parse_cache_lock:
             cached = _store_parse_cache.get(sdk_session_id)
             if cached is not None:
-                _store_parse_cache.move_to_end(sdk_session_id)
-                c_messages_json, c_usage_json = cached
-                return json.loads(c_messages_json), json.loads(c_usage_json)
+                # Only a stamped 3-tuple whose version still matches the store is
+                # safe to serve verbatim. Legacy 2-tuples carry no stamp (may hold
+                # a pre-rewind transcript) and an unresolvable/mismatched version
+                # both mean "cannot prove fresh" — drop and re-parse in every such
+                # case so a stale entry can never be served again.
+                if (
+                    len(cached) == 3
+                    and current_version is not None
+                    and cached[2] == current_version
+                ):
+                    _store_parse_cache.move_to_end(sdk_session_id)
+                    c_messages_json, c_usage_json, _ = cached
+                    return json.loads(c_messages_json), json.loads(c_usage_json)
+                _store_parse_cache.pop(sdk_session_id, None)
 
     main_entries = store_loader(sdk_session_id, None) or []
 
@@ -1669,11 +1756,16 @@ def parse_session_history_from_store(
         agent_children_loader=agent_children_loader,
     )
 
-    if use_cache:
+    # Only cache when we could stamp a version — an unstamped write would just be
+    # treated as stale on the next read (pointless) and could not invalidate
+    # cross-install. When the version is unresolvable we re-parse each time: safe,
+    # just slower.
+    if use_cache and current_version is not None:
         with _store_parse_cache_lock:
             _store_parse_cache[sdk_session_id] = (
                 json.dumps(messages, default=str),
                 json.dumps(usage_data, default=str),
+                current_version,
             )
             _store_parse_cache.move_to_end(sdk_session_id)
             while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:

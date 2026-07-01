@@ -355,6 +355,37 @@ def _load_entries_by_session_id_sync(
     return [row["entry"] for row in rows]
 
 
+def _store_version_by_session_id_sync(session_id: str) -> tuple[int, int]:
+    """Return a cheap ``(count, max_id)`` version stamp for ``session_id``'s main
+    transcript (``subpath IS NULL``), matched by ``session_id`` ALONE.
+
+    One indexed row. Used to validate ``_store_parse_cache`` entries on read:
+    the append-only ``session_store_entries`` log means the pair
+    ``(COUNT(*), MAX(id))`` changes on ANY insert (count grows, max_id grows) and
+    on ANY delete such as a rewind (count shrinks). A rewind on one install
+    DELETEs shared rows; other installs holding a cache stamped with the
+    pre-rewind ``(count, max_id)`` will see the mismatch and drop the stale entry
+    instead of serving the pre-rewind transcript verbatim (the cross-install
+    "rewind still broken" symptom).
+
+    ``max_id`` is 0 when the session has no rows (``MAX(id)`` is NULL). Matched by
+    ``session_id`` alone for the same reason as
+    :func:`_load_entries_by_session_id_sync` — the stored ``project_key`` diverges
+    from any cwd-derived key.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS n, MAX(id) AS max_id FROM session_store_entries "
+            "WHERE session_id = %s AND subpath IS NULL",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return (0, 0)
+    return (int(row["n"]), int(row["max_id"]) if row["max_id"] is not None else 0)
+
+
 def _list_subpaths_by_session_id_sync(session_id: str) -> list[str]:
     """Distinct non-null subpaths for ``session_id`` (matched by id alone).
 
