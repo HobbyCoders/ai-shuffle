@@ -177,10 +177,18 @@ class MessageResolver:
         """
         from app.core.live_session_store import live_session_store
 
-        # Check for ended-but-not-yet-cleaned-up session in live store
+        # Check for ended-but-not-yet-cleaned-up session in live store.
+        #
+        # This tier-1 snapshot can be LESS complete than the durable store
+        # transcript when the turn that produced it crashed mid-stream or was
+        # seeded from empty history (the orphaned-session symptom). heal_seed_
+        # against_store (below) applies the SAME "longer wins" completeness heal
+        # the /live read path uses (sessions.py get_live_session), so a truncated
+        # snapshot can't propagate a short seed into the new turn's buffer.
         existing = live_session_store.get_session(session_id)
         if existing and not existing.is_streaming and existing.messages:
-            return [m.to_dict() for m in existing.messages]
+            snapshot = [m.to_dict() for m in existing.messages]
+            return heal_seed_against_store(snapshot, sdk_session_id, working_dir)
 
         # Fall back to the durable transcript.
         if sdk_session_id:
@@ -191,28 +199,23 @@ class MessageResolver:
             # so historical assistant turns aren't dropped while the new turn
             # streams (mirrors the run_query seed + /live read paths).
             if _cfg.session_store_mode == "postgres_only":
-                try:
-                    from app.core.pg_session_store import _load_entries_by_session_id_sync
-                    from app.core.jsonl_parser import parse_session_history_from_store
-
-                    def _store_loader(sid: str, subpath: Optional[str] = None) -> list:
-                        return _load_entries_by_session_id_sync(sid, subpath)
-
-                    # use_cache=False: the turn-start seed must NOT inherit a
-                    # stale _store_parse_cache. After a rewind the cache is
-                    # invalidated, but a poisoned seed here (from before the fix)
-                    # would otherwise get reseeded forever via handle_done's
-                    # "fresh >= seed" guard. Turn start runs once per turn, so a
-                    # fresh store parse here is an acceptable cost.
-                    messages, _usage = parse_session_history_from_store(
-                        sdk_session_id,
-                        working_dir or _default_working_dir(),
-                        _store_loader,
-                        use_cache=False,
-                    )
+                # use_cache=False: the turn-start seed must NOT inherit a
+                # stale _store_parse_cache. After a rewind the cache is
+                # invalidated, but a poisoned seed here (from before the fix)
+                # would otherwise get reseeded forever via handle_done's
+                # "fresh >= seed" guard. Turn start runs once per turn, so a
+                # fresh store parse here is an acceptable cost.
+                messages = _parse_store_transcript(
+                    sdk_session_id, working_dir, use_cache=False
+                )
+                if messages is not None:
                     return messages
-                except Exception as e:
-                    logger.warning(f"Store-backed history load failed for live store init: {e}")
+                # Store parse FAILED (raised). Do NOT silently seed [] — a failed
+                # parse here used to drop the whole transcript for the duration of
+                # the turn (only the current user prompt + new output survived the
+                # frontend full-replace). Fall through to the JSONL reader; if that
+                # also yields nothing we return [] as before, but a transient store
+                # hiccup no longer wipes visible history.
 
             try:
                 from app.core.jsonl_parser import parse_session_history
@@ -330,6 +333,91 @@ def _default_working_dir() -> str:
     """Get the default working directory from settings."""
     from app.core.config import settings
     return str(settings.workspace_dir)
+
+
+def _parse_store_transcript(
+    sdk_session_id: str,
+    working_dir: Optional[str],
+    *,
+    use_cache: bool = True,
+) -> Optional[List[Dict[str, Any]]]:
+    """Parse the durable Postgres store transcript for a session.
+
+    Returns the parsed messages, or ``None`` when the parse RAISES. The
+    None-on-failure contract is load-bearing: callers must be able to tell a
+    genuinely-empty transcript ([]) apart from a transient store hiccup (None) so
+    a failure never silently produces a shorter seed than the durable transcript.
+
+    postgres_only-only — the store is the single source of truth there.
+    """
+    try:
+        from app.core.pg_session_store import _load_entries_by_session_id_sync
+        from app.core.jsonl_parser import parse_session_history_from_store
+
+        def _store_loader(sid: str, subpath: Optional[str] = None) -> list:
+            return _load_entries_by_session_id_sync(sid, subpath)
+
+        messages, _usage = parse_session_history_from_store(
+            sdk_session_id,
+            working_dir or _default_working_dir(),
+            _store_loader,
+            use_cache=use_cache,
+        )
+        return messages
+    except Exception as e:
+        logger.warning(f"Store-backed history load failed for live store init: {e}")
+        return None
+
+
+def heal_seed_against_store(
+    initial_messages: List[Dict[str, Any]],
+    sdk_session_id: Optional[str],
+    working_dir: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Heal a turn-start seed against the durable store transcript ("longer wins").
+
+    This is the SEED-path analogue of the "longer wins" completeness heal on the
+    non-streaming /live read path (see ``app/api/sessions.py`` get_live_session).
+    Every seed source can be LESS complete than the authoritative Postgres store
+    transcript the client already renders:
+
+      * a store-parse failure that swallowed to ``[]`` (empty seed),
+      * a NULL sdk_session_id turn whose later reuse propagates a short snapshot,
+      * a tier-1 in-memory snapshot left crash-truncated by a mid-stream OOM/kill.
+
+    When the durable transcript is MORE complete than ``initial_messages``, prefer
+    it — exactly as the read-path heal does — so historical assistant/tool turns
+    aren't dropped when the new turn's compaction poll forces a frontend full
+    replace. When the seed is longer/equal (genuinely ahead of the not-yet-flushed
+    mirror, or JSONL-mode) it wins, preserving tier-1 semantics.
+
+    No-ops (returns ``initial_messages`` unchanged) outside postgres_only, without
+    a usable ``sdk_session_id``, or when the store parse fails — a heal must never
+    make the seed SHORTER than what the caller already resolved.
+    """
+    if not sdk_session_id:
+        return initial_messages
+
+    from app.core.config import settings as _cfg
+
+    if _cfg.session_store_mode != "postgres_only":
+        return initial_messages
+
+    # use_cache=False: mirror resolve_for_streaming_init's rationale — the seed
+    # must not inherit a stale/poisoned _store_parse_cache entry.
+    durable = _parse_store_transcript(sdk_session_id, working_dir, use_cache=False)
+    if durable is None:
+        # Parse failed — keep whatever the caller resolved (never shrink the seed).
+        return initial_messages
+
+    if len(durable) > len(initial_messages):
+        logger.debug(
+            "heal_seed_against_store: durable store transcript (%d msgs) is more "
+            "complete than seed (%d msgs) — healing seed to durable transcript",
+            len(durable), len(initial_messages),
+        )
+        return durable
+    return initial_messages
 
 
 def resolve_working_dir(session: Dict[str, Any]) -> str:

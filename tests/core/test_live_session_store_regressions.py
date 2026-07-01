@@ -12,6 +12,7 @@ Bug references:
 """
 
 import pytest
+from unittest.mock import patch
 
 from app.core.live_session_store import LiveSessionStore
 
@@ -1032,3 +1033,166 @@ class TestPerSessionLockStability:
             "replacing the lock on re-query breaks mutual exclusion with an "
             "in-flight writer still holding the old lock"
         )
+
+
+# =============================================================================
+# Bug: "messages vanish after a compaction point while watching a live session"
+#
+# On SDK compaction, add_system_message(compact_boundary) sets
+# needs_full_refresh; the next /live poll returns a FULL snapshot with
+# initial_message_count=0, which the frontend treats as a full REPLACE. If the
+# turn-start seed was SHORTER than the durable Postgres store transcript the
+# client already renders (store-parse failure swallowed to [], a NULL
+# sdk_session_id turn, or a crash-truncated tier-1 snapshot), that replace wipes
+# the pre-compaction assistant/tool history.
+#
+# Fix: heal the seed against the durable store transcript ("longer wins"),
+# mirroring the non-streaming /live read-path heal — so the buffer the
+# compaction snapshot serializes is always at least as complete as the durable
+# transcript. See app/core/message_resolver.heal_seed_against_store.
+# =============================================================================
+
+# A durable store transcript with a full turn: user + assistant text + tool_use.
+_DURABLE_TRANSCRIPT = [
+    {"id": "user-hist", "role": "user", "type": "text", "content": "Analyze this"},
+    {"id": "text-hist", "role": "assistant", "type": "text", "content": "Analysis"},
+    {
+        "id": "tool-hist",
+        "role": "assistant",
+        "type": "tool_use",
+        "content": "Using tool: Read",
+        "toolName": "Read",
+        "toolId": "tool-hist",
+    },
+]
+
+
+class TestSeedHealAgainstDurableTranscript:
+    """message_resolver seed heal — turn-start seed must never be shorter than
+    the durable store transcript when postgres_only + a usable sdk_session_id."""
+
+    def test_store_parse_failure_does_not_wipe_transcript(self, monkeypatch):
+        """(a) A one-time store-parse raise must NOT seed [] — resolve_for_
+        streaming_init falls through to the JSONL reader and returns the durable
+        transcript, not an empty seed."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        # No tier-1 snapshot in the live store for this session.
+        fresh_store = LiveSessionStore()
+        monkeypatch.setattr(mr, "live_session_store", fresh_store, raising=False)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("transient store read failure")
+
+        # Store parse raises. The JSONL reader (fallthrough) returns the durable
+        # transcript so visible history survives the failure.
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store", side_effect=_boom
+        ), patch(
+            "app.core.jsonl_parser.parse_session_history",
+            return_value=(list(_DURABLE_TRANSCRIPT), {}),
+        ):
+            seed = mr.MessageResolver.resolve_for_streaming_init(
+                "sess-fail", sdk_session_id="sdk-1", working_dir="/workspace"
+            )
+
+        assert seed, "store-parse failure must not produce an empty seed"
+        assert [m["id"] for m in seed] == [m["id"] for m in _DURABLE_TRANSCRIPT]
+
+    def test_ended_snapshot_shorter_than_store_heals_to_longer(self, monkeypatch):
+        """(b) An ended live session whose kept snapshot has FEWER messages than
+        the store transcript must have its next-turn seed healed to the longer
+        durable transcript (longer wins), not the truncated snapshot."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        # A crash-truncated tier-1 snapshot: only the user prompt survived.
+        truncated_snapshot = [_DURABLE_TRANSCRIPT[0]]
+
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(_DURABLE_TRANSCRIPT), {}),
+        ):
+            healed = mr.heal_seed_against_store(
+                list(truncated_snapshot), "sdk-1", "/workspace"
+            )
+
+        assert [m["id"] for m in healed] == [m["id"] for m in _DURABLE_TRANSCRIPT], (
+            "seed must heal to the longer durable transcript"
+        )
+
+    def test_longer_snapshot_wins_over_store(self, monkeypatch):
+        """Tier-1 semantics preserved: a snapshot that is genuinely LONGER than
+        the store transcript (post-turn, mirror not yet flushed) is kept — the
+        heal never shrinks a seed."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "postgres_only")
+
+        longer_snapshot = _DURABLE_TRANSCRIPT + [
+            {"id": "text-fresh", "role": "assistant", "type": "text", "content": "new"}
+        ]
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store",
+            return_value=(list(_DURABLE_TRANSCRIPT), {}),
+        ):
+            healed = mr.heal_seed_against_store(
+                list(longer_snapshot), "sdk-1", "/workspace"
+            )
+
+        assert [m["id"] for m in healed] == [m["id"] for m in longer_snapshot]
+
+    def test_heal_noop_outside_postgres_only(self, monkeypatch):
+        """The heal must no-op (and never touch the store) outside postgres_only."""
+        import app.core.config as config_mod
+        import app.core.message_resolver as mr
+
+        monkeypatch.setattr(config_mod.settings, "session_store_mode", "mirror")
+
+        snapshot = [_DURABLE_TRANSCRIPT[0]]
+        with patch(
+            "app.core.jsonl_parser.parse_session_history_from_store"
+        ) as parse_mock:
+            healed = mr.heal_seed_against_store(list(snapshot), "sdk-1", "/workspace")
+        parse_mock.assert_not_called()
+        assert healed == snapshot
+
+
+class TestCompactionSnapshotContainsSeededHistory:
+    """(c) Full pipeline: seeded history must survive the compaction-triggered
+    full snapshot returned by get_session_since (the actual bug scenario)."""
+
+    async def test_seeded_history_survives_compaction_full_snapshot(self, store):
+        # Seed a fresh turn from the durable transcript (as the seed path would
+        # after the heal), then stream a user + assistant + tool turn.
+        await store.start_streaming("s1", initial_messages=list(_DURABLE_TRANSCRIPT))
+        update_id_before = store.get_session("s1").last_update_id
+
+        await store.add_user_message("s1", "Do the thing", "user-live")
+        await store.append_text("s1", "Working on it")
+
+        # SDK compaction boundary arrives mid-live-session.
+        await store.add_system_message(
+            "s1", content="Context compacted", subtype="compact_boundary"
+        )
+
+        # The next non-304 poll consumes needs_full_refresh → FULL snapshot.
+        result = store.get_session_since("s1", update_id_before)
+        assert result is not None
+        assert result["initial_message_count"] == 0  # frontend full-replace
+
+        ids = [m["id"] for m in result["messages"]]
+        # All seeded history ids must be present in the full snapshot — the buffer
+        # the snapshot serializes carries them, so a frontend full-replace against
+        # THIS snapshot cannot wipe the pre-compaction assistant/tool history.
+        for expected in ("user-hist", "text-hist", "tool-hist"):
+            assert expected in ids, f"seeded history id {expected} missing from snapshot"
+        # And the new turn's user prompt + compaction card are present too.
+        assert "user-live" in ids
+        assert any(m.get("systemSubtype") == "compact_boundary" for m in result["messages"])

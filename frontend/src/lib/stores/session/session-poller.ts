@@ -583,6 +583,32 @@ class SessionPoller {
 			const streamingIds = new Set(streamingMessages.map(m => m.id));
 			const safeExisting = existingMessages.filter(m => !streamingIds.has(m.id));
 			messages = [...safeExisting, ...streamingMessages];
+		} else if (isStreaming && existingMessages && existingMessages.length > 0) {
+			// FULL REPLACE (initialMessageCount === 0) WHILE STREAMING — the
+			// compaction-refresh safety net.
+			//
+			// On SDK compaction the backend flags needs_full_refresh, so the next
+			// /live poll returns a FULL snapshot of the in-memory buffer with
+			// initial_message_count=0. If that buffer's seeded history was less
+			// complete than what we already render (an empty/truncated seed slipped
+			// past the backend heal), a blind `messages = streamingMessages` here
+			// WIPES the pre-compaction assistant/tool/thinking history — only the
+			// user prompts and the compaction card survive the downstream Phase-1
+			// merge (it rescues only client-only system + optimistic user-* ids).
+			//
+			// Union-merge instead: keep the existing rendered messages the incoming
+			// snapshot is MISSING (by id) AHEAD of the snapshot's messages, so a
+			// short snapshot can only ADD, never DROP. Claim-once by id mirrors
+			// Phase 1's semantics.
+			//
+			// GATED TO STREAMING POLLS: a rewind's full refresh (live-store trim →
+			// needs_full_refresh) lands on an ENDED session (is_streaming=false), so
+			// this branch never fires for it — a legitimately-removed message is not
+			// resurrected. Delta polls (initialMessageCount > 0) take the branches
+			// above; only the compaction/end full-replace reaches here.
+			const snapshotIds = new Set(streamingMessages.map(m => m.id));
+			const missingExisting = existingMessages.filter(m => m.id && !snapshotIds.has(m.id));
+			messages = [...missingExisting, ...streamingMessages];
 		} else {
 			messages = streamingMessages;
 		}

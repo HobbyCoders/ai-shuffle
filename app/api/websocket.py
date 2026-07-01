@@ -407,6 +407,30 @@ async def chat_websocket(
                             except Exception as e:
                                 ctx.warning(logger, f"Failed to load history for live store: {e}")
 
+        # Heal the seed against the durable store transcript ("longer wins").
+        #
+        # Every branch above can produce a seed that is LESS complete than the
+        # authoritative Postgres store transcript the client already renders: the
+        # tier-1 in-memory snapshot may be crash-truncated, and the postgres_only
+        # store parse may have swallowed a transient failure to []. Without this,
+        # the new turn's compaction poll forces a frontend full-replace against a
+        # short buffer and historical assistant/tool turns vanish until reload.
+        # Same "longer wins" heal the /live read path uses (sessions.py
+        # get_live_session) — factored into message_resolver.heal_seed_against_store
+        # and shared by all seed paths. No-ops outside postgres_only.
+        try:
+            from app.core.message_resolver import heal_seed_against_store, resolve_working_dir
+
+            _heal_session = await run_sync(database.get_session, session_id)
+            _heal_sdk_id = _heal_session.get("sdk_session_id") if _heal_session else None
+            if _heal_sdk_id:
+                _heal_wd = await run_sync(resolve_working_dir, dict(_heal_session))
+                initial_messages = await run_sync(
+                    heal_seed_against_store, initial_messages, _heal_sdk_id, _heal_wd
+                )
+        except Exception as e:
+            ctx.warning(logger, f"Seed heal against store transcript failed (non-fatal): {e}")
+
         # Strip the current user message from DB-loaded initial messages.
         # The user message was already written to DB (above) before run_query starts,
         # so load_messages_from_db includes it. But add_user_message (below) re-adds

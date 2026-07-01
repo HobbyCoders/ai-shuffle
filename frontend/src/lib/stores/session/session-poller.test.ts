@@ -226,3 +226,105 @@ describe('session-poller · poll watchdog (stuck _inFlight recovery)', () => {
 		expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
 	});
 });
+
+describe('session-poller · compaction full-replace safety net', () => {
+	// Regression: "messages vanish after a compaction point while watching a live
+	// session". On SDK compaction the backend flags needs_full_refresh, so the
+	// next /live poll returns a FULL snapshot (initial_message_count=0). Pre-fix,
+	// _applyPollResult did `messages = streamingMessages` for a full replace,
+	// wiping any existing rendered assistant/tool/thinking history the snapshot's
+	// (short/empty-seeded) buffer was missing — only user prompts + the compaction
+	// card survived the downstream Phase-1 merge. Fix: while STREAMING, union-merge
+	// the existing messages the snapshot is missing (by id) AHEAD of the snapshot.
+	const SID = 'session-compaction';
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SID);
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	function seedMixedRoleHistory() {
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				{ id: 'tool-1', role: 'assistant', type: 'tool_use', content: 'Using tool: Read', toolName: 'Read', toolId: 'tool-1', streaming: false },
+			],
+			true, // isStreaming
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+	}
+
+	it('retains assistant/tool history on a streaming full-replace (compaction) snapshot', async () => {
+		seedMixedRoleHistory();
+
+		// Compaction full snapshot: buffer was short-seeded, so it only carries the
+		// new user prompt + compaction card + partial turn — missing text-1/tool-1.
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				messages: [
+					{ id: 'user-2', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'sys-compact', role: 'system', type: 'system', content: 'Context compacted', systemSubtype: 'compact_boundary', streaming: false },
+					{ id: 'text-2', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		// Let the immediate poll resolve.
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		// Pre-fix: ids would be exactly [user-2, sys-compact, text-2] — history gone.
+		// Post-fix: the missing existing messages are kept ahead of the snapshot.
+		expect(ids).toContain('text-1');
+		expect(ids).toContain('tool-1');
+		// The new snapshot messages are present too.
+		expect(ids).toContain('user-2');
+		expect(ids).toContain('sys-compact');
+		expect(ids).toContain('text-2');
+		// Missing-existing messages come AHEAD of the snapshot's messages.
+		expect(ids.indexOf('text-1')).toBeLessThan(ids.indexOf('user-2'));
+	});
+
+	it('does NOT resurrect removed messages on an ENDED full-replace (rewind)', async () => {
+		seedMixedRoleHistory();
+
+		// Rewind trims the live store and forces a full refresh, but on an ENDED
+		// session (is_streaming=false). The snapshot legitimately omits tool-1 (and
+		// everything after the checkpoint) — it must NOT be resurrected.
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: false,
+				messages: [
+					{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+					{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SID);
+
+		const session = sessionStateManager.getSession(SID);
+		const ids = session!.messages.map(m => m.id);
+		expect(ids).toEqual(['user-1', 'text-1']);
+		expect(ids).not.toContain('tool-1');
+	});
+});
