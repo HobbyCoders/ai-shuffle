@@ -176,6 +176,62 @@ describe('session-poller · park-poll lifecycle', () => {
 		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false); // now genuinely idle
 	});
 
+	it('does NOT resurrect a stopped session when an in-flight poll resolves with parked tasks after stop()', async () => {
+		// RESURRECTION GUARD: a park-rate interval poll can be in flight when
+		// stop(sessionId) runs (e.g. the session was switched away / departed). If
+		// that poll then resolves with (is_streaming=false, activeTasks>0), the park
+		// branch used to re-arm the timer UNCONDITIONALLY — re-creating a park poller
+		// for the just-departed session, which then polls it forever. The guard now
+		// only re-arms when a timer still exists (or on loadSession), so the stray
+		// post-stop poll no longer resurrects the session.
+
+		// 1) Start streaming, settle to a park timer with an active task.
+		fetchMock.mockResolvedValue(makeLive({ lastUpdateId: 1, isStreaming: true }));
+		sessionPoller.startStreaming(SESSION_ID);
+		await flush();
+		fetchMock.mockResolvedValue(
+			makeLive({ lastUpdateId: 2, isStreaming: false, activeTasks: [TASK] })
+		);
+		await vi.advanceTimersByTimeAsync(STREAMING_MS); // parks → park timer running
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+
+		// 2) Arm the NEXT park poll to hang (deferred), so it's in flight when we stop.
+		let releasePoll!: (r: Response) => void;
+		fetchMock.mockImplementationOnce(
+			() => new Promise<Response>((resolve) => { releasePoll = (r) => resolve(r); })
+		);
+		await vi.advanceTimersByTimeAsync(PARK_MS); // fires the park tick → hangs in flight
+		expect(releasePoll).toBeDefined();
+
+		// 3) The session departs: stop() clears its timer while the poll is in flight.
+		sessionPoller.stop(SESSION_ID);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false);
+
+		// 4) The stray in-flight poll resolves — still parked with an active task.
+		releasePoll(makeLive({ lastUpdateId: 3, isStreaming: false, activeTasks: [TASK] }));
+		await vi.advanceTimersByTimeAsync(0); // let the .then() chain run
+
+		// The departed session must stay stopped — no resurrected park timer.
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false);
+
+		// And it stays dead: advancing well past a park interval fires no new poll.
+		fetchMock.mockClear();
+		await vi.advanceTimersByTimeAsync(2 * PARK_MS);
+		expect(fetchMock.mock.calls.length).toBe(0);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(false);
+	});
+
+	it('still starts a park timer from loadSession for a freshly-loaded parked session', async () => {
+		// The guard must NOT break the loadSession park-start: a session loaded (via
+		// onConnected) that is parked with active tasks has no timer yet but must
+		// begin park-polling to detect the wake. fromLoadSession=true allows it.
+		fetchMock.mockResolvedValueOnce(
+			makeLive({ lastUpdateId: 1, isStreaming: false, activeTasks: [TASK] })
+		);
+		await sessionPoller.loadSession(SESSION_ID);
+		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
+	});
+
 	it('stops immediately on streaming→ended when there are no active tasks', async () => {
 		fetchMock.mockResolvedValue(makeLive({ lastUpdateId: 1, isStreaming: true }));
 		sessionPoller.startStreaming(SESSION_ID);

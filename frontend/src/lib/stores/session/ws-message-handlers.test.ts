@@ -30,6 +30,7 @@ function createMockInternal(): InternalMutableState {
 		pendingTools: new Set(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
@@ -126,6 +127,7 @@ function mockState(): ActiveSessionState {
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
+		relayError: undefined,
 	};
 }
 
@@ -480,11 +482,17 @@ describe('ws-message-handlers', () => {
 		// records the intent on internal.stopRequestedBeforeSession. The
 		// session_created / start handlers must flush it once the backend mints
 		// the id, then clear the flag so it never double-fires.
+		// The deferred stop flushes only when the frame is ACTUALLY adopted, which
+		// now requires the echoed adoption token to match (see the hijack fix). The
+		// realistic flow always has a pendingRequestId set by sendMessage and the
+		// backend echoes it, so the fixture carries a matching token.
+		const TOKEN = 'req-defer-abc';
 		function newSessionDeps() {
 			const state = mockState();
 			state.sessionId = null; // brand-new session, no id yet
 			const d = createMockDeps({ getState: vi.fn(() => state) });
 			d.internal.awaitingNewSession = true;
+			d.internal.pendingRequestId = TOKEN;
 			d.internal.stopRequestedBeforeSession = true;
 			return d;
 		}
@@ -499,7 +507,7 @@ describe('ws-message-handlers', () => {
 			deps = newSessionDeps();
 			handlers = createMessageHandlers(deps);
 
-			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new' });
+			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new', request_id: TOKEN });
 
 			const sends = stopSends(deps);
 			expect(sends).toHaveLength(1);
@@ -511,7 +519,7 @@ describe('ws-message-handlers', () => {
 			deps = newSessionDeps();
 			handlers = createMessageHandlers(deps);
 
-			handlers.handleMessage({ type: 'start', session_id: 'sess-new', message_id: 'm1' });
+			handlers.handleMessage({ type: 'start', session_id: 'sess-new', message_id: 'm1', request_id: TOKEN });
 
 			const sends = stopSends(deps);
 			expect(sends).toHaveLength(1);
@@ -524,12 +532,158 @@ describe('ws-message-handlers', () => {
 			state.sessionId = null;
 			deps = createMockDeps({ getState: vi.fn(() => state) });
 			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = TOKEN;
 			// stopRequestedBeforeSession stays false
 			handlers = createMessageHandlers(deps);
 
-			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new' });
+			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new', request_id: TOKEN });
 
 			expect(stopSends(deps)).toHaveLength(0);
+		});
+	});
+
+	describe('new-session adoption authentication (hijack fix)', () => {
+		// PRIMARY BUG: while a brand-new chat is awaiting its minted session
+		// (sessionId=null, awaitingNewSession=true), the OLD adoption predicate
+		// accepted ANY session_created / start frame. The device WS is shared, so a
+		// FOREIGN session's server-initiated turn (unpark follow-up / queue drain)
+		// unparking during that window got adopted: its sessionId, polls, messages
+		// and running tasks flashed on the new chat's page. The fix authenticates
+		// adoption with a client-generated request_id echoed by the backend in both
+		// frames — a frame without the matching token can no longer be adopted.
+
+		function awaitingState() {
+			const state = mockState();
+			state.sessionId = null; // brand-new chat, no id yet
+			state.activeTasks = []; // clean board
+			return state;
+		}
+
+		it('does NOT adopt a foreign start frame that lacks the matching request_id', () => {
+			const state = awaitingState();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = 'req-mine-123';
+			handlers = createMessageHandlers(deps);
+
+			// A foreign session's server-initiated start — NO request_id (deferred /
+			// unpark turns never carry one).
+			handlers.handleMessage({ type: 'start', session_id: 'other-session', message_id: 'm-foreign' });
+
+			// Must NOT be adopted: state untouched, poller not started, still awaiting.
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.sessionPoller.startStreaming).not.toHaveBeenCalled();
+			expect(deps.internal.awaitingNewSession).toBe(true);
+			expect(deps.internal.pendingRequestId).toBe('req-mine-123');
+		});
+
+		it('does NOT adopt a foreign session_created frame that lacks the matching request_id', () => {
+			const state = awaitingState();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = 'req-mine-123';
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_created', session_id: 'other-session', title: 'Foreign' });
+
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.internal.awaitingNewSession).toBe(true);
+			expect(deps.internal.pendingRequestId).toBe('req-mine-123');
+		});
+
+		it('does NOT adopt a frame whose request_id mismatches ours', () => {
+			const state = awaitingState();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = 'req-mine-123';
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'start', session_id: 'other-session', request_id: 'req-someone-else' });
+
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.sessionPoller.startStreaming).not.toHaveBeenCalled();
+			expect(deps.internal.awaitingNewSession).toBe(true);
+		});
+
+		it('adopts a session_created with the matching request_id AND resets activeTasks to []', () => {
+			const state = awaitingState();
+			state.activeTasks = [
+				{ id: 'inherited', subject: 'stale', status: 'running', kind: 'shell', summary: null, startedAt: '', updatedAt: '' },
+			] as ActiveSessionState['activeTasks'];
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = 'req-mine-123';
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'session_created',
+				session_id: 'my-session',
+				title: 'Mine',
+				request_id: 'req-mine-123',
+			});
+
+			expect(applied?.sessionId).toBe('my-session');
+			// activeTasks reset so no prior/foreign running-task strip flashes.
+			expect(applied?.activeTasks).toEqual([]);
+			// Awaiting flag + token cleared so a later foreign frame can't re-adopt.
+			expect(deps.internal.awaitingNewSession).toBe(false);
+			expect(deps.internal.pendingRequestId).toBeNull();
+		});
+
+		it('adopts a start with the matching request_id, resets activeTasks, and starts polling', () => {
+			const state = awaitingState();
+			state.activeTasks = [
+				{ id: 'inherited', subject: 'stale', status: 'running', kind: 'shell', summary: null, startedAt: '', updatedAt: '' },
+			] as ActiveSessionState['activeTasks'];
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			deps.internal.awaitingNewSession = true;
+			deps.internal.pendingRequestId = 'req-mine-123';
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'start',
+				session_id: 'my-session',
+				message_id: 'm1',
+				request_id: 'req-mine-123',
+			});
+
+			expect(applied?.sessionId).toBe('my-session');
+			expect(applied?.activeTasks).toEqual([]);
+			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('my-session');
+			expect(deps.internal.awaitingNewSession).toBe(false);
+			expect(deps.internal.pendingRequestId).toBeNull();
+		});
+
+		it('still adopts a start for the ALREADY-open session without a request_id (existing-session turn)', () => {
+			// An existing-session query (e.g. interrupt_for_query follow-up) routes by
+			// the known sessionId and needs no token. Its start must still be accepted
+			// and must NOT wipe the live task strip (sessionId unchanged).
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.activeTasks = [
+				{ id: 'live', subject: 'running work', status: 'running', kind: 'agent', summary: null, startedAt: '', updatedAt: '' },
+			] as ActiveSessionState['activeTasks'];
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'start', session_id: 'session-1', message_id: 'm2' });
+
+			expect(applied?.sessionId).toBe('session-1');
+			// sessionId did NOT change → activeTasks preserved (reset is adoption-only).
+			expect(applied?.activeTasks).toHaveLength(1);
+			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('session-1');
 		});
 	});
 

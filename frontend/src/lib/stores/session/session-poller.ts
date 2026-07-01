@@ -423,7 +423,12 @@ class SessionPoller {
 			// so stale detection isn't needed. The generation check in
 			// _applyPollResult will pass because we're at generation 0 or matching.
 			const currentGen = this._streamingGeneration.get(sessionId) ?? 0;
-			this._applyPollResult(sessionId, data, currentGen);
+			// fromLoadSession=true: a freshly-loaded parked session is allowed to
+			// START a park timer (it has no timer yet but must keep itself fresh to
+			// detect the wake). An interval/pollNow/pollFinal _poll() passes false so
+			// a stray in-flight poll landing after stop() can't resurrect a departed
+			// session's park poller. See the park branch in _applyPollResult.
+			this._applyPollResult(sessionId, data, currentGen, true);
 
 			const session = sessionState.getSession(sessionId);
 			if (session) {
@@ -515,7 +520,7 @@ class SessionPoller {
 	 * - Full: All messages (initial_message_count = 0 or absent) — first poll
 	 * - Delta: Only streaming messages (initial_message_count > 0) — subsequent polls
 	 */
-	private _applyPollResult(sessionId: string, data: Record<string, unknown>, pollGeneration: number): void {
+	private _applyPollResult(sessionId: string, data: Record<string, unknown>, pollGeneration: number, fromLoadSession = false): void {
 		const newUpdateId = data.last_update_id as number;
 		const isStreaming = data.is_streaming as boolean;
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
@@ -690,18 +695,29 @@ class SessionPoller {
 			if (hasTimer) this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
 		} else if (hasActiveTasks || unparkPending) {
 			// Park: downshift to the slow park-poll rate (or start it). We start a
-			// timer even from loadSession here, because a freshly-loaded parked
-			// session must keep itself fresh to detect the wake. _ensureTimer is
-			// idempotent and swaps the interval if we were at the streaming rate.
+			// fresh timer from loadSession, because a freshly-loaded parked session
+			// must keep itself fresh to detect the wake. _ensureTimer is idempotent
+			// and swaps the interval if we were at the streaming rate.
 			// `unparkPending` (no active tasks) keeps us here across the unpark
 			// hand-off gap so we don't STOP and miss the follow-up's stream.
+			//
+			// RESURRECTION GUARD: only re-arm when a timer already exists OR this is
+			// a loadSession call. Previously this re-armed UNCONDITIONALLY, so an
+			// interval poll that was in flight when stop(sessionId) ran would resolve
+			// here (isStreaming=false, tasks present) and re-create a park timer for
+			// the just-departed session — resurrecting its poller indefinitely
+			// (departed-session ghost polls). Mirror the isStreaming / interrupting
+			// branches, which likewise gate their re-arm on an existing timer.
 			const wasStreamingTimer = hasTimer &&
 				this._timers.get(sessionId)!.interval === STREAMING_POLL_INTERVAL_MS;
-			this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);
+			if (hasTimer || fromLoadSession) {
+				this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);
+			}
 			// On the streaming→parked transition, fire the stream-end side effects
 			// (session list refresh, message cache write) once — the turn's
-			// foreground output is done even though background work continues.
-			if (streamingJustEnded || wasStreamingTimer) {
+			// foreground output is done even though background work continues. Skip
+			// when neither a timer existed nor we loaded (a stray post-stop poll).
+			if ((hasTimer || fromLoadSession) && (streamingJustEnded || wasStreamingTimer)) {
 				if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
 			}
 		} else {

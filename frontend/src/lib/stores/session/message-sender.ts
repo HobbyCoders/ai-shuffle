@@ -321,8 +321,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// NO session id — setting it on the 2nd+ send of an EXISTING session
 			// left a stale flag that forced shouldNotify=true for every event and
 			// muddied session-routing. Gate it on the absence of a session id.
+			// Client-generated adoption token for the outgoing new-session query.
+			// Only the awaiting (no-sessionId) path needs it: the backend echoes it
+			// in session_created + the first start frame, and the frontend adopts
+			// ONLY on a match — so a foreign session's server-initiated turn
+			// (unpark / queue drain, which carries no request_id) can't be adopted
+			// during the awaiting window on the shared device socket. null otherwise.
+			let requestId: string | null = null;
 			if (!_state.sessionId) {
 				internal.awaitingNewSession = true;
+				requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+				internal.pendingRequestId = requestId;
 				sessionEphemeralCache.remove('__new_chat__');
 			}
 			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
@@ -393,6 +402,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				profile: _state.profile,
 				project: _state.project || undefined,
 				worktree_id: _state.worktreeId || undefined,
+				// Adoption token — present only for a new-session query (see requestId).
+				// The backend echoes it in session_created + the first start frame.
+				request_id: requestId || undefined,
 				overrides: buildOverrides(),
 				// "Send now": flag the replacement query so a start-frame send that
 				// fails on a socket dropped during the interrupt drain doesn't drop
@@ -493,6 +505,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					sessionId: response.session_id,
 					worktreeId: response.worktree_id,
 					isCreatingWorktree: false,
+					// Reset on session commit (PR #448): this fresh worktree session has
+					// no running tasks yet — clear any strip inherited from the previous
+					// view so nothing flashes before the first poll settles.
+					activeTasks: [],
 				}));
 
 				persistSession();
@@ -664,6 +680,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					worktreeId: response.worktree_id,
 					selectedWorktreeBranch: response.branch_name,
 					isCreatingWorktree: false,
+					// Reset on session commit (PR #448): the freshly auto-created
+					// worktree session starts with no tasks — clear any inherited strip
+					// so a prior session's running tasks can't flash on it.
+					activeTasks: [],
 					...(response.query_started
 						? { isStreaming: true, wsStreamContent: '', error: null }
 						: {}),

@@ -59,6 +59,7 @@ function makeDeps(initial: ActiveSessionState) {
 		pendingTools: new Set<string>(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
@@ -97,7 +98,7 @@ function makeDeps(initial: ActiveSessionState) {
 		}),
 	};
 
-	return { deps, wsConn, getState, autoCreateWorktree, createWorktree, startCloudSession };
+	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree, startCloudSession };
 }
 
 describe('message-sender worktree send backstop', () => {
@@ -152,6 +153,54 @@ describe('message-sender worktree send backstop', () => {
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
 		expect((querySends[0][0] as any).worktree_id).toBeUndefined();
+	});
+});
+
+describe('message-sender new-session adoption token (hijack fix)', () => {
+	function querySends(wsConn: { send: ReturnType<typeof vi.fn> }) {
+		return wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+	}
+
+	it('attaches a request_id to a NEW-session query and records it on internal', async () => {
+		const { deps, wsConn, internal } = makeDeps(baseState({
+			executionMode: 'local',
+			sessionId: null,
+			messages: [],
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('hello new');
+
+		const sends = querySends(wsConn);
+		expect(sends).toHaveLength(1);
+		const frame = sends[0][0] as any;
+		// The outgoing query carries the adoption token so the backend can echo it.
+		expect(typeof frame.request_id).toBe('string');
+		expect(frame.request_id).toBeTruthy();
+		// The same token is recorded so the session_created/start handlers can match it.
+		expect(internal.pendingRequestId).toBe(frame.request_id);
+		expect(internal.awaitingNewSession).toBe(true);
+	});
+
+	it('does NOT attach a request_id to an EXISTING-session query', async () => {
+		const { deps, wsConn, internal } = makeDeps(baseState({
+			executionMode: 'local',
+			sessionId: 'existing-session',
+			title: 'Existing',
+			messages: [{ id: 'user-1', role: 'user', content: 'earlier' } as any],
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('follow up');
+
+		const sends = querySends(wsConn);
+		expect(sends).toHaveLength(1);
+		const frame = sends[0][0] as any;
+		// An existing session routes its start by the known id — no token needed, and
+		// awaitingNewSession must NOT be set (it's gated on the absence of a sessionId).
+		expect(frame.request_id).toBeUndefined();
+		expect(internal.pendingRequestId).toBeNull();
+		expect(internal.awaitingNewSession).toBe(false);
 	});
 });
 

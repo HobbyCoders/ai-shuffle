@@ -1123,6 +1123,13 @@ class ChatWebSocketHandler:
         project_id = data.get("project")
         overrides = data.get("overrides")  # Optional: {model, permission_mode}
         worktree_id = data.get("worktree_id")  # Optional: link session to existing worktree
+        # Client-generated adoption token for a NEW-session query. Echoed back in
+        # both the ``session_created`` and the first ``start`` frame so the
+        # frontend can authenticate that the minted session is genuinely the one it
+        # asked for — not a foreign session's server-initiated turn (unpark / queue
+        # drain) unparking on the shared device socket during its awaiting window.
+        # Only meaningful for a new session (session_id is None); ignored otherwise.
+        request_id = data.get("request_id")
 
         if not prompt:
             await self.send_json({"type": "error", "message": "Empty prompt"})
@@ -1211,13 +1218,18 @@ class ChatWebSocketHandler:
 
             await run_sync(_create_session_atomic)
 
-            # Immediately notify frontend of new session_id so it persists on refresh
-            await self.send_json({
+            # Immediately notify frontend of new session_id so it persists on refresh.
+            # Echo the client's adoption token so the awaiting frontend accepts this
+            # session_created ONLY if it matches — authenticating new-session adoption.
+            session_created_frame = {
                 "type": "session_created",
                 "session_id": session_id,
                 "title": title,
                 "worktree_id": worktree_id  # Include worktree_id in response
-            })
+            }
+            if request_id:
+                session_created_frame["request_id"] = request_id
+            await self.send_json(session_created_frame)
 
             # Notify other devices so their side panels show the new session
             await sync_engine.broadcast_user_session_created(
@@ -1303,8 +1315,14 @@ class ChatWebSocketHandler:
         # Start new query task
         # Note: broadcast_stream_start is called inside run_query when actual
         # streaming begins. This prevents stuck streaming state if query fails early.
+        # Pass the adoption token ONLY for a brand-new session so the first `start`
+        # frame echoes it (authenticating adoption). An existing-session query needs
+        # no token — the frontend already routes its start by the known session_id.
         self.query_task = asyncio.create_task(
-            self.run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
+            self.run_query(
+                prompt, session_id, profile_id, project_id, overrides, worktree_id,
+                request_id=(request_id if is_new_session else None),
+            )
         )
         async with _active_sessions_lock:
             _active_chat_sessions[session_id] = self.query_task
@@ -2088,6 +2106,7 @@ class ChatWebSocketHandler:
         overrides: Optional[Dict[str, Any]] = None,
         worktree_id: Optional[str] = None,
         deferred_delivery: bool = False,
+        request_id: Optional[str] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket.
 
@@ -2097,6 +2116,13 @@ class ChatWebSocketHandler:
         non-fatal: the turn streams via the live store + ``sync_engine`` broadcasts
         + polling instead of tearing itself down (see the live ``/ws/chat`` route's
         ``run_query`` for the matching contract).
+
+        ``request_id`` is the client's new-session adoption token (see
+        ``handle_query``). It is echoed in the first ``start`` frame so the awaiting
+        frontend adopts the minted session ONLY on a match. It is passed ONLY for
+        the interactive new-session path — server-initiated turns (queue drain,
+        unpark follow-up) leave it ``None``, so their ``start`` frame carries no
+        token and can never be adopted as a foreign session's brand-new chat.
         """
         from app.api.websocket import (
             _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
@@ -2211,7 +2237,13 @@ class ChatWebSocketHandler:
 
         try:
             ctx.debug(logger, f"Starting query profile={profile_id}, project={project_id}, overrides={overrides}")
-            if not await self.send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
+            # Echo the client's adoption token (interactive new-session path only) so
+            # the awaiting frontend accepts this start ONLY on a match. Server-
+            # initiated turns leave request_id None → no token → non-adoptable.
+            start_frame: Dict[str, Any] = {"type": "start", "session_id": session_id, "message_id": message_id}
+            if request_id:
+                start_frame["request_id"] = request_id
+            if not await self.send_json(start_frame):
                 ctx.warning(logger, "Connection lost before query could start")
                 if deferred_delivery:
                     # Server-initiated turn (queue drain / unpark follow-up) on a

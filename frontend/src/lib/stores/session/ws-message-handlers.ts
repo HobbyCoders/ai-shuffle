@@ -30,6 +30,14 @@ export interface InternalMutableState {
 	/** True when sendMessage() sent a query for a NEW session (no sessionId yet).
 	 *  Used by session_created/start to know whether to accept the sessionId. */
 	awaitingNewSession: boolean;
+	/** Client-generated id attached to the outgoing new-session `query` frame while
+	 *  awaitingNewSession. handle_query echoes it in the `session_created` and first
+	 *  `start` frames, and the awaiting-branch adoption predicates accept ONLY when
+	 *  the incoming frame's request_id matches. This authenticates adoption so a
+	 *  server-initiated turn for ANOTHER session (unpark follow-up / queue drain) —
+	 *  which carries NO request_id — can never be adopted during the awaiting
+	 *  window on the shared device socket. null when not awaiting a new session. */
+	pendingRequestId: string | null;
 	/** True when the user clicked Stop on a brand-new session BEFORE the backend
 	 *  minted its sessionId (stopGeneration had no id to send, so the stop would
 	 *  otherwise be dropped — "Stop fired before the session started"). Consumed
@@ -520,13 +528,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sessionId = data.session_id as string;
 				const title = (data.title as string) || undefined;
 				const currentState = getState();
-				const acceptCreated = currentState.sessionId === sessionId ||
-					(!currentState.sessionId && internal.awaitingNewSession);
+				// Authenticate new-session adoption: while awaiting, accept ONLY
+				// when the frame echoes our client-generated request_id. This blocks
+				// the session-adoption hijack — a server-initiated turn for another
+				// session (unpark follow-up / queue drain) unparking on the shared
+				// device socket during the awaiting window carries no request_id, so
+				// it can never be adopted here. See `pendingRequestId`.
+				const createdRequestId = data.request_id as string | undefined;
+				const createdAwaitingMatch = !currentState.sessionId && internal.awaitingNewSession &&
+					!!internal.pendingRequestId && createdRequestId === internal.pendingRequestId;
+				const acceptCreated = currentState.sessionId === sessionId || createdAwaitingMatch;
 				if (acceptCreated) {
 					internal.awaitingNewSession = false;
+					internal.pendingRequestId = null;
 					// Set the sessionId and title so the header shows the correct
-					// session title immediately (not stale 'New Chat').
-					update(s => ({ ...s, sessionId, ...(title ? { title } : {}) }));
+					// session title immediately (not stale 'New Chat'). Reset
+					// activeTasks to [] on session commit (mirrors PR #448) so a
+					// prior/foreign session's running-task strip can't flash on the
+					// freshly-adopted session before the first poll settles.
+					update(s => ({ ...s, sessionId, activeTasks: [], ...(title ? { title } : {}) }));
 					// Deliver a Stop the user clicked before the id existed (see
 					// stopRequestedBeforeSession). Now that we have the id, the
 					// backend can interrupt and discard the no-output orphan turn.
@@ -550,10 +570,22 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sessionId = data.session_id as string;
 				internal.interruptPending = false;
 				const currentState = getState();
-				const acceptStart = currentState.sessionId === sessionId ||
-					(!currentState.sessionId && internal.awaitingNewSession);
+				// Authenticate new-session adoption (see session_created): while
+				// awaiting, accept the `start` frame ONLY when it echoes our
+				// client-generated request_id. A server-initiated turn for a foreign
+				// session unparking on the shared device socket carries no request_id
+				// and so can never hijack the awaiting new chat. See `pendingRequestId`.
+				const startRequestId = data.request_id as string | undefined;
+				const startAwaitingMatch = !currentState.sessionId && internal.awaitingNewSession &&
+					!!internal.pendingRequestId && startRequestId === internal.pendingRequestId;
+				const acceptStart = currentState.sessionId === sessionId || startAwaitingMatch;
+				// activeTasks is reset only when this frame actually adopts a NEW
+				// sessionId (mirrors PR #448) — a `start` for the already-open session
+				// (interrupt_for_query follow-up) must not wipe its live task strip.
+				const startAdoptsNewSession = currentState.sessionId !== sessionId;
 				if (acceptStart) {
 					internal.awaitingNewSession = false;
+					internal.pendingRequestId = null;
 					// Deliver a Stop deferred before the id existed (see
 					// stopRequestedBeforeSession) in case 'start' beat
 					// 'session_created' here. The flag self-clears so we never
@@ -575,7 +607,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							m => m.role === 'assistant' && m.streaming
 						);
 						if (hasStreamingAssistant) {
-							return { ...s, sessionId, isStreaming: true, streamStartTime: Date.now(), wsStreamContent: '' };
+							return { ...s, sessionId, isStreaming: true, streamStartTime: Date.now(), wsStreamContent: '', ...(startAdoptsNewSession ? { activeTasks: [] } : {}) };
 						}
 						return {
 							...s,
@@ -583,6 +615,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							isStreaming: true,
 							streamStartTime: Date.now(),
 							wsStreamContent: '',
+							...(startAdoptsNewSession ? { activeTasks: [] } : {}),
 							messages: [...s.messages, {
 								id: messageId,
 								role: 'assistant' as const,
