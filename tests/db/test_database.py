@@ -512,8 +512,10 @@ class TestSearchSessions:
 
     @pytest.mark.skip(
         reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
-        "Covered by integration tests against real Postgres."
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
+        "real-Postgres integration suite exists yet — the SQL's structure is "
+        "guarded by TestSearchSessionsSql below; behavior needs manual "
+        "verification against a Postgres instance."
     )
     def test_search_sessions_by_title(self, mock_db, setup_profile):
         """search_sessions should find sessions by title."""
@@ -527,8 +529,10 @@ class TestSearchSessions:
 
     @pytest.mark.skip(
         reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
-        "Covered by integration tests against real Postgres."
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
+        "real-Postgres integration suite exists yet — the SQL's structure is "
+        "guarded by TestSearchSessionsSql below; behavior needs manual "
+        "verification against a Postgres instance."
     )
     def test_search_sessions_by_content(self, mock_db, setup_profile):
         """search_sessions should find sessions by message content."""
@@ -547,6 +551,85 @@ class TestSearchSessions:
         result = db.search_sessions("")
 
         assert result == []
+
+
+class TestSearchSessionsSql:
+    """Always-on structural guard for the Postgres-native search SQL.
+
+    The FTS behavior itself can't run under the sqlite shim (see the skips
+    above), but the query's most fragile property is mechanical: the
+    title_matches and content_matches CTEs feed ``SELECT * ... UNION ALL``,
+    which silently mispairs values — or errors at runtime on Postgres only —
+    the moment one CTE's column list drifts from the other (how is_favorite
+    was originally missed). Capture the SQL without a database and assert the
+    two column lists stay symmetric.
+    """
+
+    @staticmethod
+    def _split_top_level(cols: str) -> list:
+        """Split a column list on commas, ignoring commas inside parens
+        (ts_headline's arguments and options string contain both)."""
+        parts, depth, buf = [], 0, []
+        for ch in cols:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    @staticmethod
+    def _output_name(col: str) -> str:
+        """The name a column contributes to the CTE's output row: its alias
+        when present, else the bare name after the table qualifier."""
+        lowered = col.lower()
+        if " as " in lowered:
+            return col[lowered.rindex(" as ") + 4:].strip()
+        return col.rsplit(".", 1)[-1].strip()
+
+    def _captured_search_sql(self) -> str:
+        from unittest.mock import MagicMock
+
+        captured = []
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.execute.side_effect = lambda sql, params=None: captured.append(sql)
+
+        with patch("app.db.sessions.get_db"), \
+             patch("app.db.sessions.get_cursor", return_value=cursor):
+            from app.db import sessions as db_sessions
+            db_sessions.search_sessions("react hooks")
+
+        assert captured, "search_sessions should have executed its query"
+        return captured[0]
+
+    def test_union_ctes_stay_column_symmetric(self):
+        sql = self._captured_search_sql()
+
+        title_cols = sql.split("WITH title_matches AS (", 1)[1]
+        title_cols = title_cols.split("SELECT", 1)[1].split("FROM sessions s", 1)[0]
+        content_cols = sql.split("content_matches AS (", 1)[1]
+        content_cols = content_cols.split("SELECT DISTINCT ON (s.id)", 1)[1]
+        content_cols = content_cols.split("FROM session_messages sm", 1)[0]
+
+        title_names = [
+            self._output_name(c) for c in self._split_top_level(title_cols)
+        ]
+        content_names = [
+            self._output_name(c) for c in self._split_top_level(content_cols)
+        ]
+
+        assert title_names == content_names
+        # UNION ALL pairs by position; duplicate output names would mask a
+        # positional drift, so require them unique too.
+        assert len(title_names) == len(set(title_names))
 
 
 # =============================================================================
@@ -1676,8 +1759,9 @@ class TestSessionsByTag:
     reason="run_database_maintenance was migrated to Postgres semantics "
     "(ANALYZE + VACUUM ANALYZE outside a txn, notifications retention). These "
     "tests assert the old SQLite contract (wal_checkpoint/optimize/PRAGMA "
-    "checkpointed_pages) and VACUUM ANALYZE isn't valid sqlite. "
-    "Covered by integration tests against real Postgres."
+    "checkpointed_pages) and VACUUM ANALYZE isn't valid sqlite. No "
+    "real-Postgres integration suite exists yet — verify maintenance manually "
+    "against a Postgres instance."
 )
 class TestRunDatabaseMaintenance:
     """Test run_database_maintenance cleanup and results."""

@@ -377,8 +377,10 @@ class TestSessionSearchExtended:
 
     @pytest.mark.skip(
         reason="search_sessions uses Postgres-native FTS (tsvector @@ plainto_tsquery, "
-        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. "
-        "Covered by integration tests against real Postgres."
+        "ts_headline, DISTINCT ON); not emulated by the sqlite test shim. No "
+        "real-Postgres integration suite exists yet — the SQL's structure is "
+        "guarded by TestSearchSessionsSql (test_database.py); behavior needs "
+        "manual verification against a Postgres instance."
     )
     def test_search_sessions_with_limit(self, mock_db, setup_profile):
         """search_sessions should respect limit."""
