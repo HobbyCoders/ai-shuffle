@@ -279,3 +279,49 @@ describe('stabilizeMessageIdentity — rewind jsonlUuid carry-forward', () => {
 		expect(a.jsonlUuid).toBe('asst-uuid'); // but keeps the server's rewind uuid
 	});
 });
+
+// Regression for "timestamps don't persist": mid-turn polls serve live-store
+// messages with NO metadata.timestamp, so the merge must not let an incoming
+// unstamped copy wipe the client-stamped send time (the UI renders a missing
+// timestamp as "now"). Conversely, once the post-turn poll delivers the
+// persisted time, a kept optimistic message must gain it.
+describe('stabilizeMessageIdentity — timestamp carry-forward', () => {
+	it('keeps the prior client-stamped timestamp when the incoming copy has none', () => {
+		// The assistant text settled (streaming → final, content grew), so the
+		// merge takes the INCOMING object through the id-swap branch — the prior
+		// object (which carries the client-stamped time) is replaced, not kept.
+		const prior = [
+			user(),
+			msg({ id: 'client-id', role: 'assistant', type: 'text', content: 'Answ', streaming: true, timestamp: '2026-01-15T14:00:00.000Z' })
+		];
+		const incoming = [
+			user(),
+			msg({ id: 'server-id', role: 'assistant', type: 'text', content: 'Answer', streaming: false })
+		];
+
+		const { messages, changed } = stabilizeMessageIdentity(incoming, prior);
+
+		expect(changed).toBe(true);
+		const a = assistantTexts(messages)[0];
+		expect(a.id).toBe('client-id'); // id-swap branch was taken
+		expect(a.timestamp).toBe('2026-01-15T14:00:00.000Z');
+	});
+
+	it('fills the persisted timestamp onto a kept optimistic message', () => {
+		const prior = [msg({ id: 'u1', role: 'user', type: 'text', content: 'hi' })];
+		const incoming = [msg({ id: 'u1', role: 'user', type: 'text', content: 'hi', timestamp: '2026-01-15T14:05:00+00:00' })];
+
+		const { messages } = stabilizeMessageIdentity(incoming, prior);
+
+		expect(messages[0].timestamp).toBe('2026-01-15T14:05:00+00:00');
+	});
+
+	it('prefers the incoming timestamp when both are present', () => {
+		const prior = [msg({ id: 'u1', role: 'user', type: 'text', content: 'edited', timestamp: '2026-01-15T13:00:00Z' })];
+		const incoming = [msg({ id: 'u1', role: 'user', type: 'text', content: 'edited later', timestamp: '2026-01-15T14:00:00Z' })];
+
+		const { messages } = stabilizeMessageIdentity(incoming, prior);
+
+		expect(messages[0].timestamp).toBe('2026-01-15T14:00:00Z');
+	});
+});

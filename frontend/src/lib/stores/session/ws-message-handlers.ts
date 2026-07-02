@@ -622,6 +622,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 								type: 'text' as const,
 								content: '',
 								streaming: true,
+								timestamp: new Date().toISOString(),
 							}],
 						};
 					});

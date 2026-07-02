@@ -968,6 +968,16 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 
 	if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
 
+	// Lift the persisted creation time (server nests it in metadata.timestamp)
+	// to the top-level field the message components render. Without this every
+	// reloaded message falls back to "now" in the UI.
+	const metaTimestamp = (msg.metadata as { timestamp?: unknown } | undefined)?.timestamp;
+	if (typeof m.timestamp === 'string' && m.timestamp) {
+		msg.timestamp = m.timestamp;
+	} else if (typeof metaTimestamp === 'string' && metaTimestamp) {
+		msg.timestamp = metaTimestamp;
+	}
+
 	return msg;
 }
 

@@ -123,6 +123,50 @@ describe('session-poller · loadSession reconciliation', () => {
 		expect(toolMsg!.toolScreenshot).toBe(dataUri);
 	});
 
+	it('lifts persisted metadata.timestamp to the top-level timestamp field', async () => {
+		// Regression: the server nests each message's creation time in
+		// metadata.timestamp; if it isn't lifted to ChatMessage.timestamp the UI
+		// falls back to new Date() and every reloaded message shows "now".
+		fetchMock.mockResolvedValueOnce(
+			makeLiveResponse({
+				lastUpdateId: 3,
+				isStreaming: false,
+				messages: [
+					{
+						id: 'msg-old-user',
+						role: 'user',
+						type: 'text',
+						content: 'question from yesterday',
+						streaming: false,
+						metadata: { timestamp: '2026-01-15T14:30:00+00:00' },
+					},
+					{
+						id: 'msg-old-assistant',
+						role: 'assistant',
+						type: 'text',
+						content: 'answer from yesterday',
+						streaming: false,
+						metadata: { timestamp: '2026-01-15T14:31:12+00:00', cost_usd: 0.01 },
+					},
+					{
+						id: 'msg-no-ts',
+						role: 'assistant',
+						type: 'text',
+						content: 'legacy message without timestamp',
+						streaming: false,
+					},
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SESSION_ID);
+		const session = sessionStateManager.getSession(SESSION_ID);
+		const byId = new Map(session!.messages.map(m => [m.id, m]));
+		expect(byId.get('msg-old-user')!.timestamp).toBe('2026-01-15T14:30:00+00:00');
+		expect(byId.get('msg-old-assistant')!.timestamp).toBe('2026-01-15T14:31:12+00:00');
+		expect(byId.get('msg-no-ts')!.timestamp).toBeUndefined();
+	});
+
 	it('omits toolScreenshot for tool_use messages without an image', async () => {
 		fetchMock.mockResolvedValueOnce(
 			makeLiveResponse({

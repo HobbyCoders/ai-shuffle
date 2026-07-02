@@ -427,6 +427,17 @@ export function stabilizeMessageIdentity(
 			needsStabilization = true;
 		}
 
+		// Same one-way fill for the creation timestamp. Mid-turn polls serve
+		// live-store messages that carry no persisted metadata.timestamp, so an
+		// incoming message replacing a client-stamped prior one must keep the
+		// prior send time; conversely a kept optimistic message gains the
+		// persisted time once the post-turn poll delivers it. Either way the
+		// timestamp never regresses to undefined — which the UI renders as "now".
+		if (!out.timestamp && (msg.timestamp || existing?.timestamp)) {
+			out = { ...out, timestamp: msg.timestamp || existing?.timestamp };
+			needsStabilization = true;
+		}
+
 		// Final safety net: never emit two messages with the same id. If the
 		// chosen id is already taken (a stale duplicate arrived in `incoming`,
 		// or the match picked an id another message already claimed), fall back

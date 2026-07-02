@@ -411,6 +411,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							role: 'user' as const,
 							content: prompt,
 							profileId: queryProfileId,
+							timestamp: new Date().toISOString(),
 						}],
 						isStreaming: true,
 						error: null,
@@ -623,6 +624,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						role: 'user' as const,
 						content: prompt,
 						profileId: queryProfileId,
+						timestamp: new Date().toISOString(),
 					}],
 				};
 			});
@@ -838,6 +840,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					role: 'user' as const,
 					content: prompt,
 					profileId: queryProfileId,
+					timestamp: new Date().toISOString(),
 				}],
 			}));
 

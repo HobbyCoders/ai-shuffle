@@ -9,6 +9,7 @@
 	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import MessageActions from './MessageActions.svelte';
+	import { formatMessageTime } from '$lib/utils/message-time';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -20,7 +21,7 @@
 		content: string;
 		/** Real-time WS stream buffer — updates every delta, not just every poll */
 		wsContent?: string;
-		timestamp?: Date;
+		timestamp?: Date | string;
 		messageIndex: number;
 		messageId: string;
 		messageUuid?: string | null;  // UUID from JSONL for direct rewind (may be same as messageId)
@@ -84,11 +85,6 @@
 
 	// Show actions if hovered (desktop) or tapped (mobile)
 	const showActions = $derived(isHovered || showActionsOnMobile);
-
-	function formatTime(date?: Date): string {
-		const d = date || new Date();
-		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-	}
 
 	function formatCost(cost: number | undefined): string {
 		if (cost === undefined) return '';
@@ -407,7 +403,7 @@
 	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm" style="color: var(--primary)">{profileName}</span>
-			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
+			<span class="text-xs text-muted-foreground">{formatMessageTime(timestamp)}</span>
 			{#if streaming}
 				<StreamingIndicator />
 			{/if}
