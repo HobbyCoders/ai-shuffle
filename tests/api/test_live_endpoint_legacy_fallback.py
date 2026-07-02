@@ -36,7 +36,7 @@ def _owner_path_patches(session):
     ]
 
 
-async def _poll_live(session, store_result, legacy_result):
+async def _poll_live(session, store_result, legacy_result, store_side_effect=None):
     patches = _owner_path_patches(session)
     for p in patches:
         p.start()
@@ -46,7 +46,7 @@ async def _poll_live(session, store_result, legacy_result):
              patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
              patch("app.core.cost_utils.attach_cost_metadata"), \
              patch("app.api.sessions.parse_session_history_via_store",
-                   return_value=store_result), \
+                   return_value=store_result, side_effect=store_side_effect), \
              patch("app.core.db_message_loader.load_messages_from_db",
                    return_value=legacy_result) as legacy_loader:
             result = await get_live_session(
@@ -82,4 +82,23 @@ async def test_postgres_only_populated_store_never_consults_legacy_db():
     )
 
     assert [m["content"] for m in result["messages"]] == ["from store"]
+    legacy_loader.assert_not_called()
+
+
+async def test_postgres_only_raised_store_parse_serves_empty_not_legacy():
+    """A RAISED store parse (transient DB error) proves nothing about the
+    store's contents. Falling through to the legacy table would render a
+    post-cutover session as the user-rows-only legacy view (the "vanishing
+    replies" trap). Serve an empty transcript instead — a transient blank
+    beats a wrong one."""
+    session = {"id": "flaky-sess", "title": "New", "sdk_session_id": "sdk-new-2"}
+
+    result, legacy_loader = await _poll_live(
+        session,
+        store_result=None,
+        store_side_effect=RuntimeError("db pool exhausted"),
+        legacy_result=([{"id": 1, "role": "user", "content": "LEGACY TRAP"}], True),
+    )
+
+    assert result["messages"] == []
     legacy_loader.assert_not_called()

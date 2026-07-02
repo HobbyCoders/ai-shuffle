@@ -803,6 +803,32 @@ class TestSessionStoreModeIsolation:
         assert data["messages"][0]["content"] == "From store"
         mock_database.get_session_messages.assert_not_called()
 
+    def test_postgres_only_raised_store_parse_serves_empty_not_legacy(
+        self, client, mock_database, sample_session
+    ):
+        """A RAISED store parse (transient DB error) is not an EMPTY store.
+        Falling through to the legacy table would render a post-cutover session
+        as the user-rows-only legacy view (the 'vanishing replies' trap) —
+        serve 200 + empty messages instead."""
+        from app.core.config import settings
+
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
+        ]
+
+        with patch.object(settings, "session_store_mode", "postgres_only"), \
+                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.side_effect = RuntimeError("db pool exhausted")
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        assert resp.json()["messages"] == []
+        mock_database.get_session_messages.assert_not_called()
+
     def test_disabled_empty_jsonl_falls_back_to_legacy_db(
         self, client, mock_database, sample_session
     ):

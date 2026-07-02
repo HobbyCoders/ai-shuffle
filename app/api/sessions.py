@@ -394,6 +394,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     sdk_session_id = session.get("sdk_session_id")
     messages = []
     working_dir = "/workspace"
+    store_parse_failed = False
 
     from app.core.config import settings as _store_settings
     _postgres_only = _store_settings.session_store_mode == "postgres_only"
@@ -491,6 +492,10 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # Log the error but don't fail - fall back to database
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
             messages = []
+            # A RAISED store parse (transient DB error) is not an EMPTY store:
+            # the legacy fallback below must not fire, or a post-cutover
+            # session would render as the user-rows-only legacy view.
+            store_parse_failed = _postgres_only
 
     # Mirror-mode drift check — no-op unless session_store_mode == "mirror".
     # Pure observability: compares the Postgres transcript mirror against the
@@ -515,8 +520,11 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         # e.g. the JSONL sits on another machine). Serve that instead of
         # rendering an existing chat as empty. Post-cutover sessions always
         # have store rows, so this can never shadow the store with the
-        # user-rows-only legacy view (the "vanishing replies" trap).
-        if not messages:
+        # user-rows-only legacy view (the "vanishing replies" trap) — EXCEPT
+        # when the store parse RAISED: then "no messages" proves nothing about
+        # the store, so serve empty (a transient blank beats a wrong
+        # transcript) rather than fall through to the legacy view.
+        if not messages and not store_parse_failed:
             if sdk_session_id:
                 logger.warning(
                     "[Session API] postgres_only: no entries in session_store for "
@@ -868,6 +876,7 @@ async def get_live_session(
 
     # Fallback 1: JSONL parsing (legacy sessions without DB messages).
     # In postgres_only this loads from the session store instead of JSONL.
+    store_parse_failed = False
     if not messages and sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
@@ -914,15 +923,19 @@ async def get_live_session(
 
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
+            # A RAISED store parse is not an EMPTY store — see GET /{id}.
+            store_parse_failed = _postgres_only
 
     # postgres_only legacy rescue: the store yielded nothing even after the
     # lazy JSONL backfill inside parse_session_history_via_store had its
     # chance — a pre-cutover session whose transcript lives ONLY in the legacy
     # session_messages table (shared across installs). Serve that instead of
-    # an empty chat. Fires ONLY on an empty store result: post-cutover
-    # sessions always have store rows, so the user-rows-only legacy view (the
-    # "vanishing replies" trap) can never shadow the store. Mirrors GET /{id}.
-    if _postgres_only and not messages:
+    # an empty chat. Fires ONLY on an empty store result — NOT on a raised
+    # parse (a transient DB error proves nothing about the store; serving the
+    # legacy view then would resurface the user-rows-only "vanishing replies"
+    # trap). Post-cutover sessions always have store rows, so the legacy view
+    # can never shadow the store. Mirrors GET /{id}.
+    if _postgres_only and not messages and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:
             db_messages, has_db = await run_sync(load_messages_from_db, session_id)
