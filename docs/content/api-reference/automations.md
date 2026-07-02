@@ -73,8 +73,8 @@ curl -X POST http://localhost:8000/api/v1/automations \
 | `max_cost_per_day` | number | No | Daily budget |
 | `max_cost_total` | number | No | Lifetime budget |
 | `max_runs_per_day` | integer | No | Max executions per day |
-| `max_turns` | integer | No | Conversation turns (1-25) |
-| `timeout_seconds` | integer | No | Timeout (30-1800) |
+| `max_turns` | integer | No | Conversation turns per run (default 1, null = unlimited) |
+| `timeout_seconds` | integer | No | Timeout in seconds (default 300, null = unlimited) |
 | `requires_approval` | boolean | No | Require manual approval |
 
 ### Trigger Configurations

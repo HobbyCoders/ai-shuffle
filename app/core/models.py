@@ -1394,8 +1394,8 @@ class AutomationCreate(BaseModel):
     profile_id: str
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
-    max_turns: int = Field(default=1, ge=1, le=25)
-    timeout_seconds: int = Field(default=300, ge=30, le=1800)
+    max_turns: Optional[int] = Field(default=1, ge=1)  # None = unlimited
+    timeout_seconds: Optional[int] = Field(default=300, ge=10)  # None = unlimited
     max_cost_per_run: Optional[float] = Field(default=None, ge=0)
     max_cost_per_day: Optional[float] = Field(default=None, ge=0)
     max_cost_total: Optional[float] = Field(default=None, ge=0)
@@ -1415,8 +1415,8 @@ class AutomationUpdate(BaseModel):
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
     output_config: Optional[Dict[str, Any]] = None
-    max_turns: Optional[int] = Field(None, ge=1, le=25)
-    timeout_seconds: Optional[int] = Field(None, ge=30, le=1800)
+    max_turns: Optional[int] = Field(None, ge=1)  # explicit null = unlimited
+    timeout_seconds: Optional[int] = Field(None, ge=10)  # explicit null = unlimited
     max_cost_per_run: Optional[float] = None
     max_cost_per_day: Optional[float] = None
     max_cost_total: Optional[float] = None
@@ -1438,8 +1438,8 @@ class Automation(BaseModel):
     profile_id: str
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
-    max_turns: int = 1
-    timeout_seconds: int = 300
+    max_turns: Optional[int] = 1  # None = unlimited
+    timeout_seconds: Optional[int] = 300  # None = unlimited
     max_cost_per_run: Optional[float] = None
     max_cost_per_day: Optional[float] = None
     max_cost_total: Optional[float] = None

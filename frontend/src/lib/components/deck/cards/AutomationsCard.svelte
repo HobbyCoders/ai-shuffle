@@ -250,8 +250,8 @@
 		formMaxCostPerDay = automation.max_cost_per_day != null ? String(automation.max_cost_per_day) : '';
 		formMaxCostTotal = automation.max_cost_total != null ? String(automation.max_cost_total) : '';
 		formMaxRunsPerDay = automation.max_runs_per_day != null ? String(automation.max_runs_per_day) : '';
-		formMaxTurns = String(automation.max_turns);
-		formTimeoutSeconds = String(automation.timeout_seconds);
+		formMaxTurns = automation.max_turns != null ? String(automation.max_turns) : '';
+		formTimeoutSeconds = automation.timeout_seconds != null ? String(automation.timeout_seconds) : '';
 		formRequiresApproval = automation.requires_approval;
 		formError = '';
 		testResult = null;
@@ -313,8 +313,8 @@
 			project_id: formProjectId || undefined,
 			output_config: outputConfig,
 			action_steps: validActionSteps.length > 0 ? validActionSteps : undefined,
-			max_turns: parseInt(formMaxTurns) || 1,
-			timeout_seconds: parseInt(formTimeoutSeconds) || 300,
+			max_turns: formMaxTurns ? parseInt(formMaxTurns) : null,
+			timeout_seconds: formTimeoutSeconds ? parseInt(formTimeoutSeconds) : null,
 			max_cost_per_run: formMaxCostPerRun ? parseFloat(formMaxCostPerRun) : null,
 			max_cost_per_day: formMaxCostPerDay ? parseFloat(formMaxCostPerDay) : null,
 			max_cost_total: formMaxCostTotal ? parseFloat(formMaxCostTotal) : null,

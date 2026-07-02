@@ -170,6 +170,85 @@ class TestAutomationCRUD:
         )
         assert response.status_code == 404
 
+    def test_update_turns_and_timeout_above_old_caps(self, authenticated_client, mock_encryption):
+        """Regression: max_turns > 25 / timeout_seconds > 1800 used to 422 on edit."""
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Big Limits",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+            },
+        )
+        aid = create_resp.json()["id"]
+
+        response = authenticated_client.patch(
+            f"/api/v1/automations/{aid}",
+            json={"max_turns": 50, "timeout_seconds": 7200},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["max_turns"] == 50
+        assert data["timeout_seconds"] == 7200
+
+    def test_unlimited_turns_and_timeout(self, authenticated_client, mock_encryption):
+        """Explicit null means unlimited, matching the cost/budget fields."""
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Unlimited",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+                "max_turns": None,
+                "timeout_seconds": None,
+            },
+        )
+        assert create_resp.status_code == 201
+        data = create_resp.json()
+        assert data["max_turns"] is None
+        assert data["timeout_seconds"] is None
+
+        # Set limits, then clear them again via PATCH
+        aid = data["id"]
+        response = authenticated_client.patch(
+            f"/api/v1/automations/{aid}",
+            json={"max_turns": 5, "timeout_seconds": 600},
+        )
+        assert response.status_code == 200
+        response = authenticated_client.patch(
+            f"/api/v1/automations/{aid}",
+            json={"max_turns": None, "timeout_seconds": None},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["max_turns"] is None
+        assert data["timeout_seconds"] is None
+
+    def test_turns_and_timeout_floors_still_enforced(self, authenticated_client, mock_encryption):
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Floors",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+            },
+        )
+        aid = create_resp.json()["id"]
+
+        response = authenticated_client.patch(f"/api/v1/automations/{aid}", json={"max_turns": 0})
+        assert response.status_code == 422
+        response = authenticated_client.patch(f"/api/v1/automations/{aid}", json={"timeout_seconds": 5})
+        assert response.status_code == 422
+
 
 # =============================================================================
 # Lifecycle Actions

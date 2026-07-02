@@ -501,12 +501,12 @@
 			<div class="ctl"><input type="number" class="inp num" min="1" value={formMaxRunsPerDay} oninput={(e) => onUpdateFormMaxRunsPerDay(e.currentTarget.value)} placeholder="No limit" /></div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Max turns</h4><p>Agent turns allowed per run.</p></div>
-			<div class="ctl"><input type="number" class="inp num" min="1" value={formMaxTurns} oninput={(e) => onUpdateFormMaxTurns(e.currentTarget.value)} /></div>
+			<div class="lab"><h4>Max turns</h4><p>Agent turns allowed per run. Blank = no limit.</p></div>
+			<div class="ctl"><input type="number" class="inp num" min="1" value={formMaxTurns} oninput={(e) => onUpdateFormMaxTurns(e.currentTarget.value)} placeholder="No limit" /></div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Timeout</h4><p>Maximum run duration in seconds.</p></div>
-			<div class="ctl"><input type="number" class="inp num" min="10" value={formTimeoutSeconds} oninput={(e) => onUpdateFormTimeoutSeconds(e.currentTarget.value)} /></div>
+			<div class="lab"><h4>Timeout</h4><p>Maximum run duration in seconds. Blank = no limit.</p></div>
+			<div class="ctl"><input type="number" class="inp num" min="10" value={formTimeoutSeconds} oninput={(e) => onUpdateFormTimeoutSeconds(e.currentTarget.value)} placeholder="No limit" /></div>
 		</div>
 	{/if}
 </div>
