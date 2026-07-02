@@ -510,6 +510,7 @@ async def execute_query(
     tool_messages = []  # Collect tool use/result messages for storage
     metadata = {}
     sdk_session_id = None
+    sdk_link_persisted = False
 
     # Wrap string prompt as async iterable to force SDK to use stream_input() path.
     # The SDK's string-prompt path calls end_input() immediately after writing,
@@ -538,6 +539,25 @@ async def execute_query(
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
+                    # Link it onto the sessions row immediately (decoupled from
+                    # end-of-turn persistence), matching the streaming paths.
+                    # The history read path keys the transcript store on
+                    # sessions.sdk_session_id, and store entries flow in live —
+                    # without this, a running (or mid-turn-crashed) automation
+                    # session reads back as "no work" (blank history).
+                    if resume_id is None and not sdk_link_persisted:
+                        try:
+                            await run_sync(
+                                database.update_session,
+                                session_id,
+                                sdk_session_id=sdk_session_id,
+                            )
+                            sdk_link_persisted = True
+                        except Exception as link_err:
+                            logger.warning(
+                                f"early sdk_session_id link failed for "
+                                f"{session_id}: {link_err}"
+                            )
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
