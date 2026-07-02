@@ -1163,3 +1163,125 @@ def test_latch_records_backgrounded_shell_via_fallback():
 
     assert task_registry.was_unparked("sess-1", "sh-1") is True
     task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# 8. Park-poll strand: unpark_pending must be latched the MOMENT a completion
+#    is consumed — not at deliver time, after the consolidation window.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unpark_pending_latched_before_consolidation_window():
+    """A park-polling client polls /live every 1.5s and the pump's consolidation
+    window is ALSO 1.5s. ``complete_task`` (via ``_record_task_message``) drops
+    the task from ``get_active`` the instant the terminal notification arrives,
+    but the latch used to be set only inside ``_deliver_unpark_impl`` — after
+    the full window plus its DB writes. Every successful unpark therefore
+    exposed a >=1.5s gap where /live reported (is_streaming=false,
+    activeTasks=[], unpark_pending=false) — indistinguishable from idle — so
+    the client's poller STOPPED and the follow-up streamed into a dead poller
+    (UI stranded showing parked + a stale running task). The latch must be up
+    as soon as the completion is consumed (``mark_unparked``), BEFORE the
+    consolidation window opens."""
+    cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.5  # widen so mid-window sampling is deterministic
+
+    task_registry.start_task("sess-1", "task-1", "shell", "sleep 90")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1", summary="done")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    deliver_seen = {}
+
+    async def _capture(**kwargs):
+        deliver_seen["latched_at_deliver"] = task_registry.is_unpark_pending("sess-1")
+        return True
+
+    handler._deliver_unpark = AsyncMock(side_effect=_capture)
+
+    with _patch_pool(state):
+        pump = asyncio.create_task(
+            handler._drain_notifications("sess-1", "claude-code", None, None)
+        )
+        # Sample DURING the consolidation window: the latch must come up while
+        # the pump is still folding (well before deliver).
+        latched_in_window = False
+        for _ in range(80):  # up to 0.4s < the 0.5s window
+            await asyncio.sleep(0.005)
+            if pump.done():
+                break
+            if task_registry.is_unpark_pending("sess-1"):
+                latched_in_window = True
+                break
+        assert latched_in_window, (
+            "unpark_pending was NOT latched during the consolidation window — "
+            "a park poll landing here stops the client's poller and strands the UI"
+        )
+        await pump
+
+    handler._deliver_unpark.assert_awaited_once()
+    assert deliver_seen.get("latched_at_deliver") is True
+
+
+@pytest.mark.asyncio
+async def test_unpark_pending_latched_for_killed_task_update_path():
+    """The TaskUpdatedMessage-alone terminal path (killed/stopped) folds into the
+    same consolidation window, so it needs the same early latch."""
+    cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.5
+
+    task_registry.start_task("sess-1", "task-k", "agent", "bg work")
+
+    client = _FakeClient([_updated("task-k", status="killed", uuid="uu-9")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        pump = asyncio.create_task(
+            handler._drain_notifications("sess-1", "claude-code", None, None)
+        )
+        latched_in_window = False
+        for _ in range(80):
+            await asyncio.sleep(0.005)
+            if pump.done():
+                break
+            if task_registry.is_unpark_pending("sess-1"):
+                latched_in_window = True
+                break
+        assert latched_in_window
+        await pump
+
+    handler._deliver_unpark.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unpark_pending_cleared_when_stop_guard_abandons_delivery():
+    """If the stop/interrupt guard abandons delivery after the latch went up,
+    the latch must be dropped — otherwise a polling client park-polls forever
+    for a follow-up that will never stream."""
+    cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.5
+
+    task_registry.start_task("sess-1", "task-1", "shell", "sleep 90")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        pump = asyncio.create_task(
+            handler._drain_notifications("sess-1", "claude-code", None, None)
+        )
+        # Wait for the latch, then stop the session mid-window.
+        for _ in range(80):
+            await asyncio.sleep(0.005)
+            if pump.done() or task_registry.is_unpark_pending("sess-1"):
+                break
+        cwh._stopped_sessions.add("sess-1")
+        try:
+            await pump
+        finally:
+            cwh._stopped_sessions.discard("sess-1")
+
+    handler._deliver_unpark.assert_not_awaited()
+    assert task_registry.is_unpark_pending("sess-1") is False

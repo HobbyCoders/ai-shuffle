@@ -601,6 +601,10 @@ async def _drain_notifications_impl(
                     "usage": None,
                     "tool_use_id": None,
                 })
+                # Latch unpark-pending the MOMENT the completion is consumed —
+                # see the notification path below for why this cannot wait until
+                # ``_deliver_unpark_impl``.
+                task_registry.mark_unpark_pending(session_id)
                 # Consolidate (Bug 1, policy #3): keep draining within the batch
                 # window instead of breaking, so completions landing close together
                 # fold into ONE follow-up turn.
@@ -716,6 +720,20 @@ async def _drain_notifications_impl(
                 "usage": frame.get("usage"),
                 "tool_use_id": frame.get("tool_use_id"),
             })
+            # Latch unpark-pending the MOMENT the completion is consumed.
+            # ``complete_task`` (via ``_record_task_message`` above) already
+            # dropped the task from ``get_active``, so from here until the
+            # follow-up's ``start_streaming`` a /live poll would read
+            # (is_streaming=false, activeTasks=[]) — indistinguishable from
+            # idle. Latching only inside ``_deliver_unpark_impl`` (after the
+            # consolidation window + its DB writes) left that gap >= the whole
+            # 1.5s window — LONGER than the client's 1.5s park-poll interval —
+            # so every successful unpark landed a poll in the gap, STOPPED the
+            # poller, and the follow-up streamed into a stranded UI (stuck
+            # showing parked + a stale running task). Idempotent with the
+            # deliver-time latch, which stays as the last-line re-assert after
+            # its own ``end_streaming`` (that call clears the latch).
+            task_registry.mark_unpark_pending(session_id)
             # Consolidate (Bug 1, policy #3): keep draining within the batch window
             # instead of breaking, so completions landing close together fold into
             # ONE follow-up turn.
@@ -724,11 +742,18 @@ async def _drain_notifications_impl(
             continue
     except asyncio.CancelledError:
         # Stopped by stop_drain_pump (a new turn is starting) — exit without
-        # firing. Re-raise so the awaiter sees the cancellation.
+        # firing. Drop our early latch (if any): no follow-up will stream for the
+        # pending we collected, and the new turn's own start_streaming would only
+        # clear it if that turn actually starts. Re-raise so the awaiter sees the
+        # cancellation.
+        if pending:
+            task_registry.clear_unpark_pending(session_id)
         _drop_drain_pump_self(session_id, _drain_pumps)
         raise
     except Exception as exc:
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
+        if pending:
+            task_registry.clear_unpark_pending(session_id)
         _drop_drain_pump_self(session_id, _drain_pumps)
         return
 
@@ -741,6 +766,9 @@ async def _drain_notifications_impl(
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
             ctx.debug(logger, "Drain pump: session stopped/interrupting — not delivering unpark")
+            # Drop the early latch: no follow-up will stream, so a polling client
+            # must not be held in park-poll waiting for one.
+            task_registry.clear_unpark_pending(session_id)
             return
         await deliver_unpark(
             pending=pending,
