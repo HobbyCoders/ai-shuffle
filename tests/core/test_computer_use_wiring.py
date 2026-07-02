@@ -11,7 +11,8 @@ These tests pin:
   3. disabled             -> neither tools nor server.
 """
 
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 import app.core.query_options as qo
 from app.mcp.computer_use_sdk import get_computer_use_tool_names
@@ -32,12 +33,36 @@ def _build(profile):
     return opts
 
 
+@contextmanager
+def _enabled_and_available():
+    """Drive the enabled+available wiring path deterministically.
+
+    Two independent seams must be controlled so the test host's real display
+    state and optional deps (pynput) don't matter:
+
+      * ``query_options`` re-imports ``computer_use_available`` from
+        ``app.mcp.computer_use.scaling`` at call time to decide tool
+        allow-listing and system-prompt guidance — patched to report available.
+      * ``query_options`` builds the server via
+        ``app.mcp.computer_use_sdk.create_computer_use_server``, whose real body
+        requires ``pynput`` and a live display. We stub it to a sentinel server
+        so the registration branch is exercised without host dependencies (the
+        factory's own availability logic is covered by test_computer_use_scaling).
+    """
+    fake_server = MagicMock(name="computer-use-server")
+    with patch(
+        "app.mcp.computer_use.scaling.computer_use_available",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.mcp.computer_use_sdk.create_computer_use_server",
+        return_value=fake_server,
+    ):
+        yield
+
+
 class TestEnabledAndAvailable:
     def test_tools_allowlisted_and_server_registered(self):
-        with patch(
-            "app.mcp.computer_use.scaling.computer_use_available",
-            return_value=(True, "ok"),
-        ):
+        with _enabled_and_available():
             opts = _build(_profile({"enabled": True}))
 
         allowed = set(opts.allowed_tools or [])
@@ -47,10 +72,7 @@ class TestEnabledAndAvailable:
         assert "computer-use" in servers, "computer-use server should be registered"
 
     def test_system_prompt_gets_guidance(self):
-        with patch(
-            "app.mcp.computer_use.scaling.computer_use_available",
-            return_value=(True, "ok"),
-        ):
+        with _enabled_and_available():
             opts = _build(_profile({"enabled": True}))
 
         sp = opts.system_prompt
