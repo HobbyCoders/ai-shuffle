@@ -62,7 +62,7 @@ class TestGlobalMcpServers:
 
     def test_list_global_servers(self, client, mock_mcp_service):
         """Test listing global MCP servers."""
-        mock_mcp_service.get_servers_for_scope.return_value = [
+        mock_mcp_service.get_all_servers_with_builtins.return_value = [
             McpServerConfig(
                 name="test-server",
                 type=McpServerType.STDIO,
@@ -153,7 +153,10 @@ class TestProjectMcpServers:
     def project_client(self, app, mock_mcp_service):
         """Create a test client with mocked MCP service and database."""
         with patch("app.api.mcp.get_mcp_service") as mock_get_mcp:
-            with patch("app.api.mcp.database") as mock_db:
+            # validate_project_access() lives in app.api.common and reads
+            # `database` from that module's namespace, so the project lookup
+            # must be patched there (not on app.api.mcp).
+            with patch("app.api.common.database") as mock_db:
                 mock_get_mcp.return_value = mock_mcp_service
                 mock_db.get_project.return_value = {
                     "id": "test-project",
