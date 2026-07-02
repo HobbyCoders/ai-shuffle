@@ -11,6 +11,7 @@ V2 Rewind: Uses direct JSONL manipulation instead of PTY-based CLI bridge.
 This is bulletproof - no terminal parsing, no race conditions.
 """
 
+import asyncio
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query
@@ -29,9 +30,14 @@ from app.core.slash_commands import (
 from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.pg_session_store import (
     RewindTargetNotFound,
+    main_transcript_is_empty,
     truncate_session_store_to_checkpoint,
 )
-from app.core.rewind_db_sync import resolve_rewind_anchor, apply_rewind_delete
+from app.core.rewind_db_sync import (
+    resolve_rewind_anchor,
+    apply_rewind_delete,
+    delete_all_session_rows,
+)
 from app.core.jsonl_parser import invalidate_parse_cache
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
@@ -592,7 +598,11 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         # subsequent rewinds hit the fast path.
         anchor_id: Optional[int] = None
         try:
-            anchor_id = resolve_rewind_anchor(
+            # Blocking: parses the full transcript (file IO / store read) and
+            # hits the DB — off the event loop, or every other request stalls
+            # for the duration on large sessions.
+            anchor_id = await asyncio.to_thread(
+                resolve_rewind_anchor,
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
                 working_dir=working_dir,
@@ -648,19 +658,21 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         if jsonl_ok:
             messages_removed = result.messages_removed or 0
 
-        # Mirror the truncation into session_messages whenever a transcript
+        # Mirror the truncation into session_messages whenever ANY transcript
         # layer was actually truncated. Without this, rewind leaves orphan rows
         # the UI renders on reload (the original "rewind doesn't stick"
-        # symptom). Gating it on jsonl_ok alone left the legacy rows intact on
-        # every postgres_only rewind where the (tmpfs, often absent) JSONL
-        # couldn't be truncated — they then resurfaced through the empty-store
-        # legacy fallback after a full rewind. Best-effort: a DB failure here
-        # does not invalidate a successful transcript truncation.
-        if jsonl_ok or (postgres_only and store_truncated):
+        # symptom). Gating it on jsonl_ok alone left the legacy rows intact
+        # whenever only the store could be truncated — e.g. mirror or
+        # postgres_only with the (tmpfs, often absent) JSONL gone — and they
+        # then resurfaced through the empty-store legacy fallback after a full
+        # rewind. Best-effort: a DB failure here does not invalidate a
+        # successful transcript truncation.
+        if jsonl_ok or store_truncated:
             db_removed = 0
             if anchor_id is not None:
                 try:
-                    db_removed = apply_rewind_delete(
+                    db_removed = await asyncio.to_thread(
+                        apply_rewind_delete,
                         session_id=session_id,
                         anchor_id=anchor_id,
                         include_response=request.include_response,
@@ -672,15 +684,34 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                     )
                     errors.append(f"DB sync failed: {db_err}")
             else:
-                logger.warning(
-                    f"Rewind DB sync skipped: no anchor row resolved for "
-                    f"session={session_id} target={request.target_uuid}. "
-                    f"UI may show stale messages until next reload with backfill."
-                )
+                # No legacy anchor row could be resolved. Usually benign (in
+                # postgres_only, post-cutover session_messages holds user rows
+                # only, so an assistant-target anchor can miss legitimately) —
+                # EXCEPT after a full rewind that emptied the store: the read
+                # path's empty-store legacy fallback would then resurrect every
+                # leftover session_messages row on reload. Nothing is left to
+                # anchor on, so wipe them all.
+                purged_legacy = False
+                if postgres_only and store_truncated:
+                    try:
+                        if await main_transcript_is_empty(sdk_session_id):
+                            db_removed = await asyncio.to_thread(
+                                delete_all_session_rows, session_id
+                            )
+                            purged_legacy = True
+                    except Exception as purge_err:
+                        logger.error(
+                            f"Rewind legacy purge failed for session {session_id}: {purge_err}",
+                            exc_info=True,
+                        )
+                if not purged_legacy:
+                    logger.warning(
+                        f"Rewind DB sync skipped: no anchor row resolved for "
+                        f"session={session_id} target={request.target_uuid}. "
+                        f"Legacy session_messages rows were left untouched; they "
+                        f"only surface through the empty-store legacy fallback."
+                    )
                 if not postgres_only:
-                    # In postgres_only, post-cutover session_messages holds
-                    # user rows only, so an assistant-target anchor can miss
-                    # legitimately — warn above, but don't fail the rewind.
                     errors.append("DB sync skipped: could not resolve anchor row")
             logger.info(
                 f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
@@ -708,13 +739,12 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             # Report a non-zero count even when only the store was truncated.
             if not messages_removed and store_removed:
                 messages_removed = store_removed
-            # Invalidate the parse caches keyed by sdk_session_id. The store-backed
-            # read path (postgres_only) serves parse_session_history_from_store
-            # verbatim from _store_parse_cache, which has NO mtime/version check —
-            # a warm pre-rewind transcript (reseeded at every turn end) would be
-            # served on the next reload, so rewind "succeeds" but the message
-            # stays in chat. Also drops the mtime-validated JSONL cache so
-            # filesystem-mode reads re-parse the truncated file.
+            # Invalidate the parse caches keyed by sdk_session_id. The
+            # store-backed _store_parse_cache is (count, max_id)-versioned, so
+            # a remote install's cache self-heals on read — but dropping the
+            # local entry here makes the truncation visible immediately without
+            # spending a version probe. Also drops the mtime-validated JSONL
+            # cache so filesystem-mode reads re-parse the truncated file.
             invalidate_parse_cache(sdk_session_id)
             # Clear stale messages from live_session_store so the next
             # load_session reads truncated data instead of serving pre-rewind
@@ -787,7 +817,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
 
     # Broadcast rewind event to all connected devices for this session
     if chat_rewound and messages_removed > 0:
-        import asyncio
         asyncio.create_task(
             sync_engine.broadcast_session_rewound(
                 session_id=session_id,

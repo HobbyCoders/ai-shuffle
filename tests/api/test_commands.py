@@ -1357,16 +1357,139 @@ class TestExecuteRewindDbSyncWithoutJsonl:
         assert response.success is False
         mock_delete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mirror_mode_syncs_legacy_rows_when_jsonl_missing(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """Same gap as Bug D but in ``mirror`` mode: the store truncated fine,
+        the JSONL was gone, and the ``postgres_only``-scoped gate skipped the
+        legacy sync — leaving orphan session_messages rows to resurface through
+        the empty-store fallback. Any truncated transcript layer must trigger
+        the sync, regardless of mode."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "mirror"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(return_value=2),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=42
+        ), patch(
+            "app.api.commands.apply_rewind_delete", return_value=2
+        ) as mock_delete, patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        mock_delete.assert_called_once()
+        assert mock_delete.call_args.kwargs["anchor_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_full_rewind_without_anchor_purges_all_legacy_rows(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """Full-rewind edge: the store was truncated to EMPTY and no legacy
+        anchor resolved (nothing left to content-match). The empty-store read
+        fallback would resurrect every leftover session_messages row on reload,
+        so they must all be purged."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "postgres_only"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(return_value=3),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=None
+        ), patch(
+            "app.api.commands.main_transcript_is_empty",
+            new=AsyncMock(return_value=True),
+        ) as mock_empty, patch(
+            "app.api.commands.delete_all_session_rows", return_value=5
+        ) as mock_purge, patch(
+            "app.api.commands.apply_rewind_delete", return_value=0
+        ) as mock_delete, patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-first-message",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        mock_empty.assert_awaited_once_with("sdk-session-1")
+        mock_purge.assert_called_once_with("session-1")
+        mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_partial_rewind_without_anchor_keeps_legacy_rows(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """No anchor but the store still has content: the legacy rows can't be
+        cut precisely, and the store (non-empty) shields them from the read
+        fallback — deleting them all would be data loss. Leave them alone."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "postgres_only"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(return_value=1),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=None
+        ), patch(
+            "app.api.commands.main_transcript_is_empty",
+            new=AsyncMock(return_value=False),
+        ), patch(
+            "app.api.commands.delete_all_session_rows", return_value=0
+        ) as mock_purge, patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        mock_purge.assert_not_called()
+
 
 class TestExecuteRewindInvalidatesParseCache:
     """Primary regression for "chat rewind still not working".
 
     In postgres_only the UI read path serves ``parse_session_history_from_store``
-    verbatim from ``_store_parse_cache`` — an LRU cache with NO mtime/version
-    check. The turn-end reseed warms it with the FULL pre-rewind transcript
-    before every rewind. If ``execute_rewind`` truncates the rows but leaves the
-    cache primed, the next reload serves the cached pre-rewind transcript and the
-    rewound message reappears. ``execute_rewind`` must invalidate the cache.
+    from ``_store_parse_cache`` — an LRU cache that (at the time of the bug) had
+    no version check; it is now (count, max_id)-stamped, but the turn-end reseed
+    still warms it with the FULL pre-rewind transcript before every rewind. If
+    ``execute_rewind`` truncates the rows but leaves the cache primed, a reload
+    can serve the cached pre-rewind transcript and the rewound message
+    reappears. ``execute_rewind`` must invalidate the cache directly.
     """
 
     @pytest.mark.asyncio

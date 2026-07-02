@@ -785,6 +785,18 @@ async def truncate_session_store_to_checkpoint(
     )
 
 
+async def main_transcript_is_empty(session_id: str) -> bool:
+    """True when ``session_id`` has no main-transcript rows in the store.
+
+    Used by the rewind endpoint to detect a full rewind (store truncated to
+    nothing): with the store empty, the read path falls back to legacy
+    ``session_messages`` rows, so any leftovers there must be purged too.
+    Reuses the indexed ``(count, max_id)`` version query.
+    """
+    count, _ = await asyncio.to_thread(_store_version_by_session_id_sync, session_id)
+    return count == 0
+
+
 # ---------------------------------------------------------------------------
 # Async SessionStore adapter (duck-typed; no Protocol subclass needed).
 # ---------------------------------------------------------------------------

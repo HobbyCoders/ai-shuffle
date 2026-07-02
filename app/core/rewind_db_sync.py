@@ -401,3 +401,27 @@ def apply_rewind_delete(
         session_id, anchor_id, removed,
     )
     return removed
+
+
+def delete_all_session_rows(session_id: str) -> int:
+    """Delete EVERY ``session_messages`` row for *session_id*.
+
+    For the full-rewind edge case: the session store was truncated to empty
+    and no legacy anchor row resolved. The empty-store read fallback would
+    otherwise resurrect these rows wholesale on the next reload."""
+    from app.db.base import get_db, get_cursor
+    from app.db.compat import ph
+
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"DELETE FROM session_messages WHERE session_id = {_ph}",
+            (session_id,),
+        )
+        removed = cursor.rowcount or 0
+    logger.info(
+        "Rewind DB purge (full rewind, no anchor): session=%s rows_removed=%d",
+        session_id, removed,
+    )
+    return removed
