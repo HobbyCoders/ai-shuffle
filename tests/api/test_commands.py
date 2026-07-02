@@ -1103,6 +1103,115 @@ class TestExecuteRewindPostgresOnly:
         assert response.chat_rewound is False
         mock_live_store.cleanup_ended_session.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_postgres_only_invalidates_parse_cache_after_rewind(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """Regression: a successful rewind must invalidate the store-parse cache.
+
+        ``_store_parse_cache`` (keyed by ``sdk_session_id`` in
+        ``app.core.jsonl_parser``) has no on-disk mtime to self-invalidate, so a
+        fresh ``/live`` cold-load re-serves the PRE-rewind transcript from cache
+        even though the Postgres store is now truncated — the rewound messages
+        reappear on reload. ``execute_rewind`` must call
+        ``invalidate_parse_cache(sdk_session_id)`` after truncating the store so
+        the next read re-parses the truncated transcript.
+        """
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "postgres_only"
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 2,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=False,
+            message="JSONL not found",
+            chat_rewound=False,
+            messages_removed=0,
+            error="JSONL file not found",
+            remaining_user_turns=None,
+        )
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(return_value=2),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=None
+        ), patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store, patch(
+            "app.api.commands.invalidate_parse_cache"
+        ) as mock_invalidate:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.chat_rewound is True
+        # The stale store-parse cache for this transcript must be dropped so the
+        # next /live cold-load re-parses the truncated store instead of serving
+        # the pre-rewind transcript verbatim.
+        mock_invalidate.assert_called_once_with("sdk-session-1")
+
+    @pytest.mark.asyncio
+    async def test_postgres_only_no_cache_invalidation_when_rewind_fails(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """A failed rewind (target absent) must NOT invalidate the parse cache —
+        there is nothing to refresh and a needless clear would force an expensive
+        re-parse on the next read."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+        from app.core.pg_session_store import RewindTargetNotFound
+
+        mock_settings.session_store_mode = "postgres_only"
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 2,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=False,
+            message="JSONL not found",
+            chat_rewound=False,
+            messages_removed=0,
+            error="JSONL file not found",
+            remaining_user_turns=None,
+        )
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(side_effect=RewindTargetNotFound("nope")),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=None
+        ), patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store, patch(
+            "app.api.commands.invalidate_parse_cache"
+        ) as mock_invalidate:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="missing",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.chat_rewound is False
+        mock_invalidate.assert_not_called()
+
 
 class TestExecuteRewindDbSyncWithoutJsonl:
     """Bug D regression: in postgres_only with the (tmpfs, often absent) JSONL

@@ -414,6 +414,19 @@ export function stabilizeMessageIdentity(
 			out = msg;
 		}
 
+		// Carry server-authoritative identity onto an adopted prior object. When
+		// `out === existing` we kept the optimistic message for reference
+		// stability — but a just-sent user message is optimistic and carries no
+		// `jsonlUuid` until the post-turn poll delivers it on `msg`. Dropping it
+		// here is the "rewind blocked until reload" bug: MessageActions sees
+		// `messageUuid == null` and refuses to rewind ("missing its checkpoint
+		// id"). Only fill when missing so a settled message stays a stable
+		// reference (no churn) on subsequent polls.
+		if (out === existing && existing && msg.jsonlUuid && !existing.jsonlUuid) {
+			out = { ...existing, jsonlUuid: msg.jsonlUuid };
+			needsStabilization = true;
+		}
+
 		// Final safety net: never emit two messages with the same id. If the
 		// chosen id is already taken (a stale duplicate arrived in `incoming`,
 		// or the match picked an id another message already claimed), fall back

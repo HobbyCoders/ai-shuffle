@@ -278,6 +278,24 @@ def _user_entry_text(content: Any) -> str:
     return ""
 
 
+def _is_genuine_user_prompt_content(content: Any) -> bool:
+    """True if a user message's content is a genuine human prompt.
+
+    Excludes tool_result echoes (role=user content carrying a ``tool_result``
+    block) and SDK command / system-reminder wrappers (rendered text starts
+    with ``<``), and requires some text. Shared by the store-side uuid extractor
+    and the live-side ordinal stamper so both count the *same* user bubbles —
+    otherwise their counts disagree and the stamper's count guard skips,
+    leaving just-sent prompts without a rewind uuid.
+    """
+    if isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    ):
+        return False
+    text = _user_entry_text(content)
+    return bool(text) and not text.startswith("<")
+
+
 def _extract_store_rewind_uuids(
     entries: Sequence[Mapping[str, Any]]
 ) -> Tuple[List[str], List[str]]:
@@ -312,14 +330,7 @@ def _extract_store_rewind_uuids(
             # what makes the count line up with the live user text bubbles.
             if entry.get("isMeta") or entry.get("isSidechain"):
                 continue
-            if isinstance(content, list):
-                if any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in content
-                ):
-                    continue
-            text = _user_entry_text(content)
-            if not text or text.startswith("<"):
+            if not _is_genuine_user_prompt_content(content):
                 continue
             user_uuids.append(uuid_)
         elif etype == "assistant" and role == "assistant":
@@ -1542,8 +1553,14 @@ class LiveSessionStore:
         prompt whose text starts with "<") that role is left for the next reload
         to resolve from the store.
         """
+        # Match user prompts by content, not by m.type: prompts seeded from a
+        # prior turn's history arrive with type=None (parse_session_history_via_store
+        # emits genuine prompts that way), while freshly added prompts are
+        # type="text". Using the same genuine-prompt predicate as the store-side
+        # extractor keeps the two counts aligned so the guard below doesn't skip.
         live_user = [
-            m for m in session.messages if m.role == "user" and m.type == "text"
+            m for m in session.messages
+            if m.role == "user" and _is_genuine_user_prompt_content(m.content)
         ]
         live_assistant = [
             m for m in session.messages if m.role == "assistant" and m.type == "text"
@@ -1553,13 +1570,25 @@ class LiveSessionStore:
             for msg, uuid_ in zip(live_user, user_uuids):
                 if not msg.uuid:
                     msg.uuid = uuid_
-        else:
+        elif live_user and user_uuids:
+            # Counts disagree (e.g. the snapshot seeded a different number of
+            # prior prompts than the store mirrored). The live snapshot always
+            # ENDS with this turn's just-sent prompt, and the store's last user
+            # uuid is that same prompt — so the LAST position is the one we can
+            # stamp without risk of a wrong target. Stamp only it, so the
+            # just-sent message is rewindable without a reload; older prompts
+            # resolve from the store on the next full load. (Stamping further
+            # back from the tail could mis-target if a *middle* prompt were ever
+            # absent from the live roster, which would violate this function's
+            # no-wrong-target guarantee.)
             logger.debug(
                 "uuid backfill: user count mismatch (live=%d store=%d) — "
-                "skipping user stamping",
+                "stamping just the last (just-sent) prompt",
                 len(live_user),
                 len(user_uuids),
             )
+            if not live_user[-1].uuid:
+                live_user[-1].uuid = user_uuids[-1]
 
         if len(live_assistant) == len(assistant_uuids):
             for msg, uuid_ in zip(live_assistant, assistant_uuids):
@@ -1624,6 +1653,7 @@ class LiveSessionStore:
             )
 
         if sdk_session_id:
+            entries = None
             try:
                 from app.core.pg_session_store import (
                     _load_entries_by_session_id_sync,

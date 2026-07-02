@@ -53,6 +53,17 @@ def _live_user(mid: str, text: str = "hi", uuid=None) -> LiveMessage:
     return LiveMessage(id=mid, role="user", type="text", content=text, uuid=uuid)
 
 
+def _seeded_user(mid: str, text: str = "hi", uuid=None) -> LiveMessage:
+    """A user prompt seeded into the live store from a *prior* turn's history.
+
+    ``start_streaming`` builds these from ``parse_session_history_via_store``
+    output, where genuine user prompts carry an explicit ``type: None`` (not
+    ``"text"``). This reproduces that shape so the ordinal stamper must count it
+    the same as a freshly added (``type="text"``) prompt.
+    """
+    return LiveMessage(id=mid, role="user", type=None, content=text, uuid=uuid)
+
+
 def _live_assistant(mid: str, text: str = "ok", uuid=None) -> LiveMessage:
     return LiveMessage(id=mid, role="assistant", type="text", content=text, uuid=uuid)
 
@@ -170,15 +181,67 @@ class TestStampUuidsByOrdinal:
         assert session.messages[0].uuid == "seeded-u1"
         assert session.messages[1].uuid == "u2"
 
-    def test_user_count_mismatch_skips_stamping(self):
-        """Guard against wrong-target rewind: unequal counts → no user stamp."""
+    def test_user_count_mismatch_stamps_only_last_prompt(self):
+        """On a count mismatch the just-sent prompt must still become rewindable.
+
+        The live snapshot always ENDS with this turn's just-sent prompt, and the
+        store's last user uuid is that same prompt — so the last position is the
+        one we can stamp without risk of a wrong target. Earlier prompts are left
+        for the next full load (store-parse) to resolve. This supersedes the old
+        over-conservative "mismatch → stamp nothing" behavior, which was the very
+        thing that left the just-sent message un-rewindable in edge cases.
+        """
         session = LiveSession(session_id="s1", messages=[
             _live_user("m1", "hello 1"),
             _live_user("m2", "hello 2"),
         ])
-        # Only one store uuid but two live user messages → mismatch → skip.
+        # Only one store uuid but two live user messages → mismatch.
         self.store._stamp_uuids_by_ordinal(session, ["u1"], [])
-        assert [m.uuid for m in session.messages] == [None, None]
+        # Last (just-sent) prompt gets the last store uuid; earlier left None.
+        assert [m.uuid for m in session.messages] == [None, "u1"]
+
+    def test_user_count_mismatch_does_not_clobber_seeded_last(self):
+        """A correct uuid already on the last prompt is never overwritten."""
+        session = LiveSession(session_id="s1", messages=[
+            _live_user("m1", "hello 1"),
+            _live_user("m2", "hello 2", uuid="already"),
+        ])
+        self.store._stamp_uuids_by_ordinal(session, ["u1"], [])
+        assert [m.uuid for m in session.messages] == [None, "already"]
+
+    def test_stamps_seeded_user_with_none_type(self):
+        """Root cause of the persistent rewind bug: a user prompt seeded from a
+        prior turn's history carries ``type=None`` (parse_session_history_via_store
+        emits genuine prompts that way), not ``type="text"``. The ordinal stamper
+        must still count it so the freshly added prompt of *this* turn inherits
+        its uuid — otherwise the count mismatches the store and ALL user stamping
+        is skipped, leaving the just-sent message un-rewindable ("missing
+        checkpoint id") until the live session is evicted from memory.
+        """
+        session = LiveSession(session_id="s1", messages=[
+            _seeded_user("m1", "hello 1"),       # seeded prior turn → type=None
+            _live_assistant("m2", "hi 1"),
+            _live_user("m3", "hello 2"),         # this turn → type="text"
+            _live_assistant("m4", "hi 2"),
+        ])
+        self.store._stamp_uuids_by_ordinal(session, ["u1", "u2"], ["a1", "a2"])
+        assert [m.uuid for m in session.messages] == ["u1", "a1", "u2", "a2"]
+
+    def test_seeded_user_tool_result_not_counted(self):
+        """A seeded role=user tool_result echo must NOT be counted as a prompt,
+        mirroring the store-side extractor — otherwise it would inflate the live
+        count and mis-align the ordinal zip."""
+        session = LiveSession(session_id="s1", messages=[
+            LiveMessage(id="tr", role="user", type=None,
+                        content=[{"type": "tool_result", "tool_use_id": "t1",
+                                  "content": "out"}]),
+            _live_user("m1", "hello 1"),
+        ])
+        # Store has exactly one genuine prompt; the tool_result echo is excluded
+        # there too, so counts line up (1 == 1) and the real prompt is stamped.
+        self.store._stamp_uuids_by_ordinal(session, ["u1"], [])
+        assert session.messages[0].uuid is None   # tool_result echo: not stamped
+        assert session.messages[1].uuid == "u1"   # genuine prompt: stamped
 
     def test_assistant_count_mismatch_skips_only_assistants(self):
         session = LiveSession(session_id="s1", messages=[
