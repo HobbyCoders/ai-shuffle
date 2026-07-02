@@ -132,6 +132,13 @@ class _FakeClient:
             raise self._exc
         return self._resp
 
+    async def get(self, url, headers=None):
+        if self._recorder is not None:
+            self._recorder.update(url=url, headers=headers)
+        if self._exc:
+            raise self._exc
+        return self._resp
+
 
 def _online_worker(monkeypatch):
     monkeypatch.setattr(
@@ -198,3 +205,76 @@ async def test_relay_queue_message_refuses_local_session(this_install):
         await cloud_relay.relay_queue_message(
             {"id": "s1", "instance_id": "install-self"}, "hi"
         )
+
+
+# --- relay_question_response (answer forwarding, owner verdict) ---------------
+
+
+async def test_relay_question_response_returns_owner_verdict_true(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(200, {"ok": True})),
+    )
+
+    ok = await cloud_relay.relay_question_response(
+        {"id": "s1", "instance_id": "install-other"}, "req-1", {"Q": "A"}
+    )
+    assert ok is True
+
+
+async def test_relay_question_response_returns_false_when_owner_had_no_pending(
+    this_install, monkeypatch
+):
+    # Regression: a delivered-but-unmatched answer (owner replies ok:false because
+    # the question was already answered/timed out) was previously reported as
+    # success, dismissing the modal as if the answer landed. The owner's verdict
+    # must flow back to the caller.
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(200, {"ok": False})),
+    )
+
+    ok = await cloud_relay.relay_question_response(
+        {"id": "s1", "instance_id": "install-other"}, "req-1", {"Q": "A"}
+    )
+    assert ok is False
+
+
+async def test_relay_question_response_offline_when_unreachable(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(exc=cloud_relay.httpx.ConnectError("boom")),
+    )
+
+    with pytest.raises(cloud_relay.InstallOffline):
+        await cloud_relay.relay_question_response(
+            {"id": "s1", "instance_id": "install-other"}, "req-1", {"Q": "A"}
+        )
+
+
+async def test_question_relays_use_live_relay_timeout(this_install, monkeypatch):
+    # Both question relays sit on interactive websocket paths (modal resync /
+    # answer ack) — a CONTROL_TIMEOUT (30s) hang there reads as a frozen UI.
+    # They must use the fast-failing LIVE_RELAY_TIMEOUT; the callers' stale/
+    # relay_offline paths handle the failure.
+    _online_worker(monkeypatch)
+    timeouts = []
+
+    def _capture_client(*a, **k):
+        timeouts.append(k.get("timeout"))
+        return _FakeClient(resp=_FakeResp(200, {"ok": True, "questions": []}))
+
+    monkeypatch.setattr(cloud_relay.httpx, "AsyncClient", _capture_client)
+
+    await cloud_relay.relay_question_response(
+        {"id": "s1", "instance_id": "install-other"}, "req-1", {"Q": "A"}
+    )
+    await cloud_relay.relay_get_pending_questions({"id": "s1", "instance_id": "install-other"})
+
+    assert timeouts == [cloud_relay.LIVE_RELAY_TIMEOUT, cloud_relay.LIVE_RELAY_TIMEOUT]

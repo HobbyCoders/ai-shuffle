@@ -231,7 +231,10 @@ async def relay_get_pending_questions(
     session. Relay the read to the owner so the viewer can surface the modal.
     """
     base_url, sid = resolve_target(session)
-    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+    # LIVE_RELAY_TIMEOUT (not CONTROL_TIMEOUT): this read blocks a modal-resync
+    # reply on the viewer's websocket — a 30s hang there looks like a frozen UI.
+    # The stale=True failure path in the caller already handles a fast failure.
+    async with httpx.AsyncClient(timeout=LIVE_RELAY_TIMEOUT) as client:
         try:
             resp = await client.get(
                 f"{base_url}/api/v1/cluster/sessions/{sid}/pending_questions",
@@ -248,16 +251,20 @@ async def relay_question_response(
     session: Dict[str, Any],
     request_id: str,
     answers: Dict[str, Any],
-) -> None:
+) -> bool:
     """Relay a user's AskUserQuestion answer to the install that owns the session.
 
     The pending question and its awaiting coroutine live on the owner; the answer
     arrived on a device connected to this install, so we forward it there to
-    unblock the owner's ``request_answers`` waiter.
+    unblock the owner's ``request_answers`` waiter. Returns the owner's verdict:
+    True when the answer resolved a pending question, False when the owner had
+    no such pending request (already answered / timed out) — callers must not
+    report success on a delivered-but-unmatched answer.
     """
     base_url, sid = resolve_target(session)
     payload = {"request_id": request_id, "answers": answers}
-    async with httpx.AsyncClient(timeout=CONTROL_TIMEOUT) as client:
+    # LIVE_RELAY_TIMEOUT: the user is sitting on the modal waiting for this ack.
+    async with httpx.AsyncClient(timeout=LIVE_RELAY_TIMEOUT) as client:
         try:
             resp = await client.post(
                 f"{base_url}/api/v1/cluster/sessions/{sid}/question_response",
@@ -267,6 +274,8 @@ async def relay_question_response(
         except httpx.HTTPError as e:
             raise InstallOffline(f"Could not reach owning install: {e}") from e
     _raise_for_status(resp, "cluster question_response")
+    body = resp.json()
+    return bool(body.get("ok")) if isinstance(body, dict) else False
 
 
 async def relay_interrupt(session: Dict[str, Any]) -> None:

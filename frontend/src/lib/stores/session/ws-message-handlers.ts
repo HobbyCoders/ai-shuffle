@@ -1163,14 +1163,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const responseSessionId = data.session_id as string | undefined;
 				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
-				// A cross-install answer relay can FAIL (owner install offline) — the
-				// backend signals this on the ack with `success: false`. Removal of the
-				// question happens ONLY here, so dismissing on a failed relay would drop
-				// the answer while the owning waiter keeps blocking. Instead keep the
-				// modal up so the user can retry, and surface the failure. Note the
-				// shared `user_question_timeout` type carries NO success field, so it
-				// (and any legacy ack without the field) still removes unconditionally.
-				if (data.type === 'user_question_response_ack' && data.success === false) {
+				// A failed ack carries WHY it failed. Only a retryable delivery
+				// failure (`reason: 'relay_offline'` — owner install unreachable)
+				// keeps the modal up so the user's in-progress answer isn't lost.
+				// Every other failure (`not_pending`, or a legacy ack without a
+				// reason) means the owner authoritatively has no such pending
+				// question — the modal is stale and must be dismissed, matching
+				// pre-relay behavior. The shared `user_question_timeout` type
+				// carries NO success field, so it also removes unconditionally.
+				if (
+					data.type === 'user_question_response_ack' &&
+					data.success === false &&
+					data.reason === 'relay_offline'
+				) {
 					notify.error(
 						"Couldn't deliver your answer — the owning device is unreachable. Try again.",
 						{ category: 'user-question-relay-error', session_id: responseSessionId }

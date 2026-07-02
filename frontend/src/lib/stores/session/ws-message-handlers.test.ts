@@ -1048,7 +1048,7 @@ describe('ws-message-handlers', () => {
 			expect(notify.error).not.toHaveBeenCalled();
 		});
 
-		it('keeps the question AND toasts an error on a failed relay (success:false)', () => {
+		it('keeps the question AND toasts an error on a retryable relay failure (reason: relay_offline)', () => {
 			// Cross-install bug: a failed answer relay (owner install offline) was acked
 			// with success:false, but the handler removed the question anyway — dismissing
 			// the modal as if answered while the owning waiter kept blocking (answer lost).
@@ -1063,6 +1063,7 @@ describe('ws-message-handlers', () => {
 				session_id: 'session-1',
 				request_id: 'q-1',
 				success: false,
+				reason: 'relay_offline',
 			});
 
 			// Modal preserved: NO removal write happened.
@@ -1070,6 +1071,53 @@ describe('ws-message-handlers', () => {
 			// User is told the delivery failed.
 			expect(notify.error).toHaveBeenCalledTimes(1);
 			expect((notify.error as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/deliver your answer/i);
+		});
+
+		it('dismisses the question on a not_pending failure (owner has no such question)', () => {
+			// Regression: an ack with success:false but reason:'not_pending' means the
+			// owner authoritatively has no pending question (already answered elsewhere
+			// or timed out). Keeping the modal would strand the user on a question
+			// nothing is waiting for — it must be removed, without a relay-error toast.
+			const state = stateWithOpenQuestion();
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { updated = fn(state).pendingQuestions as unknown[]; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question_response_ack',
+				session_id: 'session-1',
+				request_id: 'q-1',
+				success: false,
+				reason: 'not_pending',
+			});
+
+			expect(updated).toEqual([]);
+			expect(notify.error).not.toHaveBeenCalled();
+		});
+
+		it('dismisses the question on a legacy failed ack without a reason', () => {
+			// A reason-less failure must behave like pre-relay code (dismiss), not
+			// latch the modal open forever.
+			const state = stateWithOpenQuestion();
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { updated = fn(state).pendingQuestions as unknown[]; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question_response_ack',
+				session_id: 'session-1',
+				request_id: 'q-1',
+				success: false,
+			});
+
+			expect(updated).toEqual([]);
+			expect(notify.error).not.toHaveBeenCalled();
 		});
 
 		it('user_question_timeout still removes unconditionally (no success field)', () => {

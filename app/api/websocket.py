@@ -1790,16 +1790,25 @@ async def chat_websocket(
                             # Mirrors the queue_message relay pattern.
                             cloud_sess = await run_sync(database.get_session, response_session_id)
                             from app.core import cloud_relay
+                            # On failure the ack carries WHY, so the frontend can
+                            # tell a retryable delivery failure ('relay_offline' —
+                            # keep the modal so the answer isn't lost) from an
+                            # authoritative "no such pending question"
+                            # ('not_pending' — dismiss the stale modal).
+                            fail_reason = None
                             if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                                 result = False
                                 try:
-                                    await cloud_relay.relay_question_response(
+                                    result = await cloud_relay.relay_question_response(
                                         cloud_sess, request_id, answers
                                     )
-                                    result = True
+                                    if not result:
+                                        fail_reason = "not_pending"
                                 except cloud_relay.InstallOffline as e:
+                                    fail_reason = "relay_offline"
                                     logger.debug(f"Cluster relay_question_response offline for {response_session_id}: {e}")
                                 except Exception as e:  # noqa: BLE001
+                                    fail_reason = "relay_offline"
                                     logger.warning(f"Cluster relay_question_response failed for {response_session_id}: {e}")
                             else:
                                 result = await user_question_handler.respond(
@@ -1807,14 +1816,19 @@ async def chat_websocket(
                                     session_id=response_session_id,
                                     answers=answers
                                 )
+                                if not result:
+                                    fail_reason = "not_pending"
                             logger.debug(f"User question response processed: {request_id} -> {result}")
 
-                            await send_json({
+                            ack = {
                                 "type": "user_question_response_ack",
                                 "session_id": response_session_id,
                                 "request_id": request_id,
                                 "success": result
-                            })
+                            }
+                            if fail_reason:
+                                ack["reason"] = fail_reason
+                            await send_json(ack)
                         else:
                             await send_json({
                                 "type": "error",
