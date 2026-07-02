@@ -477,15 +477,18 @@ export function createSessionInit(deps: SessionInitDeps) {
 		);
 
 		sessionPoller.onPollApplied((sessionId, data) => {
+			// A poll succeeded — reset the poll-error notify guard so a future error
+			// episode surfaces one fresh toast (see setupOnPollError). Must run
+			// BEFORE the active-session gate: a background session recovering
+			// while another is focused would otherwise keep its stale guard entry
+			// and silently swallow the toast for its next failure episode.
+			_pollErrorNotified.delete(sessionId);
+
 			const _state = getState();
 			if (sessionId !== _state.sessionId) {
 				console.debug(`[PollCB] skipped: poll for ${sessionId} but active is ${_state.sessionId}`);
 				return;
 			}
-
-			// A poll succeeded — reset the poll-error notify guard so a future error
-			// episode surfaces one fresh toast (see setupOnPollError).
-			_pollErrorNotified.delete(sessionId);
 
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
@@ -615,7 +618,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 
 				// ── Phase 1: Preserve client-side-only messages ─────────────
 				const serverIdSet = new Set(finalMessages.map(m => m.id));
-				const clientOnlyEntries: Array<{msg: ChatMessage; anchorId: string | null}> = [];
+				const clientOnlyEntries: Array<{msg: ChatMessage; anchorId: string | null; srcIdx: number}> = [];
 				for (let i = 0; i < s.messages.length; i++) {
 					const m = s.messages[i];
 					if (m.type === 'system' && !serverIdSet.has(m.id)) {
@@ -626,7 +629,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 								break;
 							}
 						}
-						clientOnlyEntries.push({ msg: m, anchorId });
+						clientOnlyEntries.push({ msg: m, anchorId, srcIdx: i });
 					}
 				}
 
@@ -693,7 +696,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					if (!anchorId && finalMessages.length > 0) {
 						anchorId = finalMessages[finalMessages.length - 1].id;
 					}
-					clientOnlyEntries.push({ msg: m, anchorId });
+					clientOnlyEntries.push({ msg: m, anchorId, srcIdx: i });
 				}
 				if (clientOnlyEntries.length > 0) {
 					finalMessages = [...finalMessages];
@@ -701,6 +704,13 @@ export function createSessionInit(deps: SessionInitDeps) {
 					for (let i = 0; i < finalMessages.length; i++) {
 						if (finalMessages[i].id) idToIndex.set(finalMessages[i].id, i);
 					}
+					// The single-offset splice below assumes entries arrive in
+					// ascending insert position. They were collected in TWO passes
+					// (system msgs, then optimistic users), so a late-anchored
+					// system msg can precede an early-anchored user msg and the
+					// offset math would shove the user msg past it. Restore the
+					// original s.messages ordering before splicing.
+					clientOnlyEntries.sort((a, b) => a.srcIdx - b.srcIdx);
 					let offset = 0;
 					for (const { msg, anchorId } of clientOnlyEntries) {
 						let insertIdx: number;
@@ -862,12 +872,14 @@ export function createSessionInit(deps: SessionInitDeps) {
 				if (persisted) {
 					update(s => ({
 						...s,
-						sessionId: persisted.sessionId,
+						sessionId: persisted.sessionId ?? null,
 						// Adopting a sessionId whose history hasn't rendered yet opens
 						// the restore-race window: the UI shows "New Chat" while sends
 						// would land in the old session. Mark it until onConnected's
-						// loadSession settles.
-						isRestoringSession: persisted.sessionId !== null,
+						// loadSession settles. !! (not `!== null`): a persisted entry
+						// missing the key yields undefined, which must not strand the
+						// flag as true with nothing to restore.
+						isRestoringSession: !!persisted.sessionId,
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
 						project: persisted.project || defaultProject,

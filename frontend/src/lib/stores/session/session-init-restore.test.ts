@@ -120,6 +120,23 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		expect(getState().isRestoringSession).toBe(false);
 	});
 
+	it('treats a persisted entry with an undefined sessionId as nothing to restore', async () => {
+		// A persisted blob missing the key yields undefined, not null. The old
+		// `!== null` check stranded isRestoringSession=true with nothing to
+		// restore, permanently suppressing the empty state and blocking sends.
+		const { init, getState } = makeInit({
+			sessionId: undefined,
+			title: 'New Chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+		} as unknown as PersistedSession);
+
+		await init();
+
+		expect(getState().sessionId).toBeNull();
+		expect(getState().isRestoringSession).toBe(false);
+	});
+
 	it('does not mark the window when there is nothing persisted', async () => {
 		const { init, getState } = makeInit(null);
 
