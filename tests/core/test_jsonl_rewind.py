@@ -1063,10 +1063,12 @@ class TestJSONLRewindServiceEdgeCases:
 
         os.unlink(f.name)
 
-    def test_truncate_exclude_response_nothing_to_remove(self):
-        """Should return already at checkpoint when include_response=False removes nothing."""
+    def test_truncate_exclude_response_drops_stranded_queue_op(self):
+        """A queue-operation entry logged for the rewound-away message must go
+        with it — cutting at the user entry alone stranded it as a trailing
+        leftover (the e2e-observed Bug D residue)."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
-            # User message at index 0 preceded by system entry
+            # User message at index 1 preceded by its queue bookkeeping entry
             f.write(json.dumps({
                 "uuid": "system-1",
                 "type": "queue-operation"
@@ -1082,14 +1084,15 @@ class TestJSONLRewindServiceEdgeCases:
             jsonl_path = Path(f.name)
 
             with patch.object(service, '_get_jsonl_path', return_value=jsonl_path):
-                # Targeting user-1 at index 1, include_response=False
-                # Should keep entries[:1] = only system-1
+                # Targeting user-1 at index 1, include_response=False: the cut
+                # lands at index 1, then swallows the trailing queue-operation.
                 result = service.truncate_to_checkpoint(
                     "session-id", "user-1", include_response=False
                 )
 
                 assert result.success is True
-                assert result.messages_removed == 1
+                assert result.messages_removed == 2
+                assert jsonl_path.read_text() == ""
 
         os.unlink(f.name)
 

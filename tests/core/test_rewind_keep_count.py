@@ -154,6 +154,90 @@ class TestToolResultSkipping:
         assert [e["uuid"] for e in entries[:keep]] == ["u1", "a1", "utr", "a2"]
 
 
+# ─── trailing queue-operation trim ───────────────────────────────────────────
+
+def _qop(op: str = "add") -> dict:
+    """A CLI queue bookkeeping entry. No uuid; parsers skip these entirely."""
+    return {"type": "queue-operation", "operation": op,
+            "timestamp": "2026-07-01T00:00:00Z"}
+
+
+class TestTrailingQueueOpTrim:
+    """Bug D (e2e): a queued prompt logs queue-operation add/remove entries
+    immediately before its user entry, so cutting AT the user entry stranded
+    them as trailing leftovers in both the store and the JSONL. The cut must
+    swallow them — they describe only the rewound-away message."""
+
+    def test_user_rewind_drops_queue_ops_logged_for_the_target(self):
+        entries = [
+            _user("u1", "hello 1"),
+            _assistant("a1", "hi 1"),
+            _qop("add"),
+            _qop("remove"),
+            _user("u2", "hello 2"),
+            _assistant("a2", "hi 2"),
+        ]
+        keep, err = compute_rewind_keep_count(
+            entries, "u2", include_response=False, target_role="user"
+        )
+        assert err is None
+        assert keep == 2
+        assert [e["uuid"] for e in entries[:keep]] == ["u1", "a1"]
+
+    def test_assistant_rewind_drops_queue_ops_before_next_prompt(self):
+        entries = [
+            _user("u1", "hello 1"),
+            _assistant("a1", "hi 1"),
+            _qop("add"),
+            _user("u2", "hello 2"),
+            _assistant("a2", "hi 2"),
+        ]
+        keep, err = compute_rewind_keep_count(
+            entries, "a1", include_response=False, target_role="assistant"
+        )
+        assert err is None
+        assert keep == 2
+        assert [e["uuid"] for e in entries[:keep]] == ["u1", "a1"]
+
+    def test_noop_rewind_preserves_live_queue_state(self):
+        """Target already the tail → nothing is truncated, so trailing
+        queue-operation entries (possibly live queued messages) must survive."""
+        entries = [
+            _user("u1", "hello 1"),
+            _assistant("a1", "hi 1"),
+            _qop("add"),
+        ]
+        keep, err = compute_rewind_keep_count(
+            entries, "u1", include_response=True, target_role="user"
+        )
+        assert err is None
+        assert keep == len(entries)
+
+    def test_rewind_to_first_queued_message_drops_everything(self):
+        entries = [_qop("add"), _user("u1", "hello 1")]
+        keep, err = compute_rewind_keep_count(
+            entries, "u1", include_response=False, target_role="user"
+        )
+        assert err is None
+        assert keep == 0
+
+    def test_queue_ops_between_kept_turns_survive(self):
+        """Only entries stranded AT the cut are trimmed — bookkeeping inside
+        the kept history is untouched."""
+        entries = [
+            _qop("add"),
+            _user("u1", "hello 1"),
+            _assistant("a1", "hi 1"),
+            _user("u2", "hello 2"),
+        ]
+        keep, err = compute_rewind_keep_count(
+            entries, "u2", include_response=False, target_role="user"
+        )
+        assert err is None
+        assert keep == 3
+        assert entries[0]["type"] == "queue-operation"
+
+
 # ─── error path ──────────────────────────────────────────────────────────────
 
 class TestTargetNotFound:

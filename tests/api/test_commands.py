@@ -1104,6 +1104,151 @@ class TestExecuteRewindPostgresOnly:
         mock_live_store.cleanup_ended_session.assert_not_awaited()
 
 
+class TestExecuteRewindDbSyncWithoutJsonl:
+    """Bug D regression: in postgres_only with the (tmpfs, often absent) JSONL
+    gone, the legacy ``session_messages`` sync was gated on ``jsonl_ok`` — so
+    the store truncated fine but the legacy rows survived every rewind, and
+    resurfaced through the empty-store legacy fallback after a full rewind.
+    The DB sync must run whenever the store truncation succeeded."""
+
+    def _session(self, mock_database):
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 2,
+        }
+        mock_database.get_project.return_value = None
+
+    def _jsonl_gone(self, mock_jsonl_rewind_service):
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=False,
+            message="JSONL not found",
+            chat_rewound=False,
+            messages_removed=0,
+            error="JSONL file not found",
+            remaining_user_turns=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_postgres_only_syncs_legacy_rows_when_jsonl_missing(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "postgres_only"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(return_value=2),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=42
+        ), patch(
+            "app.api.commands.apply_rewind_delete", return_value=2
+        ) as mock_delete, patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        mock_delete.assert_called_once()
+        bound = mock_delete.call_args.kwargs
+        assert bound["session_id"] == "session-1"
+        assert bound["anchor_id"] == 42
+        assert bound["include_response"] is False
+
+    @pytest.mark.asyncio
+    async def test_anchor_resolution_runs_before_store_truncation(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """The content-fallback anchor matcher reads the store transcript when
+        the JSONL is gone — so the anchor must be resolved while the target
+        entry still EXISTS in the store, i.e. before the store truncation."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_settings.session_store_mode = "postgres_only"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        calls = []
+
+        async def store_trunc(**kwargs):
+            calls.append("store")
+            return 1
+
+        def anchor(**kwargs):
+            calls.append("anchor")
+            return 42
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=store_trunc,
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", side_effect=anchor
+        ), patch(
+            "app.api.commands.apply_rewind_delete", return_value=1
+        ), patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            await execute_rewind("session-1", request)
+
+        assert calls == ["anchor", "store"]
+
+    @pytest.mark.asyncio
+    async def test_no_db_sync_when_store_truncation_also_failed(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """Neither transcript layer was truncated → deleting legacy rows would
+        create the inverse inconsistency. Leave them alone."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+        from app.core.pg_session_store import RewindTargetNotFound
+
+        mock_settings.session_store_mode = "postgres_only"
+        self._session(mock_database)
+        self._jsonl_gone(mock_jsonl_rewind_service)
+
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(side_effect=RewindTargetNotFound("nope")),
+        ), patch(
+            "app.api.commands.resolve_rewind_anchor", return_value=42
+        ), patch(
+            "app.api.commands.apply_rewind_delete", return_value=0
+        ) as mock_delete, patch(
+            "app.api.commands.live_session_store"
+        ) as mock_live_store:
+            mock_live_store.cleanup_ended_session = AsyncMock()
+
+            request = RewindRequestV2(
+                target_uuid="uuid-target",
+                restore_chat=True,
+                include_response=False,
+                target_role="user",
+            )
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is False
+        mock_delete.assert_not_called()
+
+
 class TestExecuteRewindInvalidatesParseCache:
     """Primary regression for "chat rewind still not working".
 

@@ -128,10 +128,31 @@ def compute_rewind_keep_count(
         if truncate_before is None:
             # Target is already the tail — nothing after it to remove.
             return len(entries), None
-        return truncate_before, None
+        return _trim_trailing_queue_ops(entries, truncate_before), None
 
     # User message, drop the message itself and everything after it.
-    return target_index, None
+    return _trim_trailing_queue_ops(entries, target_index), None
+
+
+def _trim_trailing_queue_ops(
+    entries: Sequence[Mapping[str, Any]],
+    keep_count: int,
+) -> int:
+    """Shrink *keep_count* past any queue-operation entries stranded at the cut.
+
+    A queued prompt logs its queue-operation add/remove entries immediately
+    before the user entry itself, so cutting AT the user entry leaves them as
+    trailing no-ops in both the JSONL and the session store (the e2e-observed
+    rewind leftovers). They describe only the rewound-away message — drop them
+    with it. Only applies when a real truncation happens
+    (``keep_count < len(entries)``) so a no-op rewind never silently deletes
+    live queue state.
+    """
+    if keep_count >= len(entries):
+        return keep_count
+    while keep_count > 0 and entries[keep_count - 1].get("type") == "queue-operation":
+        keep_count -= 1
+    return keep_count
 
 
 class JSONLRewindService:

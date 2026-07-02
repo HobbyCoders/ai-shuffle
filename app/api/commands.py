@@ -584,8 +584,27 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         postgres_only = store_mode == "postgres_only"
         store_truncation_enabled = store_mode in ("mirror", "postgres_only")
 
-        # (a) Truncate the Postgres session store FIRST. In postgres_only this
-        # is the authoritative chat the UI reads — skipping it is the exact bug
+        # (c) Resolve the legacy-DB anchor BEFORE truncating anything. The
+        # fallback content-matcher needs the target uuid's text from a still-
+        # intact transcript — the JSONL when present, else the session store
+        # (which the next step truncates). This also runs the uuid backfill so
+        # subsequent rewinds hit the fast path.
+        anchor_id: Optional[int] = None
+        try:
+            anchor_id = resolve_rewind_anchor(
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                working_dir=working_dir,
+                target_uuid=request.target_uuid,
+            )
+        except Exception as anchor_err:
+            logger.error(
+                f"Rewind DB anchor resolution failed for session {session_id}: {anchor_err}",
+                exc_info=True,
+            )
+
+        # (a) Truncate the Postgres session store. In postgres_only this is
+        # the authoritative chat the UI reads — skipping it is the exact bug
         # where rewind "succeeds" but the message stays in chat because it still
         # lives in the store and reappears on reload.
         store_removed = 0
@@ -614,24 +633,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                 if postgres_only:
                     errors.append(f"Store rewind failed: {store_err}")
 
-        # (c) Resolve the DB anchor BEFORE truncating the JSONL. The fallback
-        # content-matcher (B) needs the JSONL intact to look up the target
-        # uuid's text when user rows lack a persisted jsonl_uuid. This also
-        # runs the (A) backfill so subsequent rewinds hit the fast path.
-        anchor_id: Optional[int] = None
-        try:
-            anchor_id = resolve_rewind_anchor(
-                session_id=session_id,
-                sdk_session_id=sdk_session_id,
-                working_dir=working_dir,
-                target_uuid=request.target_uuid,
-            )
-        except Exception as anchor_err:
-            logger.error(
-                f"Rewind DB anchor resolution failed for session {session_id}: {anchor_err}",
-                exc_info=True,
-            )
-
         # (b) Truncate the on-disk JSONL. Primary signal in disabled/mirror;
         # best-effort in postgres_only, where the tmpfs transcript may be gone
         # on a fresh server and the store is authoritative.
@@ -645,10 +646,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         jsonl_ok = result.success
         if jsonl_ok:
             messages_removed = result.messages_removed or 0
-            # Mirror the JSONL truncation into session_messages. Without this,
-            # rewind leaves orphan rows the UI renders on reload (the original
-            # "rewind doesn't stick" symptom). Best-effort: a DB failure here
-            # does not invalidate the successful JSONL truncation.
+
+        # Mirror the truncation into session_messages whenever a transcript
+        # layer was actually truncated. Without this, rewind leaves orphan rows
+        # the UI renders on reload (the original "rewind doesn't stick"
+        # symptom). Gating it on jsonl_ok alone left the legacy rows intact on
+        # every postgres_only rewind where the (tmpfs, often absent) JSONL
+        # couldn't be truncated — they then resurfaced through the empty-store
+        # legacy fallback after a full rewind. Best-effort: a DB failure here
+        # does not invalidate a successful transcript truncation.
+        if jsonl_ok or (postgres_only and store_truncated):
             db_removed = 0
             if anchor_id is not None:
                 try:
@@ -663,19 +670,22 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
                         exc_info=True,
                     )
                     errors.append(f"DB sync failed: {db_err}")
-            elif not postgres_only:
-                # In postgres_only, session_messages only holds user rows and is
-                # not what the UI reads, so a missing anchor there is expected.
+            else:
                 logger.warning(
                     f"Rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}. "
                     f"UI may show stale messages until next reload with backfill."
                 )
-                errors.append("DB sync skipped: could not resolve anchor row")
+                if not postgres_only:
+                    # In postgres_only, post-cutover session_messages holds
+                    # user rows only, so an assistant-target anchor can miss
+                    # legitimately — warn above, but don't fail the rewind.
+                    errors.append("DB sync skipped: could not resolve anchor row")
             logger.info(
                 f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
                 f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
             )
+        if jsonl_ok:
             # Update turn_count in DB so sidebar correctly hides empty sessions.
             if result.remaining_user_turns is not None:
                 current_turns = session.get("turn_count", 0)

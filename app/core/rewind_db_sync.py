@@ -98,6 +98,46 @@ def _texts_match(db_text: str, jsonl_text: str) -> bool:
     return False
 
 
+def _load_transcript_entries(
+    sdk_session_id: str,
+    working_dir: str,
+) -> List[Dict[str, Any]]:
+    """Load the session's transcript entries: JSONL when present, else the
+    Postgres session store's main transcript.
+
+    Under ``postgres_only`` the on-disk JSONL lives on tmpfs and is often gone,
+    while store ``entry`` JSONB rows are the same JSONL-shaped dicts
+    (``uuid``/``type``/``message``) — every matcher in this module works
+    identically on either source. Without this fallback, anchor resolution
+    returned None whenever the JSONL was absent and the legacy row survived
+    every rewind (the e2e "rewind leftover" bug).
+
+    Returns ``[]`` when neither source has entries. Never raises.
+    """
+    try:
+        jsonl_path = jsonl_rewind_service._get_jsonl_path(sdk_session_id, working_dir)
+        if jsonl_path:
+            entries = jsonl_rewind_service._parse_jsonl_entries(jsonl_path)
+            if entries:
+                return entries
+    except Exception as e:
+        logger.debug("JSONL transcript load failed for %s: %s", sdk_session_id, e)
+
+    # The store tables (and their %s placeholders) exist only when the
+    # Postgres session store is active — never touch them otherwise.
+    from app.core.config import settings
+
+    if settings.session_store_mode not in ("mirror", "postgres_only"):
+        return []
+    try:
+        from app.core.pg_session_store import _load_entries_by_session_id_sync
+
+        return _load_entries_by_session_id_sync(sdk_session_id, None)
+    except Exception as e:
+        logger.debug("Store transcript load failed for %s: %s", sdk_session_id, e)
+        return []
+
+
 def backfill_user_jsonl_uuids(
     session_id: str,
     sdk_session_id: Optional[str],
@@ -106,9 +146,10 @@ def backfill_user_jsonl_uuids(
     """Populate ``session_messages.jsonl_uuid`` for user rows that were
     persisted without it.
 
-    Matches DB user rows to JSONL user prompt entries **by position** and
-    sanity-checks with a loose text compare. Missing matches are skipped
-    silently so one drifted row doesn't poison the rest.
+    Matches DB user rows to transcript user prompt entries **by position** and
+    sanity-checks with a loose text compare (JSONL when present, else the
+    session store — see :func:`_load_transcript_entries`). Missing matches are
+    skipped silently so one drifted row doesn't poison the rest.
 
     Returns the number of rows updated. Safe to call repeatedly.
     """
@@ -116,10 +157,7 @@ def backfill_user_jsonl_uuids(
         return 0
 
     try:
-        jsonl_path = jsonl_rewind_service._get_jsonl_path(sdk_session_id, working_dir)
-        if not jsonl_path:
-            return 0
-        entries = jsonl_rewind_service._parse_jsonl_entries(jsonl_path)
+        entries = _load_transcript_entries(sdk_session_id, working_dir)
         if not entries:
             return 0
         jsonl_user = _collect_user_prompt_entries(entries)
@@ -177,22 +215,20 @@ def _fallback_anchor_by_content(
     working_dir: str,
     target_uuid: str,
 ) -> Optional[int]:
-    """Resolve a DB anchor id for *target_uuid* by matching JSONL entry
-    text against DB rows.
+    """Resolve a DB anchor id for *target_uuid* by matching transcript entry
+    text against DB rows (JSONL when present, else the session store — see
+    :func:`_load_transcript_entries`).
 
     Strategy: count how many **user prompt** entries precede the target in
-    the JSONL. Take the Nth user row in the DB as the anchor. For assistant
-    targets, match by normalised content on assistant rows (they're stored
-    with text already, so exact content match is usually fine).
+    the transcript. Take the Nth user row in the DB as the anchor. For
+    assistant targets, match by normalised content on assistant rows (they're
+    stored with text already, so exact content match is usually fine).
 
     Returns the DB row id to use as the rewind anchor, or None if the
     target can't be resolved.
     """
     try:
-        jsonl_path = jsonl_rewind_service._get_jsonl_path(sdk_session_id, working_dir)
-        if not jsonl_path:
-            return None
-        entries = jsonl_rewind_service._parse_jsonl_entries(jsonl_path)
+        entries = _load_transcript_entries(sdk_session_id, working_dir)
         found = _find_target_entry(entries, target_uuid)
         if not found:
             return None
@@ -321,8 +357,9 @@ def resolve_rewind_anchor(
 ) -> Optional[int]:
     """Resolve the DB row id to use as the rewind anchor.
 
-    Runs **before** the JSONL is truncated so the fallback content-match
-    can still read *target_uuid*'s text from the transcript.
+    Runs **before** the JSONL and the session store are truncated so the
+    fallback content-match can still read *target_uuid*'s text from whichever
+    transcript source survives.
 
     Steps:
       A. Backfill missing ``jsonl_uuid`` on user rows.
@@ -341,7 +378,8 @@ def resolve_rewind_anchor(
     if not sdk_session_id:
         return None
 
-    # Step B — fallback matcher. JSONL must still be intact here.
+    # Step B — fallback matcher. The transcript source (JSONL or session
+    # store) must still be intact here.
     return _fallback_anchor_by_content(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
