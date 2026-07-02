@@ -120,7 +120,9 @@ class TestAuthenticateWebSocket:
         """Should authenticate with valid admin session token."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        # authenticate_websocket lives in app.api.ws_auth and reads `database`
+        # from that module's namespace, so patch it there (not app.api.websocket).
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = {"id": "session-1", "token": "test-token"}
             mock_db.get_api_key_session.return_value = None
 
@@ -134,7 +136,7 @@ class TestAuthenticateWebSocket:
         """Should authenticate with API key session token."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
             mock_db.get_api_user.return_value = {"id": "user-123", "is_active": True}
@@ -152,7 +154,7 @@ class TestAuthenticateWebSocket:
         raw_key = "sk-test-api-key-12345"
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = {"id": "user-456", "is_active": True}
@@ -169,7 +171,7 @@ class TestAuthenticateWebSocket:
 
         mock_websocket.cookies = {"session": "cookie-session-token"}
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             # When token=None, only cookie path is checked (no side_effect needed)
             mock_db.get_auth_session.return_value = {"id": "session-1"}
             mock_db.get_api_key_session.return_value = None
@@ -183,7 +185,7 @@ class TestAuthenticateWebSocket:
         """Should fail authentication with invalid token."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = None
@@ -198,7 +200,7 @@ class TestAuthenticateWebSocket:
         """Should fail authentication if API user is inactive."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
             mock_db.get_api_user.return_value = {"id": "user-123", "is_active": False}
@@ -216,7 +218,7 @@ class TestAuthenticateWebSocket:
 
         mock_websocket.cookies = {}
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
 
@@ -243,8 +245,9 @@ class TestPingLoop:
         mock_ws.client_state = WebSocketState.CONNECTED
         mock_ws.send_json = AsyncMock()
 
-        # Run for a short time and cancel
-        with patch("app.api.websocket.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        # Run for a short time and cancel. ping_loop now lives in app.api.ws_utils;
+        # patch the sleep there.
+        with patch("app.api.ws_utils.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             mock_sleep.side_effect = [None, asyncio.CancelledError()]
 
             try:
@@ -252,10 +255,12 @@ class TestPingLoop:
             except asyncio.CancelledError:
                 pass
 
-            # Verify ping was sent after first sleep
+            # Verify ping was sent after first sleep. The ping payload uses the
+            # 'type' key (the client only handles msg.type === 'ping'); the old
+            # 'event_type' key was the bug fixed in commit 53243e4f.
             assert mock_ws.send_json.called
             call_args = mock_ws.send_json.call_args[0][0]
-            assert call_args["event_type"] == "ping"
+            assert call_args["type"] == "ping"
 
     @pytest.mark.asyncio
     async def test_ping_loop_stops_on_disconnect(self):
@@ -1433,7 +1438,8 @@ class TestAuthenticateWebSocketEdgeCases:
         """Should authenticate when API user doesn't have is_active field (defaults to True)."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        # authenticate_websocket reads `database` from app.api.ws_auth's namespace.
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
             # API user without is_active field - should default to True
@@ -1449,7 +1455,7 @@ class TestAuthenticateWebSocketEdgeCases:
         """Should fail when API user from session is None."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = {"api_user_id": "user-123"}
             mock_db.get_api_user.return_value = None  # User not found
@@ -1466,7 +1472,7 @@ class TestAuthenticateWebSocketEdgeCases:
 
         mock_websocket.cookies = {"session": "cookie-api-session"}
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None  # Not admin session
             mock_db.get_api_key_session.return_value = {"api_user_id": "api-user-1"}
             mock_db.get_api_user.return_value = {"id": "api-user-1", "is_active": True}
@@ -1483,7 +1489,7 @@ class TestAuthenticateWebSocketEdgeCases:
 
         raw_key = "sk-test-inactive-key"
 
-        with patch("app.api.websocket.database") as mock_db:
+        with patch("app.api.ws_auth.database") as mock_db:
             mock_db.get_auth_session.return_value = None
             mock_db.get_api_key_session.return_value = None
             mock_db.get_api_user_by_key_hash.return_value = {"id": "user-789", "is_active": False}
