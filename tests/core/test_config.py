@@ -475,17 +475,20 @@ class TestEnsureDirectories:
 
             with patch("app.core.config._get_default_data_dir", return_value=data_dir):
                 with patch("app.core.config._get_default_workspace_dir", return_value=workspace_dir):
-                    # We need to reload the module to get fresh settings
-                    import importlib
+                    # Swap in a fresh Settings built under the patches. Never
+                    # importlib.reload() here: reload replaces the module-level
+                    # `settings` singleton for the rest of the pytest process,
+                    # so any later test that patch.object()s the old singleton
+                    # is silently patching a dead object (order-dependent
+                    # failures). patch.object restores the original identity.
                     import app.core.config as config_module
-                    importlib.reload(config_module)
+                    with patch.object(config_module, "settings", config_module.Settings()):
+                        # Now call ensure_directories
+                        config_module.ensure_directories()
 
-                    # Now call ensure_directories
-                    config_module.ensure_directories()
-
-                    # Check directories were created
-                    assert config_module.settings.effective_data_dir.exists()
-                    assert config_module.settings.effective_workspace_dir.exists()
+                        # Check directories were created
+                        assert config_module.settings.effective_data_dir.exists()
+                        assert config_module.settings.effective_workspace_dir.exists()
 
     def test_ensure_directories_idempotent(self):
         """ensure_directories should be safe to call multiple times."""
@@ -495,16 +498,16 @@ class TestEnsureDirectories:
 
             with patch("app.core.config._get_default_data_dir", return_value=data_dir):
                 with patch("app.core.config._get_default_workspace_dir", return_value=workspace_dir):
-                    import importlib
+                    # See test_ensure_directories_creates_all_dirs — never
+                    # reload the module; swap the singleton reversibly.
                     import app.core.config as config_module
-                    importlib.reload(config_module)
+                    with patch.object(config_module, "settings", config_module.Settings()):
+                        # Call multiple times - should not raise
+                        config_module.ensure_directories()
+                        config_module.ensure_directories()
+                        config_module.ensure_directories()
 
-                    # Call multiple times - should not raise
-                    config_module.ensure_directories()
-                    config_module.ensure_directories()
-                    config_module.ensure_directories()
-
-                    assert config_module.settings.effective_data_dir.exists()
+                        assert config_module.settings.effective_data_dir.exists()
 
 
 @pytest.mark.skip(reason="Module reload tests are flaky in CI due to import caching")
