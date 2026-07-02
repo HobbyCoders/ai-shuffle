@@ -6,7 +6,18 @@ the old ``CHROME_DEBUG=1`` + expose-:9222 + hand-built DevTools URL dance.
 
 How it works
 ------------
-Headless Chrome runs inside the container (``docker/start-chrome.sh``) with a
+Two deployment modes share this router:
+
+* **container** — headless Chrome runs inside the container and the in-app
+  "Set up browser" screencast (CDP proxy below) does the one-time sign-in.
+* **native** (Windows/macOS/Linux install) — the agent drives the user's own
+  desktop Chrome via the Claude in Chrome extension; there is no supervised
+  Chrome and no CDP screencast, so the probes read the desktop install instead
+  (registry manifest + named-pipe bridge on Windows, per-user profile dirs
+  elsewhere).
+
+Container mode: headless Chrome runs inside the container
+(``docker/start-chrome.sh``) with a
 **localhost-only** DevTools/CDP port (``CHROME_CDP=1`` → 127.0.0.1:9221). That
 port is never published to the network; it is reachable only through the
 authenticated proxy in this router. The frontend "Set up browser" panel opens a
@@ -36,6 +47,8 @@ import json
 import logging
 import os
 import re
+import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -54,6 +67,7 @@ from app.core.builtin_mcp_servers import (
     CHROME_EXTENSION_ID,
 )
 from app.core.mcp_service import get_mcp_service
+from app.core.platform import is_docker_mode
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +79,32 @@ PAIR_TIMEOUT_SECONDS = 90
 router = APIRouter(prefix="/api/v1/chrome-mcp", tags=["Chrome MCP"])
 
 # ---------------------------------------------------------------------------
-# Paths / config (mirror docker/start-chrome.sh + chrome-doctor.sh)
+# Paths / config (container paths mirror docker/start-chrome.sh + chrome-doctor.sh;
+# native paths mirror what the Claude Code CLI installs on a desktop machine)
 # ---------------------------------------------------------------------------
 _HOME = Path.home()
+IS_WINDOWS = sys.platform == "win32"
 CDP_HOST = "127.0.0.1"
 CDP_PORT = int(os.environ.get("CHROME_CDP_PORT", "9221"))
 CDP_HTTP = f"http://{CDP_HOST}:{CDP_PORT}"
 
+# Container-only: the supervised headless Chrome's profile dir.
 PROFILE_DIR = _HOME / "chrome-profile"
-NM_MANIFEST = (
-    _HOME
-    / ".config/google-chrome/NativeMessagingHosts"
-    / "com.anthropic.claude_code_browser_extension.json"
-)
-NATIVE_HOST_BIN = _HOME / ".claude/chrome/chrome-native-host"
+NM_MANIFEST_NAME = "com.anthropic.claude_code_browser_extension"
+# Where the CLI installs the native messaging host launcher (chrome-native-host
+# on Unix, chrome-native-host.bat on Windows).
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(_HOME / ".claude"))
 CLAUDE_JSON = _HOME / ".claude.json"
-BRIDGE_SOCK_GLOB = "/tmp/claude-mcp-browser-bridge-*"
+# The extension⇄CLI bridge the native host serves: a per-user named pipe on
+# Windows (\\.\pipe\claude-mcp-browser-bridge-<user>), on Unix a socket dir
+# /tmp/claude-mcp-browser-bridge-<user>/<pid>.sock (older CLIs: a bare socket,
+# sometimes under $TMPDIR).
+BRIDGE_NAME_PREFIX = "claude-mcp-browser-bridge-"
+# On Windows the CLI registers the native messaging manifest in the registry.
+_WIN_NM_REGISTRY_KEYS = (
+    rf"Software\Google\Chrome\NativeMessagingHosts\{NM_MANIFEST_NAME}",
+    rf"Software\Chromium\NativeMessagingHosts\{NM_MANIFEST_NAME}",
+)
 
 # CDP target ids are hex; browser-level targets are uuids. Allow both shapes.
 _TARGET_ID_RE = re.compile(r"^[0-9A-Za-z-]{1,128}$")
@@ -91,6 +115,9 @@ _TARGET_ID_RE = re.compile(r"^[0-9A-Za-z-]{1,128}$")
 # ---------------------------------------------------------------------------
 class ChromeMcpStatus(BaseModel):
     enabled: bool  # claude-in-chrome builtin is enabled (not in disabledMcpServers)
+    # "container" = supervised headless Chrome + in-app CDP setup panel;
+    # "native" = the user's own desktop Chrome (no CDP, sign in via Chrome itself).
+    mode: str = "container"
     chrome_running: bool
     cdp_available: bool  # localhost DevTools port is reachable
     cdp_enabled: bool  # CHROME_CDP env is on (in-app setup possible)
@@ -137,32 +164,156 @@ class CdpTarget(BaseModel):
 # ---------------------------------------------------------------------------
 # Probes
 # ---------------------------------------------------------------------------
+def _is_container() -> bool:
+    """Container deployment (supervised headless Chrome) vs native desktop install."""
+    return is_docker_mode()
+
+
+# Native mode: process names the user's own Chrome/Chromium shows up as.
+_CHROME_PROCESS_NAMES = {
+    "chrome.exe",
+    "chrome",
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+}
+
+
 def _chrome_running() -> bool:
-    """True if the supervised headless Chrome is running (scan /proc cmdlines)."""
+    """True if a usable Chrome is running.
+
+    Container: scan /proc for the supervised headless Chrome.
+    Native: any Chrome/Chromium process on this machine (the user's browser).
+    """
+    if _is_container():
+        try:
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        cmd = f.read()
+                except OSError:
+                    continue
+                low = cmd.lower()
+                if b"ozone-platform=headless" in low and b"chrome" in low:
+                    return True
+        except OSError:
+            pass
+        return False
+
     try:
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as f:
-                    cmd = f.read()
-            except OSError:
-                continue
-            low = cmd.lower()
-            if b"ozone-platform=headless" in low and b"chrome" in low:
+        import psutil
+
+        for proc in psutil.process_iter(["name"]):
+            if (proc.info.get("name") or "").lower() in _CHROME_PROCESS_NAMES:
                 return True
-    except OSError:
-        pass
+    except Exception:  # noqa: BLE001 — a failed process scan must never 500 the status
+        logger.debug("Chrome process scan failed", exc_info=True)
     return False
 
 
+def _extension_manifest_globs() -> List[str]:
+    """Glob patterns for the Claude extension's manifest.json, per platform.
+
+    Container uses the supervised Chrome's dedicated profile; native uses the
+    user's real Chrome/Chromium profile dirs (any profile, not just Default).
+    """
+    ext = CHROME_EXTENSION_ID
+    if _is_container():
+        return [str(PROFILE_DIR / "Default/Extensions" / ext / "*/manifest.json")]
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or str(_HOME / "AppData" / "Local")
+        return [
+            os.path.join(local, "Google", "Chrome", "User Data", "*", "Extensions", ext, "*", "manifest.json"),
+            os.path.join(local, "Chromium", "User Data", "*", "Extensions", ext, "*", "manifest.json"),
+        ]
+    if sys.platform == "darwin":
+        base = _HOME / "Library" / "Application Support"
+        return [
+            str(base / "Google" / "Chrome" / "*" / "Extensions" / ext / "*" / "manifest.json"),
+            str(base / "Chromium" / "*" / "Extensions" / ext / "*" / "manifest.json"),
+        ]
+    return [
+        str(_HOME / ".config" / "google-chrome" / "*" / "Extensions" / ext / "*" / "manifest.json"),
+        str(_HOME / ".config" / "chromium" / "*" / "Extensions" / ext / "*" / "manifest.json"),
+    ]
+
+
+def _extension_manifests() -> List[str]:
+    hits: List[str] = []
+    for pattern in _extension_manifest_globs():
+        hits.extend(glob.glob(pattern))
+    return sorted(hits)
+
+
 def _extension_installed() -> bool:
-    pattern = str(PROFILE_DIR / "Default/Extensions" / CHROME_EXTENSION_ID / "*/manifest.json")
-    return bool(glob.glob(pattern))
+    return bool(_extension_manifests())
 
 
 def _bridge_active() -> bool:
-    return bool(glob.glob(BRIDGE_SOCK_GLOB))
+    """True if the extension⇄CLI bridge the native host serves exists right now.
+
+    The native host only lives while a browser with the signed-in extension
+    holds its native-messaging port open, so this is the live "connected" signal.
+    """
+    if IS_WINDOWS:
+        try:
+            names = os.listdir("\\\\.\\pipe\\")
+        except OSError:
+            return False
+        return any(n.startswith(BRIDGE_NAME_PREFIX) for n in names)
+    patterns = {
+        f"/tmp/{BRIDGE_NAME_PREFIX}*",
+        os.path.join(tempfile.gettempdir(), BRIDGE_NAME_PREFIX + "*"),
+    }
+    return any(glob.glob(p) for p in patterns)
+
+
+def _native_manifest_present() -> bool:
+    """True if the native-messaging host manifest the CLI installs is present.
+
+    Windows registers it under HKCU\\Software\\<browser>\\NativeMessagingHosts
+    (pointing at a JSON file); Unix writes the JSON next to the browser config.
+    """
+    if IS_WINDOWS:
+        import winreg
+
+        for key_path in _WIN_NM_REGISTRY_KEYS:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                    manifest_path, _ = winreg.QueryValueEx(key, "")
+            except OSError:
+                continue
+            if manifest_path and Path(str(manifest_path)).is_file():
+                return True
+        return False
+
+    manifest = f"{NM_MANIFEST_NAME}.json"
+    if sys.platform == "darwin":
+        base = _HOME / "Library" / "Application Support"
+        candidates = [
+            base / "Google" / "Chrome" / "NativeMessagingHosts" / manifest,
+            base / "Chromium" / "NativeMessagingHosts" / manifest,
+        ]
+    else:
+        candidates = [
+            _HOME / ".config" / "google-chrome" / "NativeMessagingHosts" / manifest,
+            _HOME / ".config" / "chromium" / "NativeMessagingHosts" / manifest,
+        ]
+    return any(c.is_file() for c in candidates)
+
+
+def _native_host_present() -> bool:
+    """True if the CLI-installed native host launcher exists (and is runnable)."""
+    for hit in glob.glob(str(CLAUDE_DIR / "chrome" / "chrome-native-host*")):
+        path = Path(hit)
+        if not path.is_file():
+            continue
+        if IS_WINDOWS or os.access(hit, os.X_OK):
+            return True
+    return False
 
 
 def _extension_options_url() -> Optional[str]:
@@ -172,9 +323,7 @@ def _extension_options_url() -> Optional[str]:
     manages pairing. It is toolbar-anchored and otherwise unreachable in a
     page screencast, so the setup panel navigates to it directly.
     """
-    manifests = sorted(
-        glob.glob(str(PROFILE_DIR / "Default/Extensions" / CHROME_EXTENSION_ID / "*/manifest.json"))
-    )
+    manifests = _extension_manifests()
     if not manifests:
         return None
     try:
@@ -221,51 +370,84 @@ async def _cdp_get(path: str) -> Optional[object]:
 
 
 def _cdp_enabled() -> bool:
-    # Mirrors start-chrome.sh: the localhost CDP port is bound unless explicitly
-    # turned off. CHROME_DEBUG also implies it.
+    # Container only: the in-app setup screencast drives the supervised headless
+    # Chrome over its localhost CDP port (mirrors start-chrome.sh — bound unless
+    # explicitly turned off; CHROME_DEBUG also implies it). A native desktop
+    # Chrome exposes no such port, so setup happens in the browser itself.
+    if not _is_container():
+        return False
     return os.environ.get("CHROME_CDP", "1") == "1" or os.environ.get("CHROME_DEBUG", "0") == "1"
 
 
 async def _build_status() -> ChromeMcpStatus:
     disabled = set(get_mcp_service().get_disabled_servers())
     enabled = BROWSER_SERVER_NAME not in disabled
+    container = _is_container()
 
     chrome_running = _chrome_running()
-    cdp_version = await _cdp_get("/json/version") if chrome_running else None
+    extension_installed = _extension_installed()
+    bridge_active = _bridge_active()
+
+    # A live bridge is proof a browser with the signed-in extension is running
+    # right now — the native host only lives while the extension holds its
+    # native-messaging port open. Trust it over the process/profile probes,
+    # which can miss unusual setups (a Chromium fork, a custom profile dir).
+    if bridge_active:
+        chrome_running = True
+        extension_installed = True
+
+    cdp_version = await _cdp_get("/json/version") if (container and chrome_running) else None
     cdp_available = cdp_version is not None
 
-    extension_installed = _extension_installed()
-    native_manifest_present = NM_MANIFEST.is_file()
-    native_host_present = NATIVE_HOST_BIN.is_file() and os.access(NATIVE_HOST_BIN, os.X_OK)
-    bridge_active = _bridge_active()
+    native_manifest_present = _native_manifest_present()
+    native_host_present = _native_host_present()
     paired_device_id, paired_device_name = _paired_device()
     paired = paired_device_id is not None
 
     # "Connected" = the extension is signed in and talking to the native host
-    # (a bridge socket exists). This is the real functional signal: with a single
-    # browser on the account the CLI auto-selects it every session even without a
-    # persisted pairing, so a connected-but-unpinned setup IS working — just not
-    # deterministic if a second browser later joins the account.
+    # (the bridge pipe/socket exists). This is the live functional signal: with a
+    # single browser on the account the CLI auto-selects it every session even
+    # without a persisted pairing, so a connected-but-unpinned setup IS working —
+    # just not deterministic if a second browser later joins the account.
     connected = enabled and chrome_running and extension_installed and bridge_active
 
-    # Ready when the agent can drive a browser: either it's pinned to this
-    # container's device (paired) OR the extension is connected (auto-select
-    # works). Pinning is the robust state, but we no longer call a working,
-    # connected setup "not ready".
+    # Ready when the agent can drive a browser: either it's pinned to a specific
+    # device (paired — the extension reconnects on use) OR the extension is
+    # connected right now (auto-select works). Pinning is the robust state, but
+    # we no longer call a working, connected setup "not ready".
     ready = enabled and chrome_running and extension_installed and (paired or bridge_active)
 
     if not enabled:
         next_step = "Claude in Chrome is disabled. Enable it to use browser tools."
     elif not chrome_running:
-        next_step = "Chrome is not running. Set START_CHROME=1 and restart the container."
+        next_step = (
+            "Chrome is not running. Set START_CHROME=1 and restart the container."
+            if container
+            else (
+                "No Chrome browser detected on this machine. Start Chrome (with "
+                "the Claude in Chrome extension) and refresh this status."
+            )
+        )
     elif not extension_installed:
         next_step = (
-            "Waiting for the Claude in Chrome extension to install (needs network "
-            "to clients2.google.com). Give it ~1 minute after Chrome starts."
+            (
+                "Waiting for the Claude in Chrome extension to install (needs network "
+                "to clients2.google.com). Give it ~1 minute after Chrome starts."
+            )
+            if container
+            else (
+                "Install the Claude in Chrome extension from the Chrome Web Store, "
+                "then sign in with your Claude account."
+            )
         )
     elif not bridge_active and not paired:
         # Nothing connected and nothing pinned → genuine first-time setup.
-        if not _cdp_enabled():
+        if not container:
+            next_step = (
+                "Not connected yet. In Chrome, open the Claude in Chrome extension "
+                "and sign in with your Claude account."
+            )
+        elif not _cdp_enabled():
             next_step = (
                 "Not set up. In-app setup needs the localhost DevTools port: set "
                 "CHROME_CDP=1 and restart the container, then run Set up browser."
@@ -281,23 +463,29 @@ async def _build_status() -> ChromeMcpStatus:
         # Pinned to a specific device — the robust, deterministic state.
         if bridge_active:
             next_step = "Ready. Pinned to this browser — the agent will use it."
-        else:
+        elif container:
             next_step = (
                 "Pinned to this browser. The extension will reconnect to the native "
                 "host on the next browser session — no action needed."
+            )
+        else:
+            next_step = (
+                "Pinned to this browser. It reconnects automatically when the agent "
+                "next uses it — no action needed."
             )
     else:
         # Connected (bridge active) but not pinned. Functional via auto-select,
         # but a second browser on the account would make it ambiguous. Offer to
         # pin without alarming the user that it's broken.
         next_step = (
-            "Connected and working. Click “Pair this browser” to pin this "
-            "container's browser so it stays selected even if you sign another "
-            "browser into the same Claude account."
+            "Connected and working. Click “Pair this browser” to pin "
+            f"{'this container’s' if container else 'this'} browser so it stays "
+            "selected even if you sign another browser into the same Claude account."
         )
 
     return ChromeMcpStatus(
         enabled=enabled,
+        mode="container" if container else "native",
         chrome_running=chrome_running,
         cdp_available=cdp_available,
         cdp_enabled=_cdp_enabled(),

@@ -70,27 +70,42 @@
 
 	onMount(load);
 
+	// Native mode = the user's own desktop Chrome; the in-app CDP setup panel
+	// (DevTools screencast) only exists for the container's headless Chrome.
+	let native = $derived(status?.mode === 'native');
+
 	// Checklist rows derived from status (label, ok, value text).
 	type Check = { label: string; ok: boolean; note: string };
 	let checks = $derived<Check[]>(
 		status
 			? [
 					{ label: 'Chrome running', ok: status.chrome_running, note: status.chrome_running ? 'Running' : 'Stopped' },
-					{
-						label: 'DevTools port',
-						ok: status.cdp_available,
-						note: status.cdp_available
-							? `Listening on 127.0.0.1:${status.cdp_port}`
-							: status.cdp_enabled
-								? 'Enabled — waiting for Chrome'
-								: 'Disabled (set CHROME_CDP=1)'
-					},
+					...(native
+						? []
+						: [
+								{
+									label: 'DevTools port',
+									ok: status.cdp_available,
+									note: status.cdp_available
+										? `Listening on 127.0.0.1:${status.cdp_port}`
+										: status.cdp_enabled
+											? 'Enabled — waiting for Chrome'
+											: 'Disabled (set CHROME_CDP=1)'
+								}
+							]),
 					{ label: 'Extension installed', ok: status.extension_installed, note: status.extension_installed ? 'Installed' : 'Not yet installed' },
 					{ label: 'Native host', ok: status.native_host_present, note: status.native_host_present ? 'Present' : 'Missing' },
 					{
+						// Live bridge = green; paired-and-otherwise-ready = green too
+						// (the extension reconnects automatically when the agent uses
+						// it), so an idle-but-working setup never reads as broken.
 						label: 'Signed in & connected',
-						ok: status.connected,
-						note: status.connected ? 'Extension is talking to the native host' : 'Not connected'
+						ok: status.connected || (status.paired && status.ready),
+						note: status.connected
+							? 'Extension is talking to the native host'
+							: status.paired && status.ready
+								? 'Idle — reconnects automatically when the agent uses the browser'
+								: 'Not connected'
 					},
 					{
 						label: 'Pinned to this browser',
@@ -109,8 +124,13 @@
 	<div class="set-grouphead">
 		<h3><Globe />Claude in Chrome</h3>
 		<p>
-			Let the agent drive a real browser running inside this container. Sign in and pair once —
-			it persists across restarts.
+			{#if native}
+				Let the agent drive the real Chrome browser on this machine via the Claude in Chrome
+				extension. Sign in and pair once — it persists across restarts.
+			{:else}
+				Let the agent drive a real browser running inside this container. Sign in and pair once —
+				it persists across restarts.
+			{/if}
 		</p>
 	</div>
 
@@ -173,18 +193,22 @@
 							class="ed-btn primary"
 							onclick={onPair}
 							disabled={pairing}
-							title="Pin this container's browser so it stays selected even if another browser joins this account"
+							title="Pin this browser so it stays selected even if another browser joins this account"
 						>{pairing ? 'Pairing…' : 'Pair this browser'}</button>
 					{/if}
 
-					<button
-						type="button"
-						class="ed-btn"
-						class:primary={!status.connected && !status.paired}
-						onclick={() => (setupOpen = true)}
-						disabled={!status.enabled}
-						title={status.enabled ? 'Open the interactive browser setup' : 'Enable browser tools first'}
-					>Set up browser</button>
+					{#if !native}
+						<!-- The CDP screencast setup only exists for the container's
+						     headless Chrome; natively you sign in via Chrome itself. -->
+						<button
+							type="button"
+							class="ed-btn"
+							class:primary={!status.connected && !status.paired}
+							onclick={() => (setupOpen = true)}
+							disabled={!status.enabled}
+							title={status.enabled ? 'Open the interactive browser setup' : 'Enable browser tools first'}
+						>Set up browser</button>
+					{/if}
 					<button type="button" class="ed-btn sm" onclick={load} title="Refresh status">
 						<RefreshCw size={14} />
 					</button>

@@ -47,9 +47,15 @@ def _patch_probes(**overrides):
     use it via the `with _Probes(...)` helper below.
     """
     defaults = {
+        # Default to container mode so the container-flavored guidance branches
+        # are exercised regardless of the OS the tests run on; native-mode tests
+        # override _is_container explicitly.
+        "_is_container": True,
         "_chrome_running": True,
         "_extension_installed": True,
         "_bridge_active": True,
+        "_native_manifest_present": True,
+        "_native_host_present": True,
         # _paired_device now returns (pairedDeviceId, pairedDeviceName).
         "_paired_device": ("dev-123", "My Laptop"),
         "_cdp_enabled": True,
@@ -129,12 +135,25 @@ class TestBuildStatus:
     @pytest.mark.asyncio
     async def test_chrome_not_running_skips_cdp_probe(self):
         # When chrome isn't running, the CDP HTTP probe must not even be attempted.
-        with _Probes(_chrome_running=False) as probes:
+        # (bridge must be down too — a live bridge proves a browser is running.)
+        with _Probes(_chrome_running=False, _bridge_active=False) as probes:
             status = await _build_status()
         assert status.chrome_running is False
         assert status.cdp_available is False
         probes  # cdp_get default would have returned a version; gate is chrome_running
         assert "not running" in status.next_step.lower()
+
+    @pytest.mark.asyncio
+    async def test_live_bridge_implies_chrome_and_extension(self):
+        # The native host only lives while a browser with the signed-in extension
+        # holds it open — a live bridge must override missed process/profile probes
+        # (e.g. a Chromium fork or a custom profile dir).
+        with _Probes(_chrome_running=False, _extension_installed=False, _bridge_active=True):
+            status = await _build_status()
+        assert status.chrome_running is True
+        assert status.extension_installed is True
+        assert status.connected is True
+        assert status.ready is True
 
     @pytest.mark.asyncio
     async def test_not_set_up_points_to_setup(self):
@@ -191,6 +210,73 @@ class TestBuildStatus:
             status = await _build_status()
         assert status.extension_installed is False
         assert status.extension_options_url is None
+
+
+# =============================================================================
+# _build_status — native mode (Windows/macOS/Linux desktop install)
+# =============================================================================
+def _native_probes(**overrides):
+    """_Probes preset for native mode: no container, no CDP setup panel."""
+    base = dict(_is_container=False, _cdp_enabled=False)
+    base.update(overrides)
+    return _Probes(**base)
+
+
+class TestBuildStatusNativeMode:
+    @pytest.mark.asyncio
+    async def test_fully_working_desktop_setup(self):
+        # The user's own Chrome, extension signed in (bridge live), pinned.
+        with _native_probes():
+            status = await _build_status()
+        assert status.mode == "native"
+        assert status.chrome_running is True
+        assert status.extension_installed is True
+        assert status.connected is True
+        assert status.ready is True
+        # No CDP surface natively — desktop Chrome exposes no supervised port.
+        assert status.cdp_enabled is False
+        assert status.cdp_available is False
+        assert status.next_step.startswith("Ready")
+
+    @pytest.mark.asyncio
+    async def test_paired_but_idle_bridge_is_ready_and_calm(self):
+        # Pinned but the bridge is momentarily down (browser idle/restarted):
+        # still ready, guidance says it reconnects on use, never mentions the
+        # container.
+        with _native_probes(_bridge_active=False):
+            status = await _build_status()
+        assert status.paired is True
+        assert status.connected is False
+        assert status.ready is True
+        assert "reconnects automatically" in status.next_step
+        assert "container" not in status.next_step.lower()
+
+    @pytest.mark.asyncio
+    async def test_chrome_not_running_gives_desktop_guidance(self):
+        with _native_probes(_chrome_running=False, _bridge_active=False):
+            status = await _build_status()
+        assert status.chrome_running is False
+        assert "START_CHROME" not in status.next_step
+        assert "container" not in status.next_step.lower()
+        assert "Start Chrome" in status.next_step
+
+    @pytest.mark.asyncio
+    async def test_extension_missing_points_to_web_store(self):
+        with _native_probes(
+            _extension_installed=False, _bridge_active=False, _paired_device=(None, None)
+        ):
+            status = await _build_status()
+        assert "Chrome Web Store" in status.next_step
+
+    @pytest.mark.asyncio
+    async def test_not_signed_in_points_to_extension_not_cdp(self):
+        # First-time native setup: no bridge, nothing pinned → guidance is to
+        # sign in via the extension in Chrome, never the CDP/setup-panel ladder.
+        with _native_probes(_bridge_active=False, _paired_device=(None, None)):
+            status = await _build_status()
+        assert "sign in" in status.next_step.lower()
+        assert "CHROME_CDP" not in status.next_step
+        assert "Set up browser" not in status.next_step
 
 
 # =============================================================================

@@ -9,6 +9,11 @@ import { api } from './client';
 
 export interface ChromeMcpStatus {
 	enabled: boolean;
+	/**
+	 * 'container' = supervised headless Chrome + in-app CDP setup panel;
+	 * 'native' = the user's own desktop Chrome (no CDP; sign in via Chrome itself).
+	 */
+	mode: 'container' | 'native';
 	chrome_running: boolean;
 	cdp_available: boolean;
 	cdp_enabled: boolean;
