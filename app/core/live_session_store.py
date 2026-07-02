@@ -222,6 +222,14 @@ class LiveSession:
     # together with needs_full_refresh in get_session_since.
     full_refresh_reason: Optional[str] = None
 
+    # The last_update_id at which a rewind trim cut this buffer. Unlike the
+    # ONE-SHOT needs_full_refresh (consumed by whichever device polls first),
+    # this is durable for the session's lifetime: EVERY poller whose
+    # since_update_id predates the trim gets the authoritative "rewind"
+    # snapshot, not a delta that never mentions the removed messages.
+    # Implicitly reset when start_streaming builds a fresh LiveSession.
+    trim_update_id: int = 0
+
     # Currently active block type: 'thinking', 'text', 'tool_use', or None
     active_block_type: Optional[str] = None
 
@@ -1911,6 +1919,10 @@ class LiveSessionStore:
             # frontend take the snapshot as authoritative instead.
             session.full_refresh_reason = "rewind"
             self._increment_update_id(session)
+            # Durable marker (vs. the one-shot flag above): every poller whose
+            # since_update_id predates this id must get the rewind snapshot,
+            # not just the first device to poll. See get_session_since.
+            session.trim_update_id = session.last_update_id
             logger.info(
                 "truncate_after_uuid: trimmed %d message(s) from live session %s "
                 "at checkpoint %s (kept %d)",
@@ -2144,13 +2156,30 @@ class LiveSessionStore:
         if session.last_update_id <= since_update_id:
             return None  # No updates since last check
 
+        # A rewind trim invalidates EVERY poller whose knowledge predates it —
+        # not just the first device to poll (which would consume the one-shot
+        # flag below). Any later device polling with a pre-trim since_update_id
+        # would otherwise get a delta that never mentions the removed messages
+        # and keep rendering them, or union-merge them back in. Serve all such
+        # pollers the same authoritative "rewind" snapshot.
+        if session.trim_update_id and since_update_id < session.trim_update_id:
+            # Safe without async lock: this is a sync method in a single-threaded
+            # asyncio context with no await points between check and clear.
+            # The one-shot flag (if still pending) is superseded by this snapshot.
+            session.needs_full_refresh = False
+            session.full_refresh_reason = None
+            result = session.to_dict(delta_only=False)
+            if result is not None:
+                result['initial_message_count'] = 0
+                result['full_refresh_reason'] = 'rewind'
+            return result
+
         # After compaction, force a full response so the frontend gets a
         # clean snapshot of all messages instead of a potentially stale delta.
         # Setting initial_message_count=0 tells the frontend to treat this as
         # a full replace (no history merge), avoiding message duplication or loss.
         if session.needs_full_refresh:
-            # Safe without async lock: this is a sync method in a single-threaded
-            # asyncio context with no await points between check and clear.
+            # Safe without async lock (see above).
             session.needs_full_refresh = False
             # Consume the attribution alongside the flag. A rewind trim tags the
             # refresh "rewind" so the client takes this snapshot as authoritative

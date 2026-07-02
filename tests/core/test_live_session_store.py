@@ -1528,3 +1528,42 @@ class TestTruncateAfterUuid:
         # mis-tagged.
         assert store.get_session_since("session-1", result["last_update_id"]) is None
         assert store.get_session("session-1").full_refresh_reason is None
+
+    @pytest.mark.asyncio
+    async def test_trim_snapshot_reaches_every_pre_trim_poller(self, store):
+        """needs_full_refresh is one-shot: whichever device polled first consumed
+        it, and every OTHER open tab kept appending deltas onto its pre-rewind
+        transcript (stale tail survived until reload). The durable
+        trim_update_id marker must hand the authoritative 'rewind' snapshot to
+        EVERY poller whose since_update_id predates the trim."""
+        await self._seed(store, [
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+            {"id": "m4", "role": "assistant", "type": "text", "content": "reply2", "uuid": "a2"},
+        ])
+        pre_trim_since = store.get_session("session-1").last_update_id
+
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="u2", include_response=False, target_role="user"
+        )
+        assert removed is True
+
+        # Device A polls first and consumes the one-shot flag.
+        first = store.get_session_since("session-1", pre_trim_since)
+        assert first is not None
+        assert first["full_refresh_reason"] == "rewind"
+        assert [m["uuid"] for m in first["messages"]] == ["u1", "a1"]
+
+        # Device B polls with a pre-trim cursor AFTER the one-shot flag was
+        # consumed. It must also get the full 'rewind' snapshot, not a delta.
+        second = store.get_session_since("session-1", pre_trim_since)
+        assert second is not None
+        assert second["full_refresh_reason"] == "rewind"
+        assert second["initial_message_count"] == 0
+        assert [m["uuid"] for m in second["messages"]] == ["u1", "a1"]
+
+        # A poller already past the trim point gets normal delta behavior:
+        # nothing new since the snapshot it just received → None.
+        post_trim_since = second["last_update_id"]
+        assert store.get_session_since("session-1", post_trim_since) is None
