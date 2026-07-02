@@ -162,8 +162,19 @@ class Settings(BaseSettings):
     sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
 
     # SDK Session Pool — max concurrent subprocess sessions kept alive between queries.
-    # Each idle subprocess uses ~100MB RAM, so 3 sessions ≈ 300MB worst case.
-    sdk_session_pool_size: int = 3
+    # Each idle subprocess uses ~100MB RAM, so 8 sessions ≈ 800MB worst case
+    # (idle eviction below reclaims them long before steady state hits that).
+    # At 3, one long-lived orchestrator + a couple of automations evicted the
+    # user's chat session on every message, forcing a full subprocess respawn
+    # (and its Chrome-extension reconnect) per message.
+    sdk_session_pool_size: int = 8
+
+    # How long a pooled subprocess may sit idle before the resource monitor
+    # evicts it. Every eviction turns the next message into a cold respawn
+    # (slower first token, Chrome native-host handshake), so keep this
+    # comfortably above a normal read-and-reply gap. Override via
+    # SDK_SESSION_IDLE_TIMEOUT_SECONDS.
+    sdk_session_idle_timeout_seconds: int = 1800  # 30 minutes
 
     # AskUserQuestion backstop (seconds). A parked question keeps its SDK
     # subprocess alive AND pinned in the pool — while awaiting an answer the

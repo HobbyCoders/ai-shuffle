@@ -132,6 +132,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting AI Hub v{settings.version}")
     logger.info("=" * 60)
 
+    # Patch the SDK's resume materialization BEFORE any session can connect:
+    # per-spawn temp CLAUDE_CONFIG_DIRs churn the Chrome native-host manifest
+    # and pop the extension reconnect window on every resumed spawn.
+    from app.core.sdk_resume_patch import install_stable_resume_patch
+    install_stable_resume_patch()
+
     # Startup phases
     init_core()
     # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so

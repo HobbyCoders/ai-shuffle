@@ -496,12 +496,15 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict dead pool sessions: {e}")
 
-    # Evict idle sessions from the session pool (idle > 10 minutes)
+    # Evict idle sessions from the session pool
     try:
+        from app.core.config import settings
         from app.core.session_pool import get_session_pool, _session_pool
         if _session_pool is not None:
             pool = get_session_pool()
-            idle = await pool.evict_idle(max_idle_seconds=600)
+            idle = await pool.evict_idle(
+                max_idle_seconds=settings.sdk_session_idle_timeout_seconds
+            )
             if idle:
                 cleaned["idle_pool_sessions"] = len(idle)
     except Exception as e:
