@@ -378,6 +378,10 @@ class SessionPool:
         # NOTE: dead-eviction (evict_dead) does NOT go through _do_evict and is
         # cleaned by the resource monitor directly, so it does not double-fire here.
         self._eviction_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+        # Strong refs to remove_broken's fire-and-forget teardown tasks — the
+        # event loop only holds weak refs, so an unreferenced task can be GC'd
+        # mid-disconnect.
+        self._background_teardowns: set[asyncio.Task] = set()
 
     def set_eviction_callback(
         self, callback: Optional[Callable[[str, str], Awaitable[None]]]
@@ -642,6 +646,43 @@ class SessionPool:
         if state is None:
             return None
         logger.info(f"[Pool] Removed dead session {session_id} (pool size: {len(self._pool)})")
+        return state
+
+    async def remove_broken(self, session_id: str) -> Optional[SessionState]:
+        """Evict a session whose subprocess is alive but in an unknown state.
+
+        Used by the two-phase interrupt when the streaming task had to be
+        force-cancelled: the CLI never acknowledged the interrupt and is
+        likely still mid-turn, so reusing the client would write the next
+        user message into a busy subprocess and kill it ("Fatal error in
+        message reader"). The pool entry is removed synchronously — the
+        follow-up query must get a fresh client — while the subprocess
+        teardown (up to several seconds of exit-grace/SIGTERM) runs in the
+        background so the interrupt confirmation is not delayed past the
+        frontend's window.
+        """
+        state = self._pool.pop(session_id, None)
+        if state is None:
+            return None
+        state.is_connected = False
+        pid = subprocess_pid(state)
+        # Snapshot while the parent is still alive — orphans are undiscoverable
+        # after it exits.
+        descendants = snapshot_descendants(pid)
+
+        async def _teardown() -> None:
+            try:
+                await graceful_disconnect(state.adapter, session_id)
+            finally:
+                record_terminated_subprocess(pid, descendants)
+
+        task = asyncio.create_task(_teardown())
+        self._background_teardowns.add(task)
+        task.add_done_callback(self._background_teardowns.discard)
+        logger.info(
+            f"[Pool] Removed broken session {session_id} (pool size: {len(self._pool)}); "
+            f"subprocess teardown continues in background"
+        )
         return state
 
     async def evict_idle(self, max_idle_seconds: int = 600) -> list[str]:

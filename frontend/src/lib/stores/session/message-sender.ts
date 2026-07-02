@@ -306,13 +306,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						resolve(false);
 						return;
 					}
-					// Safety timeout matches backend drain (8s) + buffer.
+					// Safety timeout covers the backend's worst case: SDK
+					// interrupt timeout (5s) + drain budget (8s) + buffer.
 					setTimeout(() => {
 						if (internal.interruptConfirmResolve === resolve) {
 							internal.interruptConfirmResolve = null;
 							resolve(false);
 						}
-					}, 10000);
+					}, 15000);
 				});
 
 				if (!confirmed) {

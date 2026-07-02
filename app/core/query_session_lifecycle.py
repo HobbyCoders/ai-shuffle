@@ -4,12 +4,19 @@ Session lifecycle queries: state inspection, interrupt, active/streaming lists.
 Extracted from query_engine.py to isolate session lifecycle management.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
 from app.core.session_pool import SessionState, get_session_pool
 
 logger = logging.getLogger(__name__)
+
+# A busy CLI (e.g. deep in extended thinking) can leave the interrupt control
+# request unanswered indefinitely; an unbounded await here hangs the two-phase
+# "Send now" handshake past the frontend's confirm window and loses the
+# user's message. Bounded so the caller can fall back to drain/force-cancel.
+_SDK_INTERRUPT_TIMEOUT_SECONDS = 5.0
 
 
 def get_session_state(session_id: str) -> Optional[SessionState]:
@@ -42,13 +49,22 @@ async def interrupt_session(session_id: str) -> bool:
     logger.debug(f"Attempting to interrupt session {session_id} (streaming={state.is_streaming})")
 
     try:
-        await state.client.interrupt()
+        await asyncio.wait_for(state.client.interrupt(), timeout=_SDK_INTERRUPT_TIMEOUT_SECONDS)
         # Don't set is_streaming = False here. The streaming loop will set it
         # when it actually finishes processing final messages. Setting it
         # prematurely causes a race where the loop still processes messages
         # but the session appears idle.
         logger.debug(f"Successfully interrupted session {session_id}")
         return True
+    except asyncio.TimeoutError:
+        # interrupt_requested stays set — the streaming loop's failsafe check
+        # can still end the turn, and the caller's drain/force-cancel handles
+        # the truly wedged case.
+        logger.warning(
+            f"Interrupt control request for session {session_id} unanswered after "
+            f"{_SDK_INTERRUPT_TIMEOUT_SECONDS}s (CLI busy or wedged)"
+        )
+        return False
     except Exception as e:
         logger.error(f"Failed to interrupt session {session_id}: {e}", exc_info=True)
         return False

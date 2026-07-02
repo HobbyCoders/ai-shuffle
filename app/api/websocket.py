@@ -1335,6 +1335,16 @@ async def chat_websocket(
                                         if not t.done():
                                             logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
                                             t.cancel()
+                                            try:
+                                                await t
+                                            except (asyncio.CancelledError, Exception):
+                                                pass
+                                            # Same broken-client hazard as
+                                            # interrupt_for_query: the CLI never
+                                            # honored the interrupt, so the next
+                                            # message must not reuse this client.
+                                            from app.core.session_pool import get_session_pool
+                                            await get_session_pool().remove_broken(sid)
                                     except asyncio.CancelledError:
                                         pass
                                 asyncio.create_task(_safety_cancel(task, session_id))
@@ -1400,7 +1410,10 @@ async def chat_websocket(
                                 # leaves unread messages in the subprocess
                                 # pipe.  Only force-cancel if drain did not
                                 # happen naturally within the budget.
-                                done, pending = await asyncio.wait({task}, timeout=8.0)
+                                from app.api.chat_ws_handler import _INTERRUPT_DRAIN_TIMEOUT_SECONDS
+                                done, pending = await asyncio.wait(
+                                    {task}, timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS
+                                )
                                 if pending:
                                     logger.warning(
                                         f"interrupt_for_query: drain timed out for {session_id}, force cancelling"
@@ -1410,6 +1423,15 @@ async def chat_websocket(
                                         await task
                                     except (asyncio.CancelledError, Exception):
                                         pass
+                                    # Drain timeout means the CLI never
+                                    # acknowledged the interrupt and is likely
+                                    # still mid-turn. Evict the client so the
+                                    # follow-up query resumes on a fresh one —
+                                    # reusing it writes into a busy subprocess
+                                    # and kills it ("Fatal error in message
+                                    # reader"), stopping the session dead.
+                                    from app.core.session_pool import get_session_pool
+                                    await get_session_pool().remove_broken(session_id)
 
                             await send_json({
                                 "type": "interrupt_confirmed",

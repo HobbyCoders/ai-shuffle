@@ -98,6 +98,12 @@ from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
 # TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 
+# How long the two-phase ``interrupt_for_query`` waits for the interrupted
+# streaming task to drain naturally before force-cancelling it. The frontend's
+# interrupt-confirm window must exceed this plus the SDK interrupt timeout
+# (see message-sender.ts).
+_INTERRUPT_DRAIN_TIMEOUT_SECONDS = 8.0
+
 # Statuses for which a TaskUpdatedMessage-ALONE should UNPARK the parent in the
 # drain pump. Deliberately ONLY the notification-less terminals: a TaskStop emits
 # "killed" (and "stopped" defensively) via a TaskUpdatedMessage with NO following
@@ -1331,6 +1337,15 @@ class ChatWebSocketHandler:
                             if not t.done():
                                 logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
                                 t.cancel()
+                                try:
+                                    await t
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                # Same broken-client hazard as interrupt_for_query:
+                                # the CLI never honored the interrupt, so the next
+                                # message must not reuse this pooled client.
+                                from app.core.session_pool import get_session_pool
+                                await get_session_pool().remove_broken(sid)
                         except asyncio.CancelledError:
                             pass
                     _t = asyncio.create_task(_safety_cancel(task, session_id))
@@ -1371,7 +1386,7 @@ class ChatWebSocketHandler:
             async with _active_sessions_lock:
                 task = _active_chat_sessions.get(session_id)
             if task and not task.done():
-                done, pending = await asyncio.wait({task}, timeout=8.0)
+                done, pending = await asyncio.wait({task}, timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS)
                 if pending:
                     logger.warning(f"interrupt_for_query: drain timed out for {session_id}, force cancelling")
                     task.cancel()
@@ -1379,6 +1394,14 @@ class ChatWebSocketHandler:
                         await task
                     except (asyncio.CancelledError, Exception):
                         pass
+                    # Drain timeout means the CLI never acknowledged the
+                    # interrupt and is likely still mid-turn (e.g. extended
+                    # thinking). The stream's finally keeps connected clients
+                    # pooled, so without eviction the follow-up query would
+                    # write into a busy subprocess and kill it ("Fatal error
+                    # in message reader"), stopping the session dead.
+                    from app.core.session_pool import get_session_pool
+                    await get_session_pool().remove_broken(session_id)
 
             # Step 3: Confirm to frontend — safe to send the query now
             await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
