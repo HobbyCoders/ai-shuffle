@@ -3,10 +3,11 @@
 	 * UserMessage - User message bubble with label, timestamp, and hover/touch actions
 	 */
 	import MessageActions from './MessageActions.svelte';
+	import { formatMessageTime } from '$lib/utils/message-time';
 
 	interface Props {
 		content: string;
-		timestamp?: Date;
+		timestamp?: Date | string;
 		sessionId?: string | null;
 		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		streaming?: boolean;
@@ -19,11 +20,6 @@
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
 	let showActionsOnMobile = $state(false);
-
-	function formatTime(date?: Date): string {
-		const d = date || new Date();
-		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-	}
 
 	function handleTouchStart() {
 		isTouchDevice = true;
@@ -53,7 +49,7 @@
 	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-blue-400">You</span>
-			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
+			<span class="text-xs text-muted-foreground">{formatMessageTime(timestamp)}</span>
 			<div class="ml-auto">
 				<MessageActions
 					{sessionId}

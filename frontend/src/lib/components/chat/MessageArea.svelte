@@ -1003,6 +1003,7 @@
 					{:else if message.role === 'user'}
 						<UserMessage
 							content={message.content}
+							timestamp={message.timestamp}
 							sessionId={$activeSession.sessionId}
 							messageUuid={message.jsonlUuid}
 							{fileCheckpointingEnabled}
@@ -1028,6 +1029,7 @@
 						{#if shouldRenderAssistantText(message.content, isStreamAnchor)}
 							<AssistantMessage
 								content={message.content}
+								timestamp={message.timestamp}
 								wsContent={isStreamAnchor ? $activeSession.wsStreamContent : undefined}
 								messageIndex={messageIndex}
 								messageId={message.id}

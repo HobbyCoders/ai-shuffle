@@ -90,6 +90,7 @@ export interface ChatMessage {
 	serverSide?: boolean; // True for server-executed tools (advisor, web_search, web_fetch) — SDK 0.1.65+
 	server_side?: boolean; // Snake-case alias emitted by backend on some paths
 	metadata?: Record<string, unknown>;
+	timestamp?: string; // ISO-8601 creation time — from server metadata.timestamp on load, stamped client-side on send; without it the UI falls back to "now"
 	streaming?: boolean;
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
