@@ -16,6 +16,19 @@ import pytest
 from app.core import query_persistence as qp
 
 
+@pytest.fixture(autouse=True)
+def _force_legacy_message_batch(monkeypatch):
+    """Pin the session store mode off ``postgres_only`` for this module.
+
+    _persist_turn_results gates the legacy ``session_messages`` batch write with
+    ``settings.session_store_mode != "postgres_only"`` (a temporary gate while
+    postgres_only stabilises). The deployment environment leaks
+    ``SESSION_STORE_MODE=postgres_only``, which would silently skip that batch and
+    make these row-batching assertions fail. Pin a legacy value so the batch runs.
+    """
+    monkeypatch.setattr(qp.settings, "session_store_mode", "disabled")
+
+
 # =============================================================================
 # Helpers
 # =============================================================================
