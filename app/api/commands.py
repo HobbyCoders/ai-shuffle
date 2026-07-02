@@ -32,6 +32,7 @@ from app.core.pg_session_store import (
     truncate_session_store_to_checkpoint,
 )
 from app.core.rewind_db_sync import resolve_rewind_anchor, apply_rewind_delete
+from app.core.jsonl_parser import invalidate_parse_cache
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
 from app.core.models import (
@@ -714,7 +715,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             # served on the next reload, so rewind "succeeds" but the message
             # stays in chat. Also drops the mtime-validated JSONL cache so
             # filesystem-mode reads re-parse the truncated file.
-            from app.core.jsonl_parser import invalidate_parse_cache
             invalidate_parse_cache(sdk_session_id)
             # Clear stale messages from live_session_store so the next
             # load_session reads truncated data instead of serving pre-rewind
