@@ -266,7 +266,9 @@ class TestAddMarketplace:
                 )
 
         assert response.status_code == 500
-        assert "Clone failed" in response.json()["detail"]
+        # The endpoint no longer leaks the internal exception text to the client;
+        # it logs the traceback server-side and returns a generic detail.
+        assert response.json()["detail"] == "Failed to add marketplace"
 
     def test_add_marketplace_missing_url(self, app, mock_plugin_service):
         """Should return 422 on missing URL."""
@@ -341,7 +343,8 @@ class TestSyncMarketplace:
                 response = client.post("/api/v1/plugins/marketplaces/test-marketplace/sync")
 
         assert response.status_code == 500
-        assert "Sync failed" in response.json()["detail"]
+        # Generic detail; the internal exception text is logged, not returned.
+        assert response.json()["detail"] == "Failed to sync marketplace"
 
 
 # =============================================================================
@@ -544,6 +547,9 @@ class TestGetPluginDetails:
     def test_get_plugin_details_not_found(self, app, mock_plugin_service):
         """Should return 404 when plugin not found."""
         mock_plugin_service.get_plugin_details.return_value = None
+        # The endpoint falls back to available-plugin lookup before 404ing; both
+        # sources must be empty for a genuine not-found.
+        mock_plugin_service.get_available_plugin_details.return_value = None
 
         with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
             with TestClient(app) as client:
@@ -806,8 +812,10 @@ class TestGetEnabledPlugins:
         This test verifies the actual current behavior.
         """
         # The catch-all route intercepts /state/enabled and calls get_plugin_details
-        # with plugin_id="state/enabled", which returns None (not found)
+        # with plugin_id="state/enabled", which returns None (not found). The
+        # available-plugin fallback must also be empty for the 404.
         mock_plugin_service.get_plugin_details.return_value = None
+        mock_plugin_service.get_available_plugin_details.return_value = None
 
         with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
             with TestClient(app) as client:
