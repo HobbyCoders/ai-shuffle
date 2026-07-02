@@ -47,8 +47,8 @@ export interface AutomationCreate {
 	project_id?: string;
 	output_config?: Record<string, any>;
 	action_steps?: ActionStep[];
-	max_turns?: number;
-	timeout_seconds?: number;
+	max_turns?: number | null;
+	timeout_seconds?: number | null;
 	max_cost_per_run?: number | null;
 	max_cost_per_day?: number | null;
 	max_cost_total?: number | null;
@@ -66,8 +66,8 @@ export interface AutomationUpdate {
 	profile_id?: string;
 	project_id?: string;
 	output_config?: Record<string, any>;
-	max_turns?: number;
-	timeout_seconds?: number;
+	max_turns?: number | null;
+	timeout_seconds?: number | null;
 	max_cost_per_run?: number | null;
 	max_cost_per_day?: number | null;
 	max_cost_total?: number | null;
@@ -89,8 +89,8 @@ export interface Automation {
 	project_id: string | null;
 	output_config: Record<string, any>;
 	action_steps: ActionStep[] | null;
-	max_turns: number;
-	timeout_seconds: number;
+	max_turns: number | null;
+	timeout_seconds: number | null;
 	max_cost_per_run: number | null;
 	max_cost_per_day: number | null;
 	max_cost_total: number | null;

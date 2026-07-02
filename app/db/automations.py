@@ -26,8 +26,8 @@ class AutomationRow(TypedDict):
     profile_id: str
     project_id: Optional[str]
     output_config: Dict[str, Any]
-    max_turns: int
-    timeout_seconds: int
+    max_turns: Optional[int]
+    timeout_seconds: Optional[int]
     max_cost_per_run: Optional[float]
     max_cost_per_day: Optional[float]
     max_cost_total: Optional[float]
@@ -135,8 +135,8 @@ def create_automation(
     project_id: Optional[str] = None,
     description: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
-    max_turns: int = 1,
-    timeout_seconds: int = 300,
+    max_turns: Optional[int] = 1,
+    timeout_seconds: Optional[int] = 300,
     max_cost_per_run: Optional[float] = None,
     max_cost_per_day: Optional[float] = None,
     max_cost_total: Optional[float] = None,

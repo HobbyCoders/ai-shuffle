@@ -171,8 +171,8 @@ Prevent runaway costs with granular budget limits.
 | `max_cost_per_day` | float   | Maximum total USD cost across all runs in one day |
 | `max_cost_total`   | float   | Lifetime cost cap for this automation             |
 | `max_runs_per_day` | integer | Maximum number of executions per day              |
-| `max_turns`        | integer | Max conversation turns per run (1-25)             |
-| `timeout_seconds`  | integer | Execution timeout per run (30-1800 seconds)       |
+| `max_turns`        | integer | Max conversation turns per run (default 1, null = unlimited) |
+| `timeout_seconds`  | integer | Execution timeout per run in seconds (default 300, null = unlimited) |
 
 When any limit is exceeded, the run is blocked and the automation reports the reason in its status.
 
