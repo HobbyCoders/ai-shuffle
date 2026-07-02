@@ -46,6 +46,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from contextlib import nullcontext
 from typing import Any
 
 from claude_agent_sdk.types import (
@@ -58,7 +60,7 @@ from claude_agent_sdk.types import (
 from claude_agent_sdk import fold_session_summary
 from psycopg2.extras import Json
 
-from app.db.base import get_db
+from app.db.base import get_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +196,7 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
         )
 
 
-def _count_entries_sync(key: SessionKey) -> int:
+def _count_entries_sync(key: SessionKey, _conn=None) -> int:
     """Return how many rows already exist for ``key`` (incl. its subpath).
 
     Used by the backfill's idempotency pre-check: ``session_store_entries`` has
@@ -204,12 +206,16 @@ def _count_entries_sync(key: SessionKey) -> int:
     skips any (project_key, session_id, subpath) that already has rows — the
     on-disk JSONL transcript is the complete, append-only history, so "any rows
     present" means "already backfilled (or live-mirrored)".
+
+    ``_conn``: optional open connection (the app's ``transaction()`` idiom) so
+    the lazy backfill's in-lock re-check runs on the SAME connection that holds
+    the advisory xact lock.
     """
     project_key = key["project_key"]
     session_id = key["session_id"]
     subpath = _subpath_of(key)
 
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cur = conn.cursor()
         if subpath is None:
             cur.execute(
@@ -231,6 +237,7 @@ def _backfill_entries_sync(
     key: SessionKey,
     entries: list[SessionStoreEntry],
     batch_size: int = 500,
+    _conn=None,
 ) -> int:
     """Insert ``entries`` for ``key`` using the SAME row shape as
     :func:`_append_sync`, batched, and update the summary sidecar for main
@@ -246,6 +253,10 @@ def _backfill_entries_sync(
     Insertion order is preserved by the ``BIGSERIAL id`` exactly as live
     appends are, because rows are inserted in list order within one
     transaction.
+
+    ``_conn``: optional open connection (the app's ``transaction()`` idiom).
+    The lazy backfill passes the connection holding its advisory xact lock so
+    the count re-check and the inserts share one serialized transaction.
     """
     if not entries:
         return 0
@@ -255,7 +266,7 @@ def _backfill_entries_sync(
     subpath = _subpath_of(key)
 
     written = 0
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cur = conn.cursor()
         # Batched inserts keep a single session's (possibly large) transcript
         # from building one giant executemany / huge transaction snapshot.
@@ -386,6 +397,139 @@ def _store_version_by_session_id_sync(session_id: str) -> tuple[int, int]:
     return (int(row["n"]), int(row["max_id"]) if row["max_id"] is not None else 0)
 
 
+def _has_summary_by_session_id_sync(session_id: str) -> bool:
+    """True when a ``session_store_summaries`` row exists for ``session_id``.
+
+    The summary row is created on the FIRST store append/backfill and survives
+    rewind truncation (which deletes only entries), so it acts as a tombstone:
+    "this session WAS store-recorded". The lazy backfill uses it to distinguish
+    a never-backfilled pre-cutover session (no row → safe to backfill) from a
+    session whose transcript was deliberately emptied, e.g. rewound to the
+    start (row present → a stale on-disk JSONL must NOT resurrect it).
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 AS present FROM session_store_summaries "
+            "WHERE session_id = %s LIMIT 1",
+            (session_id,),
+        )
+        return cur.fetchone() is not None
+
+
+# A main JSONL modified more recently than this is treated as live: during a
+# session's first turn the CLI is still writing the transcript locally while
+# the eager store flush is in flight, and backfilling that window would insert
+# the same entries the flush is about to append (no unique constraint exists
+# to dedupe them). Pre-cutover transcripts are days old, so the window costs
+# nothing real.
+_LAZY_BACKFILL_MIN_JSONL_AGE_S = 60.0
+
+
+def _lazy_backfill_from_jsonl_sync(
+    sdk_session_id: str, working_dir: str = "/workspace"
+) -> int:
+    """Backfill a session's store transcript from its local JSONL on a miss.
+
+    The postgres_only cutover assumed ``scripts/backfill_session_store.py`` had
+    populated the store first. Where it wasn't run, every pre-cutover session
+    has ZERO store rows, so reads render empty and SDK resume seeds a blank
+    context. This self-heals the store one session at a time, at read/resume
+    time, from the same JSONL the bulk script would have used.
+
+    Guards (cheapest first — this sits on read paths):
+      1. any main-transcript store rows → already recorded, skip;
+      2. a summaries row → session WAS store-recorded (tombstone; e.g. rewound
+         to empty) — do not resurrect from a stale JSONL;
+      3. no local JSONL / no entries → nothing to heal (the caller's legacy-DB
+         read fallback covers cross-install sessions);
+      4. JSONL modified < ``_LAZY_BACKFILL_MIN_JSONL_AGE_S`` ago → live first
+         turn, skip (see the constant);
+      5. a ``pg_advisory_xact_lock`` on ``hashtext(session_id)`` plus an
+         in-lock count re-check serializes concurrent backfillers — the table
+         has NO unique constraint, so exclusion is the only dedupe.
+
+    Returns rows written (0 = nothing to do). Raises on DB errors — use
+    :func:`lazy_backfill_session_from_jsonl` from read paths.
+    """
+    count, _ = _store_version_by_session_id_sync(sdk_session_id)
+    if count:
+        return 0
+    if _has_summary_by_session_id_sync(sdk_session_id):
+        return 0
+
+    from app.core.jsonl_parser import (
+        get_agent_jsonl_paths,
+        get_session_jsonl_path,
+        parse_jsonl_file,
+    )
+
+    jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
+    if jsonl_path is None:
+        return 0
+    if time.time() - jsonl_path.stat().st_mtime < _LAZY_BACKFILL_MIN_JSONL_AGE_S:
+        return 0
+    entries = list(parse_jsonl_file(jsonl_path))
+    if not entries:
+        return 0
+
+    # Same project_key convention as the bulk backfill script: the on-disk
+    # folder name (NOT a cwd-derived key, which diverges — see
+    # _load_entries_by_session_id_sync).
+    project_key = jsonl_path.parent.name
+    main_key: SessionKey = {"project_key": project_key, "session_id": sdk_session_id}
+
+    written = 0
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (sdk_session_id,)
+        )
+        if _count_entries_sync(main_key, _conn=conn) == 0:
+            written += _backfill_entries_sync(main_key, entries, _conn=conn)
+            for agent_id, agent_path in get_agent_jsonl_paths(
+                sdk_session_id, working_dir
+            ).items():
+                sub_entries = list(parse_jsonl_file(agent_path))
+                if not sub_entries:
+                    continue
+                sub_key: SessionKey = {
+                    "project_key": project_key,
+                    "session_id": sdk_session_id,
+                    "subpath": f"subagents/agent-{agent_id}",
+                }
+                if _count_entries_sync(sub_key, _conn=conn) == 0:
+                    written += _backfill_entries_sync(
+                        sub_key, sub_entries, _conn=conn
+                    )
+    return written
+
+
+def lazy_backfill_session_from_jsonl(
+    sdk_session_id: str, working_dir: str = "/workspace"
+) -> int:
+    """Read-path wrapper around :func:`_lazy_backfill_from_jsonl_sync`.
+
+    Never raises: a failed heal must degrade to "store still empty" (the
+    caller then falls back to the legacy DB or serves what it has), not break
+    the read. Returns rows written.
+    """
+    try:
+        written = _lazy_backfill_from_jsonl_sync(sdk_session_id, working_dir)
+    except Exception:
+        logger.exception(
+            "Lazy store backfill failed for session %s", sdk_session_id
+        )
+        return 0
+    if written:
+        logger.info(
+            "Lazily backfilled %d store entries for session %s from local JSONL",
+            written,
+            sdk_session_id,
+        )
+    return written
+
+
 def _list_subpaths_by_session_id_sync(session_id: str) -> list[str]:
     """Distinct non-null subpaths for ``session_id`` (matched by id alone).
 
@@ -413,6 +557,13 @@ def _load_sync(key: SessionKey) -> list[SessionStoreEntry] | None:
     subpath = _subpath_of(key)
 
     rows = _load_entries_by_session_id_sync(session_id, subpath)
+    if not rows and subpath is None:
+        # Main-transcript miss: almost always a pre-cutover session whose JSONL
+        # was never bulk-backfilled. Returning None here would seed the SDK
+        # resume with a BLANK context — heal from the local JSONL first (guarded
+        # inside; a no-op for genuinely new sessions).
+        if lazy_backfill_session_from_jsonl(session_id):
+            rows = _load_entries_by_session_id_sync(session_id, subpath)
     if not rows:
         return None
     return rows
@@ -489,6 +640,40 @@ def _delete_sync(key: SessionKey) -> None:
                 "WHERE project_key = %s AND session_id = %s AND subpath = %s",
                 (project_key, session_id, subpath),
             )
+
+
+def _delete_session_data_by_session_id_sync(session_id: str) -> int:
+    """Delete EVERY store row for ``session_id``: all transcript entries (main
+    + every subagent subpath) and the summary sidecar, matched by
+    ``session_id`` ALONE — the stored ``project_key`` is the on-disk folder
+    name and cannot be reconstructed by the app (see
+    :func:`_load_entries_by_session_id_sync`), so the SDK-key
+    :func:`_delete_sync` is unusable here. Returns rows removed.
+
+    Used by the session-delete endpoint's background cleanup: ``sessions`` has
+    NO foreign key into the store tables, so without this every deleted
+    session leaked its full transcript forever (Bug E).
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM session_store_entries WHERE session_id = %s",
+            (session_id,),
+        )
+        removed = cur.rowcount or 0
+        cur.execute(
+            "DELETE FROM session_store_summaries WHERE session_id = %s",
+            (session_id,),
+        )
+        removed += cur.rowcount or 0
+    return removed
+
+
+async def delete_session_data_by_session_id(session_id: str) -> int:
+    """Async wrapper around :func:`_delete_session_data_by_session_id_sync`."""
+    return await asyncio.to_thread(
+        _delete_session_data_by_session_id_sync, session_id
+    )
 
 
 def _list_subkeys_sync(key: SessionListSubkeysKey) -> list[str]:

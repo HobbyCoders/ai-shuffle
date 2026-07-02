@@ -507,18 +507,24 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 pass
 
     if _postgres_only:
-        # postgres_only HARD-CUT: the store is the single source of truth. An
-        # empty result here returns empty messages with a loud WARNING — it must
-        # NEVER fall through to the SDK disk reader (Fallback 2, reads JSONL) or
-        # the legacy session_messages table (Fallback 3, the least-rich "TRAP").
-        # Those JSONL/legacy fallbacks below run ONLY in mirror/disabled.
-        if not messages and sdk_session_id:
-            logger.warning(
-                "[Session API] postgres_only: no entries in session_store for "
-                "session %s (sdk_session_id=%s) — returning empty messages; "
-                "NOT falling back to JSONL/legacy DB.",
-                session_id, sdk_session_id,
-            )
+        # postgres_only: the store stays the single source of truth and the SDK
+        # JSONL disk reader (Fallback 2) stays hard-cut. But an EMPTY result —
+        # after the lazy JSONL backfill inside parse_session_history_via_store
+        # had its chance — means the transcript predates the cutover and lives
+        # ONLY in the legacy session_messages table (shared across installs;
+        # e.g. the JSONL sits on another machine). Serve that instead of
+        # rendering an existing chat as empty. Post-cutover sessions always
+        # have store rows, so this can never shadow the store with the
+        # user-rows-only legacy view (the "vanishing replies" trap).
+        if not messages:
+            if sdk_session_id:
+                logger.warning(
+                    "[Session API] postgres_only: no entries in session_store for "
+                    "session %s (sdk_session_id=%s) — serving legacy "
+                    "session_messages transcript.",
+                    session_id, sdk_session_id,
+                )
+            messages = await _legacy_db_messages(session_id)
     else:
         # Fallback 2: Try SDK get_session_messages() if custom parser failed.
         # The SDK handles JSONL parsing + conversation chain building independently,
@@ -540,18 +546,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
         # Fallback 3: Database messages (oldest data, least rich)
         if not messages:
-            db_messages = await run_sync(database.get_session_messages, session_id)
-            # Transform DB messages to include type field for frontend compatibility
-            for m in db_messages:
-                msg = dict(m)
-                # Infer type from role for legacy DB messages
-                if msg.get("tool_name"):
-                    msg["type"] = "tool_use"
-                    msg["toolName"] = msg.get("tool_name")
-                    msg["toolInput"] = msg.get("tool_input")
-                elif msg.get("role") == "assistant":
-                    msg["type"] = "text"
-                messages.append(msg)
+            messages = await _legacy_db_messages(session_id)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     from app.core.cost_utils import attach_cost_metadata
@@ -579,6 +574,29 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     logger.debug(f"Returning session {session_id} with {len(messages)} messages")
     return session
+
+
+async def _legacy_db_messages(session_id: str) -> list:
+    """Legacy ``session_messages`` rows transformed for the detail response.
+
+    The least-rich source (Fallback 3): type is inferred from the role/tool
+    columns. Used in mirror/disabled when JSONL yields nothing, and in
+    postgres_only as the last-resort read for pre-cutover sessions whose
+    transcript was never backfilled into the store.
+    """
+    db_messages = await run_sync(database.get_session_messages, session_id)
+    messages = []
+    for m in db_messages:
+        msg = dict(m)
+        # Infer type from role for legacy DB messages
+        if msg.get("tool_name"):
+            msg["type"] = "tool_use"
+            msg["toolName"] = msg.get("tool_name")
+            msg["toolInput"] = msg.get("tool_input")
+        elif msg.get("role") == "assistant":
+            msg["type"] = "text"
+        messages.append(msg)
+    return messages
 
 
 def _describe_relay_error(err: Exception) -> str:
@@ -897,6 +915,27 @@ async def get_live_session(
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
 
+    # postgres_only legacy rescue: the store yielded nothing even after the
+    # lazy JSONL backfill inside parse_session_history_via_store had its
+    # chance — a pre-cutover session whose transcript lives ONLY in the legacy
+    # session_messages table (shared across installs). Serve that instead of
+    # an empty chat. Fires ONLY on an empty store result: post-cutover
+    # sessions always have store rows, so the user-rows-only legacy view (the
+    # "vanishing replies" trap) can never shadow the store. Mirrors GET /{id}.
+    if _postgres_only and not messages:
+        from app.core.db_message_loader import load_messages_from_db
+        try:
+            db_messages, has_db = await run_sync(load_messages_from_db, session_id)
+            if has_db:
+                messages = db_messages
+                logger.warning(
+                    "Live endpoint: postgres_only store empty for %s — serving "
+                    "legacy DB transcript (%d messages)",
+                    session_id, len(messages),
+                )
+        except Exception as e:
+            logger.warning(f"Legacy DB fallback failed for live {session_id}: {e}")
+
     # Fallback 2: SDK get_session_messages() — JSONL disk reader. HARD-CUT in
     # postgres_only (the store is the single source of truth; the DB fast path
     # + store-backed parser above already cover it). Runs in mirror/disabled.
@@ -1207,6 +1246,22 @@ async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], pr
         await get_session_pool().remove(session_id)
     except Exception as e:
         logger.warning(f"Background session_pool.remove failed for {session_id}: {e}")
+
+    if sdk_sid:
+        # Purge the Postgres session store: sessions has NO FK into
+        # session_store_entries/_summaries, so skipping this leaks the deleted
+        # session's full transcript forever (Bug E). session_id-only match —
+        # the stored project_key cannot be reconstructed here. Runs in every
+        # store mode (cheap no-op when the session has no rows).
+        try:
+            from app.core.pg_session_store import delete_session_data_by_session_id
+            removed = await delete_session_data_by_session_id(sdk_sid)
+            if removed:
+                logger.debug(f"Deleted {removed} session store rows for {sdk_sid}")
+        except Exception as e:
+            # Non-fatal — but the transcript rows stay orphaned until a future
+            # delete retries, so make the leak visible.
+            logger.warning(f"Failed to delete session store rows for {sdk_sid}: {e}")
 
     if sdk_sid and sdk_delete_session:
         try:

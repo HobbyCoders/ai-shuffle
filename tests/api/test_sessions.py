@@ -742,30 +742,65 @@ class TestSessionStoreModeIsolation:
         data = resp.json()
         assert data["messages"][0]["content"] == "From store"
 
-    def test_postgres_only_empty_store_hard_cuts_legacy_db(
+    def test_postgres_only_empty_store_falls_back_to_legacy_db(
         self, client, mock_database, sample_session
     ):
-        """postgres_only HARD-CUT: an empty store result returns empty messages
-        and NEVER falls through to database.get_session_messages (Fallback-3)."""
+        """Bug C regression: postgres_only + empty store must serve the legacy
+        session_messages transcript. Pre-cutover sessions (created before the
+        store existed, never bulk-backfilled, JSONL possibly on another
+        install) hold their FULL transcript only in the legacy table — the
+        original hard-cut rendered them as empty chats in production. The SDK
+        JSONL disk reader (Fallback 2) stays hard-cut: only the legacy DB
+        fallback is allowed through."""
         from app.core.config import settings
 
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
-        # Sentinel: if this were called, the trap fired.
         mock_database.get_session_messages.return_value = [
-            {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
+            {"id": 99, "role": "user", "content": "legacy transcript", "tool_name": None}
         ]
 
         with patch.object(settings, "session_store_mode", "postgres_only"), \
                 patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.sdk_get_session_messages") as mock_sdk, \
                 patch("app.api.sessions.parse_session_history_via_store") as mock_store:
             mock_store.return_value = ([], {})
             resp = client.get("/api/v1/sessions/test-session-id")
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["messages"] == []
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["content"] == "legacy transcript"
+        mock_database.get_session_messages.assert_called_once()
+        mock_sdk.assert_not_called()
+
+    def test_postgres_only_populated_store_never_touches_legacy_db(
+        self, client, mock_database, sample_session
+    ):
+        """The legacy fallback fires ONLY on an empty store result. A populated
+        store (every post-cutover session) must never consult session_messages —
+        that table holds user-rows-only for post-cutover sessions and serving it
+        was the 'assistant replies vanish' bug."""
+        from app.core.config import settings
+
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
+        ]
+
+        with patch.object(settings, "session_store_mode", "postgres_only"), \
+                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.return_value = (list(self.STORE_MSGS), dict(self.USAGE))
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["messages"][0]["content"] == "From store"
         mock_database.get_session_messages.assert_not_called()
 
     def test_disabled_empty_jsonl_falls_back_to_legacy_db(

@@ -143,8 +143,18 @@ def parse_session_history_via_store(
     from app.core.pg_session_store import (
         _load_entries_by_session_id_sync,
         _store_version_by_session_id_sync,
+        lazy_backfill_session_from_jsonl,
     )
     from app.core.jsonl_parser import parse_session_history_from_store
+
+    # Store miss → almost always a pre-cutover session whose JSONL was never
+    # bulk-backfilled before the postgres_only flip. Heal the store from the
+    # local JSONL before parsing so the chat renders its history instead of
+    # empty. Guarded inside (count, summary tombstone, JSONL idle-mtime,
+    # advisory lock) so it is a cheap no-op for new/live/stored sessions.
+    count, _ = _store_version_by_session_id_sync(sdk_session_id)
+    if count == 0:
+        lazy_backfill_session_from_jsonl(sdk_session_id, working_dir)
 
     def _store_loader(session_id: str, subpath: Optional[str] = None) -> list:
         return _load_entries_by_session_id_sync(session_id, subpath)
