@@ -90,6 +90,7 @@ def _log_unpark_decision(
 from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
     _interrupt_pending_sessions,
     _stopped_sessions,
+    superseded_by_successor,
 )
 
 
@@ -2549,9 +2550,17 @@ class ChatWebSocketHandler:
                 # (i.e., an exception occurred before the normal done/error/cancel paths ran).
                 # If end_streaming WAS called, the session is kept in memory intentionally
                 # for ~30 seconds so reconnecting clients can retrieve messages.
+                # Ownership guard: a still-streaming store can also mean the drain
+                # pump handed this session to an unpark follow-up turn while this
+                # finally was unwinding — see ws_cleanup.superseded_by_successor.
+                # Cleaning up then would wipe the live session + task registry out
+                # from under the running follow-up.
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                    ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
-                    await live_session_store.cleanup_session(session_id)
+                    if await superseded_by_successor(session_id):
+                        ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping cleanup")
+                    else:
+                        ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
+                        await live_session_store.cleanup_session(session_id)
 
                 # ALWAYS ensure streaming state is cleared, even if stream_started was never set
                 # This prevents stuck streaming state after errors or early termination
@@ -2599,9 +2608,16 @@ class ChatWebSocketHandler:
                 if remaining_devices == 0:
                     ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
                     if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                        # Only force-cleanup if still marked as streaming (abnormal state)
-                        await live_session_store.cleanup_session(session_id)
-                        ctx.debug(logger, "Cleaned up stuck streaming session")
+                        # Only force-cleanup if still marked as streaming (abnormal state).
+                        # Ownership guard (same as the cleanup above): "no devices +
+                        # still streaming" is exactly the signature of an unpark
+                        # follow-up that started while this finally was unwinding —
+                        # that state belongs to the successor, not us.
+                        if await superseded_by_successor(session_id):
+                            ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping no-device cleanup")
+                        else:
+                            await live_session_store.cleanup_session(session_id)
+                            ctx.debug(logger, "Cleaned up stuck streaming session")
 
                 # Fallback queue processing for error/cancel paths.
                 # The normal completion path handles queued messages pre-close

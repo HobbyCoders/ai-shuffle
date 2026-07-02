@@ -55,6 +55,31 @@ async def stop_drain_pump(session_id: str) -> bool:
     return True
 
 
+async def superseded_by_successor(session_id: str) -> bool:
+    """True when a task OTHER than the caller is registered as the session's
+    active turn in ``_active_chat_sessions``.
+
+    A finishing turn's ``finally`` teardown calls this before its store-state
+    cleanup heuristics (``has_session && is_streaming`` → ``cleanup_session``).
+    Those heuristics exist to reap the turn's OWN dangling streaming state, but
+    the session can be handed to a successor turn while the finally is still
+    unwinding — the drain pump's unpark follow-up (``_deliver_unpark_impl``)
+    fires ~1.5s after a background task's at-rest terminal notification, inside
+    the finally's window (DB fetches + up-to-1s heartbeat-teardown stall,
+    longest exactly when the origin socket died to a page refresh). The
+    successor registers itself here BEFORE its ``start_streaming`` can run, so
+    when the store reads as streaming AND this returns True, that streaming
+    state is the successor's — cleaning it up would wipe the live session +
+    task registry out from under the running follow-up, which then streams
+    into a void (new messages appear only via the durable transcript on
+    reload, /live reports not-streaming forever).
+    """
+    current = asyncio.current_task()
+    async with _active_sessions_lock:
+        registered = _active_chat_sessions.get(session_id)
+    return registered is not None and registered is not current
+
+
 async def stop_all_drain_pumps() -> None:
     """Cancel and await every drain pump. Called on shutdown."""
     for session_id in list(_drain_pumps.keys()):

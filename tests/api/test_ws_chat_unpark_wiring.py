@@ -90,6 +90,74 @@ def test_ws_chat_run_query_source_wires_unpark():
     assert "stop_drain_pump(session_id)" in src
 
 
+def test_ws_chat_run_query_finally_guards_cleanup_against_successor():
+    """Both run_query ``finally`` blocks must NOT cleanup_session() a live
+    session that a SUCCESSOR turn now owns.
+
+    THE BUG THIS GUARDS: a turn's finally runs CONCURRENTLY with a successor
+    turn's startup whenever the between-turns drain pump delivers an unpark
+    follow-up inside the finally's window (the pump batches for ~1.5s; the
+    finally spends up to ~1s in heartbeat teardown plus DB fetches — longest
+    exactly when the origin socket died to a page refresh). The finally's
+    teardown heuristics check only STORE state (``has_session &&
+    is_streaming`` / ``remaining_devices == 0``), so when the follow-up's
+    ``start_streaming`` wins the race, the parent read the successor's
+    streaming state as its own dangling one and called ``cleanup_session()``:
+    the follow-up's live session was deleted out from under it, its registry
+    tasks reaped to "killed", and the unpark_pending latch cleared. The
+    follow-up turn then streamed into a void — the durable transcript kept
+    growing (new messages appeared on refresh) while ``/live`` reported
+    not-streaming forever, so the page never re-entered streaming.
+
+    The fix: every cleanup_session() heuristic in a run_query finally checks
+    ``superseded_by_successor(session_id)`` (ownership via
+    ``_active_chat_sessions``) and skips teardown when another task has
+    replaced this turn as the session's active turn.
+    """
+    import inspect
+
+    for src, label in (
+        (inspect.getsource(ws_mod.chat_websocket), "websocket.py inline run_query"),
+        (inspect.getsource(cwh.ChatWebSocketHandler.run_query), "chat_ws_handler.run_query"),
+    ):
+        occurrences = src.count("await superseded_by_successor(session_id)")
+        assert occurrences >= 2, (
+            f"{label}: expected the ownership guard on BOTH finally cleanup "
+            f"heuristics (streaming-never-ended AND no-devices), found "
+            f"{occurrences} — an unguarded cleanup_session() will race the "
+            f"drain pump's unpark follow-up and wipe its live session"
+        )
+
+
+@pytest.mark.asyncio
+async def test_superseded_by_successor_ownership_semantics():
+    """The ownership predicate itself: False when WE are the registered turn
+    or nothing is registered; True only when ANOTHER task replaced us."""
+    session_id = "unpark-ownership-test"
+    try:
+        # Nothing registered → not superseded (normal solo-turn teardown).
+        assert not await ws_cleanup.superseded_by_successor(session_id)
+
+        # We are the registered turn → not superseded.
+        async with ws_cleanup._active_sessions_lock:
+            ws_cleanup._active_chat_sessions[session_id] = asyncio.current_task()
+        assert not await ws_cleanup.superseded_by_successor(session_id)
+
+        # A different task replaced us (the unpark follow-up) → superseded.
+        async def _sleeper():
+            await asyncio.sleep(30)
+
+        successor = asyncio.get_running_loop().create_task(_sleeper())
+        try:
+            async with ws_cleanup._active_sessions_lock:
+                ws_cleanup._active_chat_sessions[session_id] = successor
+            assert await ws_cleanup.superseded_by_successor(session_id)
+        finally:
+            successor.cancel()
+    finally:
+        ws_cleanup._active_chat_sessions.pop(session_id, None)
+
+
 def test_post_turn_fast_path_stays_deleted():
     """Regression tripwire for the 2026-07-02 bug: the app-side post-turn
     follow-up for IN-STREAM completions (stash → _maybe_unpark_followup) was a

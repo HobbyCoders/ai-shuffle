@@ -55,6 +55,7 @@ from app.api.ws_cleanup import (  # noqa: F401
     cleanup_session_handlers,
     stop_all_drain_pumps,
     stop_drain_pump,
+    superseded_by_successor,
 )
 from app.api.ws_utils import ping_loop, safe_ws_send, WSPayloadEncodeError  # noqa: F401
 from app.api.ws_cli import (  # noqa: F401
@@ -802,10 +803,20 @@ async def chat_websocket(
             # (i.e., an exception occurred before the normal done/error/cancel paths ran).
             # If end_streaming WAS called, the session is kept in memory intentionally
             # for ~30 seconds so reconnecting clients can retrieve messages.
+            # Ownership guard: a still-streaming store can also mean the session was
+            # handed to a successor turn (the drain pump's unpark follow-up) while
+            # this finally was unwinding — see superseded_by_successor. Cleaning up
+            # then would wipe the live session + task registry out from under the
+            # running follow-up. Check supersession AFTER reading the store: the
+            # successor registers before its start_streaming can run, so successor-
+            # owned streaming state always coincides with a registered successor.
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
-                await live_session_store.cleanup_session(session_id)
-                await cleanup_session_handlers(session_id)
+                if await superseded_by_successor(session_id):
+                    ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping cleanup")
+                else:
+                    ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
+                    await live_session_store.cleanup_session(session_id)
+                    await cleanup_session_handlers(session_id)
 
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
             # This prevents stuck streaming state after errors or early termination
@@ -856,11 +867,19 @@ async def chat_websocket(
             remaining_devices = sync_engine.get_device_count(session_id)
             if remaining_devices == 0:
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                    # Only force-cleanup if still marked as streaming (abnormal state)
-                    ctx.debug(logger, "Query finished but no devices connected and session stuck streaming, cleaning up")
-                    await live_session_store.cleanup_session(session_id)
-                    await cleanup_session_handlers(session_id)
-                    ctx.debug(logger, "Cleaned up stuck streaming session")
+                    # Only force-cleanup if still marked as streaming (abnormal state).
+                    # Ownership guard (same as the cleanup above): "no devices + still
+                    # streaming" is exactly the signature of an unpark follow-up that
+                    # started while this finally was unwinding after a page refresh
+                    # killed the origin socket — that state belongs to the successor,
+                    # not us, and must not be reaped.
+                    if await superseded_by_successor(session_id):
+                        ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping no-device cleanup")
+                    else:
+                        ctx.debug(logger, "Query finished but no devices connected and session stuck streaming, cleaning up")
+                        await live_session_store.cleanup_session(session_id)
+                        await cleanup_session_handlers(session_id)
+                        ctx.debug(logger, "Cleaned up stuck streaming session")
 
             # Auto-process next queued message via shared helper.  Skip when
             # interrupt_for_query is pending (the frontend will send the real
