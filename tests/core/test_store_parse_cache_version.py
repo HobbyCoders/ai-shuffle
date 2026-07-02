@@ -284,3 +284,70 @@ def test_pre_seed_stamps_store_cache_entry():
 
     with jp._store_parse_cache_lock:
         assert len(jp._store_parse_cache[sid]) == 3
+
+def test_pre_seed_with_matching_expected_version_writes_entry():
+    """When the store hasn't moved since the caller snapshotted its messages,
+    the seed is written and stamped as usual."""
+    sid = "preseed-toctou-ok"
+    post = _entries([("Hi", "Hello")])
+    post_loader, _ = _counting_loader(post)
+    version_loader, _ = _mutable_version_loader((4, 40))
+
+    post_msgs, post_usage = jp.parse_session_history_from_store(
+        "tmp-parse-only", "/workspace", post_loader, use_cache=False,
+    )
+
+    ok = jp.pre_seed_parse_cache(
+        sid, post_msgs, post_usage, working_dir="/workspace",
+        store_version_loader=version_loader,
+        expected_store_version=(4, 40),
+    )
+    assert ok is True
+    with jp._store_parse_cache_lock:
+        assert jp._store_parse_cache[sid][2] == (4, 40)
+
+
+def test_pre_seed_drops_entry_when_store_moved_past_expected_version():
+    """TOCTOU regression: the turn-end reseed snapshots the live messages, then
+    resolves the store version at WRITE time. If the store mutated in between
+    (next turn appended entries, or a rewind deleted rows), the old snapshot
+    got stamped with the NEW version — a poisoned entry the read path's version
+    check could never catch. With the caller's pre-snapshot version passed as
+    ``expected_store_version``, the mismatch must DROP the entry instead."""
+    sid = "preseed-toctou-stale"
+    old = _entries([("Hi", "Hello")])
+    old_loader, _ = _counting_loader(old)
+    version_loader, vstate = _mutable_version_loader((4, 40))
+
+    old_msgs, old_usage = jp.parse_session_history_from_store(
+        "tmp-parse-only", "/workspace", old_loader, use_cache=False,
+    )
+
+    # Warm the cache at the old version, as the previous turn's reseed would.
+    assert jp.pre_seed_parse_cache(
+        sid, old_msgs, old_usage, working_dir="/workspace",
+        store_version_loader=version_loader,
+        expected_store_version=(4, 40),
+    )
+
+    # The store moves on between the caller's snapshot and the write.
+    vstate["version"] = (6, 60)
+    jp.pre_seed_parse_cache(
+        sid, old_msgs, old_usage, working_dir="/workspace",
+        store_version_loader=version_loader,
+        expected_store_version=(4, 40),
+    )
+
+    with jp._store_parse_cache_lock:
+        assert sid not in jp._store_parse_cache, (
+            "stale snapshot was seeded despite the store version moving on"
+        )
+
+    # And the next read re-parses fresh from the store, not the stale seed.
+    fresh_loader, fresh_calls = _counting_loader(_entries([("Hi", "Hello"), ("New", "Turn")]))
+    served, _ = jp.parse_session_history_from_store(
+        sid, "/workspace", fresh_loader, use_cache=True,
+        store_version_loader=version_loader,
+    )
+    assert fresh_calls["n"] == 1
+    assert len(served) == 4

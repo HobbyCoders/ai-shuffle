@@ -721,11 +721,23 @@ async def handle_done(
     )
 
     # Pre-seed JSONL parse cache with live store messages
-    from app.core.jsonl_parser import pre_seed_parse_cache, invalidate_parse_cache
+    from app.core.jsonl_parser import (
+        pre_seed_parse_cache,
+        invalidate_parse_cache,
+        _resolve_store_version,
+    )
 
     session_row = database.get_session(ectx.session_id)
     sdk_sid = session_row.get("sdk_session_id") if session_row else None
     if sdk_sid:
+        # Capture the store version BEFORE snapshotting the messages. If the
+        # store moves on while we build the seed (next turn appended, rewind
+        # deleted rows), pre_seed_parse_cache sees the mismatch and drops the
+        # entry instead of stamping the stale snapshot with the NEW version —
+        # a poisoned entry read-path validation could never catch.
+        expected_store_version = await asyncio.to_thread(
+            _resolve_store_version, sdk_sid
+        )
         live_data = live_session_store.get_session_dict(ectx.session_id)
         if live_data and live_data.get("messages"):
             seed_working_dir = str(settings.workspace_dir)
@@ -809,7 +821,15 @@ async def handle_done(
                         e,
                     )
 
-            pre_seed_parse_cache(sdk_sid, seed_messages, seed_usage, seed_working_dir)
+            # Blocking (store version probe + JSONL stat) — off the event loop.
+            await asyncio.to_thread(
+                pre_seed_parse_cache,
+                sdk_sid,
+                seed_messages,
+                seed_usage,
+                seed_working_dir,
+                expected_store_version=expected_store_version,
+            )
         else:
             invalidate_parse_cache(sdk_sid)
 

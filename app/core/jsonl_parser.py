@@ -810,6 +810,7 @@ def pre_seed_parse_cache(
     usage_data: Dict[str, Any],
     working_dir: str = "/workspace",
     store_version_loader=None,
+    expected_store_version=None,
 ) -> bool:
     """
     Pre-seed the parse cache with messages from the live session store.
@@ -828,6 +829,14 @@ def pre_seed_parse_cache(
         messages: Final messages from live_session_store
         usage_data: Usage data dict
         working_dir: Working directory for finding the JSONL file
+        store_version_loader: Optional ``loader(session_id) -> (count, max_id)``
+            override for the store version probe (tests / callers with a handle)
+        expected_store_version: The ``(count, max_id)`` store version resolved
+            by the caller BEFORE it captured ``messages``. When provided and the
+            store has since moved on (new turn appended, rewind deleted rows),
+            the snapshot is already stale — the store entry is dropped instead
+            of written, closing the window where an old snapshot got stamped
+            with the store's NEW version and was then served verbatim.
 
     Returns:
         True if cache was pre-seeded, False on failure (falls back to invalidation)
@@ -862,6 +871,22 @@ def pre_seed_parse_cache(
     # pre-stamp reader on other installs, or dropped-then-reparsed here); DROP any
     # existing entry instead so the next read re-parses cleanly.
     store_version = _resolve_store_version(sdk_session_id, store_version_loader)
+    if store_version is not None and expected_store_version is not None:
+        expected = (int(expected_store_version[0]), int(expected_store_version[1]))
+        if store_version != expected:
+            # The store mutated between the caller's snapshot and now (next
+            # turn started, or a rewind landed). Writing would stamp the OLD
+            # messages with the NEW version — a poisoned entry that read-path
+            # validation could never catch. Drop instead; the next read
+            # re-parses the store fresh.
+            logger.debug(
+                "Pre-seed store version moved for %s (expected %s, now %s); "
+                "dropping cache entry instead of seeding a stale snapshot",
+                sdk_session_id,
+                expected,
+                store_version,
+            )
+            store_version = None
     with _store_parse_cache_lock:
         if store_version is not None:
             _store_parse_cache[sdk_session_id] = (
