@@ -1125,6 +1125,81 @@ class TestSubagentTaskToolResult:
                 assert result[0]["agentType"] == "Explore"
 
 
+class TestBackgroundedSubagentStatus:
+    """A backgrounded sub-agent's launch-ACK must NOT mark it complete on reload.
+
+    Regression for the premature-✓ bug: in postgres_only mode the reload path
+    rebuilds sub-agents via ``_transform_entries``; a run_in_background sub-agent's
+    first tool_result is only the launch-ACK while it keeps running, so the card
+    must stay 'running' until its terminal <task-notification> arrives.
+    """
+
+    @staticmethod
+    def _parse(entries):
+        msgs, _usage = jsonl_parser._transform_entries(entries, "sdk-sess", "/workspace")
+        return [m for m in msgs if m.get("type") == "subagent"]
+
+    @staticmethod
+    def _task_use(tool_id="task-bg-1", run_in_background=True):
+        inp = {"subagent_type": "general-purpose", "description": "Map WS events", "prompt": "map"}
+        if run_in_background:
+            inp["run_in_background"] = True
+        return {"type": "assistant", "uuid": f"use-{tool_id}", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": tool_id, "name": "Task", "input": inp}]}}
+
+    @staticmethod
+    def _launch_ack(tool_id="task-bg-1",
+                    text=("Agent launched successfully and is running in the background "
+                          "with ID: agent_x. You will be notified automatically when it finishes.")):
+        return {"type": "user", "uuid": f"ack-{tool_id}",
+                "toolUseResult": {"agentId": f"agent-{tool_id}"},
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+
+    @staticmethod
+    def _notification(tool_id="task-bg-1", status="completed"):
+        body = (f"<task-notification>\n<task-id>bg</task-id>\n"
+                f"<tool-use-id>{tool_id}</tool-use-id>\n<status>{status}</status>\n"
+                f"<summary>x</summary>\n</task-notification>")
+        return {"type": "user", "uuid": f"notif-{tool_id}-{status}",
+                "message": {"role": "user", "content": body}}
+
+    def test_launch_ack_keeps_running_via_flag(self):
+        """run_in_background launch-ACK, no notification yet → 'running', not premature ✓."""
+        subs = self._parse([self._task_use(), self._launch_ack()])
+        assert len(subs) == 1
+        assert subs[0]["agentStatus"] == "running"
+
+    def test_launch_ack_keeps_running_via_content_sniff(self):
+        """ACK text alone (run_in_background flag not recorded) → still 'running'."""
+        subs = self._parse([self._task_use(run_in_background=False), self._launch_ack()])
+        assert subs[0]["agentStatus"] == "running"
+
+    def test_task_notification_flips_to_completed(self):
+        """Terminal task-notification (completed) flips the card to 'completed' on reload."""
+        subs = self._parse([self._task_use(), self._launch_ack(),
+                             self._notification(status="completed")])
+        assert subs[0]["agentStatus"] == "completed"
+
+    def test_task_notification_failed_marks_error(self):
+        """Terminal task-notification (failed) → 'error'."""
+        subs = self._parse([self._task_use(), self._launch_ack(),
+                             self._notification(status="failed")])
+        assert subs[0]["agentStatus"] == "error"
+
+    def test_foreground_subagent_still_completes(self):
+        """Regression guard: a NON-backgrounded sub-agent's real result still completes."""
+        subs = self._parse([
+            self._task_use(run_in_background=False),
+            {"type": "user", "uuid": "fg-res",
+             "toolUseResult": {"agentId": "agent-fg"},
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "task-bg-1",
+                  "content": "Here is the full mapping report with no ack phrases."}]}},
+        ])
+        assert subs[0]["agentStatus"] == "completed"
+
+
 class TestToolResultContentVariants:
     """Test various tool result content formats."""
 
