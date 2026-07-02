@@ -354,7 +354,12 @@ class TestInitEncryptionFromEnv:
         encryption._encryption_key = None
         encryption._key_salt = None
         os.environ.pop("ADMIN_PASSWORD", None)
-        yield
+        # init_encryption_from_env falls back to settings.admin_password, which
+        # the deployment env binds to a real value at import. Neutralize that
+        # fallback so the "unset" cases genuinely see no password from anywhere.
+        from app.core.config import settings
+        with patch.object(settings, "admin_password", None):
+            yield
         encryption._encryption_key = None
         encryption._key_salt = None
         os.environ.pop("ADMIN_PASSWORD", None)

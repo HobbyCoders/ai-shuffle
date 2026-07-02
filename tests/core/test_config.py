@@ -84,17 +84,21 @@ class TestSettingsDefaults:
 
     def test_default_path_settings_are_none(self):
         """Path settings should default to None before model_post_init."""
-        with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-            with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                from app.core.config import Settings
-                settings = Settings()
+        # The deployment env exports DATABASE_URL; clear it so the class-level
+        # default (None) is what this test exercises rather than the leaked value.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DATABASE_URL", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings()
 
-                # After initialization, paths should be set by model_post_init
-                assert settings.data_dir == Path("/mock/data")
-                assert settings.workspace_dir == Path("/mock/workspace")
-                assert settings.claude_projects_dir is None
-                assert settings.tools_dir is None
-                assert settings.database_url is None
+                    # After initialization, paths should be set by model_post_init
+                    assert settings.data_dir == Path("/mock/data")
+                    assert settings.workspace_dir == Path("/mock/workspace")
+                    assert settings.claude_projects_dir is None
+                    assert settings.tools_dir is None
+                    assert settings.database_url is None
 
 
 class TestSettingsFromEnvironment:
@@ -289,16 +293,19 @@ class TestDatabasePaths:
 
                 assert settings.db_path == Path("/mock/data/db.sqlite")
 
-    def test_get_database_url_default(self):
-        """get_database_url should return SQLite URL by default."""
-        with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-            with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                from app.core.config import Settings
-                settings = Settings()
+    def test_get_database_url_requires_configuration(self):
+        """get_database_url raises when unset: the app is Postgres-only (no SQLite fallback)."""
+        # Clear the deployment-leaked DATABASE_URL so the unconfigured path runs.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DATABASE_URL", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings()
 
-                url = settings.get_database_url()
-                assert url.startswith("sqlite:///")
-                assert "db.sqlite" in url
+                    assert settings.database_url is None
+                    with pytest.raises(ValueError, match="DATABASE_URL"):
+                        settings.get_database_url()
 
     def test_get_database_url_custom(self):
         """get_database_url should return custom URL when set."""
