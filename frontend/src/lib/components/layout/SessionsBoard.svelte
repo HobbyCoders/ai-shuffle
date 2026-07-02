@@ -33,7 +33,7 @@
 	let { onOpenSession, onNewSession }: Props = $props();
 
 	const UNGROUPED = '__ungrouped__';
-	const RECENT_LIMIT = 6;
+	const RECENT_LIMIT = 10;
 
 	// --- Collapsible board sections ---
 	// Users with many sessions can fold away the Pinned / Recent / Projects
