@@ -389,10 +389,12 @@ def build_options_from_profile(
     # 5. Default workspace
     execution_mode = "local"
     worktree_info = None
+    working_dir_source = "workspace"
 
     if overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
+        working_dir_source = "override"
         # Check if override includes worktree info
         if overrides.get("worktree_info"):
             execution_mode = "worktree"
@@ -404,18 +406,38 @@ def build_options_from_profile(
         wt_dir, wt_mode, wt_info = _resolve_session_worktree_cwd(session_id, project)
         if wt_dir is not None:
             working_dir = wt_dir
+            working_dir_source = "worktree"
             execution_mode = wt_mode or "worktree"
             worktree_info = wt_info
         elif project:
             working_dir = get_project_working_dir(project)
+            working_dir_source = "project"
         else:
             working_dir = str(settings.workspace_dir)
     elif project:
         working_dir = get_project_working_dir(project)
+        working_dir_source = "project"
     elif config.get("cwd"):
         working_dir = config.get("cwd")
+        working_dir_source = "profile config"
     else:
         working_dir = str(settings.workspace_dir)
+
+    # Fail fast when the resolved cwd doesn't exist: an invalid cwd otherwise
+    # surfaces as an opaque OS-level spawn failure (WinError 267 "directory name
+    # is invalid") deep inside the SDK subprocess connect. Shared-DB installs can
+    # carry project rows whose paths only exist on another machine — name the
+    # path so the failure is actionable. The default workspace is ours to create.
+    if not Path(working_dir).is_dir():
+        if working_dir_source == "workspace":
+            Path(working_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            detail = f"project '{project['name']}'" if working_dir_source == "project" and project.get("name") else working_dir_source
+            raise ValueError(
+                f"Working directory does not exist: {working_dir} (from {detail}). "
+                f"The path may belong to a different install or have been moved — "
+                f"update or remove the project/profile path, or pick another project."
+            )
 
     # Get AI tools config (used for MCP tool registration + env vars, not system prompt)
     ai_tools_config = config.get("ai_tools")

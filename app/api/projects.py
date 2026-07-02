@@ -57,7 +57,9 @@ def normalize_docker_path(path: str) -> str:
     try:
         resolved = Path(path).resolve()
         rel = resolved.relative_to(workspace)
-        return str(rel) if str(rel) != "." else ""
+        # POSIX separators: relative workspace paths are stored in the shared DB
+        # and must resolve identically on every install, including non-Windows.
+        return rel.as_posix() if str(rel) != "." else ""
     except ValueError:
         # Path is outside workspace — return as-is and let validation reject it
         return path

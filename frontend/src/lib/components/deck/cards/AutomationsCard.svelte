@@ -302,17 +302,20 @@
 			return { ...t };
 		});
 
+		// Clearable fields must send explicit null, never undefined: the PATCH
+		// endpoint uses exclude_unset, so an undefined key is dropped by JSON
+		// and the old value silently survives (e.g. "Global" kept a stale project).
 		return {
 			name: formName.trim(),
-			description: formDescription.trim() || undefined,
+			description: formDescription.trim() || null,
 			triggers: processedTriggers,
 			trigger_type: processedTriggers[0]?.type,
 			trigger_config: processedTriggers[0]?.config || {},
-			prompt: formPrompt.trim() || undefined,
+			prompt: formPrompt.trim() || null,
 			profile_id: formProfileId,
-			project_id: formProjectId || undefined,
+			project_id: formProjectId || null,
 			output_config: outputConfig,
-			action_steps: validActionSteps.length > 0 ? validActionSteps : undefined,
+			action_steps: validActionSteps.length > 0 ? validActionSteps : null,
 			max_turns: formMaxTurns ? parseInt(formMaxTurns) : null,
 			timeout_seconds: formTimeoutSeconds ? parseInt(formTimeoutSeconds) : null,
 			max_cost_per_run: formMaxCostPerRun ? parseFloat(formMaxCostPerRun) : null,

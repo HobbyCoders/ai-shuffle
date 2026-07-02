@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
+import psycopg2.errors
 
 from app.db import database
 
@@ -462,11 +463,13 @@ class AutomationManager:
 
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Update run record
-            database.update_automation_run(
-                run_id,
+            # Update run record. The run's session row can be deleted while a
+            # long run is still executing (turn messages only persist at turn
+            # end, so mid-run the session looks blank and gets cleaned up) —
+            # linking it then violates the FK. Record the successful run
+            # without the session link rather than marking it failed.
+            run_result = dict(
                 status="completed",
-                session_id=session_id,
                 response=response_text[:10000],  # Cap stored response
                 cost_usd=cost,
                 tokens_in=tokens_in,
@@ -474,6 +477,14 @@ class AutomationManager:
                 duration_ms=duration_ms,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
+            try:
+                database.update_automation_run(run_id, session_id=session_id, **run_result)
+            except psycopg2.errors.ForeignKeyViolation:
+                logger.warning(
+                    f"Automation {automation_id} run {run_id}: session {session_id} "
+                    f"was deleted mid-run; recording completed run without session link"
+                )
+                database.update_automation_run(run_id, session_id=None, **run_result)
 
             # Update automation stats
             database.update_automation(

@@ -420,6 +420,11 @@
 			<div class="ctl">
 				<select class="sel" value={formProjectId} onchange={(e) => onUpdateFormProjectId(e.currentTarget.value)}>
 					<option value="">None (global)</option>
+					{#if formProjectId && !projects.some((p) => p.id === formProjectId)}
+						<!-- Saved project isn't in this install's list; without this option the
+						     browser would silently display "None (global)" while the stale id stays saved. -->
+						<option value={formProjectId}>Unknown project ({formProjectId.slice(0, 8)}…)</option>
+					{/if}
 					{#each projects as project}
 						<option value={project.id}>{project.name}</option>
 					{/each}

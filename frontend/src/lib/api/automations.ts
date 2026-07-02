@@ -38,15 +38,15 @@ export interface ActionStep {
 
 export interface AutomationCreate {
 	name: string;
-	description?: string;
+	description?: string | null;
 	trigger_type?: TriggerType;
 	trigger_config?: Record<string, any>;
 	triggers?: TriggerItem[];
-	prompt?: string;
+	prompt?: string | null;
 	profile_id: string;
-	project_id?: string;
+	project_id?: string | null;
 	output_config?: Record<string, any>;
-	action_steps?: ActionStep[];
+	action_steps?: ActionStep[] | null;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
 	max_cost_per_run?: number | null;
@@ -58,13 +58,13 @@ export interface AutomationCreate {
 
 export interface AutomationUpdate {
 	name?: string;
-	description?: string;
+	description?: string | null;
 	trigger_type?: TriggerType;
 	trigger_config?: Record<string, any>;
 	triggers?: TriggerItem[];
-	prompt?: string;
+	prompt?: string | null;
 	profile_id?: string;
-	project_id?: string;
+	project_id?: string | null;
 	output_config?: Record<string, any>;
 	max_turns?: number | null;
 	timeout_seconds?: number | null;
@@ -72,7 +72,7 @@ export interface AutomationUpdate {
 	max_cost_per_day?: number | null;
 	max_cost_total?: number | null;
 	max_runs_per_day?: number | null;
-	action_steps?: ActionStep[];
+	action_steps?: ActionStep[] | null;
 	requires_approval?: boolean;
 	is_enabled?: boolean;
 }

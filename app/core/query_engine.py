@@ -832,8 +832,11 @@ async def stream_query(
             api_user_id=api_user_id,
             session_id=session_id
         )
-    except WorktreeUnavailableError as e:
-        logger.error(f"[Query] Worktree unavailable for session {session_id}: {e}")
+    except (WorktreeUnavailableError, ValueError) as e:
+        # Worktree unrecoverable, or the resolved working directory doesn't
+        # exist (e.g. a project path from another install) — surface a clear
+        # error instead of an opaque subprocess spawn failure.
+        logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
         yield {"type": "error", "message": str(e)}
         return
 
@@ -1398,10 +1401,12 @@ async def stream_to_websocket(
             api_user_id=api_user_id,
             session_id=session_id
         )
-    except WorktreeUnavailableError as e:
-        # A worktree session whose worktree can't be recovered: refuse to run
-        # in the main checkout. Surface a clear error to the user instead.
-        logger.error(f"[WS] Worktree unavailable for session {session_id}: {e}")
+    except (WorktreeUnavailableError, ValueError) as e:
+        # A worktree session whose worktree can't be recovered, or a working
+        # directory that doesn't exist (e.g. a project path from another
+        # install): refuse to run in the main checkout / with an invalid cwd.
+        # Surface a clear error to the user instead.
+        logger.error(f"[WS] Cannot build session options for {session_id}: {e}")
         yield {"type": "error", "message": str(e)}
         return
     _build_opts_elapsed = time.monotonic() - _build_opts_start

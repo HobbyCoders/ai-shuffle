@@ -355,3 +355,83 @@ class TestHandleConnectorEvent:
             await manager.handle_connector_event("session.complete", {"project_id": "proj-2"})
             # _execute should not be called because filter didn't match
             # (but the task might be created — depends on how get_automations_for_event works)
+
+# =============================================================================
+# Run Completion — session deleted mid-run (FK fallback)
+# =============================================================================
+
+
+class TestRunCompletionSessionFkFallback:
+    """A long run's session row can be deleted while the run executes (it looks
+    blank until turn-end persistence). Linking it at completion then raises a
+    ForeignKeyViolation — the run must still be recorded as completed, just
+    without the session link, instead of being marked failed."""
+
+    def _automation(self):
+        return {
+            "id": "auto-fk",
+            "profile_id": "default",
+            "project_id": None,
+            "action_steps": [],
+            "run_count": 0,
+            "total_cost_used": 0,
+            "max_turns": None,
+            "timeout_seconds": 60,
+            "output_config": {"type": "none"},
+        }
+
+    def _query_result(self):
+        return {
+            "response": "done",
+            "session_id": "sess-deleted",
+            "total_cost_usd": 0.01,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }
+
+    @pytest.mark.asyncio
+    async def test_completed_run_recorded_without_session_link(self, manager):
+        import psycopg2.errors
+
+        calls = []
+
+        def fake_update_run(run_id, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("status") == "completed" and kwargs.get("session_id"):
+                raise psycopg2.errors.ForeignKeyViolation("session row is gone")
+            return {}
+
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.query_engine.execute_query",
+            new=AsyncMock(return_value=self._query_result()),
+        ):
+            db.update_automation_run.side_effect = fake_update_run
+            db.update_automation.return_value = {}
+            await manager._execute_run(self._automation(), "run-fk", "do it", {})
+
+        completed = [c for c in calls if c.get("status") == "completed"]
+        assert len(completed) == 2
+        assert completed[0]["session_id"] == "sess-deleted"
+        assert completed[1]["session_id"] is None
+        assert completed[1]["response"] == "done"
+        # The automation itself was marked healthy, not errored
+        auto_updates = [
+            c.kwargs for c in db.update_automation.call_args_list if "status" in c.kwargs
+        ]
+        assert auto_updates[-1]["status"] == "idle"
+
+    @pytest.mark.asyncio
+    async def test_non_fk_completion_error_still_propagates(self, manager):
+        def fake_update_run(run_id, **kwargs):
+            if kwargs.get("status") == "completed":
+                raise RuntimeError("unrelated database failure")
+            return {}
+
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.query_engine.execute_query",
+            new=AsyncMock(return_value=self._query_result()),
+        ):
+            db.update_automation_run.side_effect = fake_update_run
+            db.update_automation.return_value = {}
+            with pytest.raises(RuntimeError, match="unrelated database failure"):
+                await manager._execute_run(self._automation(), "run-fk2", "do it", {})
