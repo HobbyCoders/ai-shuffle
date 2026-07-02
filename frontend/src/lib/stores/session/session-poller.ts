@@ -57,6 +57,19 @@ const PARK_POLL_INTERVAL_MS = 1500;
  */
 const POLL_TIMEOUT_MS = 15000;
 
+/**
+ * Error backoff for failing polls, modeled on ws-connection's reconnect curve:
+ * delay = min(BASE * 2^(consecutiveErrors-1), MAX) + jitter. The interval timer
+ * keeps ticking at its normal rate but `_poll` skips until the deadline passes,
+ * so an unhealthy backend (e.g. 503ing during a restart) sees ~1 request/sec
+ * decaying to one per 30s instead of the raw 150ms streaming rate, and the
+ * park/streaming timer lifecycle is untouched. Any successful poll (200 or 304)
+ * clears the backoff immediately.
+ */
+const POLL_BACKOFF_BASE_MS = 1000;
+const POLL_BACKOFF_MAX_MS = 30000;
+const POLL_BACKOFF_JITTER_MS = 250;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface PollTimer {
@@ -124,6 +137,9 @@ class SessionPoller {
 
 	/** Consecutive error counts per session */
 	private _errorCounts: Map<string, number> = new Map();
+
+	/** Per-session error-backoff deadlines (epoch ms); _poll skips until passed */
+	private _backoffUntil: Map<string, number> = new Map();
 
 	/**
 	 * Streaming generation counter per session. Incremented each time
@@ -234,6 +250,9 @@ class SessionPoller {
 			this._pendingPollNow.delete(sessionId);
 		}
 		this._inFlight.delete(sessionId);
+		// A fresh streaming start is a new user action (new query / reconnect) —
+		// don't let a stale error backoff swallow the immediate first poll below.
+		this._backoffUntil.delete(sessionId);
 
 		// Prepare session state for polling.
 		// If the session already has state (e.g., resuming after visibility
@@ -319,6 +338,7 @@ class SessionPoller {
 		}
 		this._inFlight.delete(sessionId);
 		this._errorCounts.delete(sessionId);
+		this._backoffUntil.delete(sessionId);
 		// NOTE: Do NOT delete _streamingGeneration here. The generation counter
 		// must persist across stop→startStreaming cycles so that in-flight polls
 		// from the old generation are correctly detected as stale. Deleting it
@@ -345,6 +365,7 @@ class SessionPoller {
 		this._timers.clear();
 		this._inFlight.clear();
 		this._errorCounts.clear();
+		this._backoffUntil.clear();
 		this._streamingGeneration.clear();
 
 		for (const timer of this._pendingPollNow.values()) {
@@ -456,6 +477,13 @@ class SessionPoller {
 
 	private async _poll(sessionId: string): Promise<void> {
 		if (this._inFlight.has(sessionId)) return;
+
+		// Error backoff: after a failed poll, skip ticks until the deadline set by
+		// _recordError passes. Keeps the timer alive (so recovery is automatic)
+		// while a 503ing/unreachable backend stops being hammered at 150ms.
+		const backoffUntil = this._backoffUntil.get(sessionId);
+		if (backoffUntil !== undefined && Date.now() < backoffUntil) return;
+
 		this._inFlight.add(sessionId);
 
 		const pollGeneration = this._streamingGeneration.get(sessionId) ?? 0;
@@ -475,6 +503,7 @@ class SessionPoller {
 
 			if (response.status === 304) {
 				this._errorCounts.delete(sessionId);
+				this._backoffUntil.delete(sessionId);
 				return;
 			}
 
@@ -487,6 +516,7 @@ class SessionPoller {
 			const data = await response.json();
 			this._applyPollResult(sessionId, data, pollGeneration);
 			this._errorCounts.delete(sessionId);
+			this._backoffUntil.delete(sessionId);
 		} catch (e) {
 			if (e instanceof DOMException && e.name === 'AbortError') {
 				// Stalled poll aborted by the watchdog — the `finally` below clears
@@ -506,7 +536,12 @@ class SessionPoller {
 		const count = (this._errorCounts.get(sessionId) || 0) + 1;
 		this._errorCounts.set(sessionId, count);
 
-		console.warn(`[Poller] Poll error for ${sessionId} (${count} consecutive):`, error);
+		const backoffMs =
+			Math.min(POLL_BACKOFF_BASE_MS * 2 ** (count - 1), POLL_BACKOFF_MAX_MS) +
+			Math.random() * POLL_BACKOFF_JITTER_MS;
+		this._backoffUntil.set(sessionId, Date.now() + backoffMs);
+
+		console.warn(`[Poller] Poll error for ${sessionId} (${count} consecutive, backing off ${Math.round(backoffMs)}ms):`, error);
 
 		if (count >= CONSECUTIVE_ERROR_THRESHOLD && this._onPollError) {
 			this._onPollError(sessionId, count, error);

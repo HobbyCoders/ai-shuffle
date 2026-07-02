@@ -220,10 +220,79 @@ describe('session-poller · poll watchdog (stuck _inFlight recovery)', () => {
 		expect(sessionPoller.isPolling(SESSION_ID)).toBe(true);
 
 		// Advance past the watchdog: the stalled fetch aborts → `finally` clears
-		// `_inFlight` → the next interval tick issues a fresh poll that resolves.
-		// Without the watchdog this advance would still show exactly one call.
-		await vi.advanceTimersByTimeAsync(POLL_TIMEOUT);
+		// `_inFlight` → after the error backoff window (an aborted poll counts as
+		// one failure → 1s) the next interval tick issues a fresh poll that
+		// resolves. Without the watchdog this advance would still show exactly
+		// one call.
+		await vi.advanceTimersByTimeAsync(POLL_TIMEOUT + 2000);
 		expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+	});
+});
+
+describe('session-poller · error backoff (503 hot-loop)', () => {
+	// Regression for e2e Bug B: with the backend answering 503 on /live, the
+	// 150ms streaming timer kept firing requests at full rate (188× GET observed)
+	// with no backoff — a hot-loop that hammers an already-unhealthy backend.
+	const SID = 'session-backoff';
+	const STREAMING_INTERVAL = 150; // STREAMING_POLL_INTERVAL_MS
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0); // deterministic jitter
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SID);
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it('backs off exponentially on repeated HTTP errors instead of polling at full rate', async () => {
+		fetchMock.mockResolvedValue({ ok: false, status: 503 } as unknown as Response);
+
+		sessionPoller.startStreaming(SID);
+		await vi.advanceTimersByTimeAsync(0); // settle the immediate first poll
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		// 10s of a persistently-503 backend. At the raw streaming rate that would
+		// be ~66 requests; exponential backoff (1s, 2s, 4s, 8s …) allows only the
+		// first poll plus a handful of retries.
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(6);
+		// The timer itself must survive the backoff — it skips, not stops.
+		expect(sessionPoller.isPolling(SID)).toBe(true);
+	});
+
+	it('clears the backoff and resumes full-rate polling once the backend recovers', async () => {
+		let calls = 0;
+		fetchMock.mockImplementation(() => {
+			calls += 1;
+			if (calls <= 2) {
+				return Promise.resolve({ ok: false, status: 503 } as unknown as Response);
+			}
+			return Promise.resolve(
+				makeLiveResponse({ lastUpdateId: calls, isStreaming: true, messages: [] })
+			);
+		});
+
+		sessionPoller.startStreaming(SID);
+		// Two failures ride the backoff ladder (1s, then 2s), then the third
+		// attempt succeeds: 0ms → fail, ~1s → fail, ~3s → success.
+		await vi.advanceTimersByTimeAsync(4_000);
+		const callsAtRecovery = fetchMock.mock.calls.length;
+		expect(callsAtRecovery).toBeGreaterThanOrEqual(3);
+
+		// Recovery must clear the backoff: the next second of streaming-rate ticks
+		// polls at full rate again (~6 ticks), not once-per-backoff-window.
+		await vi.advanceTimersByTimeAsync(1_000);
+		const callsAfter = fetchMock.mock.calls.length - callsAtRecovery;
+		expect(callsAfter).toBeGreaterThanOrEqual(Math.floor(1000 / STREAMING_INTERVAL) - 1);
 	});
 });
 
