@@ -16,16 +16,18 @@ The fix extracted the machinery into module-level ``*_impl`` functions in
 1. BINDING GUARD: ``websocket.py`` references the SAME shared impl objects as
    ``chat_ws_handler`` — i.e. the live route uses the shared machinery, not a
    divergent (or absent) copy.
-2. SOURCE-WIRING GUARD: the live ``run_query`` actually invokes the four call
-   sites the fix added (the precise thing that was missing).
-3. FAST-PATH CONTRACT: stash → maybe_unpark → deliver → ONE follow-up
-   ``run_query`` carrying a ``<task-notification>`` prompt with the sub-agent's
-   full result — driven through the shared impls with collaborators shaped
-   EXACTLY as ``websocket.py`` constructs them (a ``_deliver_unpark`` closure
-   capturing a connection-local ``run_query`` + ``set_query_task``).
+2. SOURCE-WIRING GUARD: the live ``run_query`` actually invokes the call sites
+   the fix added (the precise thing that was missing) — and does NOT resurrect
+   the deleted post-turn fast-path follow-up (the 2026-07-02 "task messages
+   surface after the session ends" bug: mid-turn completions are the CLI's to
+   deliver; the app only latches them via ``_latch_terminal_notification``).
+3. LATCH CONTRACT: an in-stream terminal notification for a genuine background
+   task spends the one-unpark-per-task token (``mark_unparked``) so a later
+   drain-pump replay of the same completion delivers NOTHING.
 4. SLOW-PATH CONTRACT: a terminal notification arriving on the pooled client
    AFTER the turn ended is caught by ``_drain_notifications_impl`` and unparks
-   the parent via the same websocket-style collaborators.
+   the parent via websocket-style collaborators (a ``_deliver_unpark`` closure
+   capturing a connection-local ``run_query`` + ``set_query_task``).
 
 No Postgres or real SDK client is required — every boundary is mocked.
 """
@@ -44,9 +46,8 @@ from claude_agent_sdk import TaskNotificationMessage
 
 
 SHARED_SYMBOLS = (
-    "_stash_terminal_notification",
+    "_latch_terminal_notification",
     "_deliver_unpark_impl",
-    "_maybe_unpark_followup_impl",
     "_drain_notifications_impl",
     "_start_drain_pump_impl",
 )
@@ -75,20 +76,33 @@ def test_ws_chat_imports_shared_unpark_machinery():
 # ---------------------------------------------------------------------------
 
 def test_ws_chat_run_query_source_wires_unpark():
-    """The inline /ws/chat run_query must contain the four call sites the fix
-    added. This is the precise wiring that was missing (machinery present in the
+    """The inline /ws/chat run_query must contain the call sites the fix added.
+    This is the precise wiring that was missing (machinery present in the
     codebase, never called from the live path)."""
     import inspect
 
     src = inspect.getsource(ws_mod.chat_websocket)
-    # FAST path: in-loop stash of terminal notifications.
-    assert "_stash_terminal_notification(" in src
-    # FAST path: post-loop follow-up turn.
-    assert "_maybe_unpark_followup_impl(" in src
-    # SLOW path: between-turns drain pump started on completion.
+    # In-loop latch of terminal notifications (dedup vs the pump).
+    assert "_latch_terminal_notification(" in src
+    # Between-turns drain pump started on completion.
     assert "_start_drain_pump_impl(" in src
     # Single-reader invariant: each turn cancels the pump before reading.
     assert "stop_drain_pump(session_id)" in src
+
+
+def test_post_turn_fast_path_stays_deleted():
+    """Regression tripwire for the 2026-07-02 bug: the app-side post-turn
+    follow-up for IN-STREAM completions (stash → _maybe_unpark_followup) was a
+    double delivery — the CLI already injects mid-turn completions into the
+    model's context before the turn ends. Neither handler may resurrect it."""
+    import inspect
+
+    for mod in (cwh, ws_mod):
+        assert not hasattr(mod, "_maybe_unpark_followup_impl")
+        assert not hasattr(mod, "_stash_terminal_notification")
+    assert "_maybe_unpark_followup" not in inspect.getsource(ws_mod.chat_websocket)
+    # The stash's carrier field is gone too.
+    assert not hasattr(MutableStreamState(), "pending_task_notifications")
 
 
 # ---------------------------------------------------------------------------
@@ -179,106 +193,84 @@ def _patch_deliver_boundaries(stack):
 
 
 # ---------------------------------------------------------------------------
-# 3. FAST-path contract — stash → maybe_unpark → deliver → follow-up run_query
+# 3. LATCH contract — in-stream completion latches; the pump never re-delivers
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_fast_path_stash_then_unpark_spawns_followup(tmp_path):
-    from contextlib import ExitStack
-
+def test_latch_spends_unpark_token_for_in_stream_completion():
+    """A genuine background task coming to rest MID-TURN (started this turn AND
+    launched in the background) is latched — the CLI delivered it to the model
+    already, so the app records mark_unparked and fires nothing itself. Other
+    events are no-ops."""
     task_registry.reset_all()
-    out = tmp_path / "out.txt"
-    out.write_text("FULL SUBAGENT RESULT TEXT", encoding="utf-8")
-
-    stream_state = MutableStreamState()
     sid = "sess-1"
-
-    # Genuine FAST path: the agent's TaskStartedMessage arrived THIS turn. The
-    # real SDK lifecycle records this via _record_task_message; here we call the
-    # stash directly, so emulate the start. Without it, _stash_terminal_notification
-    # now (correctly) suppresses the notification as a prior-turn orphan.
     task_registry.mark_started_this_turn(sid, "task-1")
-    # The parent ALSO launched it in the background (tool_use_id "tu-1"); without
-    # this the stash suppresses it as a synchronous sub-agent (result already inline).
     task_registry.mark_background_launch(sid, "tu-1")
 
-    # FAST path: a sub-agent terminal notification arrives in-stream → stash it.
-    cwh._stash_terminal_notification(stream_state, _terminal_event(out), sid)
-    # A non-terminal / non-notification event is a no-op (should not stash).
-    cwh._stash_terminal_notification(stream_state, {"type": "text", "content": "hi"}, sid)
-    cwh._stash_terminal_notification(
-        stream_state, _terminal_event(out, status="in_progress"), sid
-    )
-    assert len(stream_state.pending_task_notifications) == 1
+    # Non-notification / non-terminal events never latch.
+    cwh._latch_terminal_notification({"type": "text", "content": "hi"}, sid)
+    cwh._latch_terminal_notification(_terminal_event("x", status="in_progress"), sid)
+    assert task_registry.was_unparked(sid, "task-1") is False
 
-    run_query = _RecordingRunQuery()
-    set_calls = []
-    deliver = _make_ws_deliver_unpark(run_query, lambda t: set_calls.append(t))
-    ctx = MagicMock()
-
-    with ExitStack() as stack:
-        fresh_sessions = _patch_deliver_boundaries(stack)
-        handed_off = await cwh._maybe_unpark_followup_impl(
-            stream_state=stream_state,
-            session_id=sid,
-            profile_id="claude-code",
-            project_id=None,
-            worktree_id=None,
-            ctx=ctx,
-            deliver_unpark=deliver,
-        )
-        # Let the created follow-up coroutine settle.
-        await asyncio.sleep(0)
-
-        try:
-            assert handed_off is True
-            # Stash cleared after handoff.
-            assert stream_state.pending_task_notifications == []
-            # EXACTLY ONE follow-up run_query with the synthesized prompt.
-            assert len(run_query.calls) == 1
-            synth = run_query.calls[0]["prompt"]
-            assert "<task-notification>" in synth
-            assert "FULL SUBAGENT RESULT TEXT" in synth  # full result off disk
-            assert "task-1" in synth and "tu-1" in synth
-            assert run_query.calls[0]["session_id"] == sid
-            # The unpark follow-up MUST be marked deferred_delivery so a dead
-            # origin socket (parked / reconnected client) falls through to
-            # sync_engine + polling delivery instead of aborting — the parked-
-            # session UI-update bug. (Mirrors the "Send later" queue-drain fix.)
-            assert run_query.calls[0]["deferred_delivery"] is True
-            # Follow-up registered in the (isolated) active-sessions registry.
-            assert sid in fresh_sessions
-            # set_query_task was called with the follow-up task.
-            assert len(set_calls) == 1
-        finally:
-            task_registry.reset_all()
+    cwh._latch_terminal_notification(_terminal_event("x"), sid)
+    assert task_registry.was_unparked(sid, "task-1") is True
+    task_registry.reset_all()
 
 
 @pytest.mark.asyncio
-async def test_fast_path_no_stash_no_followup(tmp_path):
-    """A turn with no stashed notifications hands off nothing (normal completion)."""
+async def test_latched_completion_is_not_redelivered_by_pump(tmp_path):
+    """THE 2026-07-02 regression, end to end: the pooled-client buffer replays a
+    mid-turn completion to the between-turns drain pump; the pump's mark_unparked
+    gate must find the token spent by the in-stream latch and deliver NOTHING —
+    no stale post-turn <task-notification> follow-up."""
     from contextlib import ExitStack
 
     task_registry.reset_all()
-    stream_state = MutableStreamState()
+    ws_cleanup._drain_pumps.clear()
+    out = tmp_path / "out.txt"
+    out.write_text("ALREADY REPORTED RESULT", encoding="utf-8")
+
+    sid = "sess-1"
+    # Genuine background task: tracked, started this turn, backgrounded launch.
+    task_registry.start_task(sid, "task-1", "agent", "bg work")
+    task_registry.mark_started_this_turn(sid, "task-1")
+    task_registry.mark_background_launch(sid, "tu-1")
+
+    # Its terminal notification arrives IN-STREAM → latch only.
+    cwh._latch_terminal_notification(_terminal_event(out), sid)
+    assert task_registry.was_unparked(sid, "task-1") is True
+
+    # Between turns, the same completion replays on the pooled client.
+    client = _FakeClient(
+        [_sdk_notif("task-1", uuid="u-replay", output_file=str(out))], hang=False
+    )
+    state = _fake_state(client)
     run_query = _RecordingRunQuery()
     deliver = _make_ws_deliver_unpark(run_query, lambda t: None)
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
 
     with ExitStack() as stack:
         _patch_deliver_boundaries(stack)
-        handed_off = await cwh._maybe_unpark_followup_impl(
-            stream_state=stream_state,
-            session_id="sess-1",
-            profile_id="claude-code",
-            project_id=None,
-            worktree_id=None,
-            ctx=MagicMock(),
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        await cwh._drain_notifications_impl(
+            sid,
+            "claude-code",
+            None,
+            None,
+            device_id="dev-1",
+            user_id="admin",
+            send_json=AsyncMock(return_value=True),
             deliver_unpark=deliver,
         )
+        await asyncio.sleep(0)
 
-    assert handed_off is False
-    assert run_query.calls == []
-    task_registry.reset_all()
+    try:
+        # Drained the replay, delivered nothing.
+        assert client.received == 1
+        assert run_query.calls == []
+    finally:
+        task_registry.reset_all()
+        ws_cleanup._drain_pumps.clear()
 
 
 # ---------------------------------------------------------------------------

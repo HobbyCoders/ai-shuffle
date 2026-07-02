@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from app.core.config import settings
 from app.core.live_session_store import live_session_store
@@ -59,10 +59,6 @@ class MutableStreamState:
     # `handle_tool_result` can recover the original tool_input / tool_name
     # without re-parsing the live store.
     team_tool_buffer: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    # Terminal background-task notifications stashed in-loop (deduped via
-    # task_registry.mark_unparked) so run_query can fire ONE consolidated
-    # "unpark" follow-up turn after the streaming loop closes.
-    pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

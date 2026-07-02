@@ -5,12 +5,12 @@ app/api/chat_ws_handler.py.
 Drives the REAL ChatWebSocketHandler.run_query while faking the SDK stream
 (stream_to_websocket) so we can assert:
 
-- When the stream yields a terminal `task_notification` then `done`, EXACTLY ONE
-  follow-up run_query is spawned, with a synthesized prompt that contains the
-  literal `<task-notification>` substring AND the `<result>` text read from the
-  task's output_file.
-- A DUPLICATE notification (same task) spawns NO follow-up (mark_unparked dedup,
-  one unpark per task_id for its whole life).
+- A terminal `task_notification` arriving IN-STREAM (before `done`) spawns NO
+  app follow-up turn — the CLI already delivered that completion to the model
+  mid-turn (2026-07-02 incident: the app's post-turn re-delivery re-told the
+  model about work it had already reported). The completion is only LATCHED
+  (mark_unparked) so the between-turns drain pump can't re-deliver it either.
+- Duplicates and already-latched tasks likewise spawn nothing.
 
 All heavy collaborators (live_session_store, sync_engine, database, the
 session-pool/SDK, websocket I/O, cleanup) are mocked; no Postgres or SDK client
@@ -176,23 +176,21 @@ def _count_followup_run_query_coros(created, handler):
 
 
 @pytest.mark.asyncio
-async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
+async def test_terminal_notification_in_stream_spawns_no_followup(tmp_path):
+    """THE 2026-07-02 regression: a genuine background task (started this turn,
+    backgrounded launch) whose terminal notification arrives IN-STREAM must spawn
+    NO app follow-up turn — the CLI already injected the completion into the
+    model's context before the turn ended. The app only latches it so the drain
+    pump can't re-deliver it between turns."""
     task_registry.reset_all()
     # The parent launched this sub-agent in the background (its launch tool_use_id
     # is the notification's tool_use_id "tu-1"); _background_launches is not reset
-    # per turn, so pre-setting it survives run_query's start-of-turn reset. Without
-    # it, the in-stream stash correctly suppresses the notification as a
-    # synchronous sub-agent whose result already returned inline.
+    # per turn, so pre-setting it survives run_query's start-of-turn reset. Even
+    # this strongest case (all old gates pass) must fire nothing post-turn.
     task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("FULL SUBAGENT RESULT TEXT", encoding="utf-8")
 
-    # Genuine FAST path: the agent's TaskStartedMessage arrives THIS turn (the
-    # _fake_stream marks it started-this-turn as it yields), then its terminal
-    # notification arrives in-stream before `done`. Without the task_started
-    # event, the in-stream stash now (correctly) suppresses the notification as a
-    # prior-turn orphan. run_query resets the started-this-turn set at turn start,
-    # so the start MUST flow through the stream, not be pre-set.
     events = [
         {"type": "task_started", "task_id": "task-1", "description": "bg work"},
         {
@@ -216,15 +214,9 @@ async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
 
     try:
         n, prompts = _count_followup_run_query_coros(created, handler)
-        # EXACTLY ONE follow-up run_query.
-        assert n == 1, f"expected exactly one follow-up run_query, got {n}"
-        synth = prompts[0]
-        assert synth is not None
-        assert "<task-notification>" in synth
-        assert "FULL SUBAGENT RESULT TEXT" in synth  # full result, read off disk
-        assert "<result>" in synth and "</result>" in synth
-        assert "task-1" in synth  # task-id
-        assert "tu-1" in synth  # tool-use-id
+        assert n == 0, f"in-stream completion must spawn no follow-up, got {n}: {prompts}"
+        # ...but the completion is latched, spending the pump's unpark token.
+        assert task_registry.was_unparked("sess-1", "task-1") is True
     finally:
         created.close_all()
         task_registry.reset_all()
@@ -232,16 +224,13 @@ async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
 
 @pytest.mark.asyncio
 async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
+    """Duplicate in-stream notifications for the same task change nothing —
+    still zero follow-ups, still latched exactly once."""
     task_registry.reset_all()
-    # Genuine background launch (tool_use_id "tu-1") so the foreground gate passes
-    # and the dedup under test (same uuid twice) is what suppresses the second.
     task_registry.mark_background_launch("sess-1", "tu-1")
     out = tmp_path / "out.txt"
     out.write_text("RESULT", encoding="utf-8")
 
-    # Genuine FAST path: agent started this turn (via the task_started event,
-    # which _fake_stream marks started-this-turn). The dedup under test is
-    # mark_unparked (same task twice), not the started-this-turn scope guard.
     notif = {
         "type": "task_notification",
         "task_id": "task-1",
@@ -267,9 +256,9 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
         await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
 
     try:
-        n, prompts = _count_followup_run_query_coros(created, handler)
-        # The duplicate (same uuid) is deduped -> still exactly ONE follow-up.
-        assert n == 1, f"duplicate uuid should not add a second follow-up, got {n}"
+        n, _prompts = _count_followup_run_query_coros(created, handler)
+        assert n == 0, f"duplicate in-stream notifications must spawn nothing, got {n}"
+        assert task_registry.was_unparked("sess-1", "task-1") is True
     finally:
         created.close_all()
         task_registry.reset_all()

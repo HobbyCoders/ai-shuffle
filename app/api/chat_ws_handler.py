@@ -193,25 +193,29 @@ def _build_task_notification_prompt(pending: list) -> str:
 # tests that monkeypatch e.g. ``handler._deliver_unpark`` still intercept).
 
 
-def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> None:
-    """Stash an in-stream terminal ``task_notification`` (FAST sub-agent path).
+def _latch_terminal_notification(event: dict, session_id: str) -> None:
+    """Latch an in-stream terminal ``task_notification`` — record, never deliver.
 
-    If a sub-agent finishes BEFORE the parent's ``ResultMessage``, its terminal
-    notification arrives in-stream; stash it (deduped via
-    ``task_registry.mark_unparked``, keyed on ``task_id`` alone) so the post-loop
-    unpark fires ONE consolidated follow-up turn. No-op for non-terminal /
-    non-notification events, so it is safe to call for every streamed event.
+    A task that comes to rest BEFORE the parent's ``ResultMessage`` is the CLI's
+    to report, not ours: the CLI enqueues the notification on its own message
+    queue (visible as a ``queue-operation`` transcript entry) and injects it into
+    the model's context before the turn ends — same steering semantics as a user
+    message sent mid-turn. The model therefore already acknowledged the result
+    in THIS turn. The app used to ALSO stash such notifications and fire a
+    ``<task-notification>`` follow-up turn after the ResultMessage, which woke
+    the session to re-tell the model about work it had already reported — the
+    recurring "task messages surface after the session ends" bug (2026-07-02
+    incident). Only a task that comes to rest AFTER the turn ends (session
+    parked) needs an app-driven wake, and that is the between-turns drain pump's
+    job (``_drain_notifications_impl``).
 
-    SCOPE GUARD (spurious-unpark fix): only stash a notification for a task whose
-    ``TaskStartedMessage`` arrived during THIS turn (``was_started_this_turn``) —
-    the genuine FAST path is an agent SPAWNED and COMPLETED before the parent's
-    ResultMessage. The SDK's pooled client BUFFERS task notifications across turns;
-    an undrained prior-turn orphan (e.g. the drain pump broke after the first
-    terminal, or a user message cancelled it mid-wait) can leak into a LATER,
-    UNRELATED turn's ``receive_response()``. Such an orphan was NOT started this
-    turn, so we do NOT stash it → no jarring stale ``<task-notification>`` unpark.
-    The registry still records its completion in ``_record_task_message`` (runs
-    unconditionally on every message), so the indicator never strands.
+    What remains here is bookkeeping: latch ``task_registry.mark_unparked`` for
+    a genuinely backgrounded task so the drain pump can never re-deliver a
+    notification the CLI already surfaced (defense against the pooled-client
+    buffer replaying it between turns), and keep the ``unpark-decision``
+    diagnostic trail. No-op for non-terminal / non-notification events, so it is
+    safe to call for every streamed event. Registry completion is recorded
+    upstream in ``_record_task_message`` regardless, so indicators never strand.
     """
     from app.core.task_registry import task_registry
 
@@ -225,8 +229,8 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
     status = event.get("status")
     signature = event.get("uuid") or f"{output_file}:{status}"
 
-    # Prior-turn orphan leaking from the pooled-client buffer — suppress the
-    # in-stream unpark (registry completion still recorded upstream).
+    # Prior-turn orphan leaking from the pooled-client buffer: nothing to latch —
+    # its unpark fate was decided in its own turn; just leave the audit line.
     started_this_turn = task_registry.was_started_this_turn(session_id, task_id)
     if not started_this_turn:
         _log_unpark_decision(
@@ -240,21 +244,11 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
         )
         return
 
-    # SPURIOUS-UNPARK GATE (synchronous sub-agent fix): even when a notification
-    # arrives in-stream, only a task whose tool_use_id the PARENT recorded as a
-    # run_in_background=true launch should drive the follow-up unpark turn. A
-    # SYNCHRONOUS sub-agent's result already returned INLINE as a tool_result this
-    # turn (its node was completed at the query_engine "subagent_done" yield), so
-    # its at-rest notification carries no new info — do NOT stash it. The registry
-    # completion is still recorded upstream in _record_task_message, so the
-    # indicator never strands. Sits alongside the orphan guard above as a second,
-    # independent reason to suppress the in-stream unpark.
-    #
-    # Fallback for backgrounded local_bash shells: the SDK does not reliably set
-    # tool_use_id on a shell's notification, so accept a task recorded in
-    # _sdk_background_tasks (keyed by the always-present task_id). Such a task is by
-    # construction a genuine background launch, so this can't reintroduce a spurious
-    # unpark — only rescue a shell whose tool_use_id linkage is missing.
+    # Foreground work (a synchronous sub-agent, or a plain Bash/PowerShell call —
+    # the CLI emits local_bash task messages for those too): its result already
+    # returned INLINE as a tool_result this turn. No latch needed — the unpark
+    # gates (was_background_launch / is_sdk_background_task) keep it out of the
+    # drain pump as well.
     if not (
         task_registry.was_background_launch(session_id, event.get("tool_use_id"))
         or task_registry.is_sdk_background_task(session_id, task_id)
@@ -270,35 +264,16 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
         )
         return
 
-    if task_registry.mark_unparked(session_id, task_id):
-        _log_unpark_decision(
-            path="in-stream",
-            session_id=session_id,
-            task_id=task_id,
-            status=status,
-            signature=signature,
-            started_this_turn=True,
-            decision="stash",
-        )
-        stream_state.pending_task_notifications.append({
-            "task_id": task_id,
-            "status": status,
-            "summary": event.get("summary"),
-            "output_file": output_file,
-            "uuid": event.get("uuid"),
-            "usage": event.get("usage"),
-            "tool_use_id": event.get("tool_use_id"),
-        })
-    else:
-        _log_unpark_decision(
-            path="in-stream",
-            session_id=session_id,
-            task_id=task_id,
-            status=status,
-            signature=signature,
-            started_this_turn=True,
-            decision="dedup",
-        )
+    task_registry.mark_unparked(session_id, task_id)
+    _log_unpark_decision(
+        path="in-stream",
+        session_id=session_id,
+        task_id=task_id,
+        status=status,
+        signature=signature,
+        started_this_turn=True,
+        decision="cli-delivered-in-turn",
+    )
 
 
 async def _deliver_unpark_impl(
@@ -316,9 +291,11 @@ async def _deliver_unpark_impl(
     """Persist + broadcast a consolidated ``<task-notification>`` prompt and start
     ONE follow-up turn so the parent "unparks" and responds.
 
-    Shared by the in-stream stash path (``_maybe_unpark_followup``) and the
-    between-turns drain-pump path (``_drain_notifications``). Modeled EXACTLY on
-    the queue-handoff pattern (persist user msg → broadcast → end_streaming →
+    Called by the between-turns drain-pump path (``_drain_notifications``) — the
+    only path that delivers task notifications app-side; a task that comes to
+    rest mid-turn is delivered to the model by the CLI itself (see
+    ``_latch_terminal_notification``). Modeled EXACTLY on the queue-handoff
+    pattern (persist user msg → broadcast → end_streaming →
     create_task(run_query)) so streaming tears down + re-inits without a race.
 
     The caller owns any stopped/interrupting guards and dedup via
@@ -407,42 +384,6 @@ async def _deliver_unpark_impl(
         task_registry.clear_unpark_pending(session_id)
         ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
         return False
-
-
-async def _maybe_unpark_followup_impl(
-    *,
-    stream_state,
-    session_id: str,
-    profile_id: str,
-    project_id: Optional[str],
-    worktree_id: Optional[str],
-    ctx,
-    deliver_unpark: "Callable[..., Awaitable[bool]]",
-) -> bool:
-    """Deliver any stashed terminal task notifications as ONE follow-up turn.
-
-    Returns ``True`` if a follow-up turn was handed off (caller must return),
-    ``False`` otherwise (caller continues to normal completion).
-    """
-    if (
-        not stream_state.pending_task_notifications
-        or session_id in _stopped_sessions
-        or session_id in _interrupt_pending_sessions
-    ):
-        return False
-
-    pending = stream_state.pending_task_notifications
-    stream_state.pending_task_notifications = []  # clear before handing off
-
-    return await deliver_unpark(
-        pending=pending,
-        session_id=session_id,
-        profile_id=profile_id,
-        project_id=project_id,
-        worktree_id=worktree_id,
-        ctx=ctx,
-        final_metadata=stream_state.final_metadata,
-    )
 
 
 def _drop_drain_pump_self(session_id: str, drain_pumps: "Dict[str, asyncio.Task]") -> None:
@@ -1986,31 +1927,6 @@ class ChatWebSocketHandler:
                 logger.error(f"[Queue] Failed to re-queue message: {requeue_err}")
             raise
 
-    async def _maybe_unpark_followup(
-        self,
-        *,
-        stream_state,
-        session_id: str,
-        profile_id: str,
-        project_id: Optional[str],
-        worktree_id: Optional[str],
-        ctx,
-    ) -> bool:
-        """Thin wrapper → ``_maybe_unpark_followup_impl`` (shared with /ws/chat).
-
-        Passes ``self._deliver_unpark`` late-bound so unit tests that monkeypatch
-        it still intercept. Returns ``True`` if a follow-up turn was handed off.
-        """
-        return await _maybe_unpark_followup_impl(
-            stream_state=stream_state,
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=project_id,
-            worktree_id=worktree_id,
-            ctx=ctx,
-            deliver_unpark=self._deliver_unpark,
-        )
-
     async def _deliver_unpark(
         self,
         *,
@@ -2322,21 +2238,20 @@ class ChatWebSocketHandler:
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-                # --- Background-agent "unpark" stash (FAST sub-agent path) ---
-                # If a sub-agent finishes BEFORE the parent's ResultMessage, its
-                # terminal task_notification arrives IN-STREAM; stash it (deduped
-                # by task_registry.mark_unparked) to fire ONE consolidated
-                # follow-up turn in the post-loop block — never start a new query
-                # mid-loop. No-op for non-terminal / non-notification events.
+                # --- Background-task terminal latch (in-stream completions) ---
+                # If a background task finishes BEFORE the parent's ResultMessage,
+                # its terminal task_notification arrives IN-STREAM and the CLI
+                # itself delivers the completion to the model mid-turn (queued
+                # message with steering semantics). We only LATCH it here
+                # (task_registry.mark_unparked) so the between-turns drain pump
+                # never re-delivers it as a spurious post-turn follow-up.
                 #
-                # IMPORTANT: this receive loop does NOT stay open while the
-                # sub-agent runs — stream_to_websocket uses the SDK's
-                # receive_response(), which returns at the PARENT's ResultMessage
-                # (see client.py: "until and including a ResultMessage"). A SLOWER
-                # sub-agent's notification therefore arrives AFTER this loop has
-                # already ended; that case is handled by the between-turns drain
-                # pump (_drain_notifications), started on normal completion below.
-                _stash_terminal_notification(stream_state, event, session_id)
+                # A SLOWER background task's notification arrives AFTER this loop
+                # has ended (stream_to_websocket's receive_response() returns at
+                # the PARENT's ResultMessage); that case — the only one needing an
+                # app-driven unpark — is handled by the between-turns drain pump
+                # (_drain_notifications), started on normal completion below.
+                _latch_terminal_notification(event, session_id)
 
                 # NOTE: Queued ("Send Later") messages are intentionally NOT sent
                 # at intermediate turn boundaries (e.g. stop_reason="tool_use").
@@ -2350,22 +2265,6 @@ class ChatWebSocketHandler:
                 # query.
 
             ctx.debug(logger, "Query completed")
-
-            # --- Background-agent "unpark" follow-up turn ---
-            # If any terminal task_notifications were stashed in-loop, deliver them
-            # as ONE consolidated follow-up turn so the parent "unparks" and
-            # responds. Returns True when it handed off (in which case this turn is
-            # done — the follow-up task now owns streaming).
-            if await self._maybe_unpark_followup(
-                stream_state=stream_state,
-                session_id=session_id,
-                profile_id=profile_id,
-                project_id=project_id,
-                worktree_id=worktree_id,
-                ctx=ctx,
-            ):
-                handed_off_to_queued = True
-                return  # Exit this run_query — the follow-up task continues streaming
 
             # --- Pre-close queue processing ---
             # Before ending the session, check for queued messages.  If any

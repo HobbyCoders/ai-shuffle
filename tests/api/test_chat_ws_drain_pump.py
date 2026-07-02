@@ -817,10 +817,12 @@ async def test_pump_suppresses_killed_update_for_untracked_task():
 
 
 # ---------------------------------------------------------------------------
-# 8. SPURIOUS-UNPARK SUPPRESSION (the reported bug)
-#    A prior-turn orphan task_notification leaking IN-STREAM in a LATER, unrelated
-#    turn must NOT fire an unpark (it was not started THIS turn) — but the registry
-#    MUST still record its completion (the indicator never strands).
+# 8. IN-STREAM TERMINAL LATCH (the spurious post-turn follow-up bug)
+#    A task that comes to rest mid-turn is delivered to the model by the CLI
+#    itself; the app only LATCHES it (_latch_terminal_notification →
+#    mark_unparked) so the drain pump can never re-deliver it, and NEVER fires
+#    its own post-turn follow-up. The registry MUST still record its completion
+#    (the indicator never strands) — that happens in _record_task_message.
 # ---------------------------------------------------------------------------
 
 def _terminal_event(task_id="task-1", *, status="completed", uuid="u-1",
@@ -838,54 +840,35 @@ def _terminal_event(task_id="task-1", *, status="completed", uuid="u-1",
     }
 
 
-def test_stash_suppresses_prior_turn_orphan_not_started_this_turn():
-    """In-stream stash: a notification for a task NOT started this turn (a
-    prior-turn orphan leaking from the pooled-client buffer) is NOT stashed."""
-    from app.api.ws_event_handlers import MutableStreamState
-
+def test_latch_ignores_prior_turn_orphan_not_started_this_turn():
+    """In-stream latch: a notification for a task NOT started this turn (a
+    prior-turn orphan leaking from the pooled-client buffer) latches nothing —
+    its unpark fate was decided in its own turn."""
     task_registry.reset_all()
-    stream_state = MutableStreamState()
     # NOTE: we deliberately do NOT call mark_started_this_turn — this models an
     # orphan whose TaskStartedMessage belonged to an EARLIER turn (already reset).
-    cwh._stash_terminal_notification(stream_state, _terminal_event("orphan-1"), "sess-1")
+    cwh._latch_terminal_notification(_terminal_event("orphan-1"), "sess-1")
 
-    # Nothing stashed -> the post-loop unpark has nothing to deliver.
-    assert stream_state.pending_task_notifications == []
+    assert task_registry.was_unparked("sess-1", "orphan-1") is False
     task_registry.reset_all()
 
 
-def test_stash_fires_for_task_started_this_turn():
-    """In-stream stash: the genuine FAST path (started THIS turn AND launched in the
-    background) IS stashed."""
-    from app.api.ws_event_handlers import MutableStreamState
-
+def test_latch_records_cli_delivered_background_task():
+    """In-stream latch: a genuine background task that comes to rest mid-turn
+    (started THIS turn AND launched in the background) is latched via
+    mark_unparked — the CLI already delivered it to the model, so the drain
+    pump's mark_unparked gate must find it spent and never re-deliver.
+    Idempotent across the CLI's per-rest re-emissions (fresh uuid each time)."""
     task_registry.reset_all()
-    stream_state = MutableStreamState()
     task_registry.mark_started_this_turn("sess-1", "task-1")
     # The parent launched it with run_in_background=true (tool_use_id "tu-1").
     task_registry.mark_background_launch("sess-1", "tu-1")
-    cwh._stash_terminal_notification(stream_state, _terminal_event("task-1"), "sess-1")
+    cwh._latch_terminal_notification(_terminal_event("task-1", uuid="u-1"), "sess-1")
+    cwh._latch_terminal_notification(_terminal_event("task-1", uuid="u-2"), "sess-1")
 
-    assert len(stream_state.pending_task_notifications) == 1
-    assert stream_state.pending_task_notifications[0]["task_id"] == "task-1"
-    task_registry.reset_all()
-
-
-def test_stash_does_not_double_stash_same_task():
-    """Even started-this-turn, a duplicate is deduped by mark_unparked (keyed on
-    task_id alone) — at most ONE pending entry per task, even across re-emissions
-    with a fresh per-rest uuid."""
-    from app.api.ws_event_handlers import MutableStreamState
-
-    task_registry.reset_all()
-    stream_state = MutableStreamState()
-    task_registry.mark_started_this_turn("sess-1", "task-1")
-    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
-    ev = _terminal_event("task-1", uuid="u-1")
-    cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
-    cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
-
-    assert len(stream_state.pending_task_notifications) == 1
+    assert task_registry.was_unparked("sess-1", "task-1") is True
+    # The latch spent the one-unpark-per-task token: the pump's gate now denies.
+    assert task_registry.mark_unparked("sess-1", "task-1") is False
     task_registry.reset_all()
 
 
@@ -943,16 +926,20 @@ async def test_run_query_orphan_notification_does_not_unpark_but_clears_registry
 
 
 @pytest.mark.asyncio
-async def test_run_query_genuine_fast_path_still_unparks():
-    """Integration regression: an agent that BOTH starts and completes in THIS
-    turn STILL fires the in-stream unpark follow-up."""
+async def test_run_query_in_stream_completion_latches_without_followup():
+    """THE 2026-07-02 incident regression: a background task that BOTH starts and
+    completes in THIS turn fires NO app follow-up turn — the CLI already injected
+    the completion into the model's context mid-turn (queued-message steering
+    semantics), so a post-turn <task-notification> re-told the model about work
+    it had already reported. The app must only LATCH the completion so the drain
+    pump can never re-deliver it either."""
     task_registry.reset_all()
     handler = _make_handler()
     handler._start_drain_pump = MagicMock()
     handler._deliver_unpark = AsyncMock(return_value=True)
     # The parent launched this agent in the background (tool_use_id "tu-1", the
-    # notification's tool_use_id). _background_launches is NOT reset per turn, so
-    # pre-setting it here survives run_query's start-of-turn reset.
+    # notification's tool_use_id) — the strongest case: even a GENUINE background
+    # task must not fire a post-turn follow-up when it completed in-stream.
     task_registry.mark_background_launch("sess-1", "tu-1")
 
     events = [
@@ -976,11 +963,10 @@ async def test_run_query_genuine_fast_path_still_unparks():
     with _run_query_patches(handler, _stream_with_registry(events)):
         await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
 
-    # The genuine FAST path unparks exactly once.
-    handler._deliver_unpark.assert_awaited_once()
-    pending = handler._deliver_unpark.await_args.kwargs["pending"]
-    assert len(pending) == 1
-    assert pending[0]["task_id"] == "task-1"
+    # NO app-side delivery — the CLI owned it.
+    handler._deliver_unpark.assert_not_awaited()
+    # ...but the completion is latched, so the pump's mark_unparked gate is spent.
+    assert task_registry.was_unparked("sess-1", "task-1") is True
     task_registry.reset_all()
 
 
@@ -1064,39 +1050,19 @@ async def test_pump_unparks_genuine_background_launch():
     assert handler._deliver_unpark.await_args.kwargs["pending"][0]["task_id"] == "task-1"
 
 
-def test_stash_suppresses_synchronous_subagent_notification():
-    """In-stream stash: a notification started-this-turn but NOT a background launch
-    (a synchronous sub-agent whose result already returned inline) is NOT stashed."""
-    from app.api.ws_event_handlers import MutableStreamState
-
+def test_latch_skips_foreground_work():
+    """In-stream latch: a notification started-this-turn but NOT a background
+    launch (a synchronous sub-agent, or a plain foreground shell — the incident
+    shape) latches nothing: its result already returned inline as a tool_result,
+    and it can never reach the drain pump's unpark gates anyway."""
     task_registry.reset_all()
-    stream_state = MutableStreamState()
     # Started this turn (passes the orphan guard) but NOT a background launch.
     task_registry.mark_started_this_turn("sess-1", "task-1")
-    cwh._stash_terminal_notification(
-        stream_state, _terminal_event("task-1", tool_use_id="tu-1"), "sess-1"
+    cwh._latch_terminal_notification(
+        _terminal_event("task-1", tool_use_id="tu-1"), "sess-1"
     )
 
-    # Nothing stashed -> the post-loop unpark has nothing to deliver.
-    assert stream_state.pending_task_notifications == []
-    task_registry.reset_all()
-
-
-def test_stash_fires_for_background_launched_task():
-    """In-stream stash: started-this-turn AND a recorded background launch IS
-    stashed (the genuine fast background path)."""
-    from app.api.ws_event_handlers import MutableStreamState
-
-    task_registry.reset_all()
-    stream_state = MutableStreamState()
-    task_registry.mark_started_this_turn("sess-1", "task-1")
-    task_registry.mark_background_launch("sess-1", "tu-1")
-    cwh._stash_terminal_notification(
-        stream_state, _terminal_event("task-1", tool_use_id="tu-1"), "sess-1"
-    )
-
-    assert len(stream_state.pending_task_notifications) == 1
-    assert stream_state.pending_task_notifications[0]["task_id"] == "task-1"
+    assert task_registry.was_unparked("sess-1", "task-1") is False
     task_registry.reset_all()
 
 
@@ -1182,21 +1148,18 @@ async def test_pump_suppresses_unmarked_shell_notification():
     assert client.received == 1
 
 
-def test_stash_fires_for_backgrounded_shell_via_fallback():
-    """In-stream stash: a backgrounded shell that completes in-stream (started this
-    turn, in _sdk_background_tasks) IS stashed via the is_sdk_background_task
-    fallback even when its tool_use_id was not recorded as a launch."""
-    from app.api.ws_event_handlers import MutableStreamState
-
+def test_latch_records_backgrounded_shell_via_fallback():
+    """In-stream latch: a backgrounded shell that completes in-stream (started
+    this turn, in _sdk_background_tasks) IS latched via the is_sdk_background_task
+    fallback even when its tool_use_id was not recorded as a launch — the CLI
+    delivered it mid-turn, so the pump must find its unpark token spent."""
     task_registry.reset_all()
-    stream_state = MutableStreamState()
     task_registry.mark_started_this_turn("sess-1", "sh-1")
     task_registry.mark_sdk_background_task("sess-1", "sh-1")
     # No mark_background_launch — the fallback must carry it.
-    cwh._stash_terminal_notification(
-        stream_state, _terminal_event("sh-1", tool_use_id="tu-unrecorded"), "sess-1"
+    cwh._latch_terminal_notification(
+        _terminal_event("sh-1", tool_use_id="tu-unrecorded"), "sess-1"
     )
 
-    assert len(stream_state.pending_task_notifications) == 1
-    assert stream_state.pending_task_notifications[0]["task_id"] == "sh-1"
+    assert task_registry.was_unparked("sess-1", "sh-1") is True
     task_registry.reset_all()

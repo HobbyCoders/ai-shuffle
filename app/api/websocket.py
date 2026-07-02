@@ -35,9 +35,8 @@ from app.api.chat_ws_handler import (
     # Shared background-agent park→wake ("unpark") machinery. These live in
     # chat_ws_handler so BOTH the class-based headless handler AND this inline
     # /ws/chat route drive identical behaviour (see chat_ws_handler.py header).
-    _stash_terminal_notification,
+    _latch_terminal_notification,
     _deliver_unpark_impl,
-    _maybe_unpark_followup_impl,
     _drain_notifications_impl,
     _start_drain_pump_impl,
 )
@@ -582,14 +581,15 @@ async def chat_websocket(
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-                # --- Background-agent "unpark" stash (FAST sub-agent path) ---
-                # A sub-agent finishing BEFORE the parent's ResultMessage arrives
-                # in-stream; stash it (deduped via task_registry.mark_unparked) to
-                # deliver ONE consolidated follow-up turn after the loop. The SLOW
-                # case (notification lands AFTER receive_response() returns at the
-                # parent's ResultMessage) is caught by the between-turns drain pump
-                # started on normal completion below. No-op for other events.
-                _stash_terminal_notification(stream_state, event, session_id)
+                # --- Background-task terminal latch (in-stream completions) ---
+                # A background task finishing BEFORE the parent's ResultMessage
+                # arrives in-stream, and the CLI itself delivers the completion to
+                # the model mid-turn. We only LATCH it here
+                # (task_registry.mark_unparked) so the between-turns drain pump
+                # never re-delivers it post-turn. The SLOW case (notification lands
+                # AFTER receive_response() returns at the parent's ResultMessage) is
+                # caught by the drain pump started on normal completion below.
+                _latch_terminal_notification(event, session_id)
 
                 # NOTE: Queued ("Send Later") messages are intentionally NOT sent
                 # at intermediate turn boundaries (e.g. stop_reason="tool_use").
@@ -605,25 +605,7 @@ async def chat_websocket(
             query_wall_elapsed = time.monotonic() - query_wall_start
             ctx.info(logger, f"Query completed in {query_wall_elapsed:.1f}s")
 
-            # --- Background-agent "unpark" follow-up turn (FAST path) ---
-            # If any terminal task_notifications were stashed in-loop, deliver them
-            # as ONE consolidated follow-up turn so the parent "unparks" and
-            # responds. On handoff this turn is done — the follow-up task now owns
-            # streaming (registered in _active_chat_sessions), so the finally below
-            # won't tear it down and the queue drain will see the running successor
-            # and skip.
-            if await _maybe_unpark_followup_impl(
-                stream_state=stream_state,
-                session_id=session_id,
-                profile_id=profile_id,
-                project_id=project_id,
-                worktree_id=worktree_id,
-                ctx=ctx,
-                deliver_unpark=_deliver_unpark,
-            ):
-                return  # follow-up task continues streaming for this session
-
-            # --- Background "unpark" between-turns drain pump (SLOW path) ---
+            # --- Background "unpark" between-turns drain pump ---
             # If background work (a sub-agent OR an SDK-backgrounded local_bash
             # shell) is STILL in flight, its terminal notification will land on the
             # pooled, still-alive SDK client AFTER this turn's receive_response()
