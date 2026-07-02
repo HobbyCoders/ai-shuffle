@@ -48,15 +48,18 @@ class TestPingProtocol:
             sent_messages.append(data)
             return True
 
-        # Run ping_loop briefly then cancel
-        task = asyncio.create_task(ping_loop(mock_ws, "test-device", send_fn=capture_send))
-        # Wait just enough for one ping (15s interval)
-        await asyncio.sleep(15.5)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        # The ping interval is 30s. Patch the loop's sleep so it cycles a couple
+        # of times instantly and then unwinds via CancelledError (which ping_loop
+        # catches), instead of waiting real wall-clock seconds.
+        calls = {"n": 0}
+
+        async def fake_sleep(_seconds):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                raise asyncio.CancelledError
+
+        with patch("app.api.ws_utils.asyncio.sleep", fake_sleep):
+            await ping_loop(mock_ws, "test-device", send_fn=capture_send)
 
         assert len(sent_messages) >= 1, "No ping messages sent"
         ping_msg = sent_messages[0]

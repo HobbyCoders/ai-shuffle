@@ -141,10 +141,13 @@ def get_project_dir_name(working_dir: str) -> str:
     """
     import os
     # Replace Windows drive colon (D: -> D-), path separators (\, /), and spaces, all
-    # with dashes. Order matters: os.sep first for native, then / for any mixed paths,
-    # then : for Windows drives, then spaces to match the CLI's project-dir encoding.
+    # with dashes. os.sep alone is platform-dependent (it is "/" on POSIX), so a
+    # Windows-style path processed on Linux would keep its backslashes; replace "\"
+    # explicitly as well so the encoding is identical on every platform. Order among
+    # distinct characters is irrelevant.
     return (
         working_dir.replace(os.sep, "-")
+        .replace("\\", "-")
         .replace("/", "-")
         .replace(":", "-")
         .replace(" ", "-")
