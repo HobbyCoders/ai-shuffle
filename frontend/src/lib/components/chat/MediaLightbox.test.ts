@@ -79,26 +79,37 @@ describe('MediaLightbox', () => {
 		expect(dialog()).toBeNull();
 	});
 
-	it('toggles zoom on the image when clicked, and back when clicked again', async () => {
+	// Zoom is pointer-driven (pinch/drag/tap on a single CSS transform); a tap is
+	// a pointerdown+pointerup with no movement in between. jsdom has no
+	// PointerEvent or pointer capture, so synthesize with MouseEvent and stub the
+	// capture methods the handlers call.
+	function tap(img: HTMLImageElement, x = 100, y = 100) {
+		(img as any).setPointerCapture = () => {};
+		(img as any).releasePointerCapture = () => {};
+		img.dispatchEvent(new MouseEvent('pointerdown', { clientX: x, clientY: y, bubbles: true }));
+		img.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, bubbles: true }));
+	}
+
+	it('toggles zoom on the image when tapped, and back when tapped again', async () => {
 		render(MediaLightbox);
 		openLightbox('image', PNG);
 		await tick();
 
 		const img = dialog()!.querySelector('img') as HTMLImageElement;
-		// Starts unzoomed: zoom-in cursor, no scale.
+		// Starts unzoomed: zoom-in cursor, fit-to-screen transform.
 		expect(img.className).toContain('cursor-zoom-in');
-		expect(img.className).not.toContain('scale-[2]');
+		expect(img.style.transform).toContain('scale(1)');
 
-		// Click → zoomed: scaled up, zoom-out cursor.
-		img.click();
+		// Tap → zoomed to 2x, grab cursor for panning.
+		tap(img);
 		await tick();
-		expect(img.className).toContain('scale-[2]');
-		expect(img.className).toContain('cursor-zoom-out');
+		expect(img.style.transform).toContain('scale(2)');
+		expect(img.className).toContain('cursor-grab');
 
-		// Click again → back to unzoomed.
-		img.click();
+		// Tap again → back to unzoomed.
+		tap(img);
 		await tick();
-		expect(img.className).not.toContain('scale-[2]');
+		expect(img.style.transform).toContain('scale(1)');
 		expect(img.className).toContain('cursor-zoom-in');
 	});
 
@@ -108,15 +119,15 @@ describe('MediaLightbox', () => {
 		await tick();
 
 		const img = dialog()!.querySelector('img') as HTMLImageElement;
-		img.click();
+		tap(img);
 		await tick();
-		expect(img.className).toContain('scale-[2]');
+		expect(img.style.transform).toContain('scale(2)');
 
 		// Opening a different image should start unzoomed again.
 		openLightbox('image', PNG + '#second');
 		await tick();
 		const img2 = dialog()!.querySelector('img') as HTMLImageElement;
-		expect(img2.className).not.toContain('scale-[2]');
+		expect(img2.style.transform).toContain('scale(1)');
 		expect(img2.className).toContain('cursor-zoom-in');
 	});
 });
