@@ -75,6 +75,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
+		isRestoringSession: false,
 		...overrides,
 	};
 }
@@ -280,5 +281,31 @@ describe('session-switcher · load-failure error message (B4)', () => {
 		switcher.destroy();
 
 		expect(getState().error).toBe('Could not reach Studio Mac — try again');
+	});
+});
+
+/**
+ * isRestoringSession lifecycle (e2e Bug A): the restore flag set by init() must
+ * never survive a user-driven navigation. switchSession loads the target's
+ * history itself and newChat leaves no session to restore — a lingering flag
+ * would make ChatView hide the empty state and sendMessage stall for nothing.
+ */
+describe('session-switcher · isRestoringSession clears on navigation', () => {
+	it('switchSession clears a pending restore flag', async () => {
+		const { switcher, getState } = makeSwitcher(fullState({ isRestoringSession: true }));
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().isRestoringSession).toBe(false);
+	});
+
+	it('newChat clears a pending restore flag', () => {
+		const { switcher, getState } = makeSwitcher(fullState({ isRestoringSession: true }));
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().isRestoringSession).toBe(false);
 	});
 });

@@ -172,9 +172,36 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		await waitForConnection(timeoutMs);
 	}
 
+	// ─── Wait for a persisted-session restore to settle ─────────────
+
+	function waitForRestore(timeoutMs = 5000): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			if (!getState().isRestoringSession) { resolve(true); return; }
+			const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, timeoutMs);
+			const check = setInterval(() => {
+				if (!getState().isRestoringSession) { clearTimeout(timeout); clearInterval(check); resolve(true); }
+			}, 100);
+		});
+	}
+
 	return {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
+
+			// Restore-race guard: right after a page load, init() may have adopted
+			// a persisted sessionId whose history hasn't rendered yet — the UI
+			// looks like "New Chat" but a send here would silently continue the
+			// old session. Wait for the restore to settle (history fetched, or
+			// navigation cancelled it) BEFORE snapshotting state below, so the
+			// send targets what the user actually sees.
+			if (getState().isRestoringSession) {
+				const settled = await waitForRestore();
+				if (!settled) {
+					update(s => ({ ...s, error: 'Still loading your previous session — please try again in a moment.' }));
+					return false;
+				}
+			}
+
 			const _state = getState();
 
 			// Remote (cloud) session whose owning device is currently offline: live

@@ -24,8 +24,11 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 
-	// Check if this is an empty state (no messages yet)
-	const isEmptyState = $derived($activeSession.messages.length === 0);
+	// Check if this is an empty state (no messages yet). While a persisted
+	// session is being restored, messages is still [] but sessionId already
+	// points at the old session — showing the "New Chat" hero then would invite
+	// sends into an invisible session, so treat the restore window as non-empty.
+	const isEmptyState = $derived($activeSession.messages.length === 0 && !$activeSession.isRestoringSession);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);

@@ -325,6 +325,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// stale snapshot first caused a visible flash before the real history.
 			messages: [],
 			error: null,
+			// Explicit navigation supersedes any pending boot restore — the user
+			// chose this session; don't leave sendMessage waiting on the old one.
+			isRestoringSession: false,
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],
@@ -495,6 +498,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		update(s => ({
 			...s,
 			sessionId: null,
+			// A fresh chat has no session to restore — cancel any pending boot
+			// restore so its window can't outlive the navigation.
+			isRestoringSession: false,
 			sessionProfileId: null,
 			currentQueryProfileId: null,
 			profile: getPersistedProfile() || s.profile,

@@ -376,3 +376,75 @@ describe('message-sender stopGeneration deferral', () => {
 		expect(deps.internal.stopRequestedBeforeSession).toBe(false);
 	});
 });
+
+/**
+ * Restored-session race guard (e2e Bug A).
+ *
+ * init() adopts a persisted sessionId BEFORE its history has rendered — the UI
+ * shows the "New Chat" empty state while _state.sessionId silently points at an
+ * old session. A send fired in that window continues the invisible old session.
+ * sendMessage must wait for the restore's initial history load to settle
+ * (isRestoringSession → false) before targeting the session, and refuse with a
+ * clear error if it never settles.
+ */
+describe('message-sender restored-session race guard', () => {
+	function querySends(wsConn: { send: ReturnType<typeof vi.fn> }) {
+		return wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+	}
+
+	it('waits for the restore to settle, then sends into the restored session', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, wsConn } = makeDeps(baseState({
+				sessionId: 'restored-1',
+				messages: [],
+				isRestoringSession: true,
+			} as any));
+			const sender = createMessageSender(deps);
+
+			const pending = sender.sendMessage('hello restored');
+
+			// Still restoring → the query must NOT have gone out yet.
+			await vi.advanceTimersByTimeAsync(300);
+			expect(querySends(wsConn)).toHaveLength(0);
+
+			// History lands (poll applied) and the restore settles.
+			deps.update(s => ({
+				...s,
+				isRestoringSession: false,
+				messages: [{ id: 'm1', role: 'user', content: 'earlier' } as any],
+			}));
+			await vi.advanceTimersByTimeAsync(200);
+
+			const result = await pending;
+			expect(result).toBe(true);
+			const sends = querySends(wsConn);
+			expect(sends).toHaveLength(1);
+			expect((sends[0][0] as any).session_id).toBe('restored-1');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('refuses the send when the restore never settles', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, wsConn, getState } = makeDeps(baseState({
+				sessionId: 'restored-1',
+				messages: [],
+				isRestoringSession: true,
+			} as any));
+			const sender = createMessageSender(deps);
+
+			const pending = sender.sendMessage('hello stuck');
+			await vi.advanceTimersByTimeAsync(6000);
+
+			const result = await pending;
+			expect(result).toBe(false);
+			expect(querySends(wsConn)).toHaveLength(0);
+			expect(getState().error).toMatch(/loading/i);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

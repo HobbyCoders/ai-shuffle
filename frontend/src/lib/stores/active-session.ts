@@ -173,6 +173,14 @@ export interface ActiveSessionState {
 	 *  read-only banner can explain WHY. undefined for a cleanly-offline owner
 	 *  (plain "view only") and for controllable sessions. */
 	relayError: string | undefined;
+	/** True from the moment init() adopts a persisted sessionId until that
+	 *  session's history has been fetched (onConnected's loadSession settles).
+	 *  During this window the UI looks like "New Chat" (messages=[]) while
+	 *  sessionId silently points at the restored session — sends would land in
+	 *  the old session invisibly. ChatView suppresses the empty-state hero and
+	 *  sendMessage waits for this to clear. Cleared by loadSession settling,
+	 *  switchSession/newChat navigation, or reconnect exhaustion. */
+	isRestoringSession: boolean;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -256,6 +264,7 @@ function defaultState(): ActiveSessionState {
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
+		isRestoringSession: false,
 	};
 }
 
@@ -346,6 +355,12 @@ const wsConn: WsConnection = createWsConnection({
 			// when nothing actually changed.
 			sessionPoller.loadSession(sessionId).then(pollData => {
 				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
+				// The restore window is over — success or failure, we now know
+				// what this session looks like. Only clear if we're still on it
+				// (the user may have navigated away mid-fetch).
+				if (_state.sessionId === sessionId && _state.isRestoringSession) {
+					_update(s => ({ ...s, isRestoringSession: false }));
+				}
 				if (pollData && pollData.isStreaming) {
 					sessionPoller.startStreaming(sessionId);
 				} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
@@ -385,7 +400,9 @@ const wsConn: WsConnection = createWsConnection({
 	},
 	hasPendingTools: () => internal.pendingTools.size > 0,
 	onMaxReconnectAttempts: () => {
-		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.' }));
+		// No connection means the restore fetch will never happen — release any
+		// pending sendMessage waiters so they fail fast instead of timing out.
+		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', isRestoringSession: false }));
 	},
 	onVisibilityHidden: () => {
 		if (_state.sessionId && sessionPoller.isPolling(_state.sessionId)) {

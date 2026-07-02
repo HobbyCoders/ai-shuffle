@@ -129,6 +129,7 @@ function mockState(): ActiveSessionState {
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
+		isRestoringSession: false,
 	};
 }
 

@@ -850,6 +850,11 @@ export function createSessionInit(deps: SessionInitDeps) {
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId,
+						// Adopting a sessionId whose history hasn't rendered yet opens
+						// the restore-race window: the UI shows "New Chat" while sends
+						// would land in the old session. Mark it until onConnected's
+						// loadSession settles.
+						isRestoringSession: persisted.sessionId !== null,
 						title: persisted.title || 'New Chat',
 						profile: persisted.profile || defaultProfile,
 						project: persisted.project || defaultProject,
