@@ -366,7 +366,7 @@ def _load_entries_by_session_id_sync(
     return [row["entry"] for row in rows]
 
 
-def _store_version_by_session_id_sync(session_id: str) -> tuple[int, int]:
+def _store_version_by_session_id_sync(session_id: str, _conn=None) -> tuple[int, int]:
     """Return a cheap ``(count, max_id)`` version stamp for ``session_id``'s main
     transcript (``subpath IS NULL``), matched by ``session_id`` ALONE.
 
@@ -383,8 +383,12 @@ def _store_version_by_session_id_sync(session_id: str) -> tuple[int, int]:
     ``session_id`` alone for the same reason as
     :func:`_load_entries_by_session_id_sync` — the stored ``project_key`` diverges
     from any cwd-derived key.
+
+    ``_conn``: optional open connection (the app's ``transaction()`` idiom) so
+    the lazy backfill's in-lock re-check runs on the SAME connection that holds
+    the advisory xact lock.
     """
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT COUNT(*) AS n, MAX(id) AS max_id FROM session_store_entries "
@@ -445,9 +449,11 @@ def _lazy_backfill_from_jsonl_sync(
          read fallback covers cross-install sessions);
       4. JSONL modified < ``_LAZY_BACKFILL_MIN_JSONL_AGE_S`` ago → live first
          turn, skip (see the constant);
-      5. a ``pg_advisory_xact_lock`` on ``hashtext(session_id)`` plus an
-         in-lock count re-check serializes concurrent backfillers — the table
-         has NO unique constraint, so exclusion is the only dedupe.
+      5. a ``pg_advisory_xact_lock`` on ``hashtext(session_id)`` plus a
+         SESSION-WIDE in-lock count re-check serializes concurrent
+         backfillers — the table has NO unique constraint, so exclusion is
+         the only dedupe (and installs derive different project_keys, so the
+         re-check must ignore the key).
 
     Returns rows written (0 = nothing to do). Raises on DB errors — use
     :func:`lazy_backfill_session_from_jsonl` from read paths.
@@ -485,7 +491,16 @@ def _lazy_backfill_from_jsonl_sync(
         cur.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s))", (sdk_session_id,)
         )
-        if _count_entries_sync(main_key, _conn=conn) == 0:
+        # The in-lock re-check must be SESSION-WIDE (session_id alone, like
+        # the pre-lock guard), not keyed on this install's project_key: two
+        # installs derive different project_keys for the same session, so a
+        # per-key recheck would let the second backfiller insert the whole
+        # transcript again under its own key — and reads merge by session_id,
+        # serving a doubled history.
+        in_lock_count, _ = _store_version_by_session_id_sync(
+            sdk_session_id, _conn=conn
+        )
+        if in_lock_count == 0:
             written += _backfill_entries_sync(main_key, entries, _conn=conn)
             for agent_id, agent_path in get_agent_jsonl_paths(
                 sdk_session_id, working_dir

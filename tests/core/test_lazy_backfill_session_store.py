@@ -160,10 +160,22 @@ class TestGuards:
         seams.backfill.assert_not_called()
 
     def test_in_lock_recheck_aborts(self, seams):
-        """Guard 4: a concurrent backfiller that committed first is detected by
+        """Guard 5: a concurrent backfiller that committed first is detected by
         the in-lock re-check — no duplicate insert (no unique constraint
         exists to catch it otherwise)."""
-        seams.count.return_value = 3
+        seams.version.side_effect = [(0, 0), (3, 30)]
+
+        assert pss._lazy_backfill_from_jsonl_sync(SID) == 0
+        seams.backfill.assert_not_called()
+
+    def test_in_lock_recheck_is_session_wide_across_project_keys(self, seams):
+        """The concurrent backfiller may be ANOTHER install whose project_key
+        derivation differs. A per-key recheck (this install's key has 0 rows)
+        would insert the whole transcript AGAIN — and reads merge by
+        session_id alone, so the history would render doubled. The re-check
+        must count by session_id, ignoring project_key."""
+        seams.version.side_effect = [(0, 0), (210, 999)]
+        seams.count.return_value = 0  # this install's project_key: no rows
 
         assert pss._lazy_backfill_from_jsonl_sync(SID) == 0
         seams.backfill.assert_not_called()
@@ -189,11 +201,21 @@ class TestBackfill:
         assert lock_calls, "backfill must serialize via a pg advisory xact lock"
         assert lock_calls[0][1] == (SID,)
 
-    def test_threads_lock_connection_into_db_helpers(self, seams):
-        """Count re-check and inserts must run on the SAME connection that
+    def test_threads_lock_connection_into_db_helpers(self, seams, project_dir):
+        """Re-checks and inserts must run on the SAME connection that
         holds the advisory xact lock, or the serialization is meaningless."""
+        agent_path = project_dir / SID / "subagents" / "agent-a1.jsonl"
+        _write_jsonl(agent_path, [{"uuid": "s0"}])
+        seams.agent_paths.return_value = {"a1": agent_path}
+
         pss._lazy_backfill_from_jsonl_sync(SID)
 
+        # The session-wide in-lock recheck (last version call) holds the lock
+        # connection; the pre-lock guard (first call) deliberately does not.
+        in_lock_version = seams.version.call_args_list[-1]
+        conn = in_lock_version.kwargs.get("_conn")
+        assert conn is not None and conn.cursor() is seams.cursor
+        assert seams.count.call_args_list, "subagent recheck should have run"
         for call in seams.count.call_args_list + seams.backfill.call_args_list:
             conn = call.kwargs.get("_conn")
             assert conn is not None and conn.cursor() is seams.cursor
