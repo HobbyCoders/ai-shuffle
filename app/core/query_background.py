@@ -30,6 +30,7 @@ from app.db.async_database import run_sync
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect, claude_credentials_mtime,
+    credentials_rotated, refresh_subprocess_credentials,
 )
 from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
@@ -154,6 +155,8 @@ async def _run_background_query(
         if not requires_reconnect(existing_state, options):
             state = existing_state
             reusing_client = True
+            if credentials_rotated(state):
+                await refresh_subprocess_credentials(state, session_id)
             logger.info(f"[Background] Reusing pooled client for session {session_id}")
         else:
             logger.info(f"[Background] Options changed for session {session_id}, creating fresh client")

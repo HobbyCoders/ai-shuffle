@@ -82,7 +82,7 @@ from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect, graceful_disconnect, mark_subprocess_oom_killable,
-    claude_credentials_mtime,
+    claude_credentials_mtime, credentials_rotated, refresh_subprocess_credentials,
 )
 from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
@@ -849,6 +849,8 @@ async def stream_query(
         if not requires_reconnect(existing_state, options):
             state = existing_state
             reusing_client = True
+            if credentials_rotated(state):
+                await refresh_subprocess_credentials(state, session_id)
             logger.info(f"Reusing pooled client for session {session_id}")
         else:
             logger.info(f"Options changed for session {session_id}, creating fresh client")
@@ -1412,6 +1414,12 @@ async def stream_to_websocket(
             # REUSE: Subprocess is alive and options are compatible
             state = existing_state
             reusing_client = True
+
+            # OAuth rotated on disk since spawn → sync it into the subprocess's
+            # config dir in place. Respawning here would SIGTERM the subprocess
+            # and kill every background task/sub-agent it owns.
+            if credentials_rotated(state):
+                await refresh_subprocess_credentials(state, session_id)
 
             # Update callback refs so the existing can_use_tool closure sees current values
             state.callback_refs.update({
