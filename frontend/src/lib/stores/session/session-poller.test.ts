@@ -294,6 +294,68 @@ describe('session-poller · error backoff (503 hot-loop)', () => {
 		const callsAfter = fetchMock.mock.calls.length - callsAtRecovery;
 		expect(callsAfter).toBeGreaterThanOrEqual(Math.floor(1000 / STREAMING_INTERVAL) - 1);
 	});
+
+	it('pollFinal fires even while the session is inside an error-backoff window', async () => {
+		// Regression: handleDone schedules pollFinal for the authoritative
+		// post-streaming state. When a transient error had armed the backoff,
+		// _poll's early return swallowed that final poll and the transcript
+		// stayed stuck on the last streamed frame.
+		fetchMock.mockResolvedValue({ ok: false, status: 503 } as unknown as Response);
+
+		sessionPoller.startStreaming(SID);
+		await vi.advanceTimersByTimeAsync(0); // first poll fails → ~1s backoff armed
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		sessionPoller.pollFinal(SID);
+		await vi.advanceTimersByTimeAsync(150); // pollFinal's own delay
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it('pollNow fires even while the session is inside an error-backoff window', async () => {
+		// pollNow is driven by a WS notification — a positive signal that the
+		// backend is alive and has new content. It must not be swallowed by a
+		// backoff armed during an earlier blip.
+		fetchMock.mockResolvedValue({ ok: false, status: 503 } as unknown as Response);
+
+		sessionPoller.startStreaming(SID);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		sessionPoller.pollNow(SID);
+		await vi.advanceTimersByTimeAsync(100); // pollNow's debounce
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it('startStreaming on an already-polling session clears a deep backoff', async () => {
+		// Regression: startStreaming cleared the backoff AFTER its
+		// already-at-streaming-rate early return. A new user message into a
+		// session whose poller sat in a deep backoff (server briefly down) hit
+		// the no-op path, and every interval tick stayed swallowed until the
+		// stale deadline passed.
+		let calls = 0;
+		fetchMock.mockImplementation(() => {
+			calls += 1;
+			if (calls <= 2) {
+				return Promise.resolve({ ok: false, status: 503 } as unknown as Response);
+			}
+			return Promise.resolve(
+				makeLiveResponse({ lastUpdateId: calls, isStreaming: true, messages: [] })
+			);
+		});
+
+		sessionPoller.startStreaming(SID);
+		// Fail twice: first poll → 1s backoff, retry at ~1s → 2s backoff, so the
+		// deadline now sits ~2s out while the timer keeps ticking.
+		await vi.advanceTimersByTimeAsync(1_200);
+		const callsBefore = fetchMock.mock.calls.length;
+		expect(callsBefore).toBe(2);
+
+		// New user message → startStreaming again (no-op path: timer already at
+		// streaming rate). The next interval ticks must poll immediately.
+		sessionPoller.startStreaming(SID);
+		await vi.advanceTimersByTimeAsync(500);
+		expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore);
+	});
 });
 
 describe('session-poller · compaction full-replace safety net', () => {

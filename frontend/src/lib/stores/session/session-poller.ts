@@ -221,6 +221,14 @@ class SessionPoller {
 	 * to 0% on visibility changes, WS reconnects, or fallback recovery.
 	 */
 	startStreaming(sessionId: string): void {
+		// A streaming start is a new user action (new query / reconnect) — clear
+		// the error backoff BEFORE the already-at-streaming-rate no-op below.
+		// Cleared after that early return, a session stuck in a deep backoff
+		// (server was briefly down) would swallow every interval tick until the
+		// old deadline passed, even though the user just sent a message.
+		this._errorCounts.delete(sessionId);
+		this._backoffUntil.delete(sessionId);
+
 		if (this._timers.has(sessionId)) {
 			const existing = this._timers.get(sessionId)!;
 			if (existing.interval !== STREAMING_POLL_INTERVAL_MS) {
@@ -250,9 +258,6 @@ class SessionPoller {
 			this._pendingPollNow.delete(sessionId);
 		}
 		this._inFlight.delete(sessionId);
-		// A fresh streaming start is a new user action (new query / reconnect) —
-		// don't let a stale error backoff swallow the immediate first poll below.
-		this._backoffUntil.delete(sessionId);
 
 		// Prepare session state for polling.
 		// If the session already has state (e.g., resuming after visibility
@@ -302,7 +307,7 @@ class SessionPoller {
 
 		const timer = setTimeout(() => {
 			this._pendingPollNow.delete(sessionId);
-			this._poll(sessionId);
+			this._poll(sessionId, { ignoreBackoff: true });
 		}, 100);
 		this._pendingPollNow.set(sessionId, timer);
 	}
@@ -322,7 +327,7 @@ class SessionPoller {
 
 		const timer = setTimeout(() => {
 			this._pendingFinalPoll.delete(sessionId);
-			this._poll(sessionId);
+			this._poll(sessionId, { ignoreBackoff: true });
 		}, 150);
 		this._pendingFinalPoll.set(sessionId, timer);
 	}
@@ -475,14 +480,22 @@ class SessionPoller {
 
 	// ─── Private ─────────────────────────────────────────────────────────────
 
-	private async _poll(sessionId: string): Promise<void> {
+	private async _poll(
+		sessionId: string,
+		opts: { ignoreBackoff?: boolean } = {}
+	): Promise<void> {
 		if (this._inFlight.has(sessionId)) return;
 
 		// Error backoff: after a failed poll, skip ticks until the deadline set by
 		// _recordError passes. Keeps the timer alive (so recovery is automatic)
 		// while a 503ing/unreachable backend stops being hammered at 150ms.
-		const backoffUntil = this._backoffUntil.get(sessionId);
-		if (backoffUntil !== undefined && Date.now() < backoffUntil) return;
+		// Event-driven polls (pollNow from a WS notification, pollFinal after
+		// done/stop) bypass it: they fire on a positive signal that the backend
+		// is alive, and swallowing pollFinal would strand the final transcript.
+		if (!opts.ignoreBackoff) {
+			const backoffUntil = this._backoffUntil.get(sessionId);
+			if (backoffUntil !== undefined && Date.now() < backoffUntil) return;
+		}
 
 		this._inFlight.add(sessionId);
 
