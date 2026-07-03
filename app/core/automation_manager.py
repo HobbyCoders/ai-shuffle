@@ -183,7 +183,26 @@ class AutomationManager:
     # ------------------------------------------------------------------
 
     async def _on_schedule_trigger(self, automation_id: str) -> None:
-        """Called by APScheduler when a cron/interval job fires."""
+        """Called by APScheduler when a cron/interval job fires.
+
+        Automations are shared across installs (one database), so every online
+        install fires this job — the runner election picks exactly one to
+        execute, preferring the install that has the automation's project.
+        """
+        automation = database.get_automation(automation_id)
+        if not automation:
+            return
+
+        try:
+            from app.core.automation_service import should_run_scheduled_here
+            should_run, reason = should_run_scheduled_here(automation)
+        except Exception as e:
+            logger.warning(f"Automation {automation_id}: runner election failed ({e}) — running locally")
+            should_run = True
+        if not should_run:
+            logger.debug(f"Automation {automation_id}: scheduled fire skipped on this install ({reason})")
+            return
+
         trigger_data = {"trigger": "schedule", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-schedule-{automation_id}")
 
@@ -385,6 +404,25 @@ class AutomationManager:
             async with self._lock:
                 self._running.pop(automation_id, None)
 
+    @staticmethod
+    def _missing_project_message(project_id: str) -> str:
+        """Explain why the automation's project can't run on this install."""
+        owner_name = None
+        try:
+            project = database.get_project(project_id)
+            owner_id = (project or {}).get("instance_id")
+            if owner_id:
+                owner = database.get_install(owner_id)
+                owner_name = (owner or {}).get("device_name") or owner_id
+        except Exception:
+            project = None
+        project_name = (project or {}).get("name") or project_id
+        return (
+            f"Project '{project_name}' lives on {owner_name or 'another install'} and this "
+            f"install has no clone of it. Start that install, or clone the same git repository "
+            f"here (matching remotes link automatically) so the automation can run anywhere."
+        )
+
     async def _execute_run(
         self,
         automation: Dict[str, Any],
@@ -429,13 +467,28 @@ class AutomationManager:
 
             # Execute prompt if present
             if has_prompt:
+                from app.core.automation_service import resolve_local_project
                 from app.core.query_engine import execute_query
+
+                # The stored project row may belong to another install; run
+                # against this install's clone of the same repo (link group).
+                project_id = automation.get("project_id")
+                if project_id:
+                    local_project = resolve_local_project(project_id)
+                    if local_project is None:
+                        raise ValueError(self._missing_project_message(project_id))
+                    if local_project["id"] != project_id:
+                        logger.info(
+                            f"Automation {automation_id}: project {project_id} belongs to another "
+                            f"install; using local clone {local_project['id']} ({local_project.get('path')})"
+                        )
+                        project_id = local_project["id"]
 
                 result = await asyncio.wait_for(
                     execute_query(
                         prompt=rendered_prompt,
                         profile_id=automation["profile_id"],
-                        project_id=automation.get("project_id"),
+                        project_id=project_id,
                         overrides={"max_turns": automation.get("max_turns", 1)},
                         automation_id=automation_id,
                     ),

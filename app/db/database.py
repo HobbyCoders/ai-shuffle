@@ -740,6 +740,7 @@ from app.db.projects import (  # noqa: F401
     create_project,
     update_project,
     set_project_link_group,
+    get_projects_in_link_group,
     get_project_session_count,
     get_all_project_session_counts,
     delete_project,

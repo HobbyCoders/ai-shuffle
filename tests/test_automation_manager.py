@@ -478,3 +478,152 @@ class TestRunSessionProvenance:
 
         mock_query.assert_awaited_once()
         assert mock_query.call_args.kwargs["automation_id"] == "auto-badge"
+
+
+# =============================================================================
+# Cross-install: scheduled-runner election gate + local project resolution
+# =============================================================================
+
+
+class TestScheduledElectionGate:
+    """Every install fires the shared cron/interval jobs; only the elected
+    runner may execute (automations are shared via the database while each
+    install schedules them all)."""
+
+    def _track_recorder(self, manager):
+        created = []
+
+        def fake_track(coro, *, name):
+            created.append(name)
+            coro.close()
+            from unittest.mock import MagicMock
+            return MagicMock()
+
+        manager._create_tracked_task = fake_track
+        return created
+
+    @pytest.mark.asyncio
+    async def test_skips_when_another_install_is_elected(self, manager):
+        created = self._track_recorder(manager)
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.should_run_scheduled_here",
+            return_value=(False, "install other is the elected runner"),
+        ):
+            db.get_automation.return_value = {"id": "auto-1", "is_enabled": True}
+            await manager._on_schedule_trigger("auto-1")
+        assert created == []
+
+    @pytest.mark.asyncio
+    async def test_runs_when_elected(self, manager):
+        created = self._track_recorder(manager)
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.should_run_scheduled_here",
+            return_value=(True, "elected runner"),
+        ):
+            db.get_automation.return_value = {"id": "auto-1", "is_enabled": True}
+            await manager._on_schedule_trigger("auto-1")
+        assert created == ["auto-schedule-auto-1"]
+
+    @pytest.mark.asyncio
+    async def test_election_error_fails_open(self, manager):
+        created = self._track_recorder(manager)
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.should_run_scheduled_here",
+            side_effect=RuntimeError("registry exploded"),
+        ):
+            db.get_automation.return_value = {"id": "auto-1", "is_enabled": True}
+            await manager._on_schedule_trigger("auto-1")
+        assert created == ["auto-schedule-auto-1"]
+
+    @pytest.mark.asyncio
+    async def test_missing_automation_never_fires(self, manager):
+        created = self._track_recorder(manager)
+        with patch("app.core.automation_manager.database") as db:
+            db.get_automation.return_value = None
+            await manager._on_schedule_trigger("auto-gone")
+        assert created == []
+
+
+class TestExecuteRunProjectResolution:
+    """A run must execute against THIS install's clone of the automation's
+    project (same link group), not the machine-specific row stored at
+    creation time on another install."""
+
+    def _automation(self):
+        return {
+            "id": "auto-xi",
+            "name": "Cross Install",
+            "profile_id": "default",
+            "project_id": "proj-A",
+            "action_steps": [],
+            "run_count": 0,
+            "total_cost_used": 0,
+            "max_turns": 1,
+            "timeout_seconds": 60,
+            "output_config": {"type": "none"},
+        }
+
+    def _query_result(self):
+        return {
+            "response": "done",
+            "session_id": None,
+            "total_cost_usd": 0.01,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_uses_local_link_group_clone(self, manager):
+        sibling = {"id": "proj-B", "path": "/local/clone"}
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.resolve_local_project", return_value=sibling
+        ) as resolve, patch(
+            "app.core.query_engine.execute_query",
+            new=AsyncMock(return_value=self._query_result()),
+        ) as eq:
+            db.update_automation_run.return_value = {}
+            db.update_automation.return_value = {}
+            await manager._execute_run(self._automation(), "run-xi", "do it", {})
+
+        resolve.assert_called_once_with("proj-A")
+        assert eq.call_args.kwargs["project_id"] == "proj-B"
+
+    @pytest.mark.asyncio
+    async def test_run_keeps_own_project_when_local(self, manager):
+        mine = {"id": "proj-A", "path": "/here"}
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.resolve_local_project", return_value=mine
+        ), patch(
+            "app.core.query_engine.execute_query",
+            new=AsyncMock(return_value=self._query_result()),
+        ) as eq:
+            db.update_automation_run.return_value = {}
+            db.update_automation.return_value = {}
+            await manager._execute_run(self._automation(), "run-xj", "do it", {})
+
+        assert eq.call_args.kwargs["project_id"] == "proj-A"
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_project_fails_run_with_clear_error(self, manager):
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.automation_service.resolve_local_project", return_value=None
+        ), patch(
+            "app.core.query_engine.execute_query",
+            new=AsyncMock(return_value=self._query_result()),
+        ) as eq:
+            db.get_project.return_value = {
+                "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
+            }
+            db.get_install.return_value = {"device_name": "Office PC"}
+            db.update_automation_run.return_value = {}
+            db.update_automation.return_value = {}
+            with pytest.raises(ValueError, match="Office PC"):
+                await manager._execute_run(self._automation(), "run-xk", "do it", {})
+
+        eq.assert_not_called()
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "My Repo" in failed[0]["error"]
+        assert "Office PC" in failed[0]["error"]

@@ -9,6 +9,7 @@ import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core import encryption
+from app.core.config import settings
 from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
 from app.db import database
 
@@ -88,6 +89,112 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
         return False, f"Daily cost limit reached (${daily['total_cost']:.4f} / ${max_day_cost:.4f})"
 
     return True, "OK"
+
+
+# ---------------------------------------------------------------------------
+# Cross-install project resolution and scheduled-runner election
+#
+# Automations live in the shared database while their project's ``path`` is
+# machine-specific, so a run must map the stored project row onto whatever
+# clone THIS install has. The sessions board already folds same-repo rows
+# from every install into one logical project via ``link_group_id``
+# (app/core/project_links.py) — automations reuse that grouping here.
+# ---------------------------------------------------------------------------
+
+def resolve_local_project(project_id: str) -> Optional[Dict[str, Any]]:
+    """Map a project id onto the row runnable on THIS install, if any.
+
+    Returns the project row itself when this install owns it (or it predates
+    instance tracking), else this install's clone of the same repo (same
+    ``link_group_id``), else None — meaning the project only exists on other
+    installs and a run here would fail on a nonexistent working directory.
+    """
+    project = database.get_project(project_id)
+    if not project:
+        return None
+
+    me = settings.effective_instance_id
+    owner = project.get("instance_id")
+    if owner is None or owner == me:
+        return project
+
+    link_group_id = project.get("link_group_id")
+    if link_group_id:
+        for sibling in database.get_projects_in_link_group(link_group_id):
+            if sibling.get("instance_id") == me:
+                return sibling
+    return None
+
+
+def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
+    """Decide whether THIS install executes a scheduled (cron/interval) fire.
+
+    Every install schedules every enabled automation, so this gate elects
+    exactly one runner per fire from shared database state (all online
+    installs compute the same winner): the install owning the automation's
+    project row when online, else the first online install (lowest id) that
+    has a clone of the project. Projectless automations go to the first
+    online install. Fails open — running twice beats never running.
+
+    Returns (should_run, reason) where *reason* is for logging.
+    """
+    me = settings.effective_instance_id
+    try:
+        installs = database.get_installs_map()
+    except Exception as e:  # noqa: BLE001 — registry trouble must not kill the fire
+        logger.warning("Runner election: install registry unavailable (%s) — running locally", e)
+        return True, "install registry unavailable"
+
+    online = {iid for iid, row in installs.items() if row.get("online")}
+
+    project_id = automation.get("project_id")
+    if not project_id:
+        if not online:
+            return True, "no installs online per registry"
+        winner = sorted(online)[0]
+        if winner == me:
+            return True, "elected runner (projectless)"
+        return False, f"install {winner} is the elected runner"
+
+    project = database.get_project(project_id)
+    if not project:
+        # Run and let execution surface the missing-project error visibly.
+        return True, "project row missing"
+
+    owner = project.get("instance_id")
+    candidates = {owner} if owner else set()
+    link_group_id = project.get("link_group_id")
+    if link_group_id:
+        for sibling in database.get_projects_in_link_group(link_group_id):
+            if sibling.get("instance_id"):
+                candidates.add(sibling["instance_id"])
+
+    if not candidates:
+        # Legacy rows with no recorded owner: no shared state to elect from —
+        # run wherever the project resolves locally (pre-instance-id behavior).
+        if resolve_local_project(project_id) is not None:
+            return True, "project has no recorded owner; resolvable locally"
+        return False, "project has no recorded owner and no local clone"
+
+    online_candidates = sorted(candidates & online)
+    if not online_candidates:
+        # Registry says nobody with the project is online — possibly including
+        # us, if our heartbeat lags. Run iff we actually have the project.
+        if resolve_local_project(project_id) is not None:
+            return True, "no online candidate per registry; resolvable locally"
+        # Loud, not a failed run: every online install hits this every fire,
+        # and run-record spam would bury the signal.
+        logger.warning(
+            "Automation %s: no online install has project %s — scheduled fire skipped everywhere "
+            "until an install with the project comes online",
+            automation.get("id"), project_id,
+        )
+        return False, "no online install has this project"
+
+    winner = owner if owner in online_candidates else online_candidates[0]
+    if winner == me:
+        return True, "elected runner"
+    return False, f"install {winner} is the elected runner"
 
 
 # ---------------------------------------------------------------------------

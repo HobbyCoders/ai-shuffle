@@ -227,7 +227,10 @@ class TestCreateAutomation:
             )
 
     @pytest.mark.asyncio
-    async def test_create_invalid_profile(self, mock_db):
+    async def test_create_invalid_profile(self, mock_db, mock_encryption):
+        # mock_encryption: webhook triggers encrypt an auto-generated secret
+        # before profile validation, so without it this test only passes when
+        # an earlier test happens to initialize the process-global key.
         from app.core.automation_service import create_automation
 
         with pytest.raises(ValueError, match="Profile not found"):
@@ -374,3 +377,173 @@ class TestGetAutomationStats:
         assert result["automation_id"] == "auto-stats"
         assert result["total_runs"] == 0
         assert result["successful_runs"] == 0
+
+
+# =============================================================================
+# Cross-install project resolution & scheduled-runner election
+# =============================================================================
+
+ME = "install-me"
+OTHER = "install-other"
+EARLY = "install-aaa"  # sorts before both ME and OTHER
+
+
+def _proj(pid, instance_id=None, link_group_id=None, path="/p"):
+    return {
+        "id": pid, "name": pid, "path": path, "settings": {},
+        "instance_id": instance_id, "link_group_id": link_group_id,
+    }
+
+
+def _installs(*specs):
+    """specs: (install_id, online) tuples → {id: row} registry map."""
+    return {iid: {"id": iid, "device_name": iid, "online": online} for iid, online in specs}
+
+
+@pytest.fixture
+def svc_env():
+    """Patch the service's database facade and pin this install's id to ME."""
+    with patch("app.core.automation_service.database") as db, \
+         patch("app.core.automation_service.settings") as st:
+        st.effective_instance_id = ME
+        db.get_projects_in_link_group.return_value = []
+        yield db
+
+
+class TestResolveLocalProject:
+    def test_project_not_found(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        svc_env.get_project.return_value = None
+        assert resolve_local_project("missing") is None
+
+    def test_owned_by_this_install(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        mine = _proj("proj-A", instance_id=ME)
+        svc_env.get_project.return_value = mine
+        assert resolve_local_project("proj-A") == mine
+
+    def test_legacy_row_without_owner(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        legacy = _proj("proj-A", instance_id=None)
+        svc_env.get_project.return_value = legacy
+        assert resolve_local_project("proj-A") == legacy
+
+    def test_foreign_row_resolves_to_local_link_group_sibling(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
+        assert resolve_local_project("proj-A") == sibling
+        svc_env.get_projects_in_link_group.assert_called_once_with("git:abc")
+
+    def test_foreign_row_without_link_group(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        svc_env.get_project.return_value = _proj("proj-A", instance_id=OTHER)
+        assert resolve_local_project("proj-A") is None
+
+    def test_foreign_row_with_no_local_sibling(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign]
+        assert resolve_local_project("proj-A") is None
+
+
+class TestShouldRunScheduledHere:
+    def _auto(self, project_id=None):
+        return {"id": "auto-1", "project_id": project_id}
+
+    def test_empty_registry_runs_locally(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_installs_map.return_value = {}
+        should_run, _ = should_run_scheduled_here(self._auto())
+        assert should_run is True
+
+    def test_registry_error_fails_open(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_installs_map.side_effect = RuntimeError("db down")
+        should_run, _ = should_run_scheduled_here(self._auto())
+        assert should_run is True
+
+    def test_projectless_lowest_online_install_wins(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        should_run, _ = should_run_scheduled_here(self._auto())
+        assert should_run is True  # "install-me" < "install-other"
+
+        svc_env.get_installs_map.return_value = _installs((ME, True), (EARLY, True))
+        should_run, reason = should_run_scheduled_here(self._auto())
+        assert should_run is False
+        assert EARLY in reason
+
+    def test_project_owner_online_wins(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        # Owner is online; we have a clone but must defer even though ME sorts first.
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+        assert OTHER in reason
+
+    def test_owner_offline_failover_to_local_clone(self, svc_env):
+        """The core scenario: creating install is shut down, we have the repo."""
+        from app.core.automation_service import should_run_scheduled_here
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+
+    def test_owner_offline_other_clone_wins_tiebreak(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [
+            foreign,
+            _proj("proj-B", instance_id=ME, link_group_id="git:abc"),
+            _proj("proj-C", instance_id=EARLY, link_group_id="git:abc"),
+        ]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False), (EARLY, True))
+        should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+        assert EARLY in reason
+
+    def test_install_without_project_never_elected(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        # We are online but have no clone; owner offline; nobody else → skip.
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+
+    def test_no_online_candidates_but_locally_resolvable(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        # Our own heartbeat lags (we look offline) but we own the project.
+        mine = _proj("proj-A", instance_id=ME)
+        svc_env.get_project.return_value = mine
+        svc_env.get_installs_map.return_value = _installs((ME, False), (OTHER, False))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+
+    def test_legacy_project_without_owner_runs_where_it_resolves(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        legacy = _proj("proj-A", instance_id=None)
+        svc_env.get_project.return_value = legacy
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+
+    def test_missing_project_row_fails_open(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = None
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-gone"))
+        assert should_run is True

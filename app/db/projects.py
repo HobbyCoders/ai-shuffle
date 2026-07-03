@@ -22,6 +22,7 @@ class ProjectRow(TypedDict):
     description: Optional[str]
     path: str
     settings: Dict[str, Any]
+    instance_id: Optional[str]
     link_group_id: Optional[str]
     created_at: str
     updated_at: str
@@ -129,6 +130,24 @@ def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Opt
             (link_group_id, datetime.now(timezone.utc).isoformat(), project_id),
         )
     return get_project(project_id)
+
+
+def get_projects_in_link_group(link_group_id: str) -> List[ProjectRow]:
+    """All project rows sharing a link group — one row per install for the same repo.
+
+    Deliberately NOT instance-filtered: callers use this to find which installs
+    have a clone of a logical project (see app/core/project_links.py).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM projects WHERE link_group_id = %s ORDER BY id ASC",
+            (link_group_id,),
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
+        return rows
 
 
 def get_project_session_count(project_id: str) -> int:
