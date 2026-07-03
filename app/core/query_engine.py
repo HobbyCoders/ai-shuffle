@@ -430,8 +430,15 @@ async def execute_query(
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
     api_user_id: Optional[str] = None,
+    automation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute a non-streaming query."""
+    """Execute a non-streaming query.
+
+    ``automation_id`` stamps provenance onto a session this call creates, so
+    the sessions list can badge automation-run sessions (they execute headless
+    and read differently from interactive chats). Ignored when resuming an
+    existing ``session_id``.
+    """
 
     # Get profile
     profile = get_profile(profile_id)
@@ -463,7 +470,8 @@ async def execute_query(
             profile_id=profile_id,
             project_id=project_id,
             title=title,
-            api_user_id=api_user_id
+            api_user_id=api_user_id,
+            automation_id=automation_id,
         )
         resume_id = None
 

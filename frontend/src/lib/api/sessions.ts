@@ -51,6 +51,7 @@ export interface Session {
 	controllable?: boolean;  // Live send/interrupt reachable right now
 	project_name?: string | null;  // Resolved server-side (cross-install projects)
 	link_group_id?: string | null;  // Folds same-repo clones into one board group
+	automation_id?: string | null;  // Set when an automation run created this session
 }
 
 export interface SessionMessage {

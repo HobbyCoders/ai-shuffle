@@ -212,6 +212,31 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "cloud_branch"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_branch TEXT")
             migrations_applied.append("sessions.cloud_branch")
+        # Automation provenance: which automation created this session (NULL =
+        # user/API session). Lets the sessions list badge automation runs —
+        # they execute headless, so they read differently from live chats.
+        # No FK: automations are deletable and the badge should survive.
+        if not column_exists(cursor, "sessions", "automation_id"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN automation_id TEXT")
+            migrations_applied.append("sessions.automation_id")
+            # Backfill from run history for sessions created before the column.
+            try:
+                cursor.execute("""
+                    UPDATE sessions SET automation_id = (
+                        SELECT ar.automation_id FROM automation_runs ar
+                        WHERE ar.session_id = sessions.id
+                        ORDER BY ar.created_at DESC LIMIT 1
+                    )
+                    WHERE automation_id IS NULL
+                      AND id IN (SELECT session_id FROM automation_runs
+                                 WHERE session_id IS NOT NULL)
+                """)
+                if cursor.rowcount > 0:
+                    logger.info(
+                        f"Backfilled automation_id for {cursor.rowcount} sessions"
+                    )
+            except _DB_ERRORS:
+                pass  # automation_runs table may not exist yet
         # Legacy cloud offload removal (v48): the per-session proxy model
         # (cloud_remote_url / cloud_remote_session_id) is superseded by the
         # cluster intake/relay, which shares one session id across installs via

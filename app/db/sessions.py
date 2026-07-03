@@ -62,6 +62,7 @@ class SessionRow(TypedDict):
     worktree_branch: Optional[str]
     worktree_path: Optional[str]
     cloud_branch: Optional[str]
+    automation_id: Optional[str]
     title: Optional[str]
     status: str
     is_favorite: bool
@@ -397,6 +398,7 @@ def create_session(
     worktree_id: Optional[str] = None,
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
+    automation_id: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -412,16 +414,17 @@ def create_session(
         worktree_id: Optional worktree to link this session to
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
+        automation_id: Automation that created this session (NULL = user/API session)
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs13 = ", ".join([_ph] * 13)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, created_at, updated_at)
-               VALUES ({_phs13})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, now, now)
+    _phs14 = ", ".join([_ph] * 14)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, created_at, updated_at)
+               VALUES ({_phs14})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)

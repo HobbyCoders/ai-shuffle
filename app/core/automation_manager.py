@@ -437,6 +437,7 @@ class AutomationManager:
                         profile_id=automation["profile_id"],
                         project_id=automation.get("project_id"),
                         overrides={"max_turns": automation.get("max_turns", 1)},
+                        automation_id=automation_id,
                     ),
                     timeout=automation.get("timeout_seconds", 300),
                 )
@@ -616,6 +617,7 @@ class AutomationManager:
                         prompt=rendered,
                         profile_id=profile_id,
                         overrides={"max_turns": max_turns},
+                        automation_id=automation_id,
                     )
                     # Update response_text for subsequent steps
                     response_text = result.get("response", response_text)

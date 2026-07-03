@@ -435,3 +435,46 @@ class TestRunCompletionSessionFkFallback:
             db.update_automation.return_value = {}
             with pytest.raises(RuntimeError, match="unrelated database failure"):
                 await manager._execute_run(self._automation(), "run-fk2", "do it", {})
+
+
+# =============================================================================
+# Session provenance — automation runs stamp automation_id onto their session
+# =============================================================================
+
+
+class TestRunSessionProvenance:
+    """Sessions created by an automation run carry automation_id so the
+    sessions list can badge them (they run headless, unlike interactive
+    chats)."""
+
+    def _automation(self):
+        return {
+            "id": "auto-badge",
+            "profile_id": "default",
+            "project_id": None,
+            "action_steps": [],
+            "run_count": 0,
+            "total_cost_used": 0,
+            "max_turns": None,
+            "timeout_seconds": 60,
+            "output_config": {"type": "none"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_query_receives_automation_id(self, manager):
+        mock_query = AsyncMock(return_value={
+            "response": "done",
+            "session_id": "sess-1",
+            "total_cost_usd": 0.01,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        })
+        with patch("app.core.automation_manager.database") as db, patch(
+            "app.core.query_engine.execute_query", new=mock_query
+        ):
+            db.update_automation_run.return_value = {}
+            db.update_automation.return_value = {}
+            await manager._execute_run(self._automation(), "run-badge", "do it", {})
+
+        mock_query.assert_awaited_once()
+        assert mock_query.call_args.kwargs["automation_id"] == "auto-badge"

@@ -354,6 +354,19 @@ class TestSessionOperations:
         assert result is not None
         assert result["id"] == "session-1"
 
+    def test_create_session_automation_provenance(self, mock_db, setup_profile):
+        """automation_id persists on create and defaults to NULL."""
+        auto = db.create_session(
+            "session-auto", setup_profile, automation_id="auto-nightly"
+        )
+        assert auto["automation_id"] == "auto-nightly"
+        stored = db.get_session("session-auto")
+        assert stored is not None
+        assert stored["automation_id"] == "auto-nightly"
+
+        plain = db.create_session("session-plain", setup_profile)
+        assert plain["automation_id"] is None
+
     def test_get_sessions_with_filters(self, mock_db, setup_profile, setup_project):
         """get_sessions should filter by various criteria."""
         db.create_session("session-1", setup_profile, project_id=setup_project)

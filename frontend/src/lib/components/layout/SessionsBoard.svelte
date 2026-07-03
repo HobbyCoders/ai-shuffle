@@ -11,7 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor, Link2, Unlink, Check } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, Monitor, Link2, Unlink, Check, CalendarClock } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -634,6 +634,12 @@
 				<span class="row-title">{session.title || 'Untitled'}</span>
 			</div>
 			<div class="row-line2">
+				{#if session.automation_id}
+					<span class="row-automation" title="Created by an automation (runs headless — open for history)">
+						<CalendarClock size={11} strokeWidth={1.6} />
+						Automation
+					</span>
+				{/if}
 				{#if session.is_remote && session.device_name}
 					<span
 						class="row-device"
@@ -1124,6 +1130,19 @@
 		color: color-mix(in oklch, var(--primary) 85%, var(--muted-foreground));
 	}
 	.row-branch :global(svg) { flex-shrink: 0; }
+
+	.row-automation {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+		padding: 1px 7px;
+		border-radius: 999px;
+		white-space: nowrap;
+		color: color-mix(in oklch, var(--info) 80%, var(--muted-foreground));
+		background: color-mix(in oklch, var(--info) 14%, transparent);
+	}
+	.row-automation :global(svg) { flex-shrink: 0; }
 
 	.row-device {
 		display: inline-flex;

@@ -334,6 +334,10 @@ class Session(SessionBase):
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
     worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
+    # Automation provenance — set when an automation run created this session.
+    # Automation sessions run headless (no live watch surface), so the sessions
+    # list badges them to differentiate from interactive chats.
+    automation_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     # Cross-install (cluster) annotation — populated by the API enrichment layer
