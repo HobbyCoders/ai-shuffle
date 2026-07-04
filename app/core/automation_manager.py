@@ -8,6 +8,7 @@ budget enforcement, execution via execute_query(), and output delivery.
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -21,6 +22,11 @@ from app.db import database
 
 logger = logging.getLogger(__name__)
 
+# Automations are shared across installs but APScheduler jobs are per-process,
+# so each install periodically re-syncs its jobs from the database to pick up
+# automations created, changed, or deleted on other installs.
+SCHEDULE_RECONCILE_SECONDS = 60
+
 
 class AutomationManager:
     """Central hub for automation scheduling, execution, and output delivery."""
@@ -30,6 +36,8 @@ class AutomationManager:
         self._running: Dict[str, asyncio.Task] = {}  # automation_id → running task
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._scheduled_versions: Dict[str, str] = {}  # automation_id → trigger fingerprint
+        self._reconcile_task: Optional[asyncio.Task] = None
 
     def _create_tracked_task(self, coro, *, name: str) -> asyncio.Task:
         """Create a background task with error logging on failure."""
@@ -65,25 +73,25 @@ class AutomationManager:
             return
 
         # Load and schedule enabled automations
-        automations = database.get_enabled_automations()
-        scheduled = 0
-        for auto in automations:
-            triggers = auto.get("triggers") or []
-            has_scheduled = any(t.get("type") in ("cron", "interval") for t in triggers)
-            if has_scheduled:
-                try:
-                    await self.schedule_automation(auto["id"])
-                    scheduled += 1
-                except Exception as e:
-                    logger.error(f"Failed to schedule automation {auto['id']}: {e}")
+        try:
+            await self._reconcile_schedules()
+        except Exception as e:
+            logger.error(f"Failed to schedule automations at startup: {e}")
+        if self._scheduled_versions:
+            logger.info(f"Scheduled {len(self._scheduled_versions)} automation(s)")
 
-        if scheduled:
-            logger.info(f"Scheduled {scheduled} automation(s)")
+        self._reconcile_task = self._create_tracked_task(
+            self._reconcile_loop(), name="automation-schedule-reconcile"
+        )
 
         self._initialized = True
 
     async def shutdown(self) -> None:
         """Cancel all running tasks and shutdown scheduler."""
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            self._reconcile_task = None
+
         # Cancel running tasks
         async with self._lock:
             for auto_id, task in self._running.items():
@@ -98,6 +106,54 @@ class AutomationManager:
     # ------------------------------------------------------------------
     # Scheduling
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _trigger_version(automation: Dict[str, Any]) -> str:
+        """Fingerprint of an automation's trigger config, for reconcile diffing.
+
+        Deliberately NOT ``updated_at``: every run completion touches that
+        column, and re-adding an unchanged IntervalTrigger job resets its
+        next-fire time — reconciling on it would push interval automations
+        back one interval after every run.
+        """
+        return json.dumps(automation.get("triggers") or [], sort_keys=True, default=str)
+
+    async def _reconcile_loop(self) -> None:
+        """Periodically re-sync APScheduler jobs with the shared database.
+
+        Without this, an automation created or re-enabled on another install
+        never gets a job here — and if the runner election picks this install
+        (e.g. it's the only one with the project), the automation never fires.
+        """
+        while True:
+            await asyncio.sleep(SCHEDULE_RECONCILE_SECONDS)
+            try:
+                await self._reconcile_schedules()
+            except Exception as e:  # noqa: BLE001 — the loop must survive DB blips
+                logger.warning(f"Automation schedule reconcile failed: {e}")
+
+    async def _reconcile_schedules(self) -> None:
+        """Diff enabled automations against local jobs; apply the changes."""
+        if not self._scheduler:
+            return
+
+        want: Dict[str, str] = {}
+        for auto in database.get_enabled_automations():
+            triggers = auto.get("triggers") or []
+            if any(t.get("type") in ("cron", "interval") for t in triggers):
+                want[auto["id"]] = self._trigger_version(auto)
+
+        for auto_id, version in want.items():
+            if self._scheduled_versions.get(auto_id) != version:
+                try:
+                    await self.schedule_automation(auto_id)
+                except Exception as e:
+                    logger.error(f"Failed to schedule automation {auto_id}: {e}")
+
+        for auto_id in list(self._scheduled_versions):
+            if auto_id not in want:
+                logger.info(f"Automation {auto_id} disabled or deleted — removing local schedule")
+                await self.unschedule_automation(auto_id)
 
     def _remove_automation_jobs(self, automation_id: str) -> None:
         """Remove all APScheduler jobs for an automation."""
@@ -123,6 +179,10 @@ class AutomationManager:
         self._remove_automation_jobs(automation_id)
 
         triggers = automation.get("triggers") or []
+        if any(t.get("type") in ("cron", "interval") for t in triggers):
+            self._scheduled_versions[automation_id] = self._trigger_version(automation)
+        else:
+            self._scheduled_versions.pop(automation_id, None)
         for i, trig in enumerate(triggers):
             t_type = trig.get("type")
             t_config = trig.get("config", {})
@@ -176,6 +236,7 @@ class AutomationManager:
     async def unschedule_automation(self, automation_id: str) -> None:
         """Remove all APScheduler jobs for an automation."""
         self._remove_automation_jobs(automation_id)
+        self._scheduled_versions.pop(automation_id, None)
         logger.info(f"Unscheduled automation {automation_id}")
 
     # ------------------------------------------------------------------
@@ -189,19 +250,23 @@ class AutomationManager:
         install fires this job — the runner election picks exactly one to
         execute, preferring the install that has the automation's project.
         """
-        automation = database.get_automation(automation_id)
-        if not automation:
-            return
-
         try:
+            automation = database.get_automation(automation_id)
+            if not automation:
+                # Deleted (possibly on another install) while our job survived.
+                logger.warning(f"Automation {automation_id} no longer exists — removing stale schedule")
+                await self.unschedule_automation(automation_id)
+                return
+
             from app.core.automation_service import should_run_scheduled_here
             should_run, reason = should_run_scheduled_here(automation)
+            if not should_run:
+                logger.debug(f"Automation {automation_id}: scheduled fire skipped on this install ({reason})")
+                return
         except Exception as e:
-            logger.warning(f"Automation {automation_id}: runner election failed ({e}) — running locally")
-            should_run = True
-        if not should_run:
-            logger.debug(f"Automation {automation_id}: scheduled fire skipped on this install ({reason})")
-            return
+            # Fail open: a transient DB/registry blip must not silently drop
+            # the fire — _execute records its own failure if things are broken.
+            logger.warning(f"Automation {automation_id}: scheduled-fire gate failed ({e}) — running locally")
 
         trigger_data = {"trigger": "schedule", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-schedule-{automation_id}")
@@ -407,15 +472,19 @@ class AutomationManager:
     @staticmethod
     def _missing_project_message(project_id: str) -> str:
         """Explain why the automation's project can't run on this install."""
+        project = None
         owner_name = None
         try:
             project = database.get_project(project_id)
-            owner_id = (project or {}).get("instance_id")
-            if owner_id:
+        except Exception:
+            pass
+        owner_id = (project or {}).get("instance_id")
+        if owner_id:
+            try:
                 owner = database.get_install(owner_id)
                 owner_name = (owner or {}).get("device_name") or owner_id
-        except Exception:
-            project = None
+            except Exception:
+                owner_name = owner_id
         project_name = (project or {}).get("name") or project_id
         return (
             f"Project '{project_name}' lives on {owner_name or 'another install'} and this "

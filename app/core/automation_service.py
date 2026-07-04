@@ -6,11 +6,13 @@ import hashlib
 import logging
 import re
 import secrets
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core import encryption
 from app.core.config import settings
 from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
+from app.core.project_utils import get_project_working_dir
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -101,29 +103,49 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
 # (app/core/project_links.py) — automations reuse that grouping here.
 # ---------------------------------------------------------------------------
 
+def _link_group_siblings(project: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All rows sharing the project's link group (one per install), or []."""
+    link_group_id = project.get("link_group_id")
+    return database.get_projects_in_link_group(link_group_id) if link_group_id else []
+
+
+def _local_candidate(
+    project: Dict[str, Any], siblings: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """The row THIS install can actually run, given a project and its siblings.
+
+    Own row first, then this install's link-group sibling. As a last resort,
+    the stored row itself when its path exists on this machine — covering
+    legacy rows without an ``instance_id``, regenerated instance ids, and
+    shared filesystems, all of which ran fine before instance tracking.
+    """
+    me = settings.effective_instance_id
+    if project.get("instance_id") == me:
+        return project
+    for sibling in siblings:
+        if sibling.get("instance_id") == me:
+            return sibling
+    try:
+        if Path(get_project_working_dir(project)).is_dir():
+            return project
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def resolve_local_project(project_id: str) -> Optional[Dict[str, Any]]:
     """Map a project id onto the row runnable on THIS install, if any.
 
-    Returns the project row itself when this install owns it (or it predates
-    instance tracking), else this install's clone of the same repo (same
-    ``link_group_id``), else None — meaning the project only exists on other
-    installs and a run here would fail on a nonexistent working directory.
+    Returns the project row itself when this install owns it, else this
+    install's clone of the same repo (same ``link_group_id``), else the
+    stored row when its path exists here anyway. None means the project only
+    exists on other installs and a run here would fail on a nonexistent
+    working directory.
     """
     project = database.get_project(project_id)
     if not project:
         return None
-
-    me = settings.effective_instance_id
-    owner = project.get("instance_id")
-    if owner is None or owner == me:
-        return project
-
-    link_group_id = project.get("link_group_id")
-    if link_group_id:
-        for sibling in database.get_projects_in_link_group(link_group_id):
-            if sibling.get("instance_id") == me:
-                return sibling
-    return None
+    return _local_candidate(project, _link_group_siblings(project))
 
 
 def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
@@ -146,11 +168,13 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
         return True, "install registry unavailable"
 
     online = {iid for iid, row in installs.items() if row.get("online")}
+    # This code is running, so this install is alive no matter what its
+    # heartbeat row says — counting ourselves closes the boundary race where
+    # a stale row makes every install defer and nobody fires.
+    online.add(me)
 
     project_id = automation.get("project_id")
     if not project_id:
-        if not online:
-            return True, "no installs online per registry"
         winner = sorted(online)[0]
         if winner == me:
             return True, "elected runner (projectless)"
@@ -158,43 +182,61 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
 
     project = database.get_project(project_id)
     if not project:
-        # Run and let execution surface the missing-project error visibly.
-        return True, "project row missing"
+        # Elect one install to run and fail visibly — N installs producing
+        # N identical failed runs per fire would bury the signal.
+        winner = sorted(online)[0]
+        if winner == me:
+            return True, "project row missing; elected to surface the error"
+        return False, f"project row missing; install {winner} will surface the error"
 
+    siblings = _link_group_siblings(project)
     owner = project.get("instance_id")
-    candidates = {owner} if owner else set()
-    link_group_id = project.get("link_group_id")
-    if link_group_id:
-        for sibling in database.get_projects_in_link_group(link_group_id):
-            if sibling.get("instance_id"):
-                candidates.add(sibling["instance_id"])
+    candidates = {s["instance_id"] for s in siblings if s.get("instance_id")}
+    if owner:
+        candidates.add(owner)
+    local = _local_candidate(project, siblings)
 
     if not candidates:
-        # Legacy rows with no recorded owner: no shared state to elect from —
-        # run wherever the project resolves locally (pre-instance-id behavior).
-        if resolve_local_project(project_id) is not None:
+        # Legacy rows with no recorded owner anywhere: no shared state to
+        # elect from — run wherever the path exists (pre-instance-id behavior).
+        if local is not None:
             return True, "project has no recorded owner; resolvable locally"
         return False, "project has no recorded owner and no local clone"
 
     online_candidates = sorted(candidates & online)
     if not online_candidates:
-        # Registry says nobody with the project is online — possibly including
-        # us, if our heartbeat lags. Run iff we actually have the project.
-        if resolve_local_project(project_id) is not None:
+        # Registry says nobody with the project is online. Run iff we can —
+        # e.g. the stored path exists here even though no row is ours.
+        if local is not None:
             return True, "no online candidate per registry; resolvable locally"
-        # Loud, not a failed run: every online install hits this every fire,
-        # and run-record spam would bury the signal.
+        # Loud + surfaced on the automation, not a failed run: every online
+        # install hits this every fire and run-record spam buries the signal.
         logger.warning(
             "Automation %s: no online install has project %s — scheduled fire skipped everywhere "
             "until an install with the project comes online",
             automation.get("id"), project_id,
         )
+        _record_no_runner(automation, project)
         return False, "no online install has this project"
 
     winner = owner if owner in online_candidates else online_candidates[0]
     if winner == me:
         return True, "elected runner"
     return False, f"install {winner} is the elected runner"
+
+
+def _record_no_runner(automation: Dict[str, Any], project: Dict[str, Any]) -> None:
+    """Surface the nobody-can-run-this state on the automation itself."""
+    message = (
+        f"No online install has project '{project.get('name') or project.get('id')}' — "
+        f"scheduled runs are skipped until one comes online."
+    )
+    if automation.get("last_error") == message:
+        return
+    try:
+        database.update_automation(automation["id"], last_error=message)
+    except Exception as e:  # noqa: BLE001 — visibility must not break the gate
+        logger.debug("Could not record no-runner state for automation %s: %s", automation.get("id"), e)
 
 
 # ---------------------------------------------------------------------------

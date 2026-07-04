@@ -28,15 +28,19 @@ class ProjectRow(TypedDict):
     updated_at: str
 
 
+def _parse_project_row(row: Optional[Dict[str, Any]]) -> Optional[ProjectRow]:
+    """Normalize a raw projects row: decode the settings JSON column."""
+    if row:
+        row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
+    return row
+
+
 def get_project(project_id: str) -> Optional[ProjectRow]:
     """Get a project by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
-        row = row_to_dict(cursor.fetchone())
-        if row:
-            row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
-        return row
+        return _parse_project_row(row_to_dict(cursor.fetchone()))
 
 
 def get_all_projects() -> List[ProjectRow]:
@@ -49,10 +53,7 @@ def get_all_projects() -> List[ProjectRow]:
             "SELECT * FROM projects WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC",
             (instance_id,)
         )
-        rows = rows_to_list(cursor.fetchall())
-        for row in rows:
-            row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
-        return rows
+        return [_parse_project_row(row) for row in rows_to_list(cursor.fetchall())]
 
 
 def create_project(
@@ -144,10 +145,7 @@ def get_projects_in_link_group(link_group_id: str) -> List[ProjectRow]:
             "SELECT * FROM projects WHERE link_group_id = %s ORDER BY id ASC",
             (link_group_id,),
         )
-        rows = rows_to_list(cursor.fetchall())
-        for row in rows:
-            row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
-        return rows
+        return [_parse_project_row(row) for row in rows_to_list(cursor.fetchall())]
 
 
 def get_project_session_count(project_id: str) -> int:

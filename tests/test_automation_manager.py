@@ -543,6 +543,104 @@ class TestScheduledElectionGate:
             await manager._on_schedule_trigger("auto-gone")
         assert created == []
 
+    @pytest.mark.asyncio
+    async def test_ghost_job_is_unscheduled(self, manager):
+        """An automation deleted on another install leaves a local job behind;
+        the next fire must clean it up instead of skipping silently forever."""
+        created = self._track_recorder(manager)
+        manager._scheduled_versions["auto-gone"] = "stale"
+        with patch("app.core.automation_manager.database") as db:
+            db.get_automation.return_value = None
+            await manager._on_schedule_trigger("auto-gone")
+        assert created == []
+        assert "auto-gone" not in manager._scheduled_versions
+
+    @pytest.mark.asyncio
+    async def test_gate_db_error_fails_open(self, manager):
+        """A transient DB error while loading the automation must not
+        silently drop the fire on the elected winner."""
+        created = self._track_recorder(manager)
+        with patch("app.core.automation_manager.database") as db:
+            db.get_automation.side_effect = RuntimeError("db blip")
+            await manager._on_schedule_trigger("auto-1")
+        assert created == ["auto-schedule-auto-1"]
+
+
+class TestScheduleReconcile:
+    """APScheduler jobs are per-process while automations are shared via the
+    database — the reconcile pass syncs local jobs with rows changed on
+    other installs."""
+
+    def _auto(self, auto_id="auto-1", seconds=300):
+        return {
+            "id": auto_id,
+            "is_enabled": True,
+            "triggers": [{"type": "interval", "config": {"seconds": seconds}}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_schedules_automation_created_elsewhere(self, manager):
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        manager.schedule_automation = AsyncMock()
+        with patch("app.core.automation_manager.database") as db:
+            db.get_enabled_automations.return_value = [self._auto()]
+            await manager._reconcile_schedules()
+        manager.schedule_automation.assert_awaited_once_with("auto-1")
+
+    @pytest.mark.asyncio
+    async def test_unchanged_automation_is_not_rescheduled(self, manager):
+        """Re-adding an unchanged IntervalTrigger job would reset its
+        next-fire time — unchanged trigger configs must be left alone."""
+        auto = self._auto()
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        manager._scheduled_versions["auto-1"] = AutomationManager._trigger_version(auto)
+        manager.schedule_automation = AsyncMock()
+        with patch("app.core.automation_manager.database") as db:
+            db.get_enabled_automations.return_value = [auto]
+            await manager._reconcile_schedules()
+        manager.schedule_automation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_changed_trigger_config_is_rescheduled(self, manager):
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        manager._scheduled_versions["auto-1"] = AutomationManager._trigger_version(
+            self._auto(seconds=300)
+        )
+        manager.schedule_automation = AsyncMock()
+        with patch("app.core.automation_manager.database") as db:
+            db.get_enabled_automations.return_value = [self._auto(seconds=600)]
+            await manager._reconcile_schedules()
+        manager.schedule_automation.assert_awaited_once_with("auto-1")
+
+    @pytest.mark.asyncio
+    async def test_unschedules_automation_removed_elsewhere(self, manager):
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        manager._scheduled_versions["auto-old"] = "v1"
+        with patch("app.core.automation_manager.database") as db:
+            db.get_enabled_automations.return_value = []
+            await manager._reconcile_schedules()
+        assert "auto-old" not in manager._scheduled_versions
+
+    def test_trigger_version_ignores_run_bookkeeping(self):
+        """The fingerprint must only track trigger config: run completions
+        touch updated_at/run_count and must not cause a phase-resetting
+        re-schedule."""
+        a = {"id": "x", "triggers": [{"type": "cron", "config": {"expression": "0 * * * *"}}],
+             "updated_at": "2026-01-01T00:00:00", "run_count": 1}
+        b = {"id": "x", "triggers": [{"type": "cron", "config": {"expression": "0 * * * *"}}],
+             "updated_at": "2026-06-01T12:34:56", "run_count": 99}
+        assert AutomationManager._trigger_version(a) == AutomationManager._trigger_version(b)
+
+    @pytest.mark.asyncio
+    async def test_schedule_automation_records_version(self, manager):
+        auto = self._auto()
+        manager._scheduler = MagicMock(get_jobs=MagicMock(return_value=[]))
+        with patch("app.core.automation_manager.database") as db:
+            db.get_automation.return_value = auto
+            await manager.schedule_automation("auto-1")
+        assert manager._scheduled_versions["auto-1"] == AutomationManager._trigger_version(auto)
+        manager._scheduler.add_job.assert_called_once()
+
 
 class TestExecuteRunProjectResolution:
     """A run must execute against THIS install's clone of the automation's

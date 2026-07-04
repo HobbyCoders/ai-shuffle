@@ -422,11 +422,25 @@ class TestResolveLocalProject:
         svc_env.get_project.return_value = mine
         assert resolve_local_project("proj-A") == mine
 
-    def test_legacy_row_without_owner(self, svc_env):
+    def test_legacy_row_without_owner_and_existing_path(self, svc_env, tmp_path):
         from app.core.automation_service import resolve_local_project
-        legacy = _proj("proj-A", instance_id=None)
+        legacy = _proj("proj-A", instance_id=None, path=str(tmp_path))
         svc_env.get_project.return_value = legacy
         assert resolve_local_project("proj-A") == legacy
+
+    def test_legacy_row_without_owner_and_missing_path(self, svc_env):
+        from app.core.automation_service import resolve_local_project
+        legacy = _proj("proj-A", instance_id=None, path="/does/not/exist")
+        svc_env.get_project.return_value = legacy
+        assert resolve_local_project("proj-A") is None
+
+    def test_foreign_row_with_usable_local_path(self, svc_env, tmp_path):
+        """Stale/regenerated instance ids and shared filesystems: no row is
+        ours, but the stored path exists here — run it (pre-tracking behavior)."""
+        from app.core.automation_service import resolve_local_project
+        foreign = _proj("proj-A", instance_id=OTHER, path=str(tmp_path))
+        svc_env.get_project.return_value = foreign
+        assert resolve_local_project("proj-A") == foreign
 
     def test_foreign_row_resolves_to_local_link_group_sibling(self, svc_env):
         from app.core.automation_service import resolve_local_project
@@ -533,17 +547,59 @@ class TestShouldRunScheduledHere:
         should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
         assert should_run is True
 
-    def test_legacy_project_without_owner_runs_where_it_resolves(self, svc_env):
+    def test_legacy_project_without_owner_runs_where_path_exists(self, svc_env, tmp_path):
         from app.core.automation_service import should_run_scheduled_here
-        legacy = _proj("proj-A", instance_id=None)
+        legacy = _proj("proj-A", instance_id=None, path=str(tmp_path))
         svc_env.get_project.return_value = legacy
         svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
         should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
         assert should_run is True
 
-    def test_missing_project_row_fails_open(self, svc_env):
+    def test_legacy_project_without_owner_skips_where_path_missing(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        legacy = _proj("proj-A", instance_id=None, path="/does/not/exist")
+        svc_env.get_project.return_value = legacy
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+
+    def test_missing_project_row_elects_single_runner(self, svc_env):
+        """One install surfaces the missing-project error, not all of them."""
         from app.core.automation_service import should_run_scheduled_here
         svc_env.get_project.return_value = None
         svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
         should_run, _ = should_run_scheduled_here(self._auto("proj-gone"))
-        assert should_run is True
+        assert should_run is True  # "install-me" sorts first
+
+        svc_env.get_installs_map.return_value = _installs((ME, True), (EARLY, True))
+        should_run, reason = should_run_scheduled_here(self._auto("proj-gone"))
+        assert should_run is False
+        assert EARLY in reason
+
+    def test_counts_self_online_despite_stale_heartbeat(self, svc_env):
+        """A stale own-heartbeat row must not make every install defer."""
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_installs_map.return_value = _installs((ME, False), (OTHER, True))
+        should_run, _ = should_run_scheduled_here(self._auto())
+        assert should_run is True  # ME counts itself online and sorts first
+
+    def test_no_runner_anywhere_records_last_error_once(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
+        svc_env.get_project.return_value = foreign
+        svc_env.get_projects_in_link_group.return_value = [foreign]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
+
+        auto = self._auto("proj-A")
+        should_run, _ = should_run_scheduled_here(auto)
+        assert should_run is False
+        svc_env.update_automation.assert_called_once()
+        _, kwargs = svc_env.update_automation.call_args
+        assert "No online install" in kwargs["last_error"]
+
+        # Already recorded → no repeat write on subsequent fires.
+        svc_env.update_automation.reset_mock()
+        auto["last_error"] = kwargs["last_error"]
+        should_run, _ = should_run_scheduled_here(auto)
+        assert should_run is False
+        svc_env.update_automation.assert_not_called()
