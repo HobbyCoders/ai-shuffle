@@ -881,8 +881,9 @@ const VALID_TASK_KINDS = new Set(['agent', 'shell']);
  * Tolerant by contract: a missing/non-array field yields `[]`. Each entry is
  * lightly validated (id present, known status/kind) and normalized — malformed
  * rows are dropped rather than rendered. The backend contract guarantees
- * camelCase + only currently-running tasks, but we accept a snake_case
- * `started_at`/`updated_at` fallback so the UI degrades gracefully.
+ * camelCase + running tasks plus briefly-retained terminal ones (failures for
+ * the display window, completions across the unpark hand-off), but we accept a
+ * snake_case `started_at`/`updated_at` fallback so the UI degrades gracefully.
  */
 function parseActiveTasks(raw: unknown): Task[] {
 	if (!Array.isArray(raw)) return [];
