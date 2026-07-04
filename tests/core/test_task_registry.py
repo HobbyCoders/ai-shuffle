@@ -20,7 +20,13 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
-from app.core.task_registry import TaskRegistry, to_wire, task_registry
+from app.core.task_registry import (
+    TaskRegistry,
+    to_wire,
+    task_registry,
+    _RECENT_COMPLETED_WINDOW_SECONDS,
+    _RECENT_TERMINAL_WINDOW_SECONDS,
+)
 
 
 # =============================================================================
@@ -600,7 +606,11 @@ class TestRecentTerminalRetention:
     "killed") is now retained for a short window in ``_recent_terminal`` and
     surfaced by ``get_visible`` (the ``/live`` DISPLAY view) even after
     ``clear_session``. ``get_active`` (the running-only control-flow view) is
-    unchanged. A normal "completed" is NOT retained.
+    unchanged. A normal "completed" is retained too, but only for the much
+    shorter ``_RECENT_COMPLETED_WINDOW_SECONDS`` — just long enough to bridge
+    the completion -> ``unpark_pending`` hand-off gap so ``/live`` never reads
+    fully idle mid-hand-off (which stopped the poller / classified a loading
+    session as idle and stranded the unpark follow-up in a dead UI).
     """
 
     def test_killed_survives_clear_session_in_get_visible(self, reg):
@@ -626,12 +636,43 @@ class TestRecentTerminalRetention:
         assert [t["id"] for t in visible] == ["bg1"]
         assert visible[0]["status"] == "error"
 
-    def test_completed_is_not_retained(self, reg):
-        # A clean completion already drove its result/unpark; it must not linger.
+    def test_completed_retained_briefly_for_unpark_handoff(self, reg):
+        # Regression: unparked-while-away session loaded as idle. In the gap
+        # between complete_task (task drops from get_active) and the follow-up
+        # turn's unpark_pending latch, /live read (is_streaming=false,
+        # activeTasks=[], unpark_pending=false) — a poll landing there stopped
+        # the poller and a session load classified the session idle, so the
+        # unpark follow-up streamed into a dead UI until a manual refresh.
+        # A clean completion must therefore stay visible briefly.
         reg.start_task("s1", "bg1", "agent", "done well")
         reg.complete_task("s1", "bg1", "completed")
         reg.clear_session("s1")
+        assert reg.get_active("s1") == []  # control flow: gone immediately
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["bg1"]
+        assert visible[0]["status"] == "completed"
+
+    def test_completed_retention_uses_short_window(self, reg):
+        # The completed hand-off window is much shorter than the failure
+        # display window: age the entry just past it and it prunes, long
+        # before a failure would.
+        reg.start_task("s1", "bg1", "agent", "done well")
+        reg.complete_task("s1", "bg1", "completed")
+        entry = reg._recent_terminal["s1"]["bg1"]
+        assert entry["ttl"] == _RECENT_COMPLETED_WINDOW_SECONDS
+        assert _RECENT_COMPLETED_WINDOW_SECONDS < _RECENT_TERMINAL_WINDOW_SECONDS
+        entry["recorded_at"] -= _RECENT_COMPLETED_WINDOW_SECONDS + 1.0
         assert reg.get_visible("s1") == []
+
+    def test_failure_retention_outlives_completed_window(self, reg):
+        # A failure aged past the SHORT window is still visible — it gets the
+        # long display window so the user actually sees it.
+        reg.start_task("s1", "bg1", "agent", "boom")
+        reg.complete_task("s1", "bg1", "killed")
+        entry = reg._recent_terminal["s1"]["bg1"]
+        assert entry["ttl"] == _RECENT_TERMINAL_WINDOW_SECONDS
+        entry["recorded_at"] -= _RECENT_COMPLETED_WINDOW_SECONDS + 1.0
+        assert [t["id"] for t in reg.get_visible("s1")] == ["bg1"]
 
     def test_get_visible_merges_running_and_failed(self, reg):
         reg.start_task("s1", "live", "agent", "still going")

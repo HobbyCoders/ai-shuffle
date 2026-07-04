@@ -979,10 +979,24 @@ async def get_live_session(
     # shadows the full transcript and the chat renders with missing messages.
     if pending_live_full is not None:
         live_msgs = pending_live_full.get("messages") or []
-        if len(live_msgs) > len(messages):
+        # On a COUNT TIE while background tasks are still RUNNING (a parked
+        # session), the buffer wins: sub-agent progress mutates agentChildren
+        # IN PLACE on an existing live message, so the message COUNT never
+        # changes while the buffer is strictly fresher than the store
+        # transcript. Serving the store here would also echo last_update_id=0,
+        # pinning a re-attaching poller to since_update_id=0 fresh loads —
+        # locked out of the delta path that carries the progress — which froze
+        # the agent cards after a switch-away/switch-back. The snapshot carries
+        # the buffer's real last_update_id, putting the client back on deltas.
+        # A SHORTER buffer still loses, preserving the crash/empty-seed heal.
+        parked_running = bool(task_registry.get_active(session_id))
+        if len(live_msgs) > len(messages) or (
+            parked_running and live_msgs and len(live_msgs) == len(messages)
+        ):
             logger.debug(
                 f"Live endpoint: serving in-memory snapshot for {session_id} "
-                f"({len(live_msgs)} msgs > store {len(messages)} msgs)"
+                f"({len(live_msgs)} msgs vs store {len(messages)} msgs, "
+                f"parked_running={parked_running})"
             )
             pending_live_full["activeTasks"] = active_tasks
             pending_live_full["unpark_pending"] = unpark_pending

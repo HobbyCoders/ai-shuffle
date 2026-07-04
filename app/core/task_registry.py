@@ -46,9 +46,27 @@ def _now_epoch() -> float:
 # server-side). See ``_recent_terminal`` / ``get_visible``.
 _RECENT_TERMINAL_WINDOW_SECONDS = 120.0
 
-# Statuses that mean a task DIED rather than finished cleanly. Only these are
-# retained for surfacing — a "completed" task finished its work (and already
-# drove its unpark/result), so it must NOT linger on the taskbar.
+# How long a cleanly COMPLETED background task stays surfaced. Much shorter than
+# the failure window — it exists to bridge the completion → unpark hand-off, not
+# to display a result. ``complete_task`` drops a task from ``get_active`` the
+# moment its completion is consumed (for Monitor shells: the moment the process
+# exits), but the ``unpark_pending`` latch is only set a beat later — after the
+# drain pump's dispatch awaits, or, for shells, after the SDK's own terminal
+# notification arrives seconds behind the process exit (and the deliver-time
+# ``end_streaming`` briefly clears the latch before re-asserting it). In every
+# one of those gaps a ``/live`` response read (is_streaming=false,
+# activeTasks=[], unpark_pending=false) — indistinguishable from idle — so a
+# poll landing there STOPPED the poller and a session LOAD landing there
+# classified the session idle and never armed one; the unpark follow-up then
+# streamed into a dead UI until a manual refresh. Retaining the completed row
+# keeps park-polling and load classification alive across the gap; the
+# ``unpark_pending`` latch takes over well within the window. Self-limiting:
+# with no follow-up coming, the poller goes idle when the window expires.
+_RECENT_COMPLETED_WINDOW_SECONDS = 15.0
+
+# Statuses that mean a task DIED rather than finished cleanly. These get the
+# long retention window above (the user must SEE the failure); a clean
+# "completed" is retained only for the short hand-off window.
 _FAILURE_STATUSES = frozenset({"error", "killed"})
 
 
@@ -169,13 +187,21 @@ class TaskRegistry:
         self._recent_terminal: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def _prune_recent_terminal(self, session_id: str, *, now: Optional[float] = None) -> None:
-        """Drop expired failure-retention entries for a session; drop the bucket
-        if it empties. Defensive: a missing session is a no-op."""
+        """Drop expired terminal-retention entries for a session; drop the bucket
+        if it empties. Each entry carries its own ``ttl`` (failures get the long
+        window, clean completions the short hand-off window; a missing ttl —
+        pre-existing entry — defaults to the long window). Defensive: a missing
+        session is a no-op."""
         bucket = self._recent_terminal.get(session_id)
         if not bucket:
             return
-        cutoff = (now if now is not None else _now_epoch()) - _RECENT_TERMINAL_WINDOW_SECONDS
-        expired = [tid for tid, e in bucket.items() if e.get("recorded_at", 0.0) < cutoff]
+        now_val = now if now is not None else _now_epoch()
+        expired = [
+            tid
+            for tid, e in bucket.items()
+            if now_val - e.get("recorded_at", 0.0)
+            > e.get("ttl", _RECENT_TERMINAL_WINDOW_SECONDS)
+        ]
         for tid in expired:
             bucket.pop(tid, None)
         if not bucket:
@@ -407,22 +433,28 @@ class TaskRegistry:
     def complete_task(self, session_id: str, task_id: str, status: str) -> None:
         """Set a terminal status on a task. No-op if the task is unknown.
 
-        When the status is a FAILURE ("error"/"killed"), a snapshot of the task is
-        also stashed in the retention store so ``/live`` (``get_visible``) keeps
-        surfacing it as failed for ``_RECENT_TERMINAL_WINDOW_SECONDS`` even after
-        ``clear_session`` wipes the live ``_tasks`` map — otherwise a force-cleanup
-        reap (dead SDK client) drops the row with no failed indication.
+        A snapshot of the task is also stashed in the retention store so ``/live``
+        (``get_visible``) keeps surfacing it after ``clear_session`` wipes the live
+        ``_tasks`` map. FAILURES ("error"/"killed") are retained for
+        ``_RECENT_TERMINAL_WINDOW_SECONDS`` so a force-cleanup reap (dead SDK
+        client) doesn't drop the row with no failed indication; clean completions
+        get the much shorter ``_RECENT_COMPLETED_WINDOW_SECONDS`` purely to keep
+        park-polling alive across the completion → ``unpark_pending`` hand-off gap.
         """
         record = self._tasks.get(session_id, {}).get(task_id)
         if record is None:
             return
         record["status"] = status
         record["updated_at"] = _now_iso()
-        if status in _FAILURE_STATUSES:
-            now = _now_epoch()
-            self._prune_recent_terminal(session_id, now=now)
-            bucket = self._recent_terminal.setdefault(session_id, {})
-            bucket[task_id] = {"task": to_wire(record), "recorded_at": now}
+        now = _now_epoch()
+        self._prune_recent_terminal(session_id, now=now)
+        bucket = self._recent_terminal.setdefault(session_id, {})
+        ttl = (
+            _RECENT_TERMINAL_WINDOW_SECONDS
+            if status in _FAILURE_STATUSES
+            else _RECENT_COMPLETED_WINDOW_SECONDS
+        )
+        bucket[task_id] = {"task": to_wire(record), "recorded_at": now, "ttl": ttl}
 
     def get_active(self, session_id: str) -> List[Dict[str, Any]]:
         """Running tasks only, newest-first, each as a wire dict.
