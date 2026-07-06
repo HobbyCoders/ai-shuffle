@@ -152,12 +152,46 @@ async def _run_background_query(
     reusing_client = False
 
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        # Busy-write guard backstop: never write a second prompt into a client
+        # that is mid-turn (kills the CLI, loses the whole in-flight turn).
+        # Fail safe like the connect-failure path — but do NOT cleanup the live
+        # session store here: the active turn owns it and is still streaming.
+        if existing_state.is_streaming:
+            error_msg = (
+                "Session is busy with another response. "
+                "Wait for it to finish, then send your message again."
+            )
+            logger.warning(
+                f"[Background] Pooled client for session {session_id} is mid-turn — "
+                f"refusing concurrent background query (busy-write guard)"
+            )
+            await sync_engine.broadcast_stream_end(
+                session_id=session_id,
+                message_id=message_id or f"error-{session_id}",
+                metadata={"error": error_msg},
+                interrupted=True,
+                source_device_id=device_id
+            )
+            return
         if not requires_reconnect(existing_state, options):
             state = existing_state
             reusing_client = True
-            if credentials_rotated(state):
-                await refresh_subprocess_credentials(state, session_id)
-            logger.info(f"[Background] Reusing pooled client for session {session_id}")
+            # CLAIM at the reuse decision point (no await since the is_streaming
+            # check above) so two near-simultaneous entrants can't both pass the
+            # gate. The finally below clears it on every exit path.
+            state.is_streaming = True
+            # Claim-to-try guard: any exit between this claim and the main
+            # try/finally (the refresh await is a suspension point) must clear
+            # the flag — a stranded is_streaming=True bricks the pooled client
+            # (busy error forever, never idle-evicted).
+            try:
+                if credentials_rotated(state):
+                    await refresh_subprocess_credentials(state, session_id)
+                logger.info(f"[Background] Reusing pooled client for session {session_id}")
+            except BaseException:
+                state.is_streaming = False
+                state.streaming_started_at = None
+                raise
         else:
             logger.info(f"[Background] Options changed for session {session_id}, creating fresh client")
             await pool.remove(session_id)
@@ -223,44 +257,53 @@ async def _run_background_query(
         )
         pool.put(session_id, state)
 
-    # Store pending background task reference now that pool entry exists
-    _store_background_task(session_id)
-
     # Mark as streaming
     state.is_streaming = True
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
-    # Use provided message_id or generate a new one
-    # If message_id is provided, stream_start was already broadcast by start_background_query
-    assistant_msg_id = message_id or f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
+    # Claim-to-try guard: is_streaming is claimed but the protective
+    # try/finally hasn't started yet — any exit here (the broadcast/sync-log
+    # awaits can raise or be cancelled) must clear the flag or the pooled
+    # client is bricked (busy error forever, never idle-evicted).
+    try:
+        # Store pending background task reference now that pool entry exists
+        _store_background_task(session_id)
 
-    # Only broadcast stream_start if we generated a new message_id
-    # (i.e., if message_id wasn't provided by start_background_query)
-    if not message_id:
-        await sync_engine.broadcast_stream_start(
+        # Use provided message_id or generate a new one
+        # If message_id is provided, stream_start was already broadcast by start_background_query
+        assistant_msg_id = message_id or f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
+
+        # Only broadcast stream_start if we generated a new message_id
+        # (i.e., if message_id wasn't provided by start_background_query)
+        if not message_id:
+            await sync_engine.broadcast_stream_start(
+                session_id=session_id,
+                message_id=assistant_msg_id,
+                source_device_id=None,  # Don't exclude any device - all should see it
+                user_id=api_user_id
+            )
+
+        # Log stream start for polling fallback
+        await run_sync(
+            database.add_sync_log,
             session_id=session_id,
-            message_id=assistant_msg_id,
-            source_device_id=None,  # Don't exclude any device - all should see it
-            user_id=api_user_id
+            event_type="stream_start",
+            entity_type="message",
+            entity_id=assistant_msg_id,
+            data={"message_id": assistant_msg_id}
         )
 
-    # Log stream start for polling fallback
-    await run_sync(
-        database.add_sync_log,
-        session_id=session_id,
-        event_type="stream_start",
-        entity_type="message",
-        entity_id=assistant_msg_id,
-        data={"message_id": assistant_msg_id}
-    )
-
-    # Execute query
-    response_text = []
-    tool_messages = []  # Collect tool use/result messages for storage
-    metadata = {}
-    sdk_session_id = resume_id
-    interrupted = False
+        # Execute query
+        response_text = []
+        tool_messages = []  # Collect tool use/result messages for storage
+        metadata = {}
+        sdk_session_id = resume_id
+        interrupted = False
+    except BaseException:
+        state.is_streaming = False
+        state.streaming_started_at = None
+        raise
 
     try:
         await state.client.query(prompt)

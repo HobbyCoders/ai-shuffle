@@ -877,12 +877,39 @@ async def stream_query(
     reusing_client = False
 
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        # Busy-write guard backstop: never write a second prompt into a client
+        # that is mid-turn (kills the CLI, loses the whole in-flight turn).
+        if existing_state.is_streaming:
+            logger.warning(
+                f"Pooled client for session {session_id} is mid-turn — "
+                f"refusing concurrent query (busy-write guard)"
+            )
+            yield {
+                "type": "error",
+                "message": "Session is busy with another response. "
+                           "Wait for it to finish, then send your message again.",
+            }
+            return
         if not requires_reconnect(existing_state, options):
             state = existing_state
             reusing_client = True
-            if credentials_rotated(state):
-                await refresh_subprocess_credentials(state, session_id)
-            logger.info(f"Reusing pooled client for session {session_id}")
+            # CLAIM at the reuse decision point (no await since the is_streaming
+            # check above) so two near-simultaneous entrants can't both pass the
+            # gate. The finally below clears it on every exit path.
+            state.is_streaming = True
+            # Claim-to-try guard: from this claim until the main try/finally is
+            # entered, ANY exit (exception or cancellation) must clear the flag
+            # — a stranded is_streaming=True bricks the pooled client forever
+            # (every future query gets the busy error, evict_idle skips
+            # streaming states, report_long_streaming only logs).
+            try:
+                if credentials_rotated(state):
+                    await refresh_subprocess_credentials(state, session_id)
+                logger.info(f"Reusing pooled client for session {session_id}")
+            except BaseException:
+                state.is_streaming = False
+                state.streaming_started_at = None
+                raise
         else:
             logger.info(f"Options changed for session {session_id}, creating fresh client")
             await pool.remove(session_id)
@@ -947,38 +974,47 @@ async def stream_query(
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
-    # Generate a message ID for streaming sync
-    assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
+    # Claim-to-try guard: is_streaming is claimed but the protective
+    # try/finally hasn't started yet — any exit here (the broadcast/sync-log
+    # awaits can raise or be cancelled) must clear the flag or the pooled
+    # client is bricked (busy error forever, never idle-evicted).
+    try:
+        # Generate a message ID for streaming sync
+        assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
 
-    # Broadcast stream start to other devices
-    await sync_engine.broadcast_stream_start(
-        session_id=session_id,
-        message_id=assistant_msg_id,
-        source_device_id=device_id,
-        user_id=api_user_id
-    )
+        # Broadcast stream start to other devices
+        await sync_engine.broadcast_stream_start(
+            session_id=session_id,
+            message_id=assistant_msg_id,
+            source_device_id=device_id,
+            user_id=api_user_id
+        )
 
-    # Log stream start for polling fallback
-    await run_sync(
-        database.add_sync_log,
-        session_id=session_id,
-        event_type="stream_start",
-        entity_type="message",
-        entity_id=assistant_msg_id,
-        data={"message_id": assistant_msg_id}
-    )
+        # Log stream start for polling fallback
+        await run_sync(
+            database.add_sync_log,
+            session_id=session_id,
+            event_type="stream_start",
+            entity_type="message",
+            entity_id=assistant_msg_id,
+            data={"message_id": assistant_msg_id}
+        )
 
-    # Execute query
-    response_text = []
-    tool_messages = []  # Collect tool use/result messages for storage
-    tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-    metadata = {}
-    sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
-    # Persist-on-init guard (see stream_to_websocket): write the SDK session id
-    # to the sessions row the moment it's captured so a mid-turn crash can't
-    # orphan the session.
-    sdk_link_persisted = False
-    interrupted = False
+        # Execute query
+        response_text = []
+        tool_messages = []  # Collect tool use/result messages for storage
+        tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
+        metadata = {}
+        sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
+        # Persist-on-init guard (see stream_to_websocket): write the SDK session id
+        # to the sessions row the moment it's captured so a mid-turn crash can't
+        # orphan the session.
+        sdk_link_persisted = False
+        interrupted = False
+    except BaseException:
+        state.is_streaming = False
+        state.streaming_started_at = None
+        raise
 
     try:
         await state.client.query(prompt)
@@ -1442,47 +1478,82 @@ async def stream_to_websocket(
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
 
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        # Busy-write guard backstop: a client that is mid-turn must NEVER get a
+        # second prompt written into its stdin — the CLI dies with "Fatal error
+        # in message reader" and the whole in-flight turn is lost. The WS
+        # handlers enqueue instead of racing us, but this gate is the last line
+        # of defence for any caller (REST, background, unpark races).
+        if existing_state.is_streaming:
+            logger.warning(
+                f"[WS] Pooled client for session {session_id} is mid-turn — "
+                f"refusing concurrent query (busy-write guard)"
+            )
+            yield {
+                "type": "error",
+                "message": "Session is busy with another response. "
+                           "Wait for it to finish, then send your message again.",
+            }
+            return
         # Candidate for reuse — check if critical options changed
         if not requires_reconnect(existing_state, options):
             # REUSE: Subprocess is alive and options are compatible
             state = existing_state
             reusing_client = True
 
-            # OAuth rotated on disk since spawn → sync it into the subprocess's
-            # config dir in place. Respawning here would SIGTERM the subprocess
-            # and kill every background task/sub-agent it owns.
-            if credentials_rotated(state):
-                await refresh_subprocess_credentials(state, session_id)
+            # CLAIM the client at the reuse decision point. No await between the
+            # is_streaming check above and this line (requires_reconnect is
+            # synchronous), so two near-simultaneous entrants can't both pass
+            # the gate — the loser sees is_streaming=True and fails safe. The
+            # full "Mark as streaming" block below re-stamps timestamps; the
+            # try/finally around the query clears the flag on every exit path.
+            state.is_streaming = True
 
-            # Update callback refs so the existing can_use_tool closure sees current values
-            state.callback_refs.update({
-                "broadcast_func": broadcast_func,
-                "permission_mode": permission_mode,
-                "allowed_tools": allowed_tools,
-                "disallowed_tools": disallowed_tools,
-                "profile_id": profile_id,
-                "config": config,
-                "session_id": session_id,
-                "user_id": user_id,
-                # Reset the outstanding-prompt counter at the start of each turn so a
-                # prior turn that was hard-cancelled mid-prompt (its finally clear
-                # interrupted) can't leave a leaked count that pins the indicator on.
-                "attention_count": 0,
-            })
+            # Claim-to-try guard: from this claim until the main try/finally is
+            # entered, ANY exit (exception or cancellation — the refresh and
+            # set_model awaits below are suspension points) must clear the flag.
+            # A stranded is_streaming=True bricks the pooled client forever:
+            # every future query gets the busy error, evict_idle skips
+            # streaming states, and report_long_streaming only logs.
+            try:
+                # OAuth rotated on disk since spawn → sync it into the subprocess's
+                # config dir in place. Respawning here would SIGTERM the subprocess
+                # and kill every background task/sub-agent it owns.
+                if credentials_rotated(state):
+                    await refresh_subprocess_credentials(state, session_id)
 
-            # Handle runtime-changeable options via SDK methods
-            old_opts = state.connect_options
-            if old_opts:
-                new_model = getattr(options, 'model', None)
-                old_model = getattr(old_opts, 'model', None)
-                if new_model and new_model != old_model:
-                    try:
-                        await state.client.set_model(new_model)
-                        logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
-                    except Exception as e:
-                        logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
+                # Update callback refs so the existing can_use_tool closure sees current values
+                state.callback_refs.update({
+                    "broadcast_func": broadcast_func,
+                    "permission_mode": permission_mode,
+                    "allowed_tools": allowed_tools,
+                    "disallowed_tools": disallowed_tools,
+                    "profile_id": profile_id,
+                    "config": config,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    # Reset the outstanding-prompt counter at the start of each turn so a
+                    # prior turn that was hard-cancelled mid-prompt (its finally clear
+                    # interrupted) can't leave a leaked count that pins the indicator on.
+                    "attention_count": 0,
+                })
 
-            logger.info(f"[WS] Reusing pooled client for session {session_id}")
+                # Handle runtime-changeable options via SDK methods
+                old_opts = state.connect_options
+                if old_opts:
+                    new_model = getattr(options, 'model', None)
+                    old_model = getattr(old_opts, 'model', None)
+                    if new_model and new_model != old_model:
+                        try:
+                            await state.client.set_model(new_model)
+                            logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
+                        except Exception as e:
+                            logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
+
+                logger.info(f"[WS] Reusing pooled client for session {session_id}")
+            except BaseException:
+                state.is_streaming = False
+                state.streaming_started_at = None
+                raise
         else:
             # Options changed — need fresh subprocess
             logger.info(f"[WS] Options changed for session {session_id}, creating fresh client")
@@ -1839,65 +1910,73 @@ async def stream_to_websocket(
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
-    # Make this session's node subprocess (and the subagents it is about to fork,
-    # which inherit the score) the kernel's preferred OOM-kill target. If the HOST
-    # runs out of memory mid-fan-out, the global OOM-killer then reaps one session's
-    # disposable, auto-recoverable subprocess instead of the Python orchestrator
-    # (which runs every session) or the database. Best-effort; set every turn,
-    # before the query() below triggers the fan-out. No-op if disabled/unprivileged.
-    mark_subprocess_oom_killable(state)
+    # Claim-to-try guard: is_streaming is set but the protective try/finally
+    # hasn't started yet — any exit in between must clear the flag or the
+    # pooled client is bricked (busy error forever, never idle-evicted).
+    try:
+        # Make this session's node subprocess (and the subagents it is about to fork,
+        # which inherit the score) the kernel's preferred OOM-kill target. If the HOST
+        # runs out of memory mid-fan-out, the global OOM-killer then reaps one session's
+        # disposable, auto-recoverable subprocess instead of the Python orchestrator
+        # (which runs every session) or the database. Best-effort; set every turn,
+        # before the query() below triggers the fan-out. No-op if disabled/unprivileged.
+        mark_subprocess_oom_killable(state)
 
-    # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
-    sdk_session_id = resume_id
-    # Persist-on-init guard: a brand-new session's sdk_session_id is only known
-    # once the SDK emits its `init` SystemMessage. We write it to the sessions
-    # row immediately (once) so a mid-turn crash can't orphan the session.
-    sdk_link_persisted = False
-    # Set when the turn dies via `except Exception`; suppresses the trailing
-    # `done` frame (we already emitted `error`) while persistence still runs.
-    crashed = False
+        # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
+        sdk_session_id = resume_id
+        # Persist-on-init guard: a brand-new session's sdk_session_id is only known
+        # once the SDK emits its `init` SystemMessage. We write it to the sessions
+        # row immediately (once) so a mid-turn crash can't orphan the session.
+        sdk_link_persisted = False
+        # Set when the turn dies via `except Exception`; suppresses the trailing
+        # `done` frame (we already emitted `error`) while persistence still runs.
+        crashed = False
 
-    # Execute query
-    # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
-    response_text = []
-    tool_messages = []  # Collect tool use/result messages for storage
-    thinking_blocks = []  # Collect thinking blocks for DB persistence
-    system_messages_acc = []  # Collect system messages for DB persistence
-    plugin_messages_acc = []  # Collect plugin/hook warnings for DB persistence
-    # Preserve stream order for DB persistence. Each entry is tagged with a
-    # `kind` field so query_persistence can emit rows in the exact sequence
-    # they arrived, instead of bucketing all-thinking→all-tools→all-text.
-    turn_events: list = []
-    # Subagent (Task/Agent) child tool invocations keyed by parent_tool_id.
-    # These are embedded into the parent subagent's agent_children metadata
-    # at persistence time so reloading a session reconstructs the subagent's
-    # internal tool usage. Child tool_use entries are NOT persisted as
-    # top-level rows (they'd be orphaned without their parent context).
-    subagent_children: Dict[str, List[Dict[str, Any]]] = {}
-    task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
-    tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
-    metadata = {}
-    interrupted = False
-    include_partial = options.include_partial_messages  # Track if streaming events are enabled
-    has_visible_content = False  # Track if any content was yielded to the frontend
-    is_slash_command = prompt.strip().startswith("/")
-    _current_thinking = []  # Accumulate thinking deltas into blocks
-    _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
+        # Execute query
+        # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
+        response_text = []
+        tool_messages = []  # Collect tool use/result messages for storage
+        thinking_blocks = []  # Collect thinking blocks for DB persistence
+        system_messages_acc = []  # Collect system messages for DB persistence
+        plugin_messages_acc = []  # Collect plugin/hook warnings for DB persistence
+        # Preserve stream order for DB persistence. Each entry is tagged with a
+        # `kind` field so query_persistence can emit rows in the exact sequence
+        # they arrived, instead of bucketing all-thinking→all-tools→all-text.
+        turn_events: list = []
+        # Subagent (Task/Agent) child tool invocations keyed by parent_tool_id.
+        # These are embedded into the parent subagent's agent_children metadata
+        # at persistence time so reloading a session reconstructs the subagent's
+        # internal tool usage. Child tool_use entries are NOT persisted as
+        # top-level rows (they'd be orphaned without their parent context).
+        subagent_children: Dict[str, List[Dict[str, Any]]] = {}
+        task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
+        tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
+        metadata = {}
+        interrupted = False
+        include_partial = options.include_partial_messages  # Track if streaming events are enabled
+        has_visible_content = False  # Track if any content was yielded to the frontend
+        is_slash_command = prompt.strip().startswith("/")
+        _current_thinking = []  # Accumulate thinking deltas into blocks
+        _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
 
-    # Helper to drain stderr queue and yield plugin messages
-    async def drain_stderr_queue():
-        """Drain all pending stderr messages from plugin hooks."""
-        messages = []
-        while True:
-            try:
-                msg = stderr_queue.get_nowait()
-                messages.append(msg)
-                logger.debug(f"[WS] Drained plugin message from queue: {msg.get('type')}")
-            except asyncio.QueueEmpty:
-                break
-        if messages:
-            logger.debug(f"[WS] Drained {len(messages)} plugin message(s) from stderr queue")
-        return messages
+        # Helper to drain stderr queue and yield plugin messages
+        async def drain_stderr_queue():
+            """Drain all pending stderr messages from plugin hooks."""
+            messages = []
+            while True:
+                try:
+                    msg = stderr_queue.get_nowait()
+                    messages.append(msg)
+                    logger.debug(f"[WS] Drained plugin message from queue: {msg.get('type')}")
+                except asyncio.QueueEmpty:
+                    break
+            if messages:
+                logger.debug(f"[WS] Drained {len(messages)} plugin message(s) from stderr queue")
+            return messages
+    except BaseException:
+        state.is_streaming = False
+        state.streaming_started_at = None
+        raise
 
     try:
         # Resolve virtual @Notes/note-id references to actual content

@@ -316,6 +316,19 @@ async def _deliver_unpark_impl(
     if not pending:
         return False
 
+    # Busy-write guard: if a user query won the race and already owns a live
+    # turn, the unpark must yield — overwriting _active_chat_sessions and
+    # querying would write into the mid-turn CLI and kill it. The completions
+    # are already latched (mark_unparked), so nothing re-fires; the parent
+    # simply doesn't unpark this time. Checked again under the lock at task
+    # registration below (this early check just avoids persisting a synthetic
+    # prompt that would never be delivered).
+    async with _active_sessions_lock:
+        _existing = _active_chat_sessions.get(session_id)
+    if _existing is not None and not _existing.done():
+        ctx.info(logger, "Unpark: a live turn already owns the session — yielding (no clobber)")
+        return False
+
     synth_prompt = _build_task_notification_prompt(pending)
 
     ctx.debug(
@@ -374,10 +387,22 @@ async def _deliver_unpark_impl(
         # session's unpark turn silently tore itself down on the dead socket and
         # the parent's response never surfaced until a full reload (same
         # dead-socket failure mode as the "Send later" queue-drain bug).
-        task = asyncio.create_task(
-            run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id, deferred_delivery=True)
-        )
+        # Busy-write guard (late re-check, TOCTOU): the persist/broadcast awaits
+        # above are exactly where a fresh user query can land. Re-check and
+        # register under ONE lock acquisition so a live turn is never
+        # overwritten — if a query won the race, yield instead of clobbering.
         async with _active_sessions_lock:
+            existing = _active_chat_sessions.get(session_id)
+            if existing is not None and not existing.done():
+                task_registry.clear_unpark_pending(session_id)
+                ctx.info(
+                    logger,
+                    "Unpark: a user query won the race at delivery — yielding (no clobber)",
+                )
+                return False
+            task = asyncio.create_task(
+                run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id, deferred_delivery=True)
+            )
             _active_chat_sessions[session_id] = task
         set_query_task(task)
         ctx.debug(logger, "Unpark: follow-up query started (handed off)")
@@ -1123,6 +1148,30 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "message": "Not authorized for this project"})
                 return
 
+        # Busy-write guard: a query for a session that already has a live turn
+        # must NEVER cancel-and-requery — the bare cancel skipped the SDK
+        # interrupt, so the follow-up prompt was written into the mid-turn
+        # CLI's stdin, killing it ("Fatal error in message reader") and losing
+        # the whole in-flight turn. Enqueue the message instead: the existing
+        # queue machinery drains it as a clean new query when the turn ends,
+        # and the user sees it via the queue_updated ack frames. ("Send now"
+        # goes through the two-phase interrupt_for_query, not this path.)
+        if session_id:
+            async with _active_sessions_lock:
+                active_task = _active_chat_sessions.get(session_id)
+            if active_task is not None and not active_task.done():
+                logger.info(
+                    f"[BusyGuard] query for session {session_id} arrived mid-turn — "
+                    f"enqueueing instead of cancelling the live turn"
+                )
+                await self.handle_queue_message({
+                    "session_id": session_id,
+                    "content": prompt,
+                    "profile": data.get("profile"),
+                    "project": project_id,
+                })
+                return
+
         # Create or get session
         if not session_id:
             # Validate worktree access if provided
@@ -1278,30 +1327,57 @@ class ChatWebSocketHandler:
             source_device_id=self.device_id  # Exclude the sender
         )
 
-        # Cancel any existing query for this session
-        async with _active_sessions_lock:
-            existing_task = _active_chat_sessions.get(session_id)
-        if existing_task:
-            existing_task.cancel()
-            try:
-                await existing_task
-            except asyncio.CancelledError:
-                pass
-
-        # Start new query task
+        # Start new query task — busy-write guard (late re-check): the liveness
+        # check and the registration happen under the SAME lock acquisition, so
+        # a turn that started while we were persisting the user message above
+        # (queue drain, unpark follow-up, another device) is never clobbered.
+        # We never bare-cancel a live turn here: cancelling without an SDK
+        # interrupt leaves the CLI mid-turn, and the next client.query() into
+        # its stdin kills it and loses the whole in-flight turn.
         # Note: broadcast_stream_start is called inside run_query when actual
         # streaming begins. This prevents stuck streaming state if query fails early.
         # Pass the adoption token ONLY for a brand-new session so the first `start`
         # frame echoes it (authenticating adoption). An existing-session query needs
         # no token — the frontend already routes its start by the known session_id.
-        self.query_task = asyncio.create_task(
-            self.run_query(
-                prompt, session_id, profile_id, project_id, overrides, worktree_id,
-                request_id=(request_id if is_new_session else None),
-            )
-        )
+        preempted = False
         async with _active_sessions_lock:
-            _active_chat_sessions[session_id] = self.query_task
+            existing_task = _active_chat_sessions.get(session_id)
+            if existing_task is not None and not existing_task.done():
+                preempted = True
+            else:
+                self.query_task = asyncio.create_task(
+                    self.run_query(
+                        prompt, session_id, profile_id, project_id, overrides, worktree_id,
+                        request_id=(request_id if is_new_session else None),
+                    )
+                )
+                _active_chat_sessions[session_id] = self.query_task
+        if preempted:
+            # Rare double-race (a server-initiated turn won between the early
+            # busy check and here). Enqueue so the message is never lost — the
+            # live turn's post-turn queue drain picks it up. The user message
+            # was already persisted above; the drain's re-persist is the same
+            # rare duplicate the /ws/chat drain preempt path accepts.
+            logger.info(
+                f"[BusyGuard] query for session {session_id} preempted at "
+                f"registration — enqueueing instead of cancelling the live turn"
+            )
+            await run_sync(
+                database.add_queued_message,
+                session_id=session_id,
+                content=prompt,
+                profile_id=data.get("profile"),
+                project_id=project_id,
+            )
+            queue = await run_sync(database.get_queued_messages, session_id)
+            await sync_engine.broadcast_queue_updated(session_id, queue)
+            await self.send_json({
+                "type": "sync",
+                "event_type": "queue_updated",
+                "session_id": session_id,
+                "data": {"queued_messages": queue},
+            })
+            return
 
     # ------------------------------------------------------------------
     # handle_stop
@@ -1904,6 +1980,29 @@ class ChatWebSocketHandler:
 
         logger.info(f"[Queue] Auto-processing queued message for session {session_id}: {content[:80]}...")
 
+        # Busy-write guard: never cancel a live turn to make room for a queued
+        # message (the bare cancel skipped the SDK interrupt, so the queued
+        # prompt was written into the mid-turn CLI's stdin, killing it and
+        # losing the in-flight turn). If a turn is running, put the message
+        # back at the front — the post-turn queue drain picks it up.
+        async with _active_sessions_lock:
+            active_task = _active_chat_sessions.get(session_id)
+        if active_task is not None and not active_task.done():
+            logger.info(
+                f"[Queue] Session {session_id} has a live turn — re-queuing "
+                f"instead of cancelling it"
+            )
+            await run_sync(
+                database.requeue_message_at_front,
+                session_id=session_id,
+                content=content,
+                profile_id=profile_id if profile_id != "claude-code" else None,
+                project_id=project_id,
+            )
+            queue = await run_sync(database.get_queued_messages, session_id)
+            await sync_engine.broadcast_queue_updated(session_id, queue)
+            return
+
         try:
             # Broadcast updated queue to all devices
             queue = await run_sync(database.get_queued_messages, session_id)
@@ -1939,26 +2038,40 @@ class ChatWebSocketHandler:
                 source_device_id=None  # Send to ALL devices
             )
 
-            # Cancel any existing query (shouldn't be one, but safety)
-            async with _active_sessions_lock:
-                existing_task = _active_chat_sessions.get(session_id)
-            if existing_task and not existing_task.done():
-                existing_task.cancel()
-                try:
-                    await existing_task
-                except asyncio.CancelledError:
-                    pass
-
             # Look up worktree_id from session
             session_data = await run_sync(database.get_session, session_id)
             worktree_id = session_data.get("worktree_id") if session_data else None
 
-            # Start the query
-            task = asyncio.create_task(
-                self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
-            )
+            # Start the query — busy-write guard (late re-check): check-and-
+            # register under ONE lock acquisition so a turn that started during
+            # the awaits above (an explicit query, an unpark follow-up) is never
+            # clobbered. If preempted, re-queue at the front so the message is
+            # not lost — mirrors the /ws/chat _drain_reserved preempt path.
+            preempted = False
             async with _active_sessions_lock:
-                _active_chat_sessions[session_id] = task
+                existing_task = _active_chat_sessions.get(session_id)
+                if existing_task is not None and not existing_task.done():
+                    preempted = True
+                else:
+                    task = asyncio.create_task(
+                        self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+                    )
+                    _active_chat_sessions[session_id] = task
+            if preempted:
+                logger.info(
+                    f"[Queue] Drain preempted before launch for session "
+                    f"{session_id} — re-queuing instead of cancelling the live turn"
+                )
+                await run_sync(
+                    database.requeue_message_at_front,
+                    session_id=session_id,
+                    content=content,
+                    profile_id=profile_id if profile_id != "claude-code" else None,
+                    project_id=project_id,
+                )
+                queue = await run_sync(database.get_queued_messages, session_id)
+                await sync_engine.broadcast_queue_updated(session_id, queue)
+                return
             self.query_task = task
 
         except Exception as exc:

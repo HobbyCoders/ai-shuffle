@@ -1147,6 +1147,53 @@ async def chat_websocket(
                                     })
                                 continue
 
+                        # Busy-write guard: a query for a session that already
+                        # has a live turn must NEVER cancel-and-requery — the
+                        # bare cancel skipped the SDK interrupt, so the follow-up
+                        # prompt was written into the mid-turn CLI's stdin,
+                        # killing it ("Fatal error in message reader") and losing
+                        # the whole in-flight turn. Enqueue the message instead:
+                        # the queue machinery drains it as a clean new query when
+                        # the turn ends, and the user sees it via the
+                        # queue_updated ack frames. ("Send now" goes through the
+                        # two-phase interrupt_for_query, not this path.) Mirrors
+                        # ChatWebSocketHandler.handle_query.
+                        if session_id:
+                            async with _active_sessions_lock:
+                                _busy_task = _active_chat_sessions.get(session_id)
+                            if _busy_task is not None and not _busy_task.done():
+                                logger.info(
+                                    f"[BusyGuard] query for session {session_id} arrived "
+                                    f"mid-turn — enqueueing instead of cancelling the live turn"
+                                )
+                                # User explicitly sent a message — let the queue
+                                # auto-process when the session goes idle.
+                                _stopped_sessions.discard(session_id)
+                                await run_sync(
+                                    database.add_queued_message,
+                                    session_id=session_id,
+                                    content=prompt,
+                                    profile_id=data.get("profile"),
+                                    project_id=project_id,
+                                )
+                                bq_queue = await run_sync(database.get_queued_messages, session_id)
+                                await sync_engine.broadcast_queue_updated(session_id, bq_queue)
+                                await send_json({
+                                    "type": "sync",
+                                    "event_type": "queue_updated",
+                                    "session_id": session_id,
+                                    "data": {"queued_messages": bq_queue},
+                                })
+                                # If the turn ended in the check-to-enqueue window,
+                                # drain immediately so the message is never stranded
+                                # (the drain's own lock-guarded checks make this a
+                                # no-op while the turn is still live).
+                                try:
+                                    await drain_next_queued_if_idle(session_id, log_prefix="busy-guard")
+                                except Exception as exc:
+                                    logger.warning(f"[Queue:busy-guard] drain failed: {exc}")
+                                continue
+
                         # Create or get session
                         is_new_session = not session_id
                         # Safety net for the "stray new session" regression: a query
@@ -1274,26 +1321,58 @@ async def chat_websocket(
                             source_device_id=device_id  # Exclude the sender
                         )
 
-                        # Cancel any existing query for this session
-                        async with _active_sessions_lock:
-                            if session_id in _active_chat_sessions:
-                                _active_chat_sessions[session_id].cancel()
-                                try:
-                                    await _active_chat_sessions[session_id]
-                                except asyncio.CancelledError:
-                                    pass
-
-                        # Start new query task
+                        # Start new query task — busy-write guard (late re-check):
+                        # the liveness check and the registration happen under the
+                        # SAME lock acquisition, so a turn that started while we
+                        # were persisting the user message above (queue drain,
+                        # unpark follow-up, another device) is never clobbered. We
+                        # never bare-cancel a live turn: cancelling without an SDK
+                        # interrupt leaves the CLI mid-turn, and the next
+                        # client.query() into its stdin kills it and loses the
+                        # whole in-flight turn.
                         # Note: broadcast_stream_start is called inside run_query when actual
                         # streaming begins. This prevents stuck streaming state if query fails early.
                         # Pass the adoption token ONLY for a brand-new session so the first
                         # `start` frame echoes it (authenticating adoption). An existing-session
                         # query needs no token — the frontend routes its start by known session_id.
-                        query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id, deferred_delivery=is_interrupt_followup, request_id=(request_id if is_new_session else None))
-                        )
+                        _query_preempted = False
                         async with _active_sessions_lock:
-                            _active_chat_sessions[session_id] = query_task
+                            _existing_task = _active_chat_sessions.get(session_id)
+                            if _existing_task is not None and not _existing_task.done():
+                                _query_preempted = True
+                            else:
+                                query_task = asyncio.create_task(
+                                    run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id, deferred_delivery=is_interrupt_followup, request_id=(request_id if is_new_session else None))
+                                )
+                                _active_chat_sessions[session_id] = query_task
+                        if _query_preempted:
+                            # Rare double-race (a server-initiated turn won between
+                            # the early busy check and here). Enqueue so the message
+                            # is never lost — the live turn's post-turn queue drain
+                            # picks it up. The user message was already persisted
+                            # above; the drain's re-persist is the same rare
+                            # duplicate the _drain_reserved preempt path accepts.
+                            logger.info(
+                                f"[BusyGuard] query for session {session_id} preempted "
+                                f"at registration — enqueueing instead of cancelling "
+                                f"the live turn"
+                            )
+                            await run_sync(
+                                database.add_queued_message,
+                                session_id=session_id,
+                                content=prompt,
+                                profile_id=data.get("profile"),
+                                project_id=project_id,
+                            )
+                            bq_queue = await run_sync(database.get_queued_messages, session_id)
+                            await sync_engine.broadcast_queue_updated(session_id, bq_queue)
+                            await send_json({
+                                "type": "sync",
+                                "event_type": "queue_updated",
+                                "session_id": session_id,
+                                "data": {"queued_messages": bq_queue},
+                            })
+                            continue
 
                     elif msg_type == "stop":
                         # Stop current query - use interrupt_session for proper SDK-level cancellation
