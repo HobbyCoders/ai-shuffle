@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -285,6 +285,66 @@ def delete_automation(automation_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM automations WHERE id = %s", (automation_id,))
         return cursor.rowcount > 0
+
+
+def record_automation_run_success(automation_id: str, cost: float = 0.0) -> None:
+    """Record a completed run on the automation row in one atomic UPDATE.
+
+    Concurrent runs (two installs sharing the database, or overlapping
+    triggers) increment ``run_count`` / ``total_cost_used`` in SQL rather
+    than read-modify-write in Python, so no increment is ever lost. Budget
+    limit columns are untouched: NULL limits still mean unlimited.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE automations
+               SET status = 'idle',
+                   last_run_at = %s,
+                   run_count = COALESCE(run_count, 0) + 1,
+                   total_cost_used = COALESCE(total_cost_used, 0) + %s,
+                   last_error = NULL,
+                   updated_at = %s
+               WHERE id = %s""",
+            (now, cost, now, automation_id),
+        )
+
+
+# ---- Automation Fire Claims ----
+
+def claim_automation_fire(automation_id: str, fire_bucket: str) -> bool:
+    """Atomically claim one scheduled fire across installs.
+
+    Every install sharing the database computes the same *fire_bucket* for a
+    given scheduled tick, and the primary key on ``automation_fires`` lets
+    exactly one of them insert the claim row. Returns True when THIS install
+    won the claim, False when another install already holds it.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO automation_fires (automation_id, fire_bucket, claimed_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (automation_id, fire_bucket) DO NOTHING""",
+            (automation_id, fire_bucket, now),
+        )
+        return cursor.rowcount == 1
+
+
+def prune_automation_fires(older_than_days: int = 7) -> int:
+    """Delete fire-claim rows older than *older_than_days*; returns rows removed.
+
+    A claim only has to outlive the window in which installs could still
+    attempt the same tick (seconds, in practice) — a week is comfortably
+    beyond any clock skew and keeps the table tiny.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM automation_fires WHERE claimed_at < %s", (cutoff,))
+        return cursor.rowcount
 
 
 # ---- Automation Runs ----

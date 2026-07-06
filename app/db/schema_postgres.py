@@ -1,5 +1,5 @@
 """
-PostgreSQL DDL schema — creates all 49 tables, indexes, and FTS infrastructure.
+PostgreSQL DDL schema — creates all 50 tables, indexes, and FTS infrastructure.
 
 This defines the PostgreSQL schema (all tables, indexes, and FTS
 infrastructure) corresponding to ``database.py._create_schema()``
@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 
 
 def create_postgres_schema(cursor) -> None:
@@ -902,6 +902,25 @@ def create_postgres_schema(cursor) -> None:
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
             FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 45b. Automation fire claims (v50) — cross-install double-fire guard
+    # ------------------------------------------------------------------
+    # Every install schedules every enabled automation and the runner
+    # election deliberately fails open, so one scheduled tick can be
+    # attempted on more than one install. The primary key makes claiming a
+    # tick atomic: exactly one INSERT ... ON CONFLICT DO NOTHING wins per
+    # (automation_id, fire_bucket). No FK on automation_id — claims are
+    # short-lived bookkeeping (pruned after ~7 days) and must not block
+    # automation deletion on another install mid-claim.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_fires (
+            automation_id TEXT NOT NULL,
+            fire_bucket TEXT NOT NULL,
+            claimed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (automation_id, fire_bucket)
         )
     """)
 

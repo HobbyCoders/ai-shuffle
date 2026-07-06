@@ -12,7 +12,7 @@ import json
 import logging
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -210,7 +210,7 @@ class AutomationManager:
                         self._on_schedule_trigger,
                         trigger,
                         id=job_id,
-                        args=[automation_id],
+                        args=[automation_id, t_type, t_config],
                         replace_existing=True,
                     )
                     logger.info(f"Scheduled cron trigger {i} for {automation_id}: {expression} ({timezone})")
@@ -226,7 +226,7 @@ class AutomationManager:
                         self._on_schedule_trigger,
                         trigger,
                         id=job_id,
-                        args=[automation_id],
+                        args=[automation_id, t_type, t_config],
                         replace_existing=True,
                     )
                     logger.info(f"Scheduled interval trigger {i} for {automation_id}: every {interval_seconds}s")
@@ -243,12 +243,46 @@ class AutomationManager:
     # Trigger handlers
     # ------------------------------------------------------------------
 
-    async def _on_schedule_trigger(self, automation_id: str) -> None:
+    @staticmethod
+    def _fire_bucket(
+        trigger_type: str, trigger_config: Optional[Dict[str, Any]], fired_at: datetime
+    ) -> str:
+        """Deterministic identity of one scheduled tick, identical on every install.
+
+        The shared ``automation_fires`` claim keys on this, so it must name the
+        SCHEDULED fire time rather than each install's wall-clock call time:
+
+        * cron jobs fire on minute boundaries — rounding the callback time to
+          the nearest minute recovers the scheduled tick even when the event
+          loop delivers the callback late (or clocks are skewed) by <30s.
+        * interval jobs have per-install phase (each scheduler starts at a
+          different moment), so the tick is the epoch-aligned window the fire
+          lands in — every install with the same interval config computes the
+          same window.
+        """
+        if trigger_type == "interval":
+            seconds = max(int((trigger_config or {}).get("seconds") or 3600), 60)
+            window_start = int(fired_at.timestamp()) // seconds * seconds
+            window_iso = datetime.fromtimestamp(window_start, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return f"interval:{seconds}:{window_iso}"
+        minute = (fired_at + timedelta(seconds=30)).replace(second=0, microsecond=0)
+        return f"cron:{minute.strftime('%Y-%m-%dT%H:%MZ')}"
+
+    async def _on_schedule_trigger(
+        self,
+        automation_id: str,
+        trigger_type: str = "cron",
+        trigger_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Called by APScheduler when a cron/interval job fires.
 
         Automations are shared across installs (one database), so every online
         install fires this job — the runner election picks exactly one to
-        execute, preferring the install that has the automation's project.
+        execute, preferring the install that has the automation's project. The
+        election reads mutable registry state and deliberately fails open, so
+        an atomic shared-database fire claim backs it up: exactly one install
+        can insert the (automation_id, fire_bucket) row, and only that winner
+        executes the tick.
         """
         try:
             automation = database.get_automation(automation_id)
@@ -268,7 +302,29 @@ class AutomationManager:
             # the fire — _execute records its own failure if things are broken.
             logger.warning(f"Automation {automation_id}: scheduled-fire gate failed ({e}) — running locally")
 
-        trigger_data = {"trigger": "schedule", "fired_at": datetime.now(timezone.utc).isoformat()}
+        fired_at = datetime.now(timezone.utc)
+        fire_bucket = self._fire_bucket(trigger_type, trigger_config, fired_at)
+        try:
+            claimed = database.claim_automation_fire(automation_id, fire_bucket)
+        except Exception as e:  # noqa: BLE001 — claim trouble must not drop the fire
+            # Same fail-open stance as the election: if the claim table is
+            # unreachable here it is unreachable on the other installs too.
+            logger.warning(f"Automation {automation_id}: fire claim {fire_bucket} failed ({e}) — running locally")
+            claimed = True
+        if not claimed:
+            logger.info(
+                f"Automation {automation_id}: fire {fire_bucket} already claimed by another install — skipping"
+            )
+            return
+        try:
+            database.prune_automation_fires()
+        except Exception:  # noqa: BLE001 — hygiene must never block a fire
+            pass
+
+        # The claimed tick stays consumed even if _execute's budget check then
+        # blocks the run: budget counters live in the shared database, so a
+        # fire that is over budget here is over budget on every install.
+        trigger_data = {"trigger": "schedule", "fired_at": fired_at.isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-schedule-{automation_id}")
 
     async def handle_connector_event(self, event_type: str, data: Dict[str, Any]) -> None:
@@ -514,12 +570,7 @@ class AutomationManager:
                 started_at=datetime.now(timezone.utc).isoformat(),
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
-            database.update_automation(
-                automation_id, status="idle",
-                last_run_at=datetime.now(timezone.utc).isoformat(),
-                run_count=automation.get("run_count", 0) + 1,
-                last_error=None,
-            )
+            database.record_automation_run_success(automation_id)
             return
 
         database.update_automation_run(
@@ -609,15 +660,10 @@ class AutomationManager:
                 )
                 database.update_automation_run(run_id, session_id=None, **run_result)
 
-            # Update automation stats
-            database.update_automation(
-                automation_id,
-                status="idle",
-                last_run_at=datetime.now(timezone.utc).isoformat(),
-                run_count=automation.get("run_count", 0) + 1,
-                total_cost_used=automation.get("total_cost_used", 0) + cost,
-                last_error=None,
-            )
+            # Update automation stats. The increments happen in SQL (one
+            # atomic UPDATE) so a concurrent run on another install can't
+            # make this stale in-memory row lose a count or a cost.
+            database.record_automation_run_success(automation_id, cost)
 
             # Deliver output
             await self._deliver_output(automation, run_id, response_text)

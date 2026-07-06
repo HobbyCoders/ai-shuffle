@@ -414,11 +414,14 @@ class TestRunCompletionSessionFkFallback:
         assert completed[0]["session_id"] == "sess-deleted"
         assert completed[1]["session_id"] is None
         assert completed[1]["response"] == "done"
-        # The automation itself was marked healthy, not errored
-        auto_updates = [
-            c.kwargs for c in db.update_automation.call_args_list if "status" in c.kwargs
+        # The automation itself was marked healthy (atomic success UPDATE),
+        # not errored
+        db.record_automation_run_success.assert_called_once_with("auto-fk", 0.01)
+        error_updates = [
+            c.kwargs for c in db.update_automation.call_args_list
+            if c.kwargs.get("status") == "error"
         ]
-        assert auto_updates[-1]["status"] == "idle"
+        assert error_updates == []
 
     @pytest.mark.asyncio
     async def test_non_fk_completion_error_still_propagates(self, manager):

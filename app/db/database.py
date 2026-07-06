@@ -84,7 +84,8 @@ def _safe_json(value):
 # v48: Drop cloud_remote_url + cloud_remote_session_id from sessions — the legacy
 #      per-session offload proxy is replaced by the cluster intake/relay model
 # v49: Add notifications table (unified banner/notification history for the bell)
-SCHEMA_VERSION = 49
+# v50: Add automation_fires table (atomic cross-install claim per scheduled fire)
+SCHEMA_VERSION = 50
 
 
 def _run_column_migrations(cursor):
@@ -542,6 +543,23 @@ def _run_column_migrations(cursor):
         migrations_applied.append("notifications")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
+
+    # automation_fires (v50). Cross-install scheduled-fire claim table: the
+    # primary-key insert elects exactly one install per scheduled tick, closing
+    # the double-fire window left by the fail-open runner election. Idempotent
+    # so upgrades from any older version land the table without needing the
+    # SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
+    # the notifications block above).
+    if not table_exists(cursor, "automation_fires"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS automation_fires (
+                automation_id TEXT NOT NULL,
+                fire_bucket TEXT NOT NULL,
+                claimed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                PRIMARY KEY (automation_id, fire_bucket)
+            )
+        """)
+        migrations_applied.append("automation_fires")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -1022,6 +1040,9 @@ from app.db.automations import (  # noqa: F401
     get_automation_approval,
     get_pending_automation_approvals,
     update_automation_approval,
+    claim_automation_fire,
+    prune_automation_fires,
+    record_automation_run_success,
 )
 
 from app.db.queued_messages import (  # noqa: F401
