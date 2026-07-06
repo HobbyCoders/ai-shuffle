@@ -15,7 +15,7 @@ import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree, 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-export function formatWorktreeError(rawError: string, branchName: string): string {
+function formatWorktreeError(rawError: string, branchName: string): string {
 	const lower = rawError.toLowerCase();
 
 	// Git-specific errors
@@ -119,7 +119,7 @@ export interface MessageSenderDeps {
 	};
 }
 
-export interface SendMessageOptions {
+interface SendMessageOptions {
 	skipWorktreeSetup?: boolean;
 	skipMessageAppend?: boolean;
 	pendingUploadPaths?: string[];

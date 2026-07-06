@@ -16,7 +16,7 @@ import type { SessionUsage, SessionData } from './session-state.svelte';
 // Re-export types so existing imports keep working
 export type { SessionUsage, SessionData } from './session-state.svelte';
 
-export interface SessionStateMap {
+interface SessionStateMap {
 	/** Map of sessionId -> SessionData */
 	sessions: Map<string, SessionData>;
 }

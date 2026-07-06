@@ -16,7 +16,7 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
-export interface ProjectMemoryState {
+interface ProjectMemoryState {
 	files: MemoryFile[];
 	currentProjectId: string | null;
 	loading: boolean;
@@ -175,8 +175,3 @@ export const memorySaving = createDerived(() => _state.saving);
 
 /** Error state */
 export const memoryError = createDerived(() => _state.error);
-
-/** Get a specific file by location */
-export function getMemoryFileByLocation(location: MemoryLocation) {
-	return createDerived(() => _state.files.find((f) => f.location === location) ?? null);
-}

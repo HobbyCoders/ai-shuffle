@@ -6,7 +6,7 @@
 	 * which proxies the fal.ai platform API. Supports search, category filtering,
 	 * and model selection for each tool type.
 	 */
-	import '../deck/cards/card-design-system.css';
+	import '../card-design-system.css';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount } from 'svelte';
 	import type { CatalogModel, CatalogCategory } from '$lib/types/ai-models';

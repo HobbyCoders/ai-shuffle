@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Mic } from 'lucide-svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
-	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
+	import HotkeyCapture from './HotkeyCapture.svelte';
 </script>
 
 <div class="set-group">

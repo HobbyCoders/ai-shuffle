@@ -27,7 +27,7 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
-export interface McpState {
+interface McpState {
 	// Global servers (USER scope)
 	globalServers: McpServerInfo[];
 	// Project servers by scope
@@ -430,46 +430,11 @@ export const globalMcpServers = createDerived(() => _state.globalServers);
 // Project servers by scope
 export const projectMcpServers = createDerived(() => _state.projectServers);
 
-// All project servers (installed + local + project scope, excludes user since that's shown separately)
-export const allProjectMcpServers = createDerived(() => [
-	...(_state.projectServers.installed || []),
-	...(_state.projectServers.local || []),
-	...(_state.projectServers.project || [])
-]);
-
-// MCP tools
-export const mcpTools = createDerived(() => _state.tools);
-
-// Tools grouped by server
-export const mcpToolsByServer = createDerived(() => {
-	const groups: Record<string, McpTool[]> = {};
-	for (const tool of _state.tools) {
-		if (!groups[tool.server]) {
-			groups[tool.server] = [];
-		}
-		groups[tool.server].push(tool);
-	}
-	return groups;
-});
-
-// MCP stats
-export const mcpStats = createDerived(() => _state.stats);
-
 // Loading state
 export const mcpLoading = createDerived(() => _state.loading);
 
 // Error state
 export const mcpError = createDerived(() => _state.error);
-
-// Total server count (global + project)
-export const totalMcpServerCount = createDerived(() => {
-	return (
-		_state.globalServers.length +
-		(_state.projectServers.installed?.length || 0) +
-		(_state.projectServers.local?.length || 0) +
-		(_state.projectServers.project?.length || 0)
-	);
-});
 
 // Stats for display
 export const mcpDisplayStats = createDerived(() => ({

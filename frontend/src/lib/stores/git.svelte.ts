@@ -31,7 +31,7 @@ export type {
 // Store State
 // ============================================================================
 
-export type GitMode = 'project' | 'worktree';
+type GitMode = 'project' | 'worktree';
 
 interface GitState {
 	projectId: string | null;
@@ -1033,21 +1033,14 @@ export const git = {
 // ============================================================================
 
 export const branches = createDerived(() => _state.branches);
-export const commits = createDerived(() => _state.commits);
 export const worktrees = createDerived(() => _state.worktrees);
 export const gitStatus = createDerived(() => _state.status);
 export const diffStats = createDerived(() => _state.diffStats);
-export const gitLoading = createDerived(() => _state.loading);
-export const gitError = createDerived(() => _state.error);
 export const gitMode = createDerived(() => _state.mode);
 
 export const currentBranch = createDerived(
 	() => _state.branches.find((b) => b.current) || null
 );
-
-export const localBranches = createDerived(() => _state.branches.filter((b) => !b.remote));
-
-export const remoteBranches = createDerived(() => _state.branches.filter((b) => b.remote));
 
 export const changedFiles = createDerived(() => _state.changedFiles);
 export const changedFilesLoading = createDerived(() => _state.changedFilesLoading);

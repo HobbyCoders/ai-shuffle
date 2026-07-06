@@ -29,7 +29,7 @@ export type ViewType =
 	| 'stats'
 	| 'docs';
 
-export interface ActiveView {
+interface ActiveView {
 	type: ViewType;
 	/** Session ID for chat views, null for new chat */
 	sessionId?: string | null;
@@ -49,9 +49,9 @@ interface LayoutState {
 // ============================================
 
 const STORAGE_KEY = 'ai-shuffle-layout';
-export const DEFAULT_SIDEBAR_WIDTH = 390;
-export const MIN_SIDEBAR_WIDTH = 240;
-export const MAX_SIDEBAR_WIDTH = 600;
+const DEFAULT_SIDEBAR_WIDTH = 390;
+const MIN_SIDEBAR_WIDTH = 240;
+const MAX_SIDEBAR_WIDTH = 600;
 
 // ============================================
 // Persistence
@@ -202,7 +202,3 @@ export const layout = {
 export const sidebarCollapsed = createDerived(() => _state.sidebarCollapsed);
 export const activeView = createDerived(() => _state.activeView);
 export const sidebarOverlay = createDerived(() => _state.sidebarOverlay);
-export const sidebarWidth = createDerived(() => _state.sidebarWidth);
-export const isInPanelMode = createDerived(
-	() => _state.activeView != null && _state.activeView.type !== 'chat'
-);

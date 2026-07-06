@@ -10,7 +10,7 @@
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
-export interface PermissionHandlerDeps {
+interface PermissionHandlerDeps {
 	wsSend: (data: Record<string, unknown>) => boolean;
 }
 

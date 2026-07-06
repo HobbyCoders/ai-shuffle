@@ -6,7 +6,7 @@
  */
 import { writable } from 'svelte/store';
 
-export interface LightboxState {
+interface LightboxState {
 	open: boolean;
 	type: 'image' | 'video';
 	src: string;

@@ -5,11 +5,6 @@
  * Extracted from tabs/types.ts so consumers don't need to pull in the tabs store.
  */
 
-import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
-
-// Re-export API types that are used throughout components
-export type { Session, Profile, PermissionRequestType, UserQuestionRequest };
-
 // ─── API & Message Types ─────────────────────────────────────────────────────
 
 export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'team_member' | 'command' | 'plugin_warning';
@@ -36,10 +31,10 @@ export interface SubagentChildMessage {
 // ─── Background Tasks ─────────────────────────────────────────────────────────
 
 /** Status of a background task surfaced via the /live response's activeTasks. */
-export type TaskStatus = 'running' | 'completed' | 'error' | 'killed';
+type TaskStatus = 'running' | 'completed' | 'error' | 'killed';
 
 /** Kind of background task (a sub-agent or a shell subprocess). */
-export type TaskKind = 'agent' | 'shell';
+type TaskKind = 'agent' | 'shell';
 
 /**
  * A background task spun up by the in-app agent (background sub-agent or shell

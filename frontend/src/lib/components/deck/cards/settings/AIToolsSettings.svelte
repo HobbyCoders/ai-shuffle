@@ -10,7 +10,7 @@
 	 * All state is managed here and passed down to child components.
 	 * Replaces the monolithic inline AI tab in SettingsCard.
 	 */
-	import '../deck/cards/card-design-system.css';
+	import '../card-design-system.css';
 	import { api } from '$lib/api/client';
 	import { onMount } from 'svelte';
 	import { AI_TOOL_CATEGORIES, getDefaultModelSelections } from '$lib/types/ai-tool-registry';

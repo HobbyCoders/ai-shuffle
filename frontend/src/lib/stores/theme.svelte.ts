@@ -23,7 +23,7 @@ import {
 import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
-export type Theme = 'light' | 'dark' | 'system';
+type Theme = 'light' | 'dark' | 'system';
 
 interface ThemeState {
 	preference: Theme; // User's preference (light, dark, or system)
@@ -445,10 +445,7 @@ export const theme = {
 // ============================================================================
 
 export const themePreference = createDerived(() => _state.preference);
-export const isDark = createDerived(() => _state.resolved === 'dark');
-export const isLight = createDerived(() => _state.resolved === 'light');
 export const currentPresetId = createDerived(() => _state.presetId);
 
 // Re-export theme presets for use in UI
-export { themePresets, getPresetById };
-export type { ThemePreset };
+export { themePresets };

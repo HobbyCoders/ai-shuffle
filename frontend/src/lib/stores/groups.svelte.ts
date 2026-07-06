@@ -17,17 +17,17 @@ import { createSubscribers } from './store-utils';
 
 export type EntityType = 'projects' | 'profiles' | 'subagents';
 
-export interface GroupDefinition {
+interface GroupDefinition {
 	name: string;
 	collapsed: boolean;
 }
 
-export interface EntityGroups {
+interface EntityGroups {
 	groups: GroupDefinition[];
 	assignments: Record<string, string>; // entityId -> groupName
 }
 
-export interface GroupsState {
+interface GroupsState {
 	projects: EntityGroups;
 	profiles: EntityGroups;
 	subagents: EntityGroups;
@@ -193,7 +193,7 @@ let backendLoaded = false;
 
 // ─── Subscribe Shim (centralized via store-utils) ───────────────────────────
 
-const { subscribe, notifySubscribers, createDerived } =
+const { subscribe, notifySubscribers } =
 	createSubscribers<GroupsState>(
 		() => _state,
 		(v) => { _state = v; }
@@ -488,8 +488,3 @@ export function organizeByGroups<T extends { id: string }>(
 	return { grouped, ungrouped, groupOrder: entity.groups };
 }
 
-// ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
-
-export const projectGroups = createDerived(() => _state.projects);
-export const profileGroups = createDerived(() => _state.profiles);
-export const subagentGroups = createDerived(() => _state.subagents);

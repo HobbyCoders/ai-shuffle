@@ -21,7 +21,7 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
-export interface ProjectAgentsState {
+interface ProjectAgentsState {
 	agents: ProjectAgent[];
 	selectedAgent: ProjectAgentDetail | null;
 	currentProjectId: string | null;
@@ -249,30 +249,11 @@ export const projectAgents = {
 // All agents
 export const allProjectAgents = createDerived(() => _state.agents);
 
-// Selected agent detail
-export const selectedProjectAgent = createDerived(() => _state.selectedAgent);
-
 // Loading state
 export const projectAgentsLoading = createDerived(() => _state.loading);
-
-// Saving state
-export const projectAgentsSaving = createDerived(() => _state.saving);
 
 // Error state
 export const projectAgentsError = createDerived(() => _state.error);
 
 // Agent count
 export const projectAgentCount = createDerived(() => _state.agents.length);
-
-// Agents grouped by model
-export const projectAgentsByModel = createDerived(() => {
-	const groups: Record<string, ProjectAgent[]> = { 'No model': [] };
-	for (const agent of _state.agents) {
-		const model = agent.model || 'No model';
-		if (!groups[model]) {
-			groups[model] = [];
-		}
-		groups[model].push(agent);
-	}
-	return groups;
-});

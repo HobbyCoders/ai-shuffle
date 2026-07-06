@@ -31,7 +31,7 @@ export interface FileItem {
 	createdAt: string;
 }
 
-export interface FilesState {
+interface FilesState {
 	currentPath: string;
 	files: FileItem[];
 	loading: boolean;
@@ -675,9 +675,3 @@ export const sortedFiles = createDerived(() => {
 
 	return sorted;
 });
-
-// Derived: Has selection
-export const hasSelection = createDerived(() => _state.selectedFiles.size > 0);
-
-// Derived: Selection count
-export const selectionCount = createDerived(() => _state.selectedFiles.size);

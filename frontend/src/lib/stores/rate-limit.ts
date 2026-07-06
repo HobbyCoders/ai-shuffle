@@ -24,7 +24,7 @@
 
 import { createStore } from './store-utils';
 
-export interface RateLimitEvent {
+interface RateLimitEvent {
 	status: string;
 	rate_limit_type: string;
 	resets_at?: string;
@@ -34,7 +34,7 @@ export interface RateLimitEvent {
 	received_at: number;
 }
 
-export interface RateLimitState {
+interface RateLimitState {
 	event: RateLimitEvent | null;
 	dismissedEventKey: string | null;
 	/** Most recent five-hour-window reading, persisted across reloads so the
@@ -146,8 +146,3 @@ export const rateLimit = {
 		return false;
 	},
 };
-
-/** Reactive helper — true when there's an active, non-dismissed event. */
-export const rateLimitVisible = _store.createDerived(s =>
-	Boolean(s.event && (!s.dismissedEventKey || s.dismissedEventKey !== eventKey(s.event)))
-);

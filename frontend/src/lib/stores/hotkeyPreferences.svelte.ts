@@ -30,7 +30,7 @@ export interface HotkeyConfig {
 /**
  * All hotkey-related preferences
  */
-export interface HotkeyPreferences {
+interface HotkeyPreferences {
 	// Global STT hotkey
 	globalSttEnabled: boolean;
 	globalSttHotkey: HotkeyConfig;
@@ -334,6 +334,3 @@ export const hotkeyPreferences = {
 	setGlobalSttEnabled: (value: boolean) => updatePreference('globalSttEnabled', value),
 	setGlobalSttHotkey: (value: HotkeyConfig) => updatePreference('globalSttHotkey', value),
 };
-
-// Also export defaults for reference
-export { DEFAULT_PREFERENCES, DEFAULT_HOTKEY };

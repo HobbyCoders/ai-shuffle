@@ -17,11 +17,11 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================
 
-export type CommitAction = 'commit' | 'push' | 'pr';
-export type PullStrategy = 'merge' | 'rebase';
-export type MergeMethod = 'squash' | 'merge' | 'rebase';
+type CommitAction = 'commit' | 'push' | 'pr';
+type PullStrategy = 'merge' | 'rebase';
+type MergeMethod = 'squash' | 'merge' | 'rebase';
 
-export interface GitActionPreferences {
+interface GitActionPreferences {
 	// Commit modal
 	includeUnstaged: boolean;
 	nextStep: CommitAction;
@@ -292,5 +292,3 @@ export const gitActionPreferences = {
 	setMergeMethod: (value: MergeMethod) => updatePreference('mergeMethod', value),
 	setCleanupAfterMerge: (value: boolean) => updatePreference('cleanupAfterMerge', value),
 };
-
-export { DEFAULT_PREFERENCES };

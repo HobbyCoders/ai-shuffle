@@ -22,7 +22,7 @@ import { auth } from './auth.svelte';
 
 export type NotificationSeverity = 'error' | 'warning' | 'info' | 'success';
 export type NotificationSurface = 'toast' | 'banner' | 'inline';
-export type NotificationSource = 'client' | 'server';
+type NotificationSource = 'client' | 'server';
 
 /** Optional action button rendered inside a toast / banner / center row. */
 export interface NotificationAction {
@@ -50,7 +50,7 @@ export interface AppNotification {
 }
 
 /** A notification row as returned by `GET /api/v1/notifications` (wire shape). */
-export interface ServerNotificationRow {
+interface ServerNotificationRow {
 	id: string;
 	severity: NotificationSeverity;
 	surface?: NotificationSurface;
@@ -65,7 +65,7 @@ export interface ServerNotificationRow {
 	action?: { kind?: string; payload?: Record<string, unknown> } | null;
 }
 
-export interface NotificationState {
+interface NotificationState {
 	/** Currently rendered, auto-dismissing surfaces (toasts + page banners). */
 	live: AppNotification[];
 	/** Persisted history, newest first — drives the NotificationCenter. */
@@ -73,7 +73,7 @@ export interface NotificationState {
 }
 
 /** Options accepted by the public `notify.*` API. */
-export interface NotifyOptions {
+interface NotifyOptions {
 	severity?: NotificationSeverity;
 	surface?: NotificationSurface;
 	category?: string;
@@ -133,7 +133,7 @@ function _persistRemote(n: AppNotification): void {
 }
 
 /** Remove a live (toast / page banner) notification. Leaves history untouched. */
-export function dismissLive(id: string): void {
+function dismissLive(id: string): void {
 	_clearTimer(id);
 	_store.update((s) => ({ ...s, live: s.live.filter((n) => n.id !== id) }));
 }
@@ -365,9 +365,9 @@ export const unreadCount = _store.createDerived((s) => s.history.filter((n) => !
 
 // ─── Backward-compatible `toast` alias ─────────────────────────────────────────
 
-export type ToastTone = NotificationSeverity;
+type ToastTone = NotificationSeverity;
 
-export interface ToastAction {
+interface ToastAction {
 	label: string;
 	onClick: () => void;
 }

@@ -11,7 +11,7 @@
  */
 import { writable } from 'svelte/store';
 
-export type HeaderDropdownId = 'profile' | 'branch' | 'claude-status' | 'notifications';
+type HeaderDropdownId = 'profile' | 'branch' | 'claude-status' | 'notifications';
 
 /** The currently-open header dropdown, or null when all are closed. */
 export const openHeaderDropdown = writable<HeaderDropdownId | null>(null);

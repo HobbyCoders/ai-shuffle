@@ -321,6 +321,3 @@ export const chatPreferences = {
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),
 	setCompactMessageView: (value: boolean) => updatePreference('compactMessageView', value),
 };
-
-// Also export defaults for reference
-export { DEFAULT_PREFERENCES };

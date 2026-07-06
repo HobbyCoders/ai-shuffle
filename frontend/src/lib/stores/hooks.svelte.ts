@@ -20,7 +20,7 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
-export interface HooksState {
+interface HooksState {
 	hooks: Hook[];
 	pluginHooks: PluginHookInfo[];
 	currentProjectId: string | null;
@@ -345,41 +345,8 @@ export const hooks = {
 // All hooks (both app + project)
 export const projectHooks = createDerived(() => _state.hooks);
 
-// Enabled hooks only
-export const enabledHooks = createDerived(() => _state.hooks.filter((h) => h.enabled));
-
-// Disabled hooks only
-export const disabledHooks = createDerived(() => _state.hooks.filter((h) => !h.enabled));
-
-// Hooks grouped by event type
-export const hooksByEvent = createDerived(() => {
-	const groups: Record<string, Hook[]> = {};
-	for (const hook of _state.hooks) {
-		if (!groups[hook.event]) {
-			groups[hook.event] = [];
-		}
-		groups[hook.event].push(hook);
-	}
-	return groups;
-});
-
 // Plugin hooks
 export const pluginHooks = createDerived(() => _state.pluginHooks);
-
-// Plugin hooks grouped by plugin
-export const pluginHooksByPlugin = createDerived(() => {
-	const groups: Record<string, PluginHookInfo[]> = {};
-	for (const hook of _state.pluginHooks) {
-		if (!groups[hook.plugin_id]) {
-			groups[hook.plugin_id] = [];
-		}
-		groups[hook.plugin_id].push(hook);
-	}
-	return groups;
-});
-
-// Current project ID
-export const currentProjectId = createDerived(() => _state.currentProjectId);
 
 // Loading state
 export const hooksLoading = createDerived(() => _state.loading);

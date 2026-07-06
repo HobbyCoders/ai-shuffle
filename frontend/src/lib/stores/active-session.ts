@@ -794,12 +794,4 @@ export const activeSession = {
 
 // ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
 
-export const activeSessionId = createDerived(() => _state.sessionId);
-export const activeMessages = createDerived(() => _state.messages);
-export const activeIsStreaming = createDerived(() => _state.isStreaming);
 export const activeWsConnected = createDerived(() => _state.wsConnected);
-export const activePendingPermissions = createDerived(() => _state.pendingPermissions);
-export const activeTasks = createDerived(() => _state.activeTasks);
-export const activeDeferredPermissions = createDerived(() => _state.deferredPermissions);
-export const activePendingQuestions = createDerived(() => _state.pendingQuestions);
-export const activeError = createDerived(() => _state.error);

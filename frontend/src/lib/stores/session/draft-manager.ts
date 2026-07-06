@@ -17,7 +17,7 @@ import type { PollAppliedData } from './session-poller';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
-export interface DraftManagerDeps {
+interface DraftManagerDeps {
 	update: (fn: (s: ActiveSessionState) => ActiveSessionState) => void;
 	getState: () => ActiveSessionState;
 	wsSend: (data: Record<string, unknown>) => boolean;

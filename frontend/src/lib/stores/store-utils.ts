@@ -16,8 +16,8 @@ import { untrack } from 'svelte';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type Subscriber<T> = (value: T) => void;
-export type Unsubscribe = () => void;
+type Subscriber<T> = (value: T) => void;
+type Unsubscribe = () => void;
 
 // ─── createSubscribers ──────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ export function createSubscribers<T>(
 
 // ─── createStore ────────────────────────────────────────────────────────────
 
-export interface Store<T> {
+interface Store<T> {
 	readonly current: T;
 	subscribe: (fn: Subscriber<T>) => Unsubscribe;
 	update: (fn: (s: T) => T) => void;

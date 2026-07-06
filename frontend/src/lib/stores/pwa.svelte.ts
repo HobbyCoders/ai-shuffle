@@ -266,6 +266,4 @@ export const pwa = {
 // Derived values (via store-utils createDerived)
 // ============================================================================
 
-export const isOnline = createDerived(() => _state.isOnline);
 export const isInstallable = createDerived(() => _state.isInstallable && !_state.isInstalled);
-export const isInstalled = createDerived(() => _state.isInstalled);

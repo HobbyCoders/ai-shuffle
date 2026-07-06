@@ -9,14 +9,6 @@
 import * as githubApi from '$lib/api/github';
 import { createSubscribers } from './store-utils';
 
-// Re-export types from API
-export type {
-	PullRequest,
-	WorkflowRun,
-	GitHubStatus,
-	CreatePullRequestRequest
-} from '$lib/api/github';
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -293,26 +285,4 @@ export const github = {
 // Derived stores (via store-utils createDerived)
 // ============================================================================
 
-export const githubAuthenticated = createDerived(() => _state.authenticated);
-export const githubRepoName = createDerived(() => _state.repoName);
 export const githubRepoInfo = createDerived(() => _state.repoInfo);
-export const pullRequests = createDerived(() => _state.pullRequests);
-export const workflowRuns = createDerived(() => _state.workflowRuns);
-export const githubLoading = createDerived(() => _state.loading);
-export const githubLoadingPRs = createDerived(() => _state.loadingPRs);
-export const githubLoadingRuns = createDerived(() => _state.loadingRuns);
-export const githubError = createDerived(() => _state.error);
-
-// Derived stores for PR states
-export const openPullRequests = createDerived(() =>
-	_state.pullRequests.filter(pr => pr.state === 'open')
-);
-
-export const mergedPullRequests = createDerived(() =>
-	_state.pullRequests.filter(pr => pr.state === 'merged')
-);
-
-// Derived store for active/pending workflow runs
-export const activeWorkflowRuns = createDerived(() =>
-	_state.workflowRuns.filter(run => run.status === 'in_progress' || run.status === 'queued')
-);

@@ -16,7 +16,7 @@ import { createStore } from './store-utils';
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 const STORAGE_KEY = 'claude-status-dismissed-fingerprint';
 
-export interface ClaudeStatusState {
+interface ClaudeStatusState {
 	status: ClaudeStatusResponse | null;
 	loading: boolean;
 	dismissed: boolean;

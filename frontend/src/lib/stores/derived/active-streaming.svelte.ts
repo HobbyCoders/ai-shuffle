@@ -69,56 +69,6 @@ function createMultiDerived<T>(
 // ─── Derived Stores ──────────────────────────────────────────────────────────
 
 /**
- * Whether the active session is currently streaming.
- */
-export const activeIsStreaming = createMultiDerived(
-	[activeSession, sessionState],
-	() => {
-		const active = activeSession.current;
-		const state = sessionState.current;
-
-		// Store-level isStreaming is set immediately when user sends a message
-		if (active.isStreaming) return true;
-
-		if (active.sessionId) {
-			const session = state.sessions.get(active.sessionId);
-			if (session?.isStreaming) return true;
-		}
-
-		return false;
-	}
-);
-
-/**
- * Whether any session in the active session's workspace (project) is currently streaming.
- * Used to lock git controls so the workspace branch can't change during streaming.
- */
-export const workspaceIsStreaming = createMultiDerived(
-	[activeSession, sessionState, streamingSessions],
-	() => {
-		const active = activeSession.current;
-		const state = sessionState.current;
-		const streaming = streamingSessions.current;
-
-		// Active session is streaming
-		if (active.isStreaming) return true;
-		if (active.sessionId) {
-			const session = state.sessions.get(active.sessionId);
-			if (session?.isStreaming) return true;
-		}
-
-		// Any session in the same project is streaming (cross-device)
-		if (active.project) {
-			for (const [, info] of streaming) {
-				if (info.projectId === active.project) return true;
-			}
-		}
-
-		return false;
-	}
-);
-
-/**
  * Whether git controls should be locked due to streaming.
  *
  * For worktree-mode: only locked if the active session's OWN session is streaming.
@@ -138,17 +88,5 @@ export const gitControlsStreaming = createMultiDerived(
 			sessionStreaming: sessionState.current.sessions,
 			crossDeviceStreaming: streamingSessions.current
 		});
-	}
-);
-
-/**
- * Whether the active session's WebSocket is connected.
- * Single-parent derivation — uses createMultiDerived with one parent for consistency.
- */
-export const activeWsConnected = createMultiDerived(
-	[activeSession],
-	() => {
-		const active = activeSession.current;
-		return active.wsConnected;
 	}
 );

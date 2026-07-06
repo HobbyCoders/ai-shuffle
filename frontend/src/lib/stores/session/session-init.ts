@@ -75,7 +75,7 @@ export interface SessionInitDeps {
 const SKIP_RESTORE_KEY = '__aihub_skipSessionRestore';
 const INIT_GEN_KEY = '__aihub_initGeneration';
 
-export function getSkipRestore(): boolean {
+function getSkipRestore(): boolean {
 	if (typeof window === 'undefined') return false;
 	return sessionStorage.getItem(SKIP_RESTORE_KEY) === '1';
 }
@@ -89,7 +89,7 @@ export function setSkipRestore(value: boolean) {
 	}
 }
 
-export function getInitGeneration(): number {
+function getInitGeneration(): number {
 	if (typeof window === 'undefined') return 0;
 	return parseInt(sessionStorage.getItem(INIT_GEN_KEY) || '0', 10);
 }
@@ -111,7 +111,7 @@ export function bumpInitGeneration(): number {
  * switchSession's contextUsed:null reset is never overwritten and the
  * component shows stale/wrong values on the next render.
  */
-export function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionState> {
+function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionState> {
 	return {
 		totalTokensIn: usage.inputTokens,
 		totalTokensOut: usage.outputTokens,

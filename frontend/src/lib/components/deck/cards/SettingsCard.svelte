@@ -24,7 +24,7 @@
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe, Code2 } from 'lucide-svelte';
-	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
+	import AIToolsSettings from './settings/AIToolsSettings.svelte';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';

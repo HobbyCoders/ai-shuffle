@@ -62,7 +62,7 @@ export interface SessionWorktreeInfo {
 	executionMode: 'local' | 'worktree';
 }
 
-export interface SessionSwitcher {
+interface SessionSwitcher {
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
@@ -112,7 +112,7 @@ export function setPersistedExecutionMode(mode: ExecutionMode): void {
 	}
 }
 
-export async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
+async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
 	if (typeof window === 'undefined') return null;
 	try {
 		const deviceId = getOrCreateDeviceId();

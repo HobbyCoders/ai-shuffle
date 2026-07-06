@@ -28,7 +28,7 @@ import { createSubscribers } from './store-utils';
 // Types
 // ============================================================================
 
-export interface PluginsState {
+interface PluginsState {
 	marketplaces: MarketplaceInfo[];
 	available: AvailablePlugin[];
 	installed: PluginInfo[];
@@ -666,44 +666,8 @@ export const plugins = {
 // All marketplaces
 export const marketplaces = createDerived(() => _state.marketplaces);
 
-// All available plugins
-export const availablePlugins = createDerived(() => _state.available);
-
 // All installed plugins
 export const installedPlugins = createDerived(() => _state.installed);
-
-// Enabled plugins only
-export const enabledPlugins = createDerived(() =>
-	_state.installed.filter((p) => p.enabled)
-);
-
-// Disabled plugins only
-export const disabledPlugins = createDerived(() =>
-	_state.installed.filter((p) => !p.enabled)
-);
-
-// Plugins with commands
-export const pluginsWithCommands = createDerived(() =>
-	_state.installed.filter((p) => p.has_commands)
-);
-
-// Plugins with agents
-export const pluginsWithAgents = createDerived(() =>
-	_state.installed.filter((p) => p.has_agents)
-);
-
-// Plugins with skills
-export const pluginsWithSkills = createDerived(() =>
-	_state.installed.filter((p) => p.has_skills)
-);
-
-// Plugins with hooks
-export const pluginsWithHooks = createDerived(() =>
-	_state.installed.filter((p) => p.has_hooks)
-);
-
-// File-based agents
-export const fileBasedAgents = createDerived(() => _state.fileBasedAgents);
 
 // Selected plugin details
 export const selectedPlugin = createDerived(() => _state.selectedPlugin);
@@ -735,35 +699,10 @@ export const autoUpdateSettings = createDerived(() => _state.autoUpdateSettings)
 // Checking for updates state
 export const checkingUpdates = createDerived(() => _state.checkingUpdates);
 
-// Grouped by marketplace (all available)
-export const pluginsByMarketplace = createDerived(() => {
-	const groups: Record<string, AvailablePlugin[]> = {};
-	for (const plugin of _state.available) {
-		if (!groups[plugin.marketplace]) {
-			groups[plugin.marketplace] = [];
-		}
-		groups[plugin.marketplace].push(plugin);
-	}
-	return groups;
-});
-
 // Uninstalled available plugins (for Available tab - hides already installed)
 export const uninstalledAvailablePlugins = createDerived(() =>
 	_state.available.filter((p) => !p.installed)
 );
-
-// Grouped by marketplace (uninstalled only - for Available tab)
-export const uninstalledPluginsByMarketplace = createDerived(() => {
-	const groups: Record<string, AvailablePlugin[]> = {};
-	for (const plugin of _state.available) {
-		if (plugin.installed) continue; // Skip installed plugins
-		if (!groups[plugin.marketplace]) {
-			groups[plugin.marketplace] = [];
-		}
-		groups[plugin.marketplace].push(plugin);
-	}
-	return groups;
-});
 
 // Stats
 export const pluginStats = createDerived(() => ({

@@ -78,7 +78,6 @@ jobs:
           cp run_local.py "${STAGING}/"
           cp .env.example "${STAGING}/"
           cp LICENSE "${STAGING}/"
-          cp auth_helper.py "${STAGING}/"
 
           # Copy tools if dist exists
           if [ -d "tools/dist" ]; then

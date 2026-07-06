@@ -14,9 +14,6 @@ import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
 
-// Re-export the Project type so consumers migrating from the old file get it
-export type { Project };
-
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface AppDataState {
@@ -503,8 +500,5 @@ export const appData = {
 export const profiles = createDerived(() => _state.profiles);
 export const projects = createDerived(() => _state.projects);
 export const sessions = createDerived(() => _state.sessions);
-export const selectedSessionIds = createDerived(() => _state.selectedSessionIds);
-export const selectionMode = createDerived(() => _state.selectionMode);
-export const sessionsLoading = createDerived(() => _state.sessionsLoading);
 export const sessionsTagFilter = createDerived(() => _state.sessionsTagFilter);
 export const apiUserSessions = createDerived(() => _state.apiUserSessions);

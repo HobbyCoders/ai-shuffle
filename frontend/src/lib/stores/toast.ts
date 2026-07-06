@@ -7,7 +7,4 @@
  * working. Prefer importing `notify` from `$lib/stores/notifications` in new code.
  */
 
-export { toast, type ToastTone, type ToastAction } from './notifications';
-
-/** @deprecated Use `AppNotification` from `$lib/stores/notifications`. */
-export type { AppNotification as Toast } from './notifications';
+export { toast } from './notifications';

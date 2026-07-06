@@ -6,7 +6,7 @@
 	 * with model pickers, capability badges, and per-model settings panels.
 	 * Auto-saves all changes to the backend.
 	 */
-	import '../deck/cards/card-design-system.css';
+	import '../card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { api, getErrorMessage } from '$lib/api/client';
