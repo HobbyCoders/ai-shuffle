@@ -390,6 +390,14 @@ def _build_env_with_ai_tools(
     env.pop("CLAUDECODE", None)
     env["CLAUDECODE"] = ""
 
+    # ALWAYS-ON: positively attribute every spawned CLI subprocess to this
+    # install. The boot-time stray-process sweep (app.core.startup_reconcile)
+    # only terminates leftover CLI processes whose environment carries THIS
+    # install's instance id — inherited env is the one marker that survives the
+    # parent server dying, works on both Windows and Linux via psutil, and can
+    # never match a process we didn't spawn.
+    env["AI_SHUFFLE_MANAGED_BY"] = settings.effective_instance_id
+
     # ALWAYS-ON: wire the stored anthropic_api_key in as the Claude Code auth
     # credential for EVERY session, regardless of whether AI tools are enabled.
     # Must happen BEFORE the ai_tools early-returns below — auth is not gated on

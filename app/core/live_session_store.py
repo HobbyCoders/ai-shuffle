@@ -587,6 +587,18 @@ class LiveSessionStore:
             task_registry.clear_unpark_pending(session_id)
         except Exception:
             logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)
+        # Clear the durable parked marker alongside the latch: a streaming turn
+        # means the session is no longer parked awaiting an unpark follow-up.
+        # Counterpart of the end_streaming write below; boot reconcile
+        # (app.core.startup_reconcile) is the backstop for markers stranded by
+        # a crash between turns.
+        try:
+            from app.db import database
+            await asyncio.to_thread(
+                database.set_session_parked_task_kind, session_id, None
+            )
+        except Exception:
+            logger.debug("clearing parked_task_kind failed", exc_info=True)
         return session
 
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
@@ -1714,6 +1726,25 @@ class LiveSessionStore:
         Returns:
             The final messages as a list of dicts, or None if session not found
         """
+        # Durable parked marker: if this turn ends with live background work
+        # (a running sub-agent or an SDK-backgrounded shell — the same view
+        # that pins the session in the pool), record the pinning kind on the
+        # session row; otherwise clear it. This is what lets a later boot tell
+        # "parked awaiting unpark" apart from idle: boot reconcile
+        # (app.core.startup_reconcile) force-clears stale markers, since no
+        # background work survives a restart. Written before the session-lock
+        # block so the already-evicted early-return path is covered too.
+        try:
+            from app.core.task_registry import task_registry
+            from app.db import database
+            work = task_registry.get_active_background_work(session_id)
+            kind = (work[0].get("kind") or "agent") if work else None
+            await asyncio.to_thread(
+                database.set_session_parked_task_kind, session_id, kind
+            )
+        except Exception:
+            logger.debug("persisting parked_task_kind failed", exc_info=True)
+
         async with self._get_session_lock(session_id):
             # Backstop clear of the "unpark pending" latch, ABOVE the not-found
             # guard so it fires even when the session was already evicted: a turn

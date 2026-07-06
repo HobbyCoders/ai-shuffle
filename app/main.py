@@ -144,6 +144,18 @@ async def lifespan(app: FastAPI):
     # the GetAppErrors MCP tool and admin UI can surface them.
     from app.core.error_log_handler import install_error_log_handler
     install_error_log_handler()
+
+    # Reconcile from durable truth BEFORE any session machinery starts: a
+    # previous run's crash can leave sessions durably marked parked (stuck
+    # spinners/badges in the UI) and leak its CLI subprocesses — nothing in
+    # memory survived, so clear both now. Guarded: reconcile failure must
+    # never block boot.
+    try:
+        from app.core.startup_reconcile import reconcile_from_durable_truth
+        await reconcile_from_durable_truth()
+    except Exception:
+        logger.exception("Startup reconcile failed (non-fatal)")
+
     init_encryption_and_sessions()
     init_workspace()
     check_prerequisites()

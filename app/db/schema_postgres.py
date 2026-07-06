@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
 
 
 def create_postgres_schema(cursor) -> None:
@@ -177,6 +177,7 @@ def create_postgres_schema(cursor) -> None:
             worktree_path TEXT,
             cloud_branch TEXT,
             automation_id TEXT,
+            parked_task_kind TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
             is_favorite BOOLEAN DEFAULT FALSE,

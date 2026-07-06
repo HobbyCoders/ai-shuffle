@@ -221,6 +221,19 @@ class Settings(BaseSettings):
     # container. Range 1..1000; 0 = disabled.
     sdk_subprocess_oom_score_adj: int = 300
 
+    # Boot-time stray-CLI sweep (app.core.startup_reconcile). The session pool
+    # tracks its CLI subprocesses in memory only, so a server crash/restart
+    # leaks any still-running Claude CLI processes from the previous run. At
+    # boot — before this run has spawned anything — the sweep terminates
+    # leftover CLI processes it can POSITIVELY attribute to this install: the
+    # process must carry AI_SHUFFLE_MANAGED_BY=<this instance id> in its
+    # environment (injected into every spawn by _build_env_with_ai_tools) AND
+    # look like the Claude CLI, AND not be an ancestor/descendant of this
+    # server. Unattributable processes are never touched, so this is safe to
+    # leave on; disable via REAP_STRAY_CLI_ON_BOOT=false if you deliberately
+    # keep marked processes alive across server restarts.
+    reap_stray_cli_on_boot: bool = True
+
     # SDK 0.1.65 SessionStore adapter (Postgres) — controls whether we mirror
     # transcripts into Postgres and, eventually, treat Postgres as the single
     # source of truth instead of reading JSONL files from ~/.claude/projects.

@@ -578,6 +578,29 @@ def set_session_cloud_branch(session_id: str, cloud_branch: Optional[str]) -> bo
         return cursor.rowcount > 0
 
 
+def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
+    """Persist (or clear, with ``None``) the durable parked marker.
+
+    Non-NULL means the parent turn ended while background work was still
+    running — the session is "parked" awaiting an unpark follow-up (``kind``
+    is the task kind pinning it, e.g. ``"agent"`` or ``"shell"``). Written at
+    turn end by ``live_session_store.end_streaming``, cleared on the next
+    ``start_streaming``, and force-cleared at boot by
+    ``app.core.startup_reconcile`` since no background work survives a server
+    restart. Deliberately does NOT touch ``updated_at`` — a park/unpark marker
+    write must not reorder the sessions list. Returns True if a row was
+    updated.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET parked_task_kind = {_ph} WHERE id = {_ph}",
+            (kind, session_id),
+        )
+        return cursor.rowcount > 0
+
+
 def delete_session(session_id: str) -> bool:
     """Delete a session and its messages"""
     with get_db() as conn:

@@ -85,7 +85,8 @@ def _safe_json(value):
 #      per-session offload proxy is replaced by the cluster intake/relay model
 # v49: Add notifications table (unified banner/notification history for the bell)
 # v50: Add automation_fires table (atomic cross-install claim per scheduled fire)
-SCHEMA_VERSION = 50
+# v51: Add sessions.parked_task_kind (durable parked marker, cleared by boot reconcile)
+SCHEMA_VERSION = 51
 
 
 def _run_column_migrations(cursor):
@@ -238,6 +239,15 @@ def _run_column_migrations(cursor):
                     )
             except _DB_ERRORS:
                 pass  # automation_runs table may not exist yet
+        # Durable parked marker (v51): non-NULL means the parent turn ended
+        # while background work (a sub-agent, or an SDK-backgrounded shell) was
+        # still running — the session is "parked" awaiting an unpark follow-up.
+        # Written by live_session_store.end_streaming, cleared on the next
+        # start_streaming, and force-cleared at boot by
+        # app.core.startup_reconcile (no background work survives a restart).
+        if not column_exists(cursor, "sessions", "parked_task_kind"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN parked_task_kind TEXT")
+            migrations_applied.append("sessions.parked_task_kind")
         # Legacy cloud offload removal (v48): the per-session proxy model
         # (cloud_remote_url / cloud_remote_session_id) is superseded by the
         # cluster intake/relay, which shares one session id across installs via
@@ -777,6 +787,7 @@ from app.db.sessions import (  # noqa: F401
     toggle_session_favorite,
     set_session_favorite,
     set_session_cloud_branch,
+    set_session_parked_task_kind,
     session_has_forks,
     get_session_forks,
     get_session_messages,
