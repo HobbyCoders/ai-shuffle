@@ -274,7 +274,10 @@ def reap_terminated_process_trees() -> int:
     live_subprocess_pids: set[int] = set()
     try:
         if _session_pool is not None:
-            for st in _session_pool._pool.values():
+            # Snapshot — the pool dict can be mutated (evictions/removals) while
+            # this loop runs; iterating a live view would raise RuntimeError and
+            # abort with a PARTIAL live-pid set, risking a live session's tree.
+            for st in list(_session_pool._pool.values()):
                 p = subprocess_pid(st)
                 if p and is_subprocess_alive(st):
                     live_subprocess_pids.add(p)
@@ -549,40 +552,65 @@ class SessionPool:
         are streaming, allows temporary over-capacity up to the hard cap
         (max_size * 2). Beyond the hard cap, forcibly evicts the LRU streaming
         session to prevent unbounded memory growth.
+
+        LOCK SCOPE: `_eviction_lock` (non-reentrant asyncio.Lock) guards ONLY
+        victim selection + removal from the pool dict — a critical section with
+        NO awaits, so it can never be held across a context switch. The slow
+        subprocess teardown + eviction callback run AFTER the lock is released
+        (see _finish_evict), so concurrent new-session admissions are never
+        stalled behind a multi-second disconnect and a callback that re-enters
+        the pool cannot deadlock on the lock.
         """
         async with self._eviction_lock:
             if len(self._pool) < self._max_size:
                 return None
 
+            victim: Optional[tuple[str, SessionState, str]] = None
+
             # Find the LRU session that is neither streaming NOR parked on an
             # in-flight background sub-agent. Evicting either would disconnect the
             # pooled SDK client out from under live work: a streaming turn, or a
             # backgrounded sub-agent whose parent turn already returned (parked).
-            for session_id, state in self._pool.items():
+            # Snapshot the items so a mutation from concurrently-scheduled code
+            # (remove/remove_broken/evict_dead run WITHOUT this lock) can never
+            # raise "dictionary changed size during iteration".
+            for session_id, state in list(self._pool.items()):
                 if not state.is_streaming and not self._has_background_work(session_id):
-                    return await self._do_evict(session_id, state, "lru")
+                    victim = (session_id, state, "lru")
+                    break
 
-            # Every session is busy (streaming or running a background sub-agent)
-            # — allow temporary over-capacity up to the hard cap.
-            hard_cap = self.hard_cap
-            if len(self._pool) < hard_cap:
-                logger.warning(
-                    f"[Pool] At capacity ({self._max_size}) with all sessions busy "
-                    f"(streaming or background work). Allowing temporary over-capacity "
-                    f"({len(self._pool)}/{hard_cap} sessions)."
+            if victim is None:
+                # Every session is busy (streaming or running a background sub-agent)
+                # — allow temporary over-capacity up to the hard cap.
+                hard_cap = self.hard_cap
+                if len(self._pool) < hard_cap:
+                    logger.warning(
+                        f"[Pool] At capacity ({self._max_size}) with all sessions busy "
+                        f"(streaming or background work). Allowing temporary over-capacity "
+                        f"({len(self._pool)}/{hard_cap} sessions)."
+                    )
+                    return None
+
+                # Hard cap reached — forcibly evict the LRU session even if busy, to
+                # prevent unbounded memory/subprocess growth. This is the ultimate
+                # bound: it CAN kill a parked background sub-agent, but only when the
+                # box is already over 2x capacity with every session busy.
+                lru_session_id, lru_state = next(iter(self._pool.items()))
+                logger.error(
+                    f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU busy "
+                    f"session {lru_session_id} to prevent resource exhaustion."
                 )
-                return None
+                victim = (lru_session_id, lru_state, "lru_force")
 
-            # Hard cap reached — forcibly evict the LRU session even if busy, to
-            # prevent unbounded memory/subprocess growth. This is the ultimate
-            # bound: it CAN kill a parked background sub-agent, but only when the
-            # box is already over 2x capacity with every session busy.
-            lru_session_id, lru_state = next(iter(self._pool.items()))
-            logger.error(
-                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU busy "
-                f"session {lru_session_id} to prevent resource exhaustion."
-            )
-            return await self._do_evict(lru_session_id, lru_state, "lru_force")
+            # Remove the entry while still holding the lock so concurrent
+            # evict_if_needed callers immediately see the freed slot.
+            session_id, state, reason = victim
+            self._pool.pop(session_id, None)
+
+        # Slow work (subprocess teardown, eviction callback) happens OUTSIDE the
+        # critical section. The evicted id is still returned only after teardown
+        # completes, so per-caller semantics are unchanged.
+        return await self._finish_evict(session_id, state, reason)
 
     async def _do_evict(
         self, session_id: str, state: SessionState, reason: str = "evicted"
@@ -594,8 +622,27 @@ class SessionPool:
         this session. This is the single funnel for LRU + idle eviction, which is
         why wiring cleanup here covers both without a separate timer. The callback
         is best-effort: its failure never propagates out of eviction.
+
+        NOTE: does NOT take ``_eviction_lock`` — callers (evict_idle,
+        evict_orphaned_worktree_sessions) run without it, and the removal itself
+        is a single sync dict op (atomic on the event loop). evict_if_needed does
+        its own locked removal and calls _finish_evict directly.
         """
-        del self._pool[session_id]
+        self._pool.pop(session_id, None)
+        return await self._finish_evict(session_id, state, reason)
+
+    async def _finish_evict(
+        self, session_id: str, state: SessionState, reason: str
+    ) -> str:
+        """Teardown half of eviction: disconnect the subprocess + fire the callback.
+
+        The pool entry has ALREADY been removed by the caller. Deliberately runs
+        outside ``_eviction_lock``: graceful_disconnect can take multiple seconds
+        (exit-grace/SIGTERM/SIGKILL) and the eviction callback is arbitrary
+        higher-layer code — holding the lock across either would stall every
+        new-session admission and risk deadlock if the callback re-enters the
+        pool (the lock is non-reentrant).
+        """
         # Snapshot the subprocess PID + descendant tree BEFORE disconnect (while
         # the parent is still alive and its children are discoverable) so the
         # dead-tree reaper can clean up any orphaned descendants (e.g. subagent
@@ -848,15 +895,21 @@ class SessionPool:
         return session_id in self._pool
 
     def items(self):
-        return self._pool.items()
+        """Snapshot of (session_id, state) pairs.
+
+        Returns a LIST (not a live view) so callers can iterate across awaits
+        while removals/evictions mutate the pool without raising
+        "dictionary changed size during iteration".
+        """
+        return list(self._pool.items())
 
     def active_session_ids(self) -> list:
         """Get list of session IDs with connected clients."""
-        return [sid for sid, s in self._pool.items() if s.is_connected]
+        return [sid for sid, s in list(self._pool.items()) if s.is_connected]
 
     def streaming_session_ids(self) -> list:
         """Get list of session IDs currently streaming."""
-        return [sid for sid, s in self._pool.items() if s.is_streaming]
+        return [sid for sid, s in list(self._pool.items()) if s.is_streaming]
 
 
 def _agents_equivalent(old: Optional[Dict], new: Optional[Dict]) -> bool:
