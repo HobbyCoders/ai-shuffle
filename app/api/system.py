@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.core.models import HealthResponse, VersionResponse, StatsResponse
@@ -363,6 +364,91 @@ async def health_check():
 async def api_health_check():
     """API health check endpoint"""
     return await health_check()
+
+
+async def _readiness_report() -> tuple[bool, dict]:
+    """Build the readiness report: (ready, body).
+
+    Checks the two things a probe must know before routing traffic to this
+    instance:
+      * the database answers ``SELECT 1`` (the pool is up and the DB reachable)
+      * the session pool has admission headroom (not wedged at its hard cap)
+
+    Returns a plain dict so both the route and its tests can assert on the body
+    without a live server. Never raises — every failure is folded into a reason
+    string so a probe always gets a structured answer.
+    """
+    reasons: list[str] = []
+    checks: dict = {}
+
+    # 1) Database: SELECT 1 in a short-lived connection.
+    try:
+        await asyncio.to_thread(_probe_db)
+        checks["database"] = "ok"
+    except Exception as e:  # noqa: BLE001 — a probe must never 500
+        checks["database"] = "error"
+        reasons.append(f"database unreachable: {e}")
+
+    # 2) Session pool headroom: reject only when wedged at the hard cap
+    #    (no new top-level session could be admitted right now).
+    try:
+        from app.core.session_pool import get_session_pool
+        pool = get_session_pool()
+        pool_size = len(pool)
+        hard_cap = pool.hard_cap
+        checks["session_pool"] = {
+            "size": pool_size,
+            "max_size": pool.max_size,
+            "hard_cap": hard_cap,
+        }
+        if pool.is_at_hard_cap():
+            reasons.append(
+                f"session pool at hard cap ({pool_size}/{hard_cap})"
+            )
+    except Exception as e:  # noqa: BLE001
+        checks["session_pool"] = "error"
+        reasons.append(f"session pool unavailable: {e}")
+
+    ready = not reasons
+    body = {
+        "status": "ready" if ready else "not_ready",
+        "service": settings.service_name,
+        "version": settings.version,
+        "checks": checks,
+    }
+    if reasons:
+        body["reasons"] = reasons
+    return ready, body
+
+
+def _probe_db() -> None:
+    """Run ``SELECT 1`` against a pooled connection (blocking; call via to_thread)."""
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+
+
+@router.get("/health/ready")
+async def readiness_check():
+    """Kubernetes/Docker-style readiness probe (no auth — probes are unauthenticated).
+
+    200 with a small JSON body when the DB answers and the session pool has
+    admission headroom; 503 with ``reasons`` when not ready. Distinct from
+    ``/health`` (liveness): a live process can still be *not ready* (DB down,
+    pool wedged), and orchestrators must not route traffic to it.
+    """
+    ready, body = await _readiness_report()
+    if not ready:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
+    return body
+
+
+@router.get("/api/v1/health/ready")
+async def api_readiness_check():
+    """API-prefixed alias for the readiness probe."""
+    return await readiness_check()
 
 
 @router.get("/api/v1/version", response_model=VersionResponse)

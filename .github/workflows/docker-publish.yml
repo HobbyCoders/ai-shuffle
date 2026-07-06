@@ -1,6 +1,7 @@
 name: Build and Push Docker Image
 
 on:
+  # Manual trigger (with the no-cache escape hatch).
   workflow_dispatch:
     inputs:
       no_cache:
@@ -8,6 +9,15 @@ on:
         required: false
         type: boolean
         default: false
+  # Auto-build on pushes to the default branch and on version tags.
+  # Tagging semantics are unchanged (see the metadata step in the merge job):
+  #   - main push  -> 'latest' (is_default_branch) + branch tag + sha-<sha>
+  #   - v* tag      -> semver tags (1.2.3, 1.2, 1) + sha-<sha>
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
 
 # Cancel in-progress builds when new commits arrive on the same branch
 # This prevents wasted builds when merging multiple PRs in quick succession
