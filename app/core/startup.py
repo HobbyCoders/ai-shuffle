@@ -268,7 +268,35 @@ def check_prerequisites() -> None:
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
+    _check_session_store_durability()
     _check_browser_mcp_prereqs()
+
+
+def _check_session_store_durability() -> None:
+    """Scream (once, at boot) if session-transcript durability is degraded.
+
+    Only "postgres_only" streams the SDK transcript into Postgres in
+    near-real-time; any other effective mode reverts to turn-boundary
+    persistence, which reopens a full-turn data-loss window if the process
+    crashes mid-turn. The code default is "postgres_only", so reaching
+    "disabled" here means an install explicitly (mis)configured it — surface
+    that loudly so a misconfigured prod node is obvious in the logs.
+
+    Suppressed under TESTING (conftest sets TESTING=1), where the disabled
+    default is expected and harmless.
+    """
+    import os
+
+    if os.environ.get("TESTING") == "1":
+        return
+
+    if settings.session_store_mode == "disabled":
+        logger.warning(
+            "DURABILITY DEGRADED: session_store_mode=disabled — session "
+            "transcripts persist only at turn boundaries, so a mid-turn crash "
+            "loses the whole in-progress turn. Set SESSION_STORE_MODE=postgres_only "
+            "for near-real-time durable transcript persistence."
+        )
 
 
 def _check_browser_mcp_prereqs() -> None:

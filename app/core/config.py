@@ -230,7 +230,13 @@ class Settings(BaseSettings):
     #                      Used to backfill + diff-verify during rollout.
     #   "postgres_only"  — Postgres is the single source of truth; JSONL
     #                      reads are deleted. Final cutover.
-    session_store_mode: str = "disabled"
+    # Default is "postgres_only": both production installs run this via the
+    # SESSION_STORE_MODE env var, and it is the ONLY mode that streams the
+    # transcript durably in near-real-time. Any lower mode ("disabled"/"mirror")
+    # reopens a full-turn data-loss window on a crash, so the safe default must
+    # be the durable one. A loud boot-warning fires if the effective mode is
+    # "disabled" outside of tests (see app/core/startup.py).
+    session_store_mode: str = "postgres_only"
 
     # Cross-install agent-memory sync. When enabled, each session mirrors the
     # Claude Code CLI's per-project memory directory (MEMORY.md + per-fact .md
