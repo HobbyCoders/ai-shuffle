@@ -5,12 +5,13 @@ System API routes - health, version, stats, workspace configuration, tools
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.core.models import HealthResponse, VersionResponse, StatsResponse
@@ -541,12 +542,21 @@ async def set_workspace_config(
 
 
 @router.post("/api/v1/workspace/validate")
-async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
+async def validate_workspace_path(request: WorkspaceConfigRequest, http_request: Request = None) -> dict:
     """
     Validate a workspace path without saving it.
 
-    No authentication required - used during initial setup.
+    Requires admin authentication, EXCEPT during initial setup
+    (when no admin exists yet) where it is allowed for setup convenience.
+
+    This handler is stat-only: it never creates or mutates the filesystem. It
+    reports existence/writability via os.stat/os.access without touching disk.
     """
+    # Gate: admin-only unless first-run setup is still pending. FastAPI always
+    # injects http_request; the None default only applies to direct unit calls.
+    if http_request is not None and not auth_service.is_setup_required():
+        require_admin(http_request)
+
     workspace_path = request.workspace_path.strip()
 
     if not workspace_path:
@@ -565,31 +575,20 @@ async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
         error = None
 
         if exists:
-            # Check if writable
-            try:
-                test_file = path / ".ai-shuffle-test"
-                test_file.touch()
-                test_file.unlink()
+            # Stat-only writability probe: no file is created or removed.
+            if os.access(str(path), os.W_OK):
                 writable = True
-            except PermissionError:
+            else:
                 error = "Directory exists but is not writable"
-            except Exception as e:
-                error = f"Cannot write to directory: {str(e)}"
         else:
-            # Check if parent exists and is writable
+            # Directory does not exist yet — check whether the parent is writable
+            # so it could be created later, without actually creating anything.
             parent = path.parent
             if parent.exists():
-                try:
-                    path.mkdir(parents=True, exist_ok=True)
-                    test_file = path / ".ai-shuffle-test"
-                    test_file.touch()
-                    test_file.unlink()
-                    path.rmdir()  # Remove the test directory
+                if os.access(str(parent), os.W_OK):
                     writable = True
-                except PermissionError:
+                else:
                     error = "Cannot create directory: permission denied"
-                except Exception as e:
-                    error = f"Cannot create directory: {str(e)}"
             else:
                 error = f"Parent directory does not exist: {parent}"
 

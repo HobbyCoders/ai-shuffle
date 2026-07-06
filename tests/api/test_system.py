@@ -578,13 +578,14 @@ class TestValidateWorkspacePathFunction:
 
     @pytest.mark.asyncio
     async def test_validate_workspace_path_permission_denied(self, temp_workspace):
-        """Should handle permission denied on existing directory."""
+        """Should handle permission denied on existing directory.
+
+        Stat-only handler: writability is probed with os.access, so we mock
+        os.access to deny write on the existing directory.
+        """
         from app.api.system import validate_workspace_path, WorkspaceConfigRequest
 
-        # Create a directory but mock the write test to fail
-        with patch("pathlib.Path.touch") as mock_touch:
-            mock_touch.side_effect = PermissionError("Access denied")
-
+        with patch("app.api.system.os.access", return_value=False):
             request = WorkspaceConfigRequest(workspace_path=str(temp_workspace))
             result = await validate_workspace_path(request)
 
@@ -616,6 +617,87 @@ class TestValidateWorkspacePathFunction:
 
         # Should report invalid or show parent error
         assert result["writable"] is False or result["error"] is not None
+
+    @pytest.mark.asyncio
+    async def test_validate_new_dir_does_not_mutate_filesystem(self, temp_workspace):
+        """Stat-only: validating a non-existent path must NOT create it."""
+        from app.api.system import validate_workspace_path, WorkspaceConfigRequest
+
+        new_path = temp_workspace / "should_not_be_created"
+        assert not new_path.exists()
+
+        request = WorkspaceConfigRequest(workspace_path=str(new_path))
+        result = await validate_workspace_path(request)
+
+        # Parent is writable, so it reports creatable, but nothing is created.
+        assert result["exists"] is False
+        assert not new_path.exists(), "validate must not create the directory"
+
+    @pytest.mark.asyncio
+    async def test_validate_existing_dir_creates_no_test_file(self, temp_workspace):
+        """Stat-only: validating an existing dir must not leave a test file."""
+        from app.api.system import validate_workspace_path, WorkspaceConfigRequest
+
+        before = set(p.name for p in temp_workspace.iterdir())
+        request = WorkspaceConfigRequest(workspace_path=str(temp_workspace))
+        await validate_workspace_path(request)
+        after = set(p.name for p in temp_workspace.iterdir())
+
+        assert before == after, "validate must not touch/remove any files"
+        assert ".ai-shuffle-test" not in after
+
+
+# =============================================================================
+# Workspace validate authentication (Phase 1.2)
+# =============================================================================
+
+class TestValidateWorkspaceAuth:
+    """POST /api/v1/workspace/validate must require admin post-setup."""
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api.system import router
+        app = FastAPI()
+        app.include_router(router)
+        return TestClient(app)
+
+    def test_unauthenticated_post_setup_is_rejected(self, temp_workspace):
+        """When setup is complete and no admin cookie/bearer → 401/403."""
+        client = self._client()
+        with patch("app.api.system.auth_service") as mock_auth:
+            mock_auth.is_setup_required.return_value = False  # setup complete
+            resp = client.post(
+                "/api/v1/workspace/validate",
+                json={"workspace_path": str(temp_workspace)},
+            )
+        assert resp.status_code in (401, 403)
+
+    def test_no_directory_created_on_rejected_request(self, temp_workspace):
+        """A rejected (unauthenticated) request must not create any directory."""
+        target = temp_workspace / "rejected_should_not_exist"
+        client = self._client()
+        with patch("app.api.system.auth_service") as mock_auth:
+            mock_auth.is_setup_required.return_value = False
+            resp = client.post(
+                "/api/v1/workspace/validate",
+                json={"workspace_path": str(target)},
+            )
+        assert resp.status_code in (401, 403)
+        assert not target.exists()
+
+    def test_pre_setup_request_allowed_without_admin(self, temp_workspace):
+        """During first-run setup (is_setup_required True) → allowed."""
+        client = self._client()
+        with patch("app.api.system.auth_service") as mock_auth:
+            mock_auth.is_setup_required.return_value = True
+            resp = client.post(
+                "/api/v1/workspace/validate",
+                json={"workspace_path": str(temp_workspace)},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["exists"] is True
 
 
 # =============================================================================

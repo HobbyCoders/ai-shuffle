@@ -159,7 +159,8 @@ class WebhookConnector(BaseConnector):
 
         # Token auth
         if inbound_token:
-            if token == inbound_token:
+            # Timing-safe compare to avoid leaking the token via response timing
+            if token is not None and hmac.compare_digest(token, inbound_token):
                 return True
             logger.warning("Webhook inbound token mismatch for %s", self.connector_id)
             return False
@@ -168,9 +169,16 @@ class WebhookConnector(BaseConnector):
         if secret and signature:
             return _verify_signature(payload_body, secret, signature)
 
-        # No auth configured — allow (user's choice)
+        # No credentials configured — refuse rather than accept unauthenticated
+        # inbound requests. An inbound connector with neither a token nor a
+        # secret is fully open, so we fail closed.
         if not inbound_token and not secret:
-            return True
+            logger.warning(
+                "Webhook inbound request refused for %s: connector has neither "
+                "inbound_token nor secret configured",
+                self.connector_id,
+            )
+            return False
 
         return False
 

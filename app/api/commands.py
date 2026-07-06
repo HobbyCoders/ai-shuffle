@@ -14,10 +14,12 @@ This is bulletproof - no terminal parsing, no race conditions.
 import asyncio
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 
 from app.db import database
+from app.api.auth import require_auth
+from app.api.sessions import check_session_access
 from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.api.common import resolve_project_path
@@ -50,7 +52,11 @@ from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/commands", tags=["Commands"])
+router = APIRouter(
+    prefix="/api/v1/commands",
+    tags=["Commands"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 class CommandInfo(BaseModel):
@@ -190,7 +196,7 @@ class ExecuteCommandResponseV2(BaseModel):
 
 
 @router.post("/execute", response_model=ExecuteCommandResponse)
-async def execute_command(request: ExecuteCommandRequest):
+async def execute_command(request: ExecuteCommandRequest, http_request: Request = None):
     """
     Execute a custom slash command.
 
@@ -232,6 +238,9 @@ async def execute_command(request: ExecuteCommandRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if http_request is not None:
+        check_session_access(http_request, session)
+
     project_id = session.get("project_id")
     working_dir = get_working_dir_for_project(project_id)
 
@@ -263,7 +272,8 @@ async def execute_command(request: ExecuteCommandRequest):
 async def sync_after_rewind(
     session_id: str = Query(..., description="Session ID"),
     checkpoint_message: str = Query(..., description="The user message text at the checkpoint"),
-    restore_option: int = Query(..., description="Restore option (1-4)")
+    restore_option: int = Query(..., description="Restore option (1-4)"),
+    http_request: Request = None,
 ):
     """
     Sync our chat database after a rewind operation completes.
@@ -293,6 +303,9 @@ async def sync_after_rewind(
     session = database.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if http_request is not None:
+        check_session_access(http_request, session)
 
     # Get all messages for this session
     messages = database.get_session_messages(session_id)
@@ -440,7 +453,7 @@ async def rewind_files_via_sdk(
 
 
 @router.get("/rewind/checkpoints/{session_id}")
-async def get_rewind_checkpoints(session_id: str):
+async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
     """
     Get available checkpoints for a session that can be rewound to.
 
@@ -450,6 +463,9 @@ async def get_rewind_checkpoints(session_id: str):
     session = database.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if http_request is not None:
+        check_session_access(http_request, session)
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -512,7 +528,7 @@ async def get_rewind_checkpoints(session_id: str):
 
 
 @router.post("/rewind/execute/{session_id}")
-async def execute_rewind(session_id: str, request: RewindRequestV2):
+async def execute_rewind(session_id: str, request: RewindRequestV2, http_request: Request = None):
     """
     Execute a rewind operation to restore conversation and optionally files.
 
@@ -533,6 +549,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
     session = database.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if http_request is not None:
+        check_session_access(http_request, session)
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -839,13 +858,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
 
 # Legacy endpoints for backwards compatibility
 @router.get("/rewind/checkpoints/{session_id}/legacy", response_model=RewindCheckpointsResponse)
-async def get_rewind_checkpoints_legacy(session_id: str):
+async def get_rewind_checkpoints_legacy(session_id: str, http_request: Request = None):
     """
     Legacy endpoint - redirects to V2.
 
     Maintained for backwards compatibility with older frontends.
     """
-    v2_response = await get_rewind_checkpoints(session_id)
+    v2_response = await get_rewind_checkpoints(session_id, http_request)
 
     # Convert V2 response to legacy format
     legacy_checkpoints = [
@@ -868,7 +887,7 @@ async def get_rewind_checkpoints_legacy(session_id: str):
 
 
 @router.post("/rewind/execute/{session_id}/legacy", response_model=RewindExecuteResponse)
-async def execute_rewind_legacy(session_id: str, request: RewindRequest):
+async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_request: Request = None):
     """
     Legacy endpoint - converts old format to V2.
 
@@ -878,6 +897,9 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest):
     session = database.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if http_request is not None:
+        check_session_access(http_request, session)
 
     sdk_session_id = session.get("sdk_session_id")
     working_dir = get_working_dir_for_project(session.get("project_id"))
@@ -913,7 +935,7 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest):
         include_response=True
     )
 
-    v2_response = await execute_rewind(session_id, v2_request)
+    v2_response = await execute_rewind(session_id, v2_request, http_request)
 
     return RewindExecuteResponse(
         success=v2_response.success,

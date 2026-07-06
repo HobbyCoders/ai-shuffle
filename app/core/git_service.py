@@ -164,12 +164,29 @@ class GitService(
             timeout: Command timeout in seconds (default 120 for network ops)
 
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_message). A clone URL that is rejected by the
+            safety guards fails closed with (False, reason) before any subprocess
+            runs — matching the return-False guard style in git_branch_ops.py.
         """
+        # Reject flag injection: a url beginning with '-' would be parsed by git
+        # as an option. Reject remote-helper schemes (ext::/file::) which can run
+        # arbitrary local commands. Fail closed with the tuple contract rather than
+        # raising, so callers surface a clean error instead of a 500.
+        stripped = clone_url.strip()
+        if stripped.startswith("-"):
+            logger.warning("Refusing clone URL that looks like an option: %s", clone_url[:50])
+            return False, "Invalid clone URL (looks like a command-line option)"
+        lowered = stripped.lower()
+        if lowered.startswith("ext::") or lowered.startswith("file::"):
+            logger.warning("Refusing unsafe clone URL scheme: %s", clone_url[:50])
+            return False, "Refusing unsafe clone URL scheme (ext:: / file::)"
+
         try:
+            # `--` terminates option parsing so the url is always treated as a
+            # positional argument even if a future value slips past the guard.
             result = self._run_git(
                 working_dir,
-                ["clone", clone_url, "."],
+                ["clone", "--", clone_url, "."],
                 timeout=timeout
             )
             if result.returncode == 0:

@@ -2067,3 +2067,183 @@ class TestCommandsAPIIntegration:
         """Verify commands router has correct tags."""
         from app.api.commands import router
         assert "Commands" in router.tags
+
+
+# =============================================================================
+# Security: router-level authentication + per-session ownership (Phase 1.1)
+# =============================================================================
+
+class TestCommandsAuthentication:
+    """The /api/v1/commands router must require authentication."""
+
+    def test_router_has_auth_dependency(self):
+        """Router should carry a router-level auth dependency."""
+        from app.api.commands import router
+        # There must be at least one router-level dependency (require_auth).
+        assert len(router.dependencies) >= 1
+
+    def _build_app_no_auth_override(self):
+        """Build an app WITHOUT overriding require_auth so the real dependency runs."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api.commands import router
+
+        app = FastAPI()
+        app.include_router(router)
+        return TestClient(app)
+
+    def test_execute_unauthenticated_returns_401(self):
+        """Unauthenticated POST /execute → 401 (no cookie, no bearer)."""
+        client = self._build_app_no_auth_override()
+        resp = client.post(
+            "/api/v1/commands/execute",
+            json={"command": "/foo", "session_id": "session-1"},
+        )
+        assert resp.status_code == 401
+
+    def test_get_checkpoints_unauthenticated_returns_401(self):
+        """Unauthenticated GET rewind checkpoints → 401."""
+        client = self._build_app_no_auth_override()
+        resp = client.get("/api/v1/commands/rewind/checkpoints/session-1")
+        assert resp.status_code == 401
+
+    def test_execute_rewind_unauthenticated_returns_401(self):
+        """Unauthenticated POST rewind execute → 401."""
+        client = self._build_app_no_auth_override()
+        resp = client.post(
+            "/api/v1/commands/rewind/execute/session-1",
+            json={"target_uuid": "uuid-1", "restore_chat": True},
+        )
+        assert resp.status_code == 401
+
+    def test_list_commands_unauthenticated_returns_401(self):
+        """Even the read-only list endpoint requires auth (router-level)."""
+        client = self._build_app_no_auth_override()
+        resp = client.get("/api/v1/commands/")
+        assert resp.status_code == 401
+
+
+class TestCommandsSessionOwnership:
+    """Session-scoped routes must enforce per-session access control."""
+
+    @staticmethod
+    def _request_for_api_user(project_id=None, profile_id=None):
+        """Build a mock FastAPI Request carrying an API user (non-admin)."""
+        req = MagicMock()
+        req.state = MagicMock()
+        req.state.api_user = {"project_id": project_id, "profile_id": profile_id}
+        return req
+
+    @pytest.mark.asyncio
+    async def test_execute_command_cross_project_denied(
+        self, mock_slash_commands, mock_database, mock_settings
+    ):
+        """API user restricted to another project → 403 on /execute."""
+        from app.api.commands import execute_command, ExecuteCommandRequest
+        from fastapi import HTTPException
+
+        mock_slash_commands["parse_command_input"].return_value = ("my-command", "arg1")
+        mock_slash_commands["is_interactive_command"].return_value = False
+        mock_slash_commands["is_rest_api_command"].return_value = False
+        # Session belongs to proj-A; user is scoped to proj-B.
+        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
+
+        http_request = self._request_for_api_user(project_id="proj-B")
+        request = ExecuteCommandRequest(command="/my-command arg1", session_id="session-1")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await execute_command(request, http_request)
+
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_execute_command_same_project_allowed(
+        self, mock_slash_commands, mock_database, mock_settings
+    ):
+        """API user scoped to the SAME project passes the ownership check."""
+        from app.api.commands import execute_command, ExecuteCommandRequest
+
+        mock_slash_commands["parse_command_input"].return_value = ("my-command", "arg1")
+        mock_slash_commands["is_interactive_command"].return_value = False
+        mock_slash_commands["is_rest_api_command"].return_value = False
+        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
+        mock_database.get_project.return_value = {"id": "proj-A", "path": "proj-a"}
+        mock_slash_commands["get_command_by_name"].return_value = MockSlashCommand(
+            name="my-command", description="d", content="Do $ARGUMENTS", argument_hint=None
+        )
+
+        http_request = self._request_for_api_user(project_id="proj-A")
+        request = ExecuteCommandRequest(command="/my-command arg1", session_id="session-1")
+
+        response = await execute_command(request, http_request)
+        assert response.success is True
+
+    @pytest.mark.asyncio
+    async def test_execute_rewind_cross_project_denied(self, mock_database):
+        """API user restricted to another project → 403 on rewind/execute."""
+        from app.api.commands import execute_command  # noqa: F401 (ensure module loaded)
+        from app.api.commands import execute_rewind, RewindRequestV2
+        from fastapi import HTTPException
+
+        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
+
+        http_request = self._request_for_api_user(project_id="proj-B")
+        request = RewindRequestV2(target_uuid="uuid-1", restore_chat=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await execute_rewind("session-1", request, http_request)
+
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_get_checkpoints_cross_project_denied(self, mock_database, mock_settings):
+        """API user restricted to another project → 403 on rewind checkpoints."""
+        from app.api.commands import get_rewind_checkpoints
+        from fastapi import HTTPException
+
+        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
+
+        http_request = self._request_for_api_user(project_id="proj-B")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_rewind_checkpoints("session-1", http_request)
+
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_sync_after_rewind_cross_project_denied(self, mock_database):
+        """API user restricted to another project → 403 on sync-after-rewind."""
+        from app.api.commands import sync_after_rewind
+        from fastapi import HTTPException
+
+        mock_database.get_session.return_value = {"id": "session-1", "project_id": "proj-A"}
+
+        http_request = self._request_for_api_user(project_id="proj-B")
+
+        with pytest.raises(HTTPException) as exc_info:
+            # restore_option 1 forces the session lookup + access check.
+            await sync_after_rewind(
+                session_id="session-1",
+                checkpoint_message="hello",
+                restore_option=1,
+                http_request=http_request,
+            )
+
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_admin_request_bypasses_ownership(self, mock_database, mock_settings):
+        """Admin (no api_user) is not blocked by check_session_access."""
+        from app.api.commands import get_rewind_checkpoints
+
+        mock_database.get_session.return_value = {
+            "id": "session-1", "project_id": "proj-A", "sdk_session_id": None,
+        }
+        # Admin request: state.api_user is None → full access.
+        req = MagicMock()
+        req.state = MagicMock()
+        req.state.api_user = None
+
+        response = await get_rewind_checkpoints("session-1", req)
+        # No 403 raised; handler proceeds (returns the no-sdk-session response).
+        assert response.session_id == "session-1"
