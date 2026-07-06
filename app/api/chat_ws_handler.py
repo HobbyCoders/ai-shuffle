@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi.websockets import WebSocketState
-from starlette.websockets import WebSocket
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
 from app.core.connectors.manager import connector_manager

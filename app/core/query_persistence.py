@@ -4,8 +4,10 @@ Persistence helpers for query turn results.
 Extracted from query_engine.py to isolate DB write logic.
 """
 
+import collections
+import collections.abc
 import logging
-from typing import Optional, Callable
+from typing import Deque, Optional, Callable
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -14,13 +16,24 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-def _wrap_stderr_capture(original_stderr: Optional[Callable]) -> tuple[Callable[[str], None], list[str]]:
-    """Wrap a stderr callback to also capture lines into a list.
+_STDERR_CAPTURE_MAXLEN = 50
+
+
+def _wrap_stderr_capture(
+    original_stderr: Optional[Callable],
+) -> tuple[Callable[[str], None], "Deque[str]"]:
+    """Wrap a stderr callback to also capture lines into a bounded ring buffer.
 
     Returns (capturing_callback, captured_lines) so callers can inspect
     captured stderr output for error reporting.
+
+    ``captured_lines`` is a ``collections.deque(maxlen=50)`` rather than an
+    unbounded list: the buffer is stored on ``SessionState`` and shared across
+    every turn of a long-lived pooled subprocess, so an unbounded list leaked
+    for the subprocess's whole lifetime. Only the lines nearest a crash are
+    diagnostic, so the ring keeps the newest 50 and drops the oldest.
     """
-    captured: list[str] = []
+    captured: "Deque[str]" = collections.deque(maxlen=_STDERR_CAPTURE_MAXLEN)
 
     def capturing_stderr(line: str):
         captured.append(line)
@@ -30,7 +43,9 @@ def _wrap_stderr_capture(original_stderr: Optional[Callable]) -> tuple[Callable[
     return capturing_stderr, captured
 
 
-def _extract_connection_error(exc: Exception, cli_stderr_lines: list[str]) -> str:
+def _extract_connection_error(
+    exc: Exception, cli_stderr_lines: "Optional[collections.abc.Iterable[str]]"
+) -> str:
     """Extract the most useful error message from a connection failure.
 
     Priority order:
@@ -60,7 +75,7 @@ def _extract_connection_error(exc: Exception, cli_stderr_lines: list[str]) -> st
 
 def log_captured_cli_stderr(
     session_id: str,
-    cli_stderr_lines: Optional[list],
+    cli_stderr_lines: "Optional[collections.abc.Iterable[str]]",
     context: str = "",
 ) -> None:
     """Record captured CLI subprocess stderr at ERROR after a mid-stream crash.
@@ -84,7 +99,10 @@ def log_captured_cli_stderr(
             return
         # A long-lived pooled subprocess accumulates stderr across turns; the
         # lines nearest the crash are the most diagnostic, so keep the tail.
-        tail = [ln.strip() for ln in cli_stderr_lines[-40:] if ln and ln.strip()]
+        # ``cli_stderr_lines`` is a bounded ``deque`` (see _wrap_stderr_capture)
+        # which does NOT support slice indexing, so materialise to a list first.
+        recent = list(cli_stderr_lines)[-40:]
+        tail = [ln.strip() for ln in recent if ln and ln.strip()]
         if not tail:
             return
         ctx = f" [{context}]" if context else ""

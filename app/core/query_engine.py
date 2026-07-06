@@ -130,6 +130,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _persist_turn_results,
     log_captured_cli_stderr,
 )
+from app.core.session_context import set_current_session_id
 from app.core.memory_sync import reconcile_memory, push_memory
 from app.core.query_background import (  # noqa: F401 — re-exports
     _pending_background_tasks,
@@ -932,6 +933,12 @@ async def stream_query(
         await pool.evict_if_needed()
 
         logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+
+        # Attribute this session to the SDK's detached message-reader task, which
+        # is created inside adapter.connect() below and inherits this context. A
+        # "Fatal error in message reader" logged by that task then carries the
+        # session id into error_log (see error_log_handler.emit).
+        set_current_session_id(session_id)
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
@@ -1859,6 +1866,10 @@ async def stream_to_websocket(
             logger.error(f"[WS] CWD does not exist: {options.cwd}")
             yield {"type": "error", "message": f"Working directory does not exist: {options.cwd}"}
             return
+
+        # Attribute this session to the SDK's detached message-reader task (see
+        # the chat path above / error_log_handler.emit).
+        set_current_session_id(session_id)
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)

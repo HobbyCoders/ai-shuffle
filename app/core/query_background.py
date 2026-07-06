@@ -39,6 +39,7 @@ from app.core.permission_handler import permission_handler
 from app.core.live_session_store import live_session_store
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.provider.claude_adapter import ClaudeAgentAdapter
+from app.core.session_context import set_current_session_id
 
 from app.core.query_persistence import (
     _wrap_stderr_capture,
@@ -213,6 +214,11 @@ async def _run_background_query(
         await pool.evict_if_needed()
 
         logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+
+        # Attribute this session to the SDK's detached message-reader task, which
+        # is created inside adapter.connect() below and inherits this context, so
+        # a "Fatal error in message reader" carries the session id into error_log.
+        set_current_session_id(session_id)
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)

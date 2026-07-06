@@ -14,7 +14,7 @@ user messages, avoiding repeated subprocess spawns and JSONL history replays.
 import asyncio
 import logging
 import os
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,8 +79,10 @@ class SessionState:
     # CLI output at ERROR when the subprocess dies MID-STREAM — at that point
     # the connect-scoped cli_stderr_lines local is long out of scope, which is
     # why mid-stream exit-1 crashes previously recorded no reason. None until a
-    # client is created (a reused pooled client keeps the list from creation).
-    cli_stderr_lines: Optional[list] = None
+    # client is created (a reused pooled client keeps the ring from creation).
+    # A bounded ``deque(maxlen=50)`` (see _wrap_stderr_capture) — an unbounded
+    # list leaked for the subprocess's whole lifetime.
+    cli_stderr_lines: "Optional[deque[str]]" = None
 
     @property
     def client(self) -> Optional["ClaudeSDKClient"]:

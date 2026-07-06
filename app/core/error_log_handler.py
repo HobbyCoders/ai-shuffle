@@ -30,6 +30,41 @@ _formatter = logging.Formatter()
 # Module-level singleton so install/uninstall are idempotent.
 _handler: "ErrorLogDBHandler | None" = None
 
+# Conservative marker for the SDK reader-task fatal we most need forensics on.
+_FATAL_READER_MARKER = "Fatal error in message reader"
+
+
+def _fatal_stderr_tail(session_id: str) -> "str | None":
+    """Return the pooled subprocess's captured stderr tail for ``session_id``.
+
+    Used to enrich a "Fatal error in message reader" error_log row with the
+    real CLI output the SDK's ProcessError never carries. Best-effort and never
+    raises: pool import is deferred (avoid an import cycle) and every lookup is
+    guarded, so a missing session / empty ring simply yields None.
+    """
+    try:
+        # Deferred import: session_pool imports the provider stack; importing it
+        # at module load could form a cycle with the logging bootstrap.
+        # Read the module-level singleton directly rather than get_session_pool()
+        # so a logging emit never *creates* a pool as a side effect.
+        from app.core import session_pool as _sp
+
+        pool = _sp._session_pool
+        if pool is None:
+            return None
+        state = pool.peek(session_id)  # non-mutating (no LRU promote)
+        if state is None:
+            return None
+        lines = getattr(state, "cli_stderr_lines", None)
+        if not lines:
+            return None
+        tail = [ln.strip() for ln in list(lines) if ln and ln.strip()]
+        if not tail:
+            return None
+        return "\n".join(tail)
+    except Exception:  # noqa: BLE001 — enrichment must never break emit
+        return None
+
 
 class ErrorLogDBHandler(logging.Handler):
     """Persist ERROR+ log records to the ``error_log`` table."""
@@ -56,12 +91,39 @@ class ErrorLogDBHandler(logging.Handler):
             elif record.stack_info:
                 detail = _formatter.formatStack(record.stack_info)
 
+            message = record.getMessage()
+
+            # Session attribution: the SDK's detached message-reader task (which
+            # logs the fatal below) inherits a ContextVar set at the spawn/query
+            # site. Only fill it when the record doesn't already carry a session
+            # id, and never let the read raise out of this logging path.
+            session_id = getattr(record, "session_id", None)
+            if session_id is None:
+                try:
+                    from app.core.session_context import get_current_session_id
+                    session_id = get_current_session_id()
+                except Exception:
+                    session_id = None
+
+            # Enrich the fatal-reader record with the real CLI stderr tail the
+            # SDK's ProcessError never carries. Conservative substring match;
+            # fully guarded so a missing state / empty ring is a no-op.
+            if session_id and _FATAL_READER_MARKER in message:
+                try:
+                    tail = _fatal_stderr_tail(session_id)
+                except Exception:
+                    tail = None
+                if tail:
+                    prefix = f"{detail}\n\n" if detail else ""
+                    detail = f"{prefix}[Captured CLI stderr]\n{tail}"
+
             error_logs.record_error(
                 source="backend",
-                message=record.getMessage(),
+                message=message,
                 level=record.levelname,
                 detail=detail,
                 logger_name=record.name,
+                session_id=session_id,
                 context={
                     "module": record.module,
                     "func": record.funcName,
