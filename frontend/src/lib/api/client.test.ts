@@ -5,6 +5,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ApiClient } from './client';
 
+// The 401 interceptor dynamically imports `$app/navigation` and calls goto().
+// Mock it so we can assert the redirect fires (or doesn't) without a real router.
+const gotoMock = vi.fn(async (_url?: string | URL) => {});
+vi.mock('$app/navigation', () => ({
+	goto: (url?: string | URL) => gotoMock(url)
+}));
+
 describe('ApiClient', () => {
 	let client: ApiClient;
 	let fetchMock: ReturnType<typeof vi.fn>;
@@ -246,6 +253,91 @@ describe('ApiClient', () => {
 				detail: 'Server error (HTTP 418: I\'m a teapot)',
 				status: 418
 			});
+		});
+	});
+
+	// ── Phase 3.2: global 401 → /login interceptor ─────────────────────────
+	describe('401 interceptor', () => {
+		function set401(): void {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 401,
+				json: () => Promise.resolve({ detail: 'Authentication required' })
+			});
+		}
+
+		function setPathname(path: string): void {
+			Object.defineProperty(window, 'location', {
+				configurable: true,
+				value: { pathname: path, assign: vi.fn() }
+			});
+		}
+
+		beforeEach(() => {
+			gotoMock.mockClear();
+			setPathname('/'); // default: an app page, not login/setup
+		});
+
+		it('redirects to /login on a 401 from a NON-auth endpoint', async () => {
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			// goto fires via a dynamic import() → poll until the async chain resolves.
+			await vi.waitFor(() => expect(gotoMock).toHaveBeenCalledWith('/login'));
+		});
+
+		// Give any (erroneously scheduled) dynamic-import redirect a real chance to
+		// run before asserting it did NOT fire — otherwise "not called" is trivial.
+		async function flush() {
+			await new Promise((r) => setTimeout(r, 0));
+			await new Promise((r) => setTimeout(r, 0));
+		}
+
+		it('does NOT redirect on a 401 from an auth endpoint (/auth/*)', async () => {
+			set401();
+			await expect(client.get('/auth/status')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
+		});
+
+		it('does NOT redirect on a 401 from the /auth/login endpoint', async () => {
+			set401();
+			await expect(client.post('/auth/login', { u: 'x' })).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
+		});
+
+		it('does NOT redirect on a 401 from a /workspace/* probe endpoint', async () => {
+			set401();
+			await expect(client.get('/workspace/validate')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
+		});
+
+		it('does NOT redirect when already on /login (loop guard)', async () => {
+			setPathname('/login');
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
+		});
+
+		it('does NOT redirect when already on /setup (loop guard)', async () => {
+			setPathname('/setup');
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
+		});
+
+		it('does NOT redirect on a non-401 error from a non-auth endpoint', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 403,
+				json: () => Promise.resolve({ detail: 'Forbidden' })
+			});
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 403 });
+			await flush();
+			expect(gotoMock).not.toHaveBeenCalled();
 		});
 	});
 });

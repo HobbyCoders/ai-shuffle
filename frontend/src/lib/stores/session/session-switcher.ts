@@ -14,7 +14,7 @@ import type { ExecutionMode } from '../types';
 import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
-import { getOrCreateDeviceId } from '../device-id';
+import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -198,40 +198,55 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Persistence ─────────────────────────────────────────────────────
 
-	function buildPersistBody() {
+	/** The active-session snapshot persisted to both the server (device key) and
+	 * this tab's sessionStorage slot. */
+	function buildPersistValue(): PersistedSession {
 		const state = getState();
-		const deviceId = getOrCreateDeviceId();
-		const prefKey = `active_session:${deviceId}`;
-		return JSON.stringify({
-			key: prefKey,
-			value: {
-				sessionId: state.sessionId,
-				title: state.title,
-				profile: state.profile,
-				project: state.project,
-				modelOverride: state.modelOverride,
-				permissionModeOverride: state.permissionModeOverride,
-				effortLevelOverride: state.effortLevelOverride,
-				executionMode: state.executionMode,
-				worktreeId: state.worktreeId,
-				worktreeBranch: state.worktreeBranch,
-				worktreeBaseBranch: state.worktreeBaseBranch,
-				selectedWorktreeBranch: state.selectedWorktreeBranch,
-				worktreeMode: state.worktreeMode,
-				worktreeDeleted: state.worktreeDeleted,
-			} satisfies PersistedSession,
-		});
+		return {
+			sessionId: state.sessionId,
+			title: state.title,
+			profile: state.profile,
+			project: state.project,
+			modelOverride: state.modelOverride,
+			permissionModeOverride: state.permissionModeOverride,
+			effortLevelOverride: state.effortLevelOverride,
+			executionMode: state.executionMode,
+			worktreeId: state.worktreeId,
+			worktreeBranch: state.worktreeBranch,
+			worktreeBaseBranch: state.worktreeBaseBranch,
+			selectedWorktreeBranch: state.selectedWorktreeBranch,
+			worktreeMode: state.worktreeMode,
+			worktreeDeleted: state.worktreeDeleted,
+		} satisfies PersistedSession;
+	}
+
+	/** Server key stays device-scoped (unchanged): one row per device, updated in
+	 * place on every persist — so a new tab / new device restores the device's
+	 * most recent session. */
+	function serverPrefKey(): string {
+		return `active_session:${getOrCreateDeviceId()}`;
 	}
 
 	async function doPersist() {
+		const value = buildPersistValue();
+		// (a) Tab-local slot: sessionStorage is per-tab, so reloading THIS tab
+		//     restores THIS tab's session even when another tab wrote the server
+		//     device key afterwards. No server row, no tab id in the key.
 		try {
-			const deviceId = getOrCreateDeviceId();
-			const prefKey = `active_session:${deviceId}`;
+			if (typeof sessionStorage !== 'undefined') {
+				sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify(value));
+			}
+		} catch {
+			// sessionStorage unavailable / full — server key still covers restore.
+		}
+		// (b) Server device key: unchanged behavior (debounce/keepalive intact).
+		try {
+			const prefKey = serverPrefKey();
 			await fetch(`/api/v1/preferences/${encodeURIComponent(prefKey)}`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'include',
-				body: buildPersistBody(),
+				body: JSON.stringify({ key: prefKey, value }),
 			});
 		} catch (e) {
 			console.error('[ActiveSession] Failed to persist session:', e);
@@ -252,9 +267,23 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	async function loadPersistedSession(): Promise<PersistedSession | null> {
+		// Prefer THIS tab's own sessionStorage slot so two tabs no longer clobber
+		// each other on reload. A brand-new tab (or new device) has no slot yet, so
+		// fall back to the server device key — existing users keep restoring the
+		// device's most recent session instead of landing on an empty one.
 		try {
-			const deviceId = getOrCreateDeviceId();
-			const prefKey = `active_session:${deviceId}`;
+			if (typeof sessionStorage !== 'undefined') {
+				const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
+				if (raw) {
+					const value = JSON.parse(raw) as PersistedSession;
+					if (value && typeof value === 'object') return value;
+				}
+			}
+		} catch {
+			// Absent or corrupt tab-local slot — fall through to the server key.
+		}
+		try {
+			const prefKey = serverPrefKey();
 			const response = await api.get<{ key: string; value: PersistedSession } | null>(`/preferences/${encodeURIComponent(prefKey)}`);
 			if (response?.value) return response.value;
 		} catch {

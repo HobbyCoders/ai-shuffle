@@ -14,6 +14,42 @@ export interface ApiError {
 }
 
 /**
+ * Auth-related endpoint path prefixes (relative to API_BASE). A 401 from any of
+ * these is EXPECTED during the login / setup / status-check flow (bad password,
+ * not-yet-authenticated status poll, etc.) — redirecting on those would create a
+ * redirect loop off the very page that needs to render the 401. Everything else
+ * that 401s means the session expired mid-use → send the user to /login.
+ */
+const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/'];
+
+function isAuthPath(path: string): boolean {
+	// `path` is the API-relative path (e.g. '/auth/status', '/sessions'). Strip a
+	// leading query string before matching so '/auth/status?x=1' still counts.
+	const clean = path.split('?')[0];
+	return AUTH_PATH_PREFIXES.some((prefix) => clean.startsWith(prefix));
+}
+
+/**
+ * Redirect to /login after a session-expiry 401 on a non-auth endpoint.
+ *
+ * Uses a dynamic `$app/navigation` import (mirrors the WS 4001 handler in
+ * active-session.ts) so this module stays importable from plain unit tests that
+ * don't run inside SvelteKit. Guards against redirect loops: never fires when
+ * already on /login or /setup.
+ */
+export function redirectToLoginOn401(): void {
+	if (typeof window === 'undefined') return;
+	const path = window.location?.pathname ?? '';
+	if (path === '/login' || path === '/setup') return;
+	import('$app/navigation')
+		.then(({ goto }) => goto('/login'))
+		.catch(() => {
+			// Fall back to a hard navigation if the dynamic import is unavailable.
+			window.location.assign('/login');
+		});
+}
+
+/**
  * Extract a meaningful error message from a failed HTTP response.
  * Tries JSON first, then plain text, then falls back to status description.
  */
@@ -106,6 +142,13 @@ export class ApiClient {
 
 		if (!response.ok) {
 			const detail = await extractErrorDetail(response);
+			// Global session-expiry handling: a 401 on any non-auth endpoint means
+			// the cookie session lapsed mid-use — bounce to /login. Auth endpoints
+			// (login/setup/status/workspace probes) are excluded so their expected
+			// 401s don't loop the user off the page that must render them.
+			if (response.status === 401 && !isAuthPath(path)) {
+				redirectToLoginOn401();
+			}
 			throw {
 				detail,
 				status: response.status

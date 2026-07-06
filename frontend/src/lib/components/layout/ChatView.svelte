@@ -11,7 +11,7 @@
 	 * - Active: MessageArea + ChatInput at bottom
 	 */
 	import { untrack } from 'svelte';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import Banner from '$lib/components/Banner.svelte';
@@ -121,6 +121,13 @@
 	function handleProjectSelect(projectId: string) {
 		activeSession.setProject(projectId);
 	}
+
+	// Manually re-establish the WebSocket (the Reconnect button on the
+	// disconnection banner). Delegates to the existing reconnect machinery —
+	// resets backoff then reconnects — rather than inventing a new path.
+	function handleReconnect() {
+		activeSession.reconnect();
+	}
 </script>
 
 <div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
@@ -147,6 +154,18 @@
 		<!-- Active chat: Messages + input -->
 		<div class="chat-column">
 			<div class="message-area-wrapper">
+				{#if $activeSession.sessionId && $activeSession.remoteControllable !== false && !$activeWsConnected}
+					<!-- Live connection lost. The client auto-reconnects with backoff,
+					     but surface it so the user knows why messages may lag — and
+					     give them a manual retry that skips the backoff wait. -->
+					<div class="connection-banner">
+						<Banner
+							severity="warning"
+							message="Connection lost — trying to reconnect. Live updates are paused."
+							action={{ label: 'Reconnect', onClick: handleReconnect }}
+						/>
+					</div>
+				{/if}
 				{#if $activeSession.sessionId && $activeSession.remoteControllable === false}
 					<!-- Cross-install (cloud) session whose owning device isn't reachable:
 					     history is still readable from the shared DB, but live control
@@ -295,6 +314,12 @@
 
 	.input-wrapper {
 		flex-shrink: 0;
+	}
+
+	/* Thin, unobtrusive disconnection notice pinned above the message list. */
+	.connection-banner {
+		flex-shrink: 0;
+		padding: 6px 12px 0;
 	}
 
 	.inline-deferred-strip {

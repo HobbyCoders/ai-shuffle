@@ -774,6 +774,19 @@ export const activeSession = {
 
 	// (already delegated above)
 
+	// ── Connection ──────────────────────────────────────────────────
+
+	/**
+	 * Manually re-establish the WebSocket after a disconnect. Resets the
+	 * exponential-backoff counter so the retry is immediate (the user just
+	 * asked for it), then reconnects. Idempotent: connect() is a no-op if the
+	 * socket is already open/connecting.
+	 */
+	reconnect: () => {
+		wsConn.resetReconnectAttempts();
+		wsConn.connect();
+	},
+
 	// ── Getters for derived stores ──────────────────────────────────
 
 	getDeviceId: () => typeof window !== 'undefined' ? getOrCreateDeviceId() : '',

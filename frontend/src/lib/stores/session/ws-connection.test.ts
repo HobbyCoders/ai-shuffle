@@ -502,4 +502,34 @@ describe('ws-connection', () => {
 			removeListenerSpy.mockRestore();
 		});
 	});
+
+	// Phase 3.1: the manual "Reconnect" button calls activeSession.reconnect(),
+	// which is resetReconnectAttempts() + connect(). Verify that sequence forces
+	// an immediate new socket even after backoff attempts have accumulated.
+	describe('manual reconnect (resetReconnectAttempts + connect)', () => {
+		it('opens a fresh socket immediately when triggered while disconnected', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+
+			// Establish then lose the connection a few times so the backoff counter
+			// climbs and the pending auto-reconnect timer is long.
+			conn.connect();
+			createdSockets[0].simulateOpen();
+			createdSockets[0].simulateClose(1006, 'Abnormal closure');
+			vi.advanceTimersByTime(5000);
+			createdSockets[1].simulateOpen();
+			createdSockets[1].simulateClose(1006, 'Abnormal closure');
+
+			const socketsBefore = createdSockets.length;
+
+			// User clicks Reconnect → the two calls activeSession.reconnect() makes.
+			conn.resetReconnectAttempts();
+			conn.connect();
+
+			// A new socket is created synchronously — no waiting on the backoff timer.
+			expect(createdSockets.length).toBe(socketsBefore + 1);
+
+			conn.destroy();
+		});
+	});
 });

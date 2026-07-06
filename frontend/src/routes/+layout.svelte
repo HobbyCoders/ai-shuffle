@@ -34,11 +34,25 @@
 	const AUTH_POLL_INTERVAL_MS = 120_000;
 	let authPollTimer: ReturnType<typeof setInterval> | null = null;
 
+	// Bounce to /login when the auth poll observes a lost session, mirroring the
+	// HTTP-401 interceptor. Guarded against loops: only fires once initialized,
+	// only when confirmed-unauthenticated (not merely "still checking"), setup is
+	// not the intended destination, and we're not already on /login or /setup.
+	function redirectIfDeauthenticated() {
+		if (!initialized) return;
+		if ($setupRequired) return; // setup flow owns its own routing
+		if ($isAuthenticated) return;
+		const path = $page.url.pathname;
+		if (path === '/login' || path === '/setup') return;
+		goto('/login');
+	}
+
 	function startAuthPoll() {
 		if (authPollTimer) return;
 		authPollTimer = setInterval(async () => {
 			try {
 				await auth.checkAuth();
+				redirectIfDeauthenticated();
 			} catch (e) {
 				console.debug('Auth poll failed:', e);
 			}
@@ -57,7 +71,7 @@
 			stopAuthPoll();
 		} else {
 			// Check immediately on tab return, then resume interval
-			auth.checkAuth().catch(() => {});
+			auth.checkAuth().then(redirectIfDeauthenticated).catch(() => {});
 			startAuthPoll();
 		}
 	}
