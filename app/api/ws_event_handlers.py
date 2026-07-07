@@ -803,7 +803,7 @@ async def handle_done(
                         seed_messages = fresh_messages
                     else:
                         logger.warning(
-                            "[Rewind] store re-parse incomplete for %s "
+                            "[TurnEndReseed] store re-parse incomplete for %s "
                             "(fresh=%d live=%d); seeding live messages",
                             sdk_sid,
                             len(fresh_messages) if fresh_messages else 0,
@@ -811,7 +811,7 @@ async def handle_done(
                         )
                 except Exception as e:
                     logger.warning(
-                        "[Rewind] store re-parse failed for %s: %s; "
+                        "[TurnEndReseed] store re-parse failed for %s: %s; "
                         "seeding live messages",
                         sdk_sid,
                         e,
