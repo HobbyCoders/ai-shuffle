@@ -718,9 +718,34 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				break;
 			}
+			case 'stream_block_stop': {
+				// End of ONE content block. Session guard: reject non-active sessions.
+				const blockSessionId = data.session_id as string | undefined;
+				const blockState = getState();
+				if (!blockSessionId || blockSessionId !== blockState.sessionId) break;
+				// Clear the WS text buffer at the block boundary — the principled fix
+				// for the "mega-blob" incident. `wsStreamContent` accumulates every
+				// stream_delta with no separator and is otherwise cleared ONLY at turn
+				// boundaries (done / stopped / start). When a text block finalizes
+				// mid-turn into a tool call, nothing clears the buffer at the source,
+				// so cross-block deltas pile up and the poll-time staleness drop in
+				// mergeWsStreamBuffer is the sole guard — which failed the moment an
+				// upstream bug split one block into two finalized messages (the last
+				// finalized short tail can never startsWith the long buffer). Clearing
+				// here makes cross-block accumulation impossible: the next block refills
+				// from empty (the documented intent, see session-init.ts merge notes).
+				// Non-text blocks (tool_use/thinking) never wrote to the buffer, so this
+				// clears an already-empty buffer — harmless. The `s.wsStreamContent ?`
+				// guard keeps the state reference stable when nothing to clear.
+				update(s => (s.wsStreamContent ? { ...s, wsStreamContent: '' } : s));
+				// Ensure polling is started if we're streaming but poller isn't running.
+				if (blockState.isStreaming && !sessionPoller.isPolling(blockState.sessionId)) {
+					sessionPoller.startStreaming(blockState.sessionId);
+				}
+				break;
+			}
 			case 'stream_start':
 			case 'stream_block_start':
-			case 'stream_block_stop':
 			case 'system': {
 				// Session guard: reject events not targeting the active session
 				const sysSessionId = data.session_id as string | undefined;

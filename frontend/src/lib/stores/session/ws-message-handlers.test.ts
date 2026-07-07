@@ -434,6 +434,94 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('stream_block_stop handler (per-block buffer clear)', () => {
+		// Principled layer of the mega-blob fix: wsStreamContent accumulates every
+		// text delta with no separator and is cleared ONLY at turn boundaries
+		// (done / stopped / start). If a text block finalizes mid-turn into a tool
+		// call, nothing clears the buffer at the source, so cross-block deltas pile
+		// up and the poll-time staleness drop is the sole guard. Clearing the
+		// buffer on the block-boundary WS event (`stream_block_stop`) makes
+		// cross-block accumulation impossible in the first place; the next block
+		// then refills from empty (the documented intent). Non-text blocks
+		// (tool_use/thinking) never wrote to the buffer, so their block-stop clears
+		// a buffer that is already empty — harmless.
+		it('clears wsStreamContent on the active session', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			state.wsStreamContent = 'Hello world, this block just finalized';
+			let captured = '__unset__';
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					captured = fn(state).wsStreamContent;
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'stream_block_stop',
+				session_id: 'session-1',
+				index: 0,
+			});
+
+			expect(captured).toBe('');
+		});
+
+		it('does NOT clear the buffer for a background (non-active) session', () => {
+			const state = mockState();
+			state.sessionId = 'session-active';
+			state.wsStreamContent = 'live text for the active session';
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'stream_block_stop',
+				session_id: 'session-bg',
+				index: 0,
+			});
+
+			// Session guard rejects the event → no state write at all.
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('multi-block turn: each block-stop resets the buffer so blocks cannot accumulate', () => {
+			// Simulate the accumulation shape the incident produced: text deltas of
+			// block 1, its block-stop, then text deltas of block 2. Without the
+			// per-block clear, block 2's buffer would be block1+block2 concatenated
+			// (the mega-blob seed). With the clear, block 2 starts from empty.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			handlers = createMessageHandlers(
+				createMockDeps({
+					getState: vi.fn(() => state),
+					update: vi.fn((fn) => {
+						// Apply the reducer against the live mock state so successive
+						// deltas accumulate the way the real store does.
+						const next = fn(state);
+						state.wsStreamContent = next.wsStreamContent;
+					}),
+				})
+			);
+
+			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'Block one ' });
+			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'text.' });
+			expect(state.wsStreamContent).toBe('Block one text.');
+
+			// Block 1 finalizes → buffer cleared at the source.
+			handlers.handleMessage({ type: 'stream_block_stop', session_id: 'session-1', index: 0 });
+			expect(state.wsStreamContent).toBe('');
+
+			// Block 2 deltas refill from empty — no cross-block accumulation.
+			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'Block two text.' });
+			expect(state.wsStreamContent).toBe('Block two text.');
+			expect(state.wsStreamContent).not.toContain('Block one');
+		});
+	});
+
 	describe('user_message_discarded handler', () => {
 		it('should set pendingInterruptPrompt and trigger a final poll', () => {
 			const state = mockState();

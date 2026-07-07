@@ -192,6 +192,56 @@ export function mergeWsStreamBuffer(
 		}
 	}
 
+	// Defensive divergence-tolerant trim (the "mega-blob" incident). The check
+	// above only fires when the LAST finalized text *contains* the whole buffer.
+	// But an upstream bug can split ONE streamed block into several finalized
+	// messages mid-word (e.g. a 208-char head + a 35-char tail), while the WS
+	// buffer holds the full uninterrupted concatenation. Then the last finalized
+	// text (the short tail) can never startsWith the long buffer, the drop fails
+	// on EVERY poll, and each later block appends into the same buffer → a
+	// growing stale mega-blob re-appended as a phantom streaming bubble.
+	//
+	// Self-heal by PEELING finalized prefixes off the buffer front, walking the
+	// TRAILING run of finalized assistant-text blocks in document order. The
+	// buffer is the accumulation of exactly those blocks' deltas, in order, so
+	// each one is a prefix of what remains. We anchor to the trailing finalized
+	// run (contiguous back from the last finalized text, skipping interleaved
+	// tool_use/thinking) so an OLDER unrelated finalized text that merely
+	// prefixes a genuinely-live new partial is never consumed — preserving the
+	// false-stale guard above and the WS-ahead head-start. Whatever remains after
+	// peeling is the genuinely-live tail of the current (not-yet-finalized) block.
+	if (finalWsContent) {
+		// Collect the trailing contiguous run of finalized assistant texts, oldest
+		// → newest, allowing tool_use / thinking blocks to interleave between them
+		// (the incident's two text fragments were followed by a tool_use).
+		const trailingFinalized: string[] = [];
+		let sawFinalizedText = false;
+		for (let i = finalMessages.length - 1; i >= 0; i--) {
+			const m = finalMessages[i];
+			if (m.role === 'assistant' && m.type === 'text' && !m.streaming) {
+				trailingFinalized.unshift(m.content || '');
+				sawFinalizedText = true;
+			} else if (m.role === 'assistant' && (m.type === 'tool_use' || m.type === 'thinking')) {
+				// interleaved non-text block — keep scanning the run
+				continue;
+			} else if (sawFinalizedText) {
+				// Reached a non-assistant (e.g. the user turn) or a streaming text —
+				// the trailing finalized run ends here.
+				break;
+			}
+		}
+		// Peel each finalized text (oldest-first) that prefixes the remaining
+		// buffer. Stop at the first that does not match so we never trim past the
+		// covered region into a live partial that coincidentally shares a prefix.
+		for (const finalizedText of trailingFinalized) {
+			if (finalizedText && finalWsContent.startsWith(finalizedText)) {
+				finalWsContent = finalWsContent.slice(finalizedText.length);
+			} else {
+				break;
+			}
+		}
+	}
+
 	let pollerStreamIdx = -1;
 	for (let i = finalMessages.length - 1; i >= 0; i--) {
 		if (

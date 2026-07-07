@@ -240,4 +240,73 @@ describe('mergeWsStreamBuffer', () => {
 		expect(result.messages.length).toBe(pollerData.length);
 		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
 	});
+
+	// ── Case: upstream mid-word split into TWO finalized messages (INCIDENT) ─
+	// Live incident: a backend bug split one streamed text block mid-word into
+	// TWO live-store messages — a 208-char head ("…must NO") and a 35-char tail
+	// ("T be resurrected by a union-merge):") — while the WS buffer held the full
+	// uninterrupted 243 chars (head+tail). The LAST finalized text is the 35-char
+	// tail, which can never `startsWith` the 243-char buffer, so the single
+	// most-recent-only staleness check failed on EVERY poll for the rest of the
+	// turn. Each later block then appended into the same buffer → a growing
+	// ":"-joined mega-blob re-appended at the tail as a streaming synthetic,
+	// pinned at the bottom with typing dots. Refresh (client-memory only) fixed
+	// it. The defensive fix must self-heal this shape within ONE poll: the buffer
+	// is fully covered by the concatenation of the trailing finalized texts, so
+	// it must be trimmed to empty and NO synthetic containing the blob may leak.
+	it('self-heals a buffer that is a mid-word split across two finalized messages (incident)', () => {
+		const head = 'X'.repeat(208 - 'must NO'.length) + 'must NO'; // 208 chars
+		const tail = 'T be resurrected by a union-merge):'; // 35 chars
+		const buffer = head + tail; // 243 chars, no separator (the accumulation bug)
+		expect(head.length).toBe(208);
+		expect(tail.length).toBe(35);
+		expect(buffer.length).toBe(243);
+
+		const prior = [userMsg(), phantom()];
+		// Poller data: the two finalized fragments (both non-streaming), tail LAST.
+		const pollerData = [
+			userMsg(),
+			finalText(head),
+			finalText(tail),
+			completeTool('Grep'),
+		];
+
+		const result = mergeWsStreamBuffer(pollerData, buffer, prior, true);
+
+		// The buffer is fully covered by the trailing finalized texts → cleared.
+		expect(result.wsStreamContent).toBe('');
+		// No streaming synthetic carrying the mega-blob may be appended.
+		expect(hasNonEmptyStreamingTextTail(result.messages)).toBe(false);
+		expect(
+			result.messages.some(
+				(m) =>
+					m.role === 'assistant' &&
+					m.streaming &&
+					(m.content ?? '').includes('union-merge')
+			)
+		).toBe(false);
+		// The think-gap dots must show once the blob is gone.
+		expect(shouldShowGapIndicator(result.messages, true, SHOWN)).toBe(true);
+	});
+
+	it('self-heals when the buffer covers the finalized head plus a live tail beyond it', () => {
+		// A softer variant: the buffer holds finalized head + a genuinely-live tail
+		// that has NOT yet finalized. Trimming the covered prefix must leave ONLY
+		// the live remainder as the WS-ahead partial (not clear the whole buffer,
+		// not keep the stale head).
+		const head = 'The first finalized block. ';
+		const liveTail = 'And the next block is starting';
+		const buffer = head + liveTail;
+
+		const prior = [userMsg(), phantom()];
+		const pollerData = [userMsg(), finalText(head), completeTool('Read')];
+
+		const result = mergeWsStreamBuffer(pollerData, buffer, prior, true);
+
+		// The finalized-head prefix is trimmed; the live tail survives as the partial.
+		expect(result.wsStreamContent).toBe(liveTail);
+		const last = result.messages[result.messages.length - 1];
+		expect(last.streaming).toBe(true);
+		expect(last.content).toBe(liveTail);
+	});
 });
