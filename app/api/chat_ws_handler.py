@@ -1148,6 +1148,37 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "message": "Not authorized for this project"})
                 return
 
+        # Cross-install (cluster) session: owned by another install on the
+        # shared DB. Forward the follow-up prompt there; its /live stream is
+        # mirrored back via the poller. Headless handlers never relay
+        # (websocket is None) — a headless query always runs locally.
+        if session_id and self.websocket is not None:
+            cloud_sess = await run_sync(database.get_session, session_id)
+            from app.core import cloud_relay
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                if session_id != self.current_session_id:
+                    if self.current_session_id:
+                        await sync_engine.unregister_device(self.device_id, self.current_session_id)
+                    await sync_engine.register_device(self.device_id, session_id, self.websocket)
+                    self.current_session_id = session_id
+                try:
+                    await cloud_relay.relay_message(
+                        cloud_sess, prompt, profile_id, overrides
+                    )
+                    await self.send_json({"type": "cloud_forwarded", "session_id": session_id})
+                except cloud_relay.InstallOffline as e:
+                    await self.send_json({
+                        "type": "error",
+                        "message": f"Device offline — cannot send: {e}",
+                    })
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Cluster relay_message failed for {session_id}: {e}")
+                    await self.send_json({
+                        "type": "error",
+                        "message": f"Could not reach owning device: {e}",
+                    })
+                return
+
         # Busy-write guard: a query for a session that already has a live turn
         # must NEVER cancel-and-requery — the bare cancel skipped the SDK
         # interrupt, so the follow-up prompt was written into the mid-turn
@@ -1389,6 +1420,24 @@ class ChatWebSocketHandler:
 
         session_id = data.get("session_id") or self.current_session_id
         if session_id:
+            # Cross-install (cluster) session: relay the interrupt to the
+            # owning install. A silent skip when offline is fine — there is
+            # nothing running here to stop. PARITY: like the closure, this
+            # returns BEFORE the _stopped_sessions latch add, so a remote stop
+            # never latches locally. Headless handlers never relay
+            # (websocket is None).
+            if self.websocket is not None:
+                cloud_sess = await run_sync(database.get_session, session_id)
+                from app.core import cloud_relay
+                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                    try:
+                        await cloud_relay.relay_interrupt(cloud_sess)
+                    except cloud_relay.InstallOffline as e:
+                        logger.debug(f"Cluster interrupt skipped (offline) for {session_id}: {e}")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Cluster relay_interrupt failed for {session_id}: {e}")
+                    return
+
             from app.core.query_engine import interrupt_session
 
             # Mark session as user-stopped so the finally block in run_query
@@ -1445,6 +1494,31 @@ class ChatWebSocketHandler:
         if not session_id:
             await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": "No active session"})
             return
+
+        # Cross-install (cluster) session: relay the interrupt to the owner,
+        # then confirm so the frontend sends the replacement query (also
+        # relayed). Headless handlers never relay (websocket is None).
+        if self.websocket is not None:
+            cloud_sess = await run_sync(database.get_session, session_id)
+            from app.core import cloud_relay
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                try:
+                    await cloud_relay.relay_interrupt(cloud_sess)
+                    await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
+                except cloud_relay.InstallOffline as e:
+                    await self.send_json({
+                        "type": "interrupt_failed",
+                        "session_id": session_id,
+                        "message": f"Device offline: {e}",
+                    })
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Cluster interrupt_for_query failed for {session_id}: {e}")
+                    await self.send_json({
+                        "type": "interrupt_failed",
+                        "session_id": session_id,
+                        "message": f"Could not reach owning device: {e}",
+                    })
+                return
 
         from app.core.query_engine import interrupt_session
 
@@ -1712,6 +1786,12 @@ class ChatWebSocketHandler:
 
     async def handle_permission_response(self, data: dict) -> None:
         """Handle 'permission_response' message type."""
+        # KNOWN GAP (deliberately deferred, parity with the live closure):
+        # permission_response and get_pending_permissions have NO cloud/cluster
+        # relay branch — a remote session's pending permission lives on the
+        # OWNING install's in-memory handler, so a viewer install's response
+        # resolves nothing there. The closure never relayed these either; do
+        # not add a relay here without doing the closure-parity work first.
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
         decision = data.get("decision")  # "allow", "deny", or "defer"
@@ -1795,19 +1875,52 @@ class ChatWebSocketHandler:
         answers = data.get("answers", {})
 
         if response_session_id and request_id and answers:
-            result = await user_question_handler.respond(
-                request_id=request_id,
-                session_id=response_session_id,
-                answers=answers
-            )
+            # Cross-install session: the pending question and its awaiting
+            # coroutine live on the OWNING install, so responding locally would
+            # just log "no pending question". Relay the answer to the owner to
+            # unblock its waiter. On failure the ack carries WHY, so the
+            # frontend can tell a retryable delivery failure ('relay_offline' —
+            # keep the modal so the answer isn't lost) from an authoritative
+            # "no such pending question" ('not_pending' — dismiss the stale
+            # modal). Headless handlers never relay (websocket is None).
+            fail_reason = None
+            cloud_sess = None
+            if self.websocket is not None:
+                cloud_sess = await run_sync(database.get_session, response_session_id)
+            from app.core import cloud_relay
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                result = False
+                try:
+                    result = await cloud_relay.relay_question_response(
+                        cloud_sess, request_id, answers
+                    )
+                    if not result:
+                        fail_reason = "not_pending"
+                except cloud_relay.InstallOffline as e:
+                    fail_reason = "relay_offline"
+                    logger.debug(f"Cluster relay_question_response offline for {response_session_id}: {e}")
+                except Exception as e:  # noqa: BLE001
+                    fail_reason = "relay_offline"
+                    logger.warning(f"Cluster relay_question_response failed for {response_session_id}: {e}")
+            else:
+                result = await user_question_handler.respond(
+                    request_id=request_id,
+                    session_id=response_session_id,
+                    answers=answers
+                )
+                if not result:
+                    fail_reason = "not_pending"
             logger.debug(f"User question response processed: {request_id} -> {result}")
 
-            await self.send_json({
+            ack = {
                 "type": "user_question_response_ack",
                 "session_id": response_session_id,
                 "request_id": request_id,
                 "success": result
-            })
+            }
+            if fail_reason:
+                ack["reason"] = fail_reason
+            await self.send_json(ack)
         else:
             await self.send_json({
                 "type": "error",
@@ -1821,12 +1934,42 @@ class ChatWebSocketHandler:
     async def handle_get_pending_questions(self, data: dict) -> None:
         """Handle 'get_pending_questions' message type."""
         if self.current_session_id:
+            # Cross-install session: the pending question lives in the OWNING
+            # install's in-memory handler, so the local handler is always
+            # empty here. Relay the read to the owner. A SUCCESSFUL relay
+            # (even with zero questions) is authoritative and must clear any
+            # stale modal. But a FAILED relay (owner offline / error) leaves
+            # us with the local empty set, which is NOT authoritative —
+            # replying with a bare empty list would let the frontend wipe a
+            # locally-open question modal (and its in-progress answer) on
+            # every reconnect/switch resync. So on relay failure we flag the
+            # reply `stale` and keep the questions we have; the frontend
+            # leaves its modal untouched when it sees the marker. Headless
+            # handlers never relay (websocket is None).
             pending = user_question_handler.get_pending_questions(self.current_session_id)
-            await self.send_json({
+            stale = False
+            if self.websocket is not None:
+                cloud_sess = await run_sync(database.get_session, self.current_session_id)
+                from app.core import cloud_relay
+                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                    try:
+                        pending = await cloud_relay.relay_get_pending_questions(cloud_sess)
+                    except cloud_relay.InstallOffline as e:
+                        stale = True
+                        logger.debug(f"Cluster relay_get_pending_questions offline for {self.current_session_id}: {e}")
+                    except Exception as e:  # noqa: BLE001
+                        stale = True
+                        logger.warning(f"Cluster relay_get_pending_questions failed for {self.current_session_id}: {e}")
+            reply = {
                 "type": "pending_questions",
                 "session_id": self.current_session_id,
                 "questions": pending
-            })
+            }
+            # Only mark a FAILED relay. A success (even empty) omits the key
+            # so old clients keep clearing stale modals.
+            if stale:
+                reply["stale"] = True
+            await self.send_json(reply)
 
     # ------------------------------------------------------------------
     # handle_tabs_update
@@ -1868,6 +2011,41 @@ class ChatWebSocketHandler:
         if not session_id:
             await self.send_json({"type": "error", "message": "No session for queue"})
             return
+
+        # Cross-install (cloud) session: it runs on the owning install, where
+        # the worktree/working dir live. Relay the queue op there — it stores
+        # the message in the shared queue and drains it on the owner when
+        # idle. Draining here would try to run the query against a worktree
+        # this install does not have (the original "cloud mode queue" error).
+        # The queue lives in the shared DB, so we read it back to update this
+        # device's queue UI immediately (and to reconcile away the frontend's
+        # optimistic entry on a relay failure). PARITY: returns BEFORE the
+        # _stopped_sessions.discard below — a remote queue op never touches
+        # the local latch. Headless handlers never relay (websocket is None).
+        if self.websocket is not None:
+            cloud_sess = await run_sync(database.get_session, session_id)
+            from app.core import cloud_relay
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                relay_error: Optional[str] = None
+                try:
+                    await cloud_relay.relay_queue_message(
+                        cloud_sess, content, profile_id, project_id
+                    )
+                except cloud_relay.InstallOffline as e:
+                    relay_error = f"Device offline — cannot queue: {e}"
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Cluster relay_queue_message failed for {session_id}: {e}")
+                    relay_error = f"Could not reach owning device: {e}"
+                queue = await run_sync(database.get_queued_messages, session_id)
+                await self.send_json({
+                    "type": "sync",
+                    "event_type": "queue_updated",
+                    "session_id": session_id,
+                    "data": {"queued_messages": queue},
+                })
+                if relay_error:
+                    await self.send_json({"type": "error", "message": relay_error})
+                return
 
         # Clear stopped flag — user explicitly queued a new message, so they
         # want the queue to auto-process when the session becomes idle.
