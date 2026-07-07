@@ -78,17 +78,24 @@ class TestRekeyModuleImports:
         assert hasattr(rekey, "rekey")
         assert callable(rekey.main)
 
-    def test_sensitive_settings_list_matches_encryption_module(self):
-        """The script's list must stay in lockstep with re_encrypt_all_secrets."""
-        from scripts.rekey import _sensitive_settings
-        expected = {
-            "openai_api_key",
-            "gemini_api_key",
-            "image_api_key",
-            "video_api_key",
-            "anthropic_api_key",
-        }
-        assert set(_sensitive_settings()) == expected
+    def test_uses_shared_discovery_no_mirrored_list(self):
+        """The script must reuse the encryption module's dynamic discovery
+        (single source of truth) rather than a mirrored hardcoded name list."""
+        from scripts import rekey
+        from app.core import encryption
+
+        # The old mirrored list is gone.
+        assert not hasattr(rekey, "_sensitive_settings")
+        # And the shared plan builder exists to be reused.
+        assert callable(encryption.build_reencryption_plan)
+        assert callable(encryption.apply_reencryption_plan)
+
+    def test_rekey_exposes_skip_undecryptable(self):
+        """rekey() must accept the --skip-undecryptable operator escape hatch."""
+        import inspect
+        from scripts.rekey import rekey
+        params = inspect.signature(rekey).parameters
+        assert "skip_undecryptable" in params
 
     def test_server_probe_returns_none_when_nothing_listening(self, monkeypatch):
         """With no server, the probe reports clear (None)."""
@@ -100,3 +107,91 @@ class TestRekeyModuleImports:
             port = 59999
         monkeypatch.setattr("app.core.config.settings", _S(), raising=False)
         assert rekey._server_appears_up() is None
+
+
+class TestRekeyDbBacked:
+    """Drive scripts.rekey.rekey() end-to-end over the pg_shim DB.
+
+    Covers all four storage locations through the offline script's own code
+    path (shared discovery), plus --dry-run (writes nothing) and
+    --skip-undecryptable (skips bricked orphans, rekeys the rest).
+    """
+
+    def _seed_all(self, db):
+        from app.core import encryption
+        encryption.set_encryption_key("old-pw", db)
+        db.set_system_setting("fal_api_key", encryption.encrypt_value("fal-secret"))
+        db.create_connector(
+            connector_id="conn-r",
+            connector_type="telegram",
+            name="tg",
+            config={"bot_token": encryption.encrypt_value("tok-r")},
+            events=[],
+        )
+        db.create_automation(
+            automation_id="auto-r",
+            name="wh",
+            trigger_type="webhook",
+            trigger_config={"secret": encryption.encrypt_value("wh-r")},
+            triggers=[{"type": "webhook", "config": {"secret": encryption.encrypt_value("wh-r")}}],
+            prompt="p",
+            profile_id="default",
+        )
+
+    def test_rekey_reencrypts_all_locations(self, mock_db):
+        from scripts.rekey import rekey
+        from app.core import encryption
+        from app.db import database as db
+
+        self._seed_all(db)
+        rc = rekey("old-pw", "new-pw", dry_run=False, update_admin_hash=False)
+        assert rc == 0
+
+        # In-memory key is now the new key; every location decrypts.
+        assert encryption.decrypt_value(db.get_system_setting("fal_api_key")) == "fal-secret"
+        conn_tok = db.get_connector("conn-r")["config"]["bot_token"]
+        assert encryption.decrypt_value(conn_tok) == "tok-r"
+        wh = db.get_automation("auto-r")["triggers"][0]["config"]["secret"]
+        assert encryption.decrypt_value(wh) == "wh-r"
+
+    def test_rekey_dry_run_writes_nothing(self, mock_db):
+        from scripts.rekey import rekey
+        from app.db import database as db
+
+        self._seed_all(db)
+        before = db.get_system_setting("fal_api_key")
+        rc = rekey("old-pw", "new-pw", dry_run=True, update_admin_hash=False)
+        assert rc == 0
+        assert db.get_system_setting("fal_api_key") == before
+
+    def test_rekey_aborts_on_undecryptable_by_default(self, mock_db):
+        from scripts.rekey import rekey
+        from app.db import database as db
+
+        self._seed_all(db)
+        db.set_system_setting(
+            "cloud_install_api_key", "enc:" + base64.b64encode(b"garbage").decode()
+        )
+        before = db.get_system_setting("fal_api_key")
+        rc = rekey("old-pw", "new-pw", dry_run=False, update_admin_hash=False)
+        assert rc == 3
+        assert db.get_system_setting("fal_api_key") == before  # nothing written
+
+    def test_rekey_skip_undecryptable_rekeys_the_rest(self, mock_db):
+        from scripts.rekey import rekey
+        from app.core import encryption
+        from app.db import database as db
+
+        self._seed_all(db)
+        bricked = "enc:" + base64.b64encode(b"garbage").decode()
+        db.set_system_setting("cloud_install_api_key", bricked)
+
+        rc = rekey(
+            "old-pw", "new-pw",
+            dry_run=False, update_admin_hash=False, skip_undecryptable=True,
+        )
+        assert rc == 0
+        # Good values rekeyed and readable under the new key.
+        assert encryption.decrypt_value(db.get_system_setting("fal_api_key")) == "fal-secret"
+        # The bricked orphan was left exactly as-is (not touched).
+        assert db.get_system_setting("cloud_install_api_key") == bricked

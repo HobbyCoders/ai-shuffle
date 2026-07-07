@@ -398,8 +398,33 @@ class TestInitEncryptionFromEnv:
         assert result is False
 
 
+def _make_settings_mock_db(salt: bytes, settings: dict):
+    """Build a MagicMock db exposing the discovery accessors.
+
+    ``settings`` maps system_settings key -> stored value. The encrypted-value
+    discovery scans ``get_all_system_settings()``; ``get_system_setting`` is
+    still wired for the salt lookup. Automations/connectors/credentials return
+    empty so those locations are exercised as "nothing to do".
+    """
+    mock_db = MagicMock()
+    stored = dict(settings)
+    stored["encryption_salt"] = base64.b64encode(salt).decode()
+
+    mock_db.get_system_setting.side_effect = lambda key: stored.get(key)
+    mock_db.get_all_system_settings.side_effect = lambda: dict(stored)
+
+    def _set(key, value):
+        stored[key] = value
+    mock_db.set_system_setting.side_effect = _set
+
+    mock_db.get_all_automations.return_value = []
+    mock_db.get_all_connectors.return_value = []
+    mock_db.get_all_api_users.return_value = []
+    return mock_db
+
+
 class TestReEncryptAllSecrets:
-    """Test re-encryption when password changes."""
+    """Test re-encryption when password changes (dynamic discovery)."""
 
     @pytest.fixture(autouse=True)
     def reset_state(self):
@@ -412,83 +437,48 @@ class TestReEncryptAllSecrets:
 
     def test_re_encrypt_all_secrets_success(self):
         """Should re-encrypt all secrets with new password."""
-        mock_db = MagicMock()
-        salt = b"S" * 32
-        mock_db.get_system_setting.side_effect = lambda key: {
-            "encryption_salt": base64.b64encode(salt).decode(),
-            "openai_api_key": None,
-            "gemini_api_key": None,
-            "image_api_key": None,
-            "video_api_key": None,
-        }.get(key)
+        mock_db = _make_settings_mock_db(b"S" * 32, {})
         result = encryption.re_encrypt_all_secrets("old_pass", "new_pass", mock_db)
         assert result is True
         assert encryption._encryption_key is not None
 
     def test_re_encrypt_with_encrypted_values(self):
         """Should decrypt with old key and re-encrypt with new key."""
-        mock_db = MagicMock()
         salt = b"T" * 32
         old_key = encryption.derive_key_from_password("old_password", salt)
         old_fernet = Fernet(old_key)
         encrypted_api_key = old_fernet.encrypt(b"sk-secret123")
         encrypted_value = f"enc:{base64.b64encode(encrypted_api_key).decode()}"
 
-        def mock_get_setting(key):
-            if key == "encryption_salt":
-                return base64.b64encode(salt).decode()
-            elif key == "openai_api_key":
-                return encrypted_value
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
+        mock_db = _make_settings_mock_db(salt, {"openai_api_key": encrypted_value})
         result = encryption.re_encrypt_all_secrets("old_password", "new_password", mock_db)
         assert result is True
         mock_db.set_system_setting.assert_called()
 
-    def test_re_encrypt_with_plaintext_values(self):
-        """Should encrypt plaintext values with new key (migration)."""
-        mock_db = MagicMock()
-        salt = b"U" * 32
-
-        def mock_get_setting(key):
-            if key == "encryption_salt":
-                return base64.b64encode(salt).decode()
-            elif key == "openai_api_key":
-                return "sk-plaintext-key"
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        result = encryption.re_encrypt_all_secrets("old", "new", mock_db)
-        assert result is True
-        call_args = mock_db.set_system_setting.call_args_list
-        openai_calls = [c for c in call_args if c[0][0] == "openai_api_key"]
-        assert len(openai_calls) == 1
-        assert openai_calls[0][0][1].startswith("enc:")
-
     def test_re_encrypt_fails_on_decrypt_error(self):
         """Should return False if decryption fails."""
-        mock_db = MagicMock()
         salt = b"V" * 32
-
-        def mock_get_setting(key):
-            if key == "encryption_salt":
-                return base64.b64encode(salt).decode()
-            elif key == "openai_api_key":
-                return "enc:" + base64.b64encode(b"invalid").decode()
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
+        mock_db = _make_settings_mock_db(
+            salt, {"openai_api_key": "enc:" + base64.b64encode(b"invalid").decode()}
+        )
         result = encryption.re_encrypt_all_secrets("wrong_old_password", "new", mock_db)
         assert result is False
 
+    def test_re_encrypt_fails_closed_writes_nothing(self):
+        """A single undecryptable value must abort ALL writes (fail-closed)."""
+        salt = b"Q" * 32
+        old_key = encryption.derive_key_from_password("old_pass", salt)
+        old_fernet = Fernet(old_key)
+        good = f"enc:{base64.b64encode(old_fernet.encrypt(b'good')).decode()}"
+        bad = "enc:" + base64.b64encode(b"not-a-token").decode()
+        mock_db = _make_settings_mock_db(salt, {"fal_api_key": good, "anthropic_api_key": bad})
+        result = encryption.re_encrypt_all_secrets("old_pass", "new_pass", mock_db)
+        assert result is False
+        mock_db.set_system_setting.assert_not_called()
+
     def test_re_encrypt_logs_success(self):
         """Should log success message."""
-        mock_db = MagicMock()
-        salt = b"W" * 32
-        mock_db.get_system_setting.side_effect = lambda key:             base64.b64encode(salt).decode() if key == "encryption_salt" else None
+        mock_db = _make_settings_mock_db(b"W" * 32, {})
         with patch.object(encryption.logger, "info") as mock_log:
             encryption.re_encrypt_all_secrets("old", "new", mock_db)
             calls = [str(c) for c in mock_log.call_args_list]
@@ -496,57 +486,23 @@ class TestReEncryptAllSecrets:
 
     def test_re_encrypt_updates_in_memory_key(self):
         """Should update the in-memory encryption key to the new key."""
-        mock_db = MagicMock()
         salt = b"X" * 32
-        mock_db.get_system_setting.side_effect = lambda key:             base64.b64encode(salt).decode() if key == "encryption_salt" else None
+        mock_db = _make_settings_mock_db(salt, {})
         expected_new_key = encryption.derive_key_from_password("new_password", salt)
         encryption.re_encrypt_all_secrets("old_password", "new_password", mock_db)
         assert encryption._encryption_key == expected_new_key
 
-    def test_re_encrypt_logs_each_key(self):
-        """Should log re-encryption of each individual key."""
-        mock_db = MagicMock()
-        salt = b"Y" * 32
-        old_key = encryption.derive_key_from_password("old_pass", salt)
-        old_fernet = Fernet(old_key)
-        encrypted_openai = f"enc:{base64.b64encode(old_fernet.encrypt(b'key1')).decode()}"
-        encrypted_gemini = f"enc:{base64.b64encode(old_fernet.encrypt(b'key2')).decode()}"
-
-        def mock_get_setting(key):
-            if key == "encryption_salt":
-                return base64.b64encode(salt).decode()
-            elif key == "openai_api_key":
-                return encrypted_openai
-            elif key == "gemini_api_key":
-                return encrypted_gemini
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
-        mock_db.set_system_setting = MagicMock()
-        with patch.object(encryption.logger, "debug") as mock_log:
-            encryption.re_encrypt_all_secrets("old_pass", "new_pass", mock_db)
-            calls = [str(c) for c in mock_log.call_args_list]
-            assert any("Re-encrypted openai_api_key" in c for c in calls)
-            assert any("Re-encrypted gemini_api_key" in c for c in calls)
-
     def test_re_encrypt_logs_error_on_failure(self):
         """Should log error when decryption fails."""
-        mock_db = MagicMock()
         salt = b"Z" * 32
-
-        def mock_get_setting(key):
-            if key == "encryption_salt":
-                return base64.b64encode(salt).decode()
-            elif key == "openai_api_key":
-                return "enc:" + base64.b64encode(b"bad_data").decode()
-            return None
-
-        mock_db.get_system_setting = mock_get_setting
+        mock_db = _make_settings_mock_db(
+            salt, {"openai_api_key": "enc:" + base64.b64encode(b"bad_data").decode()}
+        )
         with patch.object(encryption.logger, "error") as mock_log:
             encryption.re_encrypt_all_secrets("wrong", "new", mock_db)
             assert mock_log.called
             calls = [str(c) for c in mock_log.call_args_list]
-            assert any("Failed to decrypt" in c for c in calls)
+            assert any("Cannot re-encrypt" in c for c in calls)
 
 
 class TestEncryptExistingPlaintextKeys:
@@ -718,6 +674,10 @@ class TestEncryptionIntegration:
 
         mock_db.get_system_setting = mock_get
         mock_db.set_system_setting = mock_set
+        mock_db.get_all_system_settings.side_effect = lambda: dict(stored_settings)
+        mock_db.get_all_automations.return_value = []
+        mock_db.get_all_connectors.return_value = []
+        mock_db.get_all_api_users.return_value = []
 
         old_password = "old_password"
         encryption.set_encryption_key(old_password, mock_db)
@@ -732,3 +692,148 @@ class TestEncryptionIntegration:
         assert new_encrypted != encrypted
         decrypted = encryption.decrypt_value(new_encrypted)
         assert decrypted == original_secret
+
+
+class TestReEncryptAllStorageLocationsDbBacked:
+    """Ship-stopper reproduction: password change must re-encrypt EVERY at-rest
+    secret, not just a hardcoded 5-name list.
+
+    These run against the real app SQL (pg_shim/SQLite) so decrypt/re-encrypt
+    goes through the true db accessors and JSONB parsing. The pre-fix code
+    silently skipped fal_api_key, webhook secrets, connector tokens, and user
+    credentials — so after a password change they were undecryptable. Each test
+    below FAILS against that old behavior.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_state(self):
+        encryption._encryption_key = None
+        encryption._key_salt = None
+        yield
+        encryption._encryption_key = None
+        encryption._key_salt = None
+
+    def _init_key(self, db, password="old-admin-pw"):
+        encryption.set_encryption_key(password, db)
+
+    def test_fal_api_key_reencrypted(self, mock_db):
+        """system_settings.fal_api_key (NOT in the old hardcoded list)."""
+        from app.db import database as db
+
+        self._init_key(db)
+        db.set_system_setting("fal_api_key", encryption.encrypt_value("fal-secret-123"))
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is True
+
+        # Now readable only under the NEW key (which re_encrypt left in memory).
+        stored = db.get_system_setting("fal_api_key")
+        assert encryption.is_encrypted(stored)
+        assert encryption.decrypt_value(stored) == "fal-secret-123"
+
+    def test_orphaned_cloud_install_api_key_reencrypted(self, mock_db):
+        """An orphaned encrypted setting with no live writer must still be caught."""
+        from app.db import database as db
+
+        self._init_key(db)
+        db.set_system_setting(
+            "cloud_install_api_key", encryption.encrypt_value("orphan-token")
+        )
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is True
+        stored = db.get_system_setting("cloud_install_api_key")
+        assert encryption.decrypt_value(stored) == "orphan-token"
+
+    def test_webhook_secret_in_automation_reencrypted(self, mock_db):
+        """automations.triggers[*].config.secret (JSONB) must be re-encrypted."""
+        from app.db import database as db
+        from app.core import automation_service
+
+        self._init_key(db)
+        enc_secret = encryption.encrypt_value("webhook-shhh")
+        triggers = [{"type": "webhook", "config": {"secret": enc_secret}}]
+        db.create_automation(
+            automation_id="auto-wh",
+            name="wh",
+            trigger_type="webhook",
+            trigger_config={"secret": enc_secret},
+            triggers=triggers,
+            prompt="p",
+            profile_id="default",
+        )
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is True
+
+        row = db.get_automation("auto-wh")
+        new_secret = row["triggers"][0]["config"]["secret"]
+        assert encryption.is_encrypted(new_secret)
+        # Readable under the new in-memory key; decrypt via service path too.
+        assert encryption.decrypt_value(new_secret) == "webhook-shhh"
+        dec = automation_service.decrypt_webhook_secret(row["triggers"][0]["config"])
+        assert dec["secret"] == "webhook-shhh"
+
+    def test_connector_token_reencrypted(self, mock_db):
+        """connectors.config sensitive field (JSONB) must be re-encrypted."""
+        from app.db import database as db
+        from app.core import connector_service
+
+        self._init_key(db)
+        enc_token = encryption.encrypt_value("bot-token-xyz")
+        db.create_connector(
+            connector_id="conn-1",
+            connector_type="telegram",
+            name="tg",
+            config={"bot_token": enc_token},
+            events=[],
+        )
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is True
+
+        row = db.get_connector("conn-1")
+        new_token = row["config"]["bot_token"]
+        assert encryption.is_encrypted(new_token)
+        dec = connector_service.decrypt_config(row["config"], "telegram")
+        assert dec["bot_token"] == "bot-token-xyz"
+
+    def test_api_user_credential_reencrypted(self, mock_db):
+        """api_user_credentials.encrypted_value must be re-encrypted."""
+        from app.db import database as db
+
+        self._init_key(db)
+        db.create_api_user(
+            user_id="u1", name="user1", api_key_hash="hash", profile_ids=None
+        )
+        db.set_user_credential("u1", "github_token", encryption.encrypt_value("ghp_abc"))
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is True
+
+        cred = db.get_user_credential("u1", "github_token")
+        assert encryption.is_encrypted(cred["encrypted_value"])
+        assert encryption.decrypt_value(cred["encrypted_value"]) == "ghp_abc"
+
+    def test_all_locations_together_and_fail_closed(self, mock_db):
+        """All four locations round-trip; and a bricked orphan aborts everything."""
+        from app.db import database as db
+
+        self._init_key(db)
+        db.set_system_setting("fal_api_key", encryption.encrypt_value("fal-1"))
+        db.create_connector(
+            connector_id="conn-2",
+            connector_type="telegram",
+            name="tg2",
+            config={"bot_token": encryption.encrypt_value("tok-1")},
+            events=[],
+        )
+
+        # Corrupt orphan that the OLD key cannot decrypt -> fail closed.
+        db.set_system_setting(
+            "cloud_install_api_key", "enc:" + base64.b64encode(b"garbage").decode()
+        )
+
+        pre_fal = db.get_system_setting("fal_api_key")
+        pre_tok = db.get_connector("conn-2")["config"]["bot_token"]
+
+        assert encryption.re_encrypt_all_secrets("old-admin-pw", "new-admin-pw", db) is False
+
+        # Nothing was written — values unchanged, in-memory key untouched.
+        assert db.get_system_setting("fal_api_key") == pre_fal
+        assert db.get_connector("conn-2")["config"]["bot_token"] == pre_tok
