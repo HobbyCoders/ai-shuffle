@@ -81,6 +81,13 @@ class _HandlerHarness:
         # --- database -----------------------------------------------------------
         self.db = s.enter_context(patch.object(cwh, "database"))
         self.db.get_queued_messages = MagicMock(return_value=[])
+        # Permission handlers now consult the session row to decide whether to
+        # relay to a remote owner. These watch/permission tests exercise the
+        # LOCAL path, so return a legacy row (instance_id=None => local) keyed
+        # by the requested id — is_remote_session() then never relays.
+        self.db.get_session = MagicMock(
+            side_effect=lambda sid: {"id": sid, "instance_id": None}
+        )
 
         async def _fake_run_sync(fn, *a, **k):
             return fn(*a, **k)

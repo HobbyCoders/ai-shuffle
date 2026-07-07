@@ -1461,10 +1461,12 @@ def test_unified_handler_inbound_type_inventory():
 
 
 def test_unified_handler_relay_sites_inventory():
-    """FLIP-ADAPT (adapted at flip time): exactly six msg types consult
-    is_remote_session — the cloud/cluster relay sites ported into the class
-    in step 4. Guards against a relay branch being added/dropped without the
-    parity plan noticing."""
+    """FLIP-ADAPT (adapted at flip time): exactly eight msg types consult
+    is_remote_session — the six cloud/cluster relay sites ported into the class
+    in step 4, PLUS the two permission relays (permission_response,
+    get_pending_permissions) that closed the previously-deferred gap. Guards
+    against a relay branch being added/dropped without the parity plan
+    noticing."""
     handlers = _bare_handler()._handlers
     relayed = {
         msg_type
@@ -1478,4 +1480,6 @@ def test_unified_handler_relay_sites_inventory():
         "user_question_response",
         "get_pending_questions",
         "queue_message",
+        "permission_response",
+        "get_pending_permissions",
     }

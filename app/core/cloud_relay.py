@@ -278,6 +278,81 @@ async def relay_question_response(
     return bool(body.get("ok")) if isinstance(body, dict) else False
 
 
+async def relay_get_pending_permissions(
+    session: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fetch the owning install's pending + deferred permission requests.
+
+    A pending permission request lives only in the owner's in-memory
+    ``permission_handler``, so a viewer install's local ``get_pending_requests``
+    is always empty for a remote session. Relay the read to the owner so the
+    viewer can surface the approval modal. Returns the owner's
+    ``{"pending": [...], "deferred": [...]}`` payload.
+    """
+    base_url, sid = resolve_target(session)
+    # LIVE_RELAY_TIMEOUT (not CONTROL_TIMEOUT): this read blocks a modal-resync
+    # reply on the viewer's websocket — a 30s hang there looks like a frozen UI.
+    # The stale=True failure path in the caller already handles a fast failure.
+    async with httpx.AsyncClient(timeout=LIVE_RELAY_TIMEOUT) as client:
+        try:
+            resp = await client.get(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/pending_permissions",
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster pending_permissions")
+    body = resp.json()
+    if not isinstance(body, dict):
+        return {"pending": [], "deferred": []}
+    return {
+        "pending": body.get("pending", []),
+        "deferred": body.get("deferred", []),
+    }
+
+
+async def relay_permission_response(
+    session: Dict[str, Any],
+    *,
+    request_id: str,
+    decision: str,
+    remember: Optional[str] = None,
+    pattern: Optional[str] = None,
+) -> bool:
+    """Relay a user's tool-permission decision to the install that owns the session.
+
+    The pending permission request and the coroutine awaiting it (inside
+    ``permission_handler.request_permission``) live on the owner; the user's
+    approve/deny/defer arrived on a device connected to this install, so we
+    forward it there to unblock the owner's waiter — otherwise the prompt sits
+    until the owner's 300s auto-deny. Returns the owner's verdict: True when the
+    decision resolved a pending request, False when the owner had no such pending
+    request (already resolved / timed out) — callers must not report success on a
+    delivered-but-unmatched decision.
+    """
+    base_url, sid = resolve_target(session)
+    payload = {
+        "request_id": request_id,
+        "decision": decision,
+        "remember": remember,
+        "pattern": pattern,
+    }
+    # LIVE_RELAY_TIMEOUT: the user is sitting on the approval modal waiting for
+    # this ack.
+    async with httpx.AsyncClient(timeout=LIVE_RELAY_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/permission_response",
+                json=payload,
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster permission_response")
+    body = resp.json()
+    return bool(body.get("ok")) if isinstance(body, dict) else False
+
+
 async def relay_interrupt(session: Dict[str, Any]) -> None:
     """Relay an interrupt/stop to the install that owns the session."""
     base_url, sid = resolve_target(session)

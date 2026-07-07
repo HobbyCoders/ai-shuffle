@@ -252,6 +252,83 @@ async def cluster_question_response(
     return {"ok": ok, "session_id": session_id, "request_id": body.request_id}
 
 
+@router.get("/sessions/{session_id}/pending_permissions")
+async def cluster_pending_permissions(
+    session_id: str,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Return the pending + deferred tool-permission requests for a session we own.
+
+    A pending permission request lives ONLY in the owning install's in-memory
+    ``permission_handler`` — a viewer install's local handler is always empty for
+    a remote session. A controlling install relays ``get_pending_permissions``
+    here so a user driving the session from another install can still see (and
+    then answer) the approval prompt. Keyed by the *shared* session id.
+    """
+    from app.core.permission_handler import permission_handler
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session_id": session_id,
+        "pending": permission_handler.get_pending_requests(session_id),
+        "deferred": permission_handler.get_deferred_requests(session_id),
+    }
+
+
+class ClusterPermissionResponseRequest(BaseModel):
+    """A peer install relaying a user's tool-permission decision for a session we own."""
+    request_id: str
+    decision: str  # "allow", "deny", or "defer"
+    remember: Optional[str] = None  # "none", "session", or "profile" (ignored for defer)
+    pattern: Optional[str] = None  # optional rule pattern (ignored for defer)
+
+
+@router.post("/sessions/{session_id}/permission_response")
+async def cluster_permission_response(
+    session_id: str,
+    body: ClusterPermissionResponseRequest,
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Deliver a user's tool-permission decision to a session this install owns.
+
+    The pending permission request and the coroutine awaiting it (inside
+    ``permission_handler.request_permission``) live here (the owner); the decision
+    arrived on a device connected to a *different* install, which relays it to us.
+    Resolving it unblocks the owner's waiter (else it sits until the 300s
+    auto-deny). Keyed by the *shared* session id.
+    """
+    from app.core.permission_handler import permission_handler
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Mirror the WS handler: remember/pattern are meaningless for a defer.
+    remember = body.remember if body.decision != "defer" else None
+    pattern = body.pattern if body.decision != "defer" else None
+
+    result = await permission_handler.respond(
+        request_id=body.request_id,
+        session_id=session_id,
+        decision=body.decision,
+        remember=remember,
+        pattern=pattern,
+        broadcast_func=None,
+    )
+    # respond() returns {"error": ...} when the request is not pending (already
+    # resolved / timed out), else a {"resolved": True, ...} dict. Collapse to a
+    # single ok verdict so the caller can tell a landed decision from a stale one.
+    ok = isinstance(result, dict) and not result.get("error")
+    logger.info(
+        "Cluster permission_response from install %s on session %s -> %s",
+        install_id or "?", session_id, ok,
+    )
+    return {"ok": ok, "session_id": session_id, "request_id": body.request_id}
+
+
 @router.get("/sessions/{session_id}/live")
 async def cluster_live(
     request: Request,

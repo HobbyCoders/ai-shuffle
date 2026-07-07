@@ -1991,12 +1991,6 @@ class ChatWebSocketHandler:
 
     async def handle_permission_response(self, data: dict) -> None:
         """Handle 'permission_response' message type."""
-        # KNOWN GAP (deliberately deferred, parity with the live closure):
-        # permission_response and get_pending_permissions have NO cloud/cluster
-        # relay branch — a remote session's pending permission lives on the
-        # OWNING install's in-memory handler, so a viewer install's response
-        # resolves nothing there. The closure never relayed these either; do
-        # not add a relay here without doing the closure-parity work first.
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
         decision = data.get("decision")  # "allow", "deny", or "defer"
@@ -2005,23 +1999,68 @@ class ChatWebSocketHandler:
         pattern = data.get("pattern")  # Optional pattern for the rule
 
         if request_id and decision and response_session_id:
-            result = await permission_handler.respond(
-                request_id=request_id,
-                session_id=response_session_id,
-                decision=decision,
-                remember=remember if decision != "defer" else None,
-                pattern=pattern if decision != "defer" else None,
-                broadcast_func=self.send_json
-            )
+            eff_remember = remember if decision != "defer" else None
+            eff_pattern = pattern if decision != "defer" else None
+
+            # Cross-install session: the pending permission request and the
+            # coroutine awaiting it live on the OWNING install, so responding
+            # locally would just log "Request not found" and the owner's prompt
+            # would sit until its 300s auto-deny. Relay the decision to the owner
+            # to unblock its waiter. On failure the ack carries WHY, so the
+            # frontend can tell a retryable delivery failure ('relay_offline' —
+            # keep the modal so the decision isn't lost) from an authoritative
+            # "no such pending request" ('not_pending' — dismiss the stale
+            # modal). Headless handlers never relay (websocket is None).
+            fail_reason = None
+            cloud_sess = None
+            if self.websocket is not None:
+                cloud_sess = await run_sync(database.get_session, response_session_id)
+            from app.core import cloud_relay
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                success = False
+                try:
+                    success = await cloud_relay.relay_permission_response(
+                        cloud_sess,
+                        request_id=request_id,
+                        decision=decision,
+                        remember=eff_remember,
+                        pattern=eff_pattern,
+                    )
+                    if not success:
+                        fail_reason = "not_pending"
+                except cloud_relay.InstallOffline as e:
+                    fail_reason = "relay_offline"
+                    logger.debug(f"Cluster relay_permission_response offline for {response_session_id}: {e}")
+                except Exception as e:  # noqa: BLE001
+                    fail_reason = "relay_offline"
+                    logger.warning(f"Cluster relay_permission_response failed for {response_session_id}: {e}")
+                result = success
+            else:
+                result = await permission_handler.respond(
+                    request_id=request_id,
+                    session_id=response_session_id,
+                    decision=decision,
+                    remember=eff_remember,
+                    pattern=eff_pattern,
+                    broadcast_func=self.send_json
+                )
             logger.debug(f"Permission response processed: {result}")
 
-            # Send confirmation back
-            await self.send_json({
+            # Send confirmation back. Mirrors user_question_response_ack: a
+            # remote relay reports success + optional reason; a local respond
+            # returns its richer result dict for backward compatibility.
+            ack = {
                 "type": "permission_response_ack",
                 "session_id": response_session_id,
                 "request_id": request_id,
-                "result": result
-            })
+            }
+            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                ack["success"] = bool(result)
+                if fail_reason:
+                    ack["reason"] = fail_reason
+            else:
+                ack["result"] = result
+            await self.send_json(ack)
         else:
             await self.send_json({
                 "type": "error",
@@ -2035,14 +2074,45 @@ class ChatWebSocketHandler:
     async def handle_get_pending_permissions(self, data: dict) -> None:
         """Handle 'get_pending_permissions' message type."""
         if self.current_session_id:
+            # Cross-install session: the pending permission request lives in the
+            # OWNING install's in-memory handler, so the local handler is always
+            # empty here. Relay the read to the owner. A SUCCESSFUL relay (even
+            # with zero requests) is authoritative and replaces the local set.
+            # But a FAILED relay (owner offline / error) leaves us with the local
+            # empty set, which is NOT authoritative — replying with bare empty
+            # lists would let the frontend wipe a locally-open permission modal on
+            # every reconnect/switch resync. So on relay failure we flag the reply
+            # `stale` and keep what we have; a stale-aware frontend leaves its
+            # modal untouched. Mirrors handle_get_pending_questions. Headless
+            # handlers never relay (websocket is None).
             pending = permission_handler.get_pending_requests(self.current_session_id)
             deferred = permission_handler.get_deferred_requests(self.current_session_id)
-            await self.send_json({
+            stale = False
+            if self.websocket is not None:
+                cloud_sess = await run_sync(database.get_session, self.current_session_id)
+                from app.core import cloud_relay
+                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
+                    try:
+                        payload = await cloud_relay.relay_get_pending_permissions(cloud_sess)
+                        pending = payload.get("pending", [])
+                        deferred = payload.get("deferred", [])
+                    except cloud_relay.InstallOffline as e:
+                        stale = True
+                        logger.debug(f"Cluster relay_get_pending_permissions offline for {self.current_session_id}: {e}")
+                    except Exception as e:  # noqa: BLE001
+                        stale = True
+                        logger.warning(f"Cluster relay_get_pending_permissions failed for {self.current_session_id}: {e}")
+            reply = {
                 "type": "pending_permissions",
                 "session_id": self.current_session_id,
                 "pending": pending,
                 "deferred": deferred,
-            })
+            }
+            # Only mark a FAILED relay. A success (even empty) omits the key so
+            # old clients keep clearing stale modals.
+            if stale:
+                reply["stale"] = True
+            await self.send_json(reply)
 
     # ------------------------------------------------------------------
     # handle_requeue_deferred_permissions

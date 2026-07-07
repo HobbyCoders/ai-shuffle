@@ -166,6 +166,12 @@ class _HandlerHarness:
         self.uq.get_pending_questions = MagicMock(return_value=[])
         self.uq.respond = AsyncMock(return_value=True)
 
+        # --- permission handler -------------------------------------------------
+        self.ph = s.enter_context(patch.object(cwh, "permission_handler"))
+        self.ph.get_pending_requests = MagicMock(return_value=[])
+        self.ph.get_deferred_requests = MagicMock(return_value=[])
+        self.ph.respond = AsyncMock(return_value={"resolved": True})
+
         # --- cloud relay (class imports inline: `from app.core import cloud_relay`)
         self.cloud = SimpleNamespace(
             is_remote_session=s.enter_context(
@@ -185,6 +191,16 @@ class _HandlerHarness:
             ),
             relay_queue_message=s.enter_context(
                 patch.object(cloud_relay_mod, "relay_queue_message", AsyncMock())
+            ),
+            relay_permission_response=s.enter_context(
+                patch.object(cloud_relay_mod, "relay_permission_response", AsyncMock(return_value=True))
+            ),
+            relay_get_pending_permissions=s.enter_context(
+                patch.object(
+                    cloud_relay_mod,
+                    "relay_get_pending_permissions",
+                    AsyncMock(return_value={"pending": [], "deferred": []}),
+                )
             ),
         )
 
@@ -791,6 +807,208 @@ async def test_headless_queue_message_never_relays():
     h.db.add_queued_message.assert_called_once()
 
 
+# ═══ 7b. permission_response — relay site 7 ════════════════════════════════════
+#
+# The pending permission lives on the OWNING install; the decision must be
+# relayed there to unblock its awaiting request_permission() coroutine (else it
+# sits until the 300s auto-deny). Mirrors user_question_response.
+
+
+async def test_permission_response_remote_relays():
+    """Remote permission_response relays the decision; the local handler is never
+    consulted. Success ack carries no reason."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "allow",
+            "remember": "session",
+            "pattern": "Bash:npm*",
+        })
+
+    kw = h.cloud.relay_permission_response.await_args.kwargs
+    args = h.cloud.relay_permission_response.await_args.args
+    assert args[0]["id"] == "sess-r"
+    assert kw == {
+        "request_id": "p1",
+        "decision": "allow",
+        "remember": "session",
+        "pattern": "Bash:npm*",
+    }
+    h.ph.respond.assert_not_awaited()
+    assert _frames(h.ws, "permission_response_ack") == [{
+        "type": "permission_response_ack",
+        "session_id": "sess-r",
+        "request_id": "p1",
+        "success": True,
+    }], "success ack must NOT carry a reason key"
+
+
+async def test_permission_response_remote_defer_drops_remember_pattern():
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "defer",
+            "remember": "session",
+            "pattern": "X",
+        })
+
+    kw = h.cloud.relay_permission_response.await_args.kwargs
+    assert kw == {
+        "request_id": "p1",
+        "decision": "defer",
+        "remember": None,
+        "pattern": None,
+    }
+
+
+async def test_permission_response_remote_offline_reason():
+    """Offline relay => success False + reason 'relay_offline' so the frontend
+    KEEPS the modal (retryable) instead of dismissing a stale one."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_permission_response.side_effect = InstallOffline("gone")
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "deny",
+        })
+
+    assert _frames(h.ws, "permission_response_ack") == [{
+        "type": "permission_response_ack",
+        "session_id": "sess-r",
+        "request_id": "p1",
+        "success": False,
+        "reason": "relay_offline",
+    }]
+
+
+async def test_permission_response_remote_error_reason():
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_permission_response.side_effect = RuntimeError("boom")
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "deny",
+        })
+
+    ack = _frames(h.ws, "permission_response_ack")[0]
+    assert ack["success"] is False
+    assert ack["reason"] == "relay_offline"
+
+
+async def test_permission_response_remote_not_pending_reason():
+    """Owner authoritatively says "no such pending request" => reason
+    'not_pending' so the frontend dismisses the stale modal."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_permission_response.return_value = False
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "allow",
+        })
+
+    ack = _frames(h.ws, "permission_response_ack")[0]
+    assert ack["success"] is False
+    assert ack["reason"] == "not_pending"
+
+
+async def test_permission_response_local_does_not_relay():
+    with _HandlerHarness() as h:
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-1",
+            "decision": "allow",
+        })
+
+    h.cloud.relay_permission_response.assert_not_awaited()
+    h.ph.respond.assert_awaited_once()
+    kw = h.ph.respond.await_args.kwargs
+    assert kw["request_id"] == "p1"
+    assert kw["session_id"] == "sess-1"
+    assert kw["decision"] == "allow"
+    assert _frames(h.ws, "permission_response_ack"), "local ack still sent"
+
+
+# ═══ 7c. get_pending_permissions — relay site 8 ════════════════════════════════
+
+
+async def test_get_pending_permissions_remote_success_is_authoritative():
+    """A SUCCESSFUL relay (even empty) replaces the local sets and omits `stale`
+    so old clients keep clearing stale modals."""
+    with _HandlerHarness() as h:
+        h.ph.get_pending_requests.return_value = [{"request_id": "local-only"}]
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_get_pending_permissions.return_value = {
+            "pending": [{"request_id": "owner-p"}],
+            "deferred": [{"request_id": "owner-d"}],
+        }
+        handler = h.make_handler()
+        handler.current_session_id = "sess-r"
+        await handler.handle_get_pending_permissions({})
+
+    frame = _frames(h.ws, "pending_permissions")[0]
+    assert frame["pending"] == [{"request_id": "owner-p"}]
+    assert frame["deferred"] == [{"request_id": "owner-d"}]
+    assert "stale" not in frame
+
+
+async def test_get_pending_permissions_remote_offline_marks_stale():
+    """FAILED relay keeps the local (non-authoritative) sets and flags the reply
+    stale so the frontend leaves an open modal untouched."""
+    with _HandlerHarness() as h:
+        h.ph.get_pending_requests.return_value = [{"request_id": "local-p"}]
+        h.ph.get_deferred_requests.return_value = [{"request_id": "local-d"}]
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_get_pending_permissions.side_effect = InstallOffline("gone")
+        handler = h.make_handler()
+        handler.current_session_id = "sess-r"
+        await handler.handle_get_pending_permissions({})
+
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions",
+        "session_id": "sess-r",
+        "pending": [{"request_id": "local-p"}],
+        "deferred": [{"request_id": "local-d"}],
+        "stale": True,
+    }]
+
+
+async def test_get_pending_permissions_remote_error_marks_stale():
+    with _HandlerHarness() as h:
+        h.ph.get_pending_requests.return_value = [{"request_id": "local-p"}]
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_get_pending_permissions.side_effect = RuntimeError("boom")
+        handler = h.make_handler()
+        handler.current_session_id = "sess-r"
+        await handler.handle_get_pending_permissions({})
+
+    frame = _frames(h.ws, "pending_permissions")[0]
+    assert frame["pending"] == [{"request_id": "local-p"}]
+    assert frame["stale"] is True
+
+
+async def test_get_pending_permissions_local_no_stale_no_relay():
+    with _HandlerHarness() as h:
+        h.ph.get_pending_requests.return_value = [{"request_id": "p1"}]
+        handler = h.make_handler()
+        handler.current_session_id = "sess-1"
+        await handler.handle_get_pending_permissions({})
+
+    h.cloud.relay_get_pending_permissions.assert_not_awaited()
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions",
+        "session_id": "sess-1",
+        "pending": [{"request_id": "p1"}],
+        "deferred": [],
+    }], "local reply must not carry the stale marker"
+
+
 # ═══ 9. Source-level parity guards ═════════════════════════════════════════════
 
 
@@ -801,20 +1019,48 @@ _RELAYED_HANDLERS = (
     "handle_user_question_response",
     "handle_get_pending_questions",
     "handle_queue_message",
+    "handle_permission_response",
+    "handle_get_pending_permissions",
 )
 
 
-def test_exactly_six_class_handlers_relay_and_all_are_headless_guarded():
+def test_exactly_eight_class_handlers_relay_and_all_are_headless_guarded():
     """Every relay branch consults is_remote_session AND is guarded by the
-    websocket-None headless check; the deliberately-unrelayed permission
-    handlers stay relay-free (known gap, parity with the closure)."""
+    websocket-None headless check. The permission handlers gained their relay
+    branches (the previously-deferred gap is now closed), joining the six
+    question/query/stop/queue relays for eight total."""
     for name in _RELAYED_HANDLERS:
         src = inspect.getsource(getattr(cwh.ChatWebSocketHandler, name))
         assert "is_remote_session" in src, f"{name} lost its relay branch"
         assert "self.websocket is not None" in src, f"{name} lost the headless guard"
 
-    for name in ("handle_permission_response", "handle_get_pending_permissions"):
-        src = inspect.getsource(getattr(cwh.ChatWebSocketHandler, name))
-        assert "is_remote_session" not in src, (
-            f"{name} must NOT relay (deferred gap — see plan / closure parity)"
-        )
+
+# ═══ 10. Headless — permission relays must NEVER fire when websocket is None ════
+
+
+async def test_headless_permission_response_never_relays():
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_headless().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-h",
+            "decision": "allow",
+        })
+
+    h.cloud.is_remote_session.assert_not_called()
+    h.cloud.relay_permission_response.assert_not_awaited()
+    h.ph.respond.assert_awaited_once()
+    h.db.get_session.assert_not_called()
+
+
+async def test_headless_get_pending_permissions_never_relays():
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        handler = h.make_headless()
+        handler.current_session_id = "sess-h"
+        await handler.handle_get_pending_permissions({})
+
+    h.cloud.is_remote_session.assert_not_called()
+    h.cloud.relay_get_pending_permissions.assert_not_awaited()
+    h.ph.get_pending_requests.assert_called_once_with("sess-h")
+    h.db.get_session.assert_not_called()

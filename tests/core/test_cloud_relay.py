@@ -278,3 +278,163 @@ async def test_question_relays_use_live_relay_timeout(this_install, monkeypatch)
     await cloud_relay.relay_get_pending_questions({"id": "s1", "instance_id": "install-other"})
 
     assert timeouts == [cloud_relay.LIVE_RELAY_TIMEOUT, cloud_relay.LIVE_RELAY_TIMEOUT]
+
+
+# --- relay_permission_response (approve/deny forwarding, owner verdict) -------
+#
+# A pending permission request lives ONLY in the owning install's in-memory
+# permission_handler. When a user drives a cloud-mode session from a *different*
+# install, the answer must be forwarded to the owner's endpoint so the owner's
+# awaiting request_permission() coroutine unblocks — otherwise it sits until the
+# 300s auto-deny. Mirrors relay_question_response exactly.
+
+
+async def test_relay_permission_response_posts_full_payload(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    rec: dict = {}
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(200, {"ok": True}), recorder=rec),
+    )
+
+    session = {"id": "s1", "instance_id": "install-other"}
+    ok = await cloud_relay.relay_permission_response(
+        session,
+        request_id="perm-1",
+        decision="allow",
+        remember="session",
+        pattern="Bash:npm*",
+    )
+
+    assert ok is True
+    assert rec["url"] == (
+        "https://worker.example.com/api/v1/cluster/sessions/s1/permission_response"
+    )
+    assert rec["json"] == {
+        "request_id": "perm-1",
+        "decision": "allow",
+        "remember": "session",
+        "pattern": "Bash:npm*",
+    }
+    assert rec["headers"] == {"X-Cluster": "secret"}
+
+
+async def test_relay_permission_response_returns_false_when_owner_had_no_pending(
+    this_install, monkeypatch
+):
+    # Owner replies ok:false when the request was already resolved / timed out.
+    # That verdict must flow back so the caller does not report a phantom success.
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(200, {"ok": False})),
+    )
+
+    ok = await cloud_relay.relay_permission_response(
+        {"id": "s1", "instance_id": "install-other"},
+        request_id="perm-1",
+        decision="deny",
+    )
+    assert ok is False
+
+
+async def test_relay_permission_response_offline_when_unreachable(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(exc=cloud_relay.httpx.ConnectError("boom")),
+    )
+
+    with pytest.raises(cloud_relay.InstallOffline):
+        await cloud_relay.relay_permission_response(
+            {"id": "s1", "instance_id": "install-other"},
+            request_id="perm-1",
+            decision="allow",
+        )
+
+
+async def test_relay_permission_response_raises_on_peer_error(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(500, {"detail": "nope"})),
+    )
+
+    with pytest.raises(cloud_relay.CloudRelayError):
+        await cloud_relay.relay_permission_response(
+            {"id": "s1", "instance_id": "install-other"},
+            request_id="perm-1",
+            decision="allow",
+        )
+
+
+async def test_relay_permission_response_refuses_local_session(this_install):
+    with pytest.raises(cloud_relay.CloudRelayError):
+        await cloud_relay.relay_permission_response(
+            {"id": "s1", "instance_id": "install-self"},
+            request_id="perm-1",
+            decision="allow",
+        )
+
+
+# --- relay_get_pending_permissions (modal resync read) -----------------------
+
+
+async def test_relay_get_pending_permissions_returns_owner_payload(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    payload = {
+        "pending": [{"request_id": "perm-1", "tool_name": "Bash"}],
+        "deferred": [{"request_id": "perm-2", "tool_name": "Read"}],
+    }
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(resp=_FakeResp(200, payload)),
+    )
+
+    result = await cloud_relay.relay_get_pending_permissions(
+        {"id": "s1", "instance_id": "install-other"}
+    )
+    assert result == payload
+
+
+async def test_relay_get_pending_permissions_offline_when_unreachable(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeClient(exc=cloud_relay.httpx.ConnectError("boom")),
+    )
+
+    with pytest.raises(cloud_relay.InstallOffline):
+        await cloud_relay.relay_get_pending_permissions(
+            {"id": "s1", "instance_id": "install-other"}
+        )
+
+
+async def test_permission_relays_use_live_relay_timeout(this_install, monkeypatch):
+    # Both permission relays sit on interactive websocket paths (modal resync /
+    # approval ack) — a CONTROL_TIMEOUT (30s) hang there reads as a frozen UI.
+    # They must use the fast-failing LIVE_RELAY_TIMEOUT, mirroring the question
+    # relays.
+    _online_worker(monkeypatch)
+    timeouts = []
+
+    def _capture_client(*a, **k):
+        timeouts.append(k.get("timeout"))
+        return _FakeClient(resp=_FakeResp(200, {"ok": True, "pending": [], "deferred": []}))
+
+    monkeypatch.setattr(cloud_relay.httpx, "AsyncClient", _capture_client)
+
+    await cloud_relay.relay_permission_response(
+        {"id": "s1", "instance_id": "install-other"}, request_id="p-1", decision="allow"
+    )
+    await cloud_relay.relay_get_pending_permissions(
+        {"id": "s1", "instance_id": "install-other"}
+    )
+
+    assert timeouts == [cloud_relay.LIVE_RELAY_TIMEOUT, cloud_relay.LIVE_RELAY_TIMEOUT]
