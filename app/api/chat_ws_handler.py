@@ -1379,11 +1379,13 @@ class ChatWebSocketHandler:
             await sync_engine.register_device(self.device_id, session_id, self.websocket)
             self.current_session_id = session_id
 
-        # Store user message for existing sessions (new sessions already stored atomically above)
         if not is_new_session:
             # Backfill title from first user message for sessions created without
             # one (e.g. via the auto-worktree REST endpoint, which creates the
-            # session before any user prompt exists).
+            # session before any user prompt exists). Harmless if this query is
+            # later preempted — the title derives from a prompt that will still
+            # run via the queue. (The user-message persist itself happens further
+            # down, only after this query WINS the check-and-register.)
             existing_session = await run_sync(database.get_session, session_id)
             if existing_session and not (existing_session.get("title") or "").strip():
                 derived_title = prompt[:100].strip()
@@ -1402,42 +1404,17 @@ class ChatWebSocketHandler:
                         source_device_id=None,
                     )
 
-            _msg_role = "user"
-            _msg_meta = None
-            if prompt.strip().startswith("/"):
-                _parts = prompt.strip().split(None, 1)
-                _msg_role = "command"
-                _msg_meta = {
-                    "command_name": _parts[0],
-                    "command_args": _parts[1] if len(_parts) > 1 else "",
-                }
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role=_msg_role,
-                content=prompt,
-                metadata=_msg_meta,
-                profile_id=profile_id,
-            )
-
-        # Broadcast user message to other devices
-        await sync_engine.broadcast_message_added(
-            session_id=session_id,
-            message={
-                "role": "user",
-                "content": prompt,
-                "profile_id": profile_id
-            },
-            source_device_id=self.device_id  # Exclude the sender
-        )
-
         # Start new query task — busy-write guard (late re-check): the liveness
         # check and the registration happen under the SAME lock acquisition, so
-        # a turn that started while we were persisting the user message above
-        # (queue drain, unpark follow-up, another device) is never clobbered.
+        # a turn that started while we were awaiting above (queue drain, unpark
+        # follow-up, another device) is never clobbered.
         # We never bare-cancel a live turn here: cancelling without an SDK
         # interrupt leaves the CLI mid-turn, and the next client.query() into
         # its stdin kills it and loses the whole in-flight turn.
+        # The user-message persist + broadcast are deliberately ordered AFTER
+        # this check-and-register (below): persisting first meant a preempted
+        # query enqueued an already-persisted prompt, and the queue drain later
+        # persisted it a second time (duplicate user-message row).
         # Note: broadcast_stream_start is called inside run_query when actual
         # streaming begins. This prevents stuck streaming state if query fails early.
         # Pass the adoption token ONLY for a brand-new session so the first `start`
@@ -1459,9 +1436,10 @@ class ChatWebSocketHandler:
         if preempted:
             # Rare double-race (a server-initiated turn won between the early
             # busy check and here). Enqueue so the message is never lost — the
-            # live turn's post-turn queue drain picks it up. The user message
-            # was already persisted above; the drain's re-persist is the same
-            # rare duplicate the /ws/chat drain preempt path accepts.
+            # live turn's post-turn queue drain picks it up. NOTHING has been
+            # persisted or broadcast for this prompt yet (the persist below
+            # runs only after a WON registration), so the drain's persist is
+            # the one and only persist — no duplicate user-message row.
             logger.info(
                 f"[BusyGuard] query for session {session_id} preempted at "
                 f"registration — enqueueing instead of cancelling the live turn"
@@ -1482,6 +1460,51 @@ class ChatWebSocketHandler:
                 "data": {"queued_messages": queue},
             })
             return
+
+        # Persist + broadcast the user message now that THIS query owns the
+        # turn (existing sessions only — a new session persisted its first
+        # message atomically at creation and cannot be preempted: nothing else
+        # knows its freshly minted id). The running turn never misses the
+        # prompt: run_query hands it to the SDK directly and the live store
+        # carries it via add_user_message; session_messages is not on the
+        # streaming-init read path. A failure here must not tear down the
+        # already-running turn — log and continue.
+        try:
+            if not is_new_session:
+                _msg_role = "user"
+                _msg_meta = None
+                if prompt.strip().startswith("/"):
+                    _parts = prompt.strip().split(None, 1)
+                    _msg_role = "command"
+                    _msg_meta = {
+                        "command_name": _parts[0],
+                        "command_args": _parts[1] if len(_parts) > 1 else "",
+                    }
+                await run_sync(
+                    database.add_session_message,
+                    session_id=session_id,
+                    role=_msg_role,
+                    content=prompt,
+                    metadata=_msg_meta,
+                    profile_id=profile_id,
+                )
+
+            # Broadcast user message to other devices
+            await sync_engine.broadcast_message_added(
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": prompt,
+                    "profile_id": profile_id
+                },
+                source_device_id=self.device_id  # Exclude the sender
+            )
+        except Exception as persist_exc:  # noqa: BLE001
+            logger.warning(
+                f"[BusyGuard] post-registration user-message persist/broadcast "
+                f"failed for session {session_id} (turn already running): "
+                f"{persist_exc}"
+            )
 
     # ------------------------------------------------------------------
     # handle_stop
@@ -2418,102 +2441,63 @@ class ChatWebSocketHandler:
         message is queued and the session is idle. Runs entirely server-side
         — does not require the originating browser to be connected.
 
+        Race guards (closing the three latent gaps documented in a361648f):
+        - Drain-once reservation: ``_draining_sessions`` is claimed under
+          ``_active_sessions_lock`` BEFORE the pop, so at most one drain per
+          session is inside the pop→register window at a time. Racing drains
+          can therefore never pop two messages and start them out of queue
+          order (the loser bails without popping anything).
+        - The late check-and-register re-checks the stop/interrupt latches in
+          the SAME lock acquisition as the liveness check: a Stop or
+          interrupt_for_query landing between the pop and the registration
+          aborts the drain (message re-queued at the front, latch left set —
+          the latch owner consumes it) instead of being silently lost.
+        - The user message is persisted + broadcast only AFTER the
+          registration is won, so a preempted/latched drain re-queues a
+          message that was never persisted — no duplicate user-message row.
+
         If anything fails after the message is popped from the queue, it is
         re-inserted at the front so the user never silently loses a message.
         """
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+        from app.api.websocket import (
+            _active_chat_sessions,
+            _active_sessions_lock,
+            _draining_sessions,
+        )
 
-        msg = await run_sync(database.pop_next_queued_message, session_id)
-        if not msg:
-            return
-
-        content = msg["content"]
-        profile_id = msg.get("profile_id") or "claude-code"
-        project_id = msg.get("project_id")
-
-        logger.info(f"[Queue] Auto-processing queued message for session {session_id}: {content[:80]}...")
-
-        # Busy-write guard: never cancel a live turn to make room for a queued
-        # message (the bare cancel skipped the SDK interrupt, so the queued
-        # prompt was written into the mid-turn CLI's stdin, killing it and
-        # losing the in-flight turn). If a turn is running, put the message
-        # back at the front — the post-turn queue drain picks it up.
+        # Drain-once reservation (see docstring). Claimed under the same lock
+        # that serializes the check-and-register; released in the finally.
         async with _active_sessions_lock:
-            active_task = _active_chat_sessions.get(session_id)
-        if active_task is not None and not active_task.done():
-            logger.info(
-                f"[Queue] Session {session_id} has a live turn — re-queuing "
-                f"instead of cancelling it"
-            )
-            await run_sync(
-                database.requeue_message_at_front,
-                session_id=session_id,
-                content=content,
-                profile_id=profile_id if profile_id != "claude-code" else None,
-                project_id=project_id,
-            )
-            queue = await run_sync(database.get_queued_messages, session_id)
-            await sync_engine.broadcast_queue_updated(session_id, queue)
-            return
+            if session_id in _draining_sessions:
+                logger.info(
+                    f"[Queue] Drain already in flight for session {session_id} "
+                    f"— skipping (drain-once guard)"
+                )
+                return
+            _draining_sessions.add(session_id)
 
         try:
-            # Broadcast updated queue to all devices
-            queue = await run_sync(database.get_queued_messages, session_id)
-            await sync_engine.broadcast_queue_updated(session_id, queue)
+            msg = await run_sync(database.pop_next_queued_message, session_id)
+            if not msg:
+                return
 
-            # Store user message in DB (detect slash commands)
-            _msg_role = "user"
-            _msg_meta = None
-            if content.strip().startswith("/"):
-                _parts = content.strip().split(None, 1)
-                _msg_role = "command"
-                _msg_meta = {
-                    "command_name": _parts[0],
-                    "command_args": _parts[1] if len(_parts) > 1 else "",
-                }
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role=_msg_role,
-                content=content,
-                metadata=_msg_meta,
-                profile_id=profile_id,
-            )
+            content = msg["content"]
+            profile_id = msg.get("profile_id") or "claude-code"
+            project_id = msg.get("project_id")
 
-            # Broadcast user message to all devices (no source_device_id — server-originated)
-            await sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": content,
-                    "profile_id": profile_id
-                },
-                source_device_id=None  # Send to ALL devices
-            )
+            logger.info(f"[Queue] Auto-processing queued message for session {session_id}: {content[:80]}...")
 
-            # Look up worktree_id from session
-            session_data = await run_sync(database.get_session, session_id)
-            worktree_id = session_data.get("worktree_id") if session_data else None
-
-            # Start the query — busy-write guard (late re-check): check-and-
-            # register under ONE lock acquisition so a turn that started during
-            # the awaits above (an explicit query, an unpark follow-up) is never
-            # clobbered. If preempted, re-queue at the front so the message is
-            # not lost — mirrors the /ws/chat _drain_reserved preempt path.
-            preempted = False
+            # Busy-write guard: never cancel a live turn to make room for a queued
+            # message (the bare cancel skipped the SDK interrupt, so the queued
+            # prompt was written into the mid-turn CLI's stdin, killing it and
+            # losing the in-flight turn). If a turn is running, put the message
+            # back at the front — the post-turn queue drain picks it up.
             async with _active_sessions_lock:
-                existing_task = _active_chat_sessions.get(session_id)
-                if existing_task is not None and not existing_task.done():
-                    preempted = True
-                else:
-                    task = asyncio.create_task(
-                        self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
-                    )
-                    _active_chat_sessions[session_id] = task
-            if preempted:
+                active_task = _active_chat_sessions.get(session_id)
+            if active_task is not None and not active_task.done():
                 logger.info(
-                    f"[Queue] Drain preempted before launch for session "
-                    f"{session_id} — re-queuing instead of cancelling the live turn"
+                    f"[Queue] Session {session_id} has a live turn — re-queuing "
+                    f"instead of cancelling it"
                 )
                 await run_sync(
                     database.requeue_message_at_front,
@@ -2525,25 +2509,126 @@ class ChatWebSocketHandler:
                 queue = await run_sync(database.get_queued_messages, session_id)
                 await sync_engine.broadcast_queue_updated(session_id, queue)
                 return
-            self.query_task = task
 
-        except Exception as exc:
-            # Re-insert the message at the front of the queue so it isn't lost.
-            logger.error(f"[Queue] Failed to start query for queued message, re-queuing: {exc}")
             try:
-                await run_sync(
-                    database.requeue_message_at_front,
-                    session_id=session_id,
-                    content=content,
-                    profile_id=profile_id if profile_id != "claude-code" else None,
-                    project_id=project_id,
-                )
-                # Broadcast the restored queue
+                # Broadcast updated queue to all devices
                 queue = await run_sync(database.get_queued_messages, session_id)
                 await sync_engine.broadcast_queue_updated(session_id, queue)
-            except Exception as requeue_err:
-                logger.error(f"[Queue] Failed to re-queue message: {requeue_err}")
-            raise
+
+                # Look up worktree_id from session
+                session_data = await run_sync(database.get_session, session_id)
+                worktree_id = session_data.get("worktree_id") if session_data else None
+
+                # Start the query — busy-write guard (late re-check): the
+                # liveness check, the stop/interrupt-latch check, and the
+                # registration all happen under ONE lock acquisition so a turn
+                # that started — or a Stop/interrupt that latched — during the
+                # awaits above is never clobbered/lost. If preempted or
+                # latched, re-queue at the front so the message is not lost
+                # (the latch itself is left set for its owner to consume).
+                preempted = False
+                latched = False
+                async with _active_sessions_lock:
+                    existing_task = _active_chat_sessions.get(session_id)
+                    if existing_task is not None and not existing_task.done():
+                        preempted = True
+                    elif (
+                        session_id in _stopped_sessions
+                        or session_id in _interrupt_pending_sessions
+                    ):
+                        latched = True
+                    else:
+                        task = asyncio.create_task(
+                            self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+                        )
+                        _active_chat_sessions[session_id] = task
+                if preempted or latched:
+                    reason = (
+                        "preempted before launch" if preempted
+                        else "stop/interrupt latched mid-drain"
+                    )
+                    logger.info(
+                        f"[Queue] Drain {reason} for session {session_id} — "
+                        f"re-queuing instead of starting the turn"
+                    )
+                    await run_sync(
+                        database.requeue_message_at_front,
+                        session_id=session_id,
+                        content=content,
+                        profile_id=profile_id if profile_id != "claude-code" else None,
+                        project_id=project_id,
+                    )
+                    queue = await run_sync(database.get_queued_messages, session_id)
+                    await sync_engine.broadcast_queue_updated(session_id, queue)
+                    return
+                self.query_task = task
+
+            except Exception as exc:
+                # Re-insert the message at the front of the queue so it isn't lost.
+                logger.error(f"[Queue] Failed to start query for queued message, re-queuing: {exc}")
+                try:
+                    await run_sync(
+                        database.requeue_message_at_front,
+                        session_id=session_id,
+                        content=content,
+                        profile_id=profile_id if profile_id != "claude-code" else None,
+                        project_id=project_id,
+                    )
+                    # Broadcast the restored queue
+                    queue = await run_sync(database.get_queued_messages, session_id)
+                    await sync_engine.broadcast_queue_updated(session_id, queue)
+                except Exception as requeue_err:
+                    logger.error(f"[Queue] Failed to re-queue message: {requeue_err}")
+                raise
+
+            # Persist + broadcast the user message now that the turn is
+            # registered and owns the session. Deliberately AFTER the
+            # check-and-register: persisting before it meant a preempted drain
+            # re-queued an already-persisted message, and the next drain
+            # persisted it a second time (duplicate user-message row). The
+            # running turn never misses the prompt — run_query hands it to the
+            # SDK directly and the live store carries it via add_user_message;
+            # session_messages is not on the streaming-init read path. A
+            # failure here must NOT re-queue (the turn is already running —
+            # re-queuing would run the message twice) — log and continue.
+            try:
+                # Store user message in DB (detect slash commands)
+                _msg_role = "user"
+                _msg_meta = None
+                if content.strip().startswith("/"):
+                    _parts = content.strip().split(None, 1)
+                    _msg_role = "command"
+                    _msg_meta = {
+                        "command_name": _parts[0],
+                        "command_args": _parts[1] if len(_parts) > 1 else "",
+                    }
+                await run_sync(
+                    database.add_session_message,
+                    session_id=session_id,
+                    role=_msg_role,
+                    content=content,
+                    metadata=_msg_meta,
+                    profile_id=profile_id,
+                )
+
+                # Broadcast user message to all devices (no source_device_id — server-originated)
+                await sync_engine.broadcast_message_added(
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": content,
+                        "profile_id": profile_id
+                    },
+                    source_device_id=None  # Send to ALL devices
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[Queue] post-registration user-message persist/broadcast "
+                    f"failed for session {session_id} (turn already running): "
+                    f"{persist_exc}"
+                )
+        finally:
+            _draining_sessions.discard(session_id)
 
     async def _deliver_unpark(
         self,

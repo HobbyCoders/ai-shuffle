@@ -189,10 +189,12 @@ async def test_handle_query_done_task_proceeds_normally():
 
 
 async def test_handle_query_late_preempt_enqueues_under_lock():
-    """TOCTOU: a server-initiated turn (queue drain / unpark) registers while
-    handle_query is persisting the user message. The late check-and-register
-    happens under ONE lock acquisition — the interloper is never clobbered or
-    cancelled; the prompt is enqueued and acked instead."""
+    """TOCTOU: a server-initiated turn (queue drain / unpark) registers during
+    handle_query's pre-registration awaits (device registration / title
+    backfill). The late check-and-register happens under ONE lock acquisition —
+    the interloper is never clobbered or cancelled; the prompt is enqueued and
+    acked instead, and (dup-persist gap) NOT persisted — the queue drain that
+    eventually runs it owns the single persist."""
     handler = _make_handler()
     handler.handle_queue_message = AsyncMock()
     interloper = _FakeLiveTask()
@@ -202,10 +204,10 @@ async def test_handle_query_late_preempt_enqueues_under_lock():
     with ExitStack() as stack:
         sync, db = _handler_patches(stack, created, registry)
 
-        async def _inject_interloper(**kwargs):
+        async def _inject_interloper(*args, **kwargs):
             registry["sess-race"] = interloper
 
-        sync.broadcast_message_added = AsyncMock(side_effect=_inject_interloper)
+        sync.register_device = AsyncMock(side_effect=_inject_interloper)
 
         await handler.handle_query({
             "prompt": "raced message",
@@ -220,6 +222,9 @@ async def test_handle_query_late_preempt_enqueues_under_lock():
     assert created.run_query_spawns == [], "preempted query must not spawn run_query"
     db.add_queued_message.assert_called_once()
     assert db.add_queued_message.call_args.kwargs["content"] == "raced message"
+    db.add_session_message.assert_not_called(), (
+        "a preempted query must not persist the prompt (the drain persists it)"
+    )
     # User feedback: queue_updated broadcast + direct frame.
     sync.broadcast_queue_updated.assert_awaited_once()
     queue_frames = [
@@ -258,8 +263,9 @@ async def test_process_next_queued_busy_requeues_at_front():
 
 async def test_process_next_queued_late_preempt_requeues_at_front():
     """TOCTOU inside the drain: an explicit query registers during the drain's
-    persist/broadcast awaits — the drain yields, re-queues at the front, and
-    never cancels the interloper."""
+    post-pop awaits (queue broadcast / worktree lookup) — the drain yields,
+    re-queues at the front, never cancels the interloper, and (dup-persist gap)
+    persists nothing — only the drain that runs the message persists it."""
     handler = _make_handler()
     interloper = _FakeLiveTask()
     registry: dict = {}
@@ -271,10 +277,11 @@ async def test_process_next_queued_late_preempt_requeues_at_front():
             return_value={"content": "drained then raced", "profile_id": None, "project_id": None}
         )
 
-        async def _inject_interloper(**kwargs):
+        def _inject_interloper(sid):
             registry["sess-race"] = interloper
+            return {"sdk_session_id": "sdk-1", "title": "t", "worktree_id": None}
 
-        sync.broadcast_message_added = AsyncMock(side_effect=_inject_interloper)
+        db.get_session = MagicMock(side_effect=_inject_interloper)
         await handler._process_next_queued("sess-race")
         created.close_all()
 
@@ -283,6 +290,9 @@ async def test_process_next_queued_late_preempt_requeues_at_front():
     assert created.run_query_spawns == []
     db.requeue_message_at_front.assert_called_once()
     assert db.requeue_message_at_front.call_args.kwargs["content"] == "drained then raced"
+    db.add_session_message.assert_not_called(), (
+        "a preempted drain must not persist the message it did not run"
+    )
 
 
 # ═══ 3. _deliver_unpark_impl — unpark yields to a live user query ════════════
@@ -595,6 +605,12 @@ def test_busy_guard_source_parity():
     # The old kill vector — bare-cancelling the live turn — must stay dead.
     assert ".cancel()" not in hq_src, "handle_query must never cancel a live turn"
     assert ".cancel()" not in pq_src, "_process_next_queued must never cancel a live turn"
+    # Race-gap guards (a361648f follow-up): the drain must hold the drain-once
+    # reservation and re-check the stop/interrupt latches at registration.
+    assert "_draining_sessions" in pq_src, "drain must keep the drain-once reservation"
+    assert "_stopped_sessions" in pq_src and "_interrupt_pending_sessions" in pq_src, (
+        "the drain's late check-and-register must honor the stop/interrupt latches"
+    )
 
 
 def test_unpark_impl_yields_no_clobber_source_guard():
