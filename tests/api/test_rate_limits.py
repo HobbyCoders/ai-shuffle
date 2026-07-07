@@ -347,14 +347,28 @@ class TestQueueStatusResponse:
 # =============================================================================
 
 class TestGetCurrentUser:
-    """Test get_current_user authentication helper."""
+    """Test get_current_user authentication helper.
+
+    ``get_current_user`` was consolidated onto the centralized
+    ``app.api.auth`` primitives: it now takes a ``Request`` and validates the
+    cookie via ``auth_service.validate_session`` (patched here) rather than
+    inlining ``database.get_auth_session``. The tuple contract
+    ``(user_id, api_key_id, is_admin)`` is unchanged.
+    """
+
+    @staticmethod
+    def _request(session=None, authorization=None):
+        from types import SimpleNamespace
+        cookies = {"session": session} if session is not None else {}
+        headers = {"Authorization": authorization} if authorization is not None else {}
+        return SimpleNamespace(cookies=cookies, headers=headers, state=SimpleNamespace())
 
     @pytest.mark.asyncio
     async def test_get_current_user_no_auth(self, mock_database):
         """get_current_user should return None values when no auth provided."""
         from app.api.rate_limits import get_current_user
 
-        user_id, api_key_id, is_admin = await get_current_user(None, None)
+        user_id, api_key_id, is_admin = await get_current_user(self._request())
 
         assert user_id is None
         assert api_key_id is None
@@ -365,13 +379,10 @@ class TestGetCurrentUser:
         """get_current_user should return admin for valid session."""
         from app.api.rate_limits import get_current_user
 
-        mock_database.get_auth_session.return_value = {
-            "id": "session-id",
-            "token": "test-token",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        }
-
-        user_id, api_key_id, is_admin = await get_current_user("test-token", None)
+        with patch("app.api.auth.auth_service.validate_session", return_value=True):
+            user_id, api_key_id, is_admin = await get_current_user(
+                self._request(session="test-token")
+            )
 
         assert user_id == "admin"
         assert api_key_id is None
@@ -382,9 +393,10 @@ class TestGetCurrentUser:
         """get_current_user should return None for invalid session."""
         from app.api.rate_limits import get_current_user
 
-        mock_database.get_auth_session.return_value = None
-
-        user_id, api_key_id, is_admin = await get_current_user("invalid-token", None)
+        with patch("app.api.auth.auth_service.validate_session", return_value=False):
+            user_id, api_key_id, is_admin = await get_current_user(
+                self._request(session="invalid-token")
+            )
 
         assert user_id is None
         assert api_key_id is None
@@ -401,7 +413,9 @@ class TestGetCurrentUser:
             "name": "Test User"
         }
 
-        user_id, api_key_id, is_admin = await get_current_user(None, "Bearer aih_test_key")
+        user_id, api_key_id, is_admin = await get_current_user(
+            self._request(authorization="Bearer aih_test_key")
+        )
 
         assert user_id == "testuser"
         assert api_key_id == "api-user-id"
@@ -417,7 +431,9 @@ class TestGetCurrentUser:
             "name": "Test User"
         }
 
-        user_id, api_key_id, is_admin = await get_current_user(None, "Bearer aih_test_key")
+        user_id, api_key_id, is_admin = await get_current_user(
+            self._request(authorization="Bearer aih_test_key")
+        )
 
         assert user_id == "Test User"
         assert api_key_id == "api-user-id"
@@ -437,7 +453,9 @@ class TestGetCurrentUser:
             "name": "Session User"
         }
 
-        user_id, api_key_id, is_admin = await get_current_user(None, "Bearer session-token")
+        user_id, api_key_id, is_admin = await get_current_user(
+            self._request(authorization="Bearer session-token")
+        )
 
         assert user_id == "sessionuser"
         assert api_key_id == "api-user-id"
@@ -454,7 +472,9 @@ class TestGetCurrentUser:
         }
         mock_database.get_api_user.return_value = None
 
-        user_id, api_key_id, is_admin = await get_current_user(None, "Bearer session-token")
+        user_id, api_key_id, is_admin = await get_current_user(
+            self._request(authorization="Bearer session-token")
+        )
 
         assert user_id is None
         assert api_key_id is None
@@ -464,7 +484,9 @@ class TestGetCurrentUser:
         """get_current_user should ignore malformed auth header."""
         from app.api.rate_limits import get_current_user
 
-        user_id, api_key_id, is_admin = await get_current_user(None, "InvalidHeader")
+        user_id, api_key_id, is_admin = await get_current_user(
+            self._request(authorization="InvalidHeader")
+        )
 
         assert user_id is None
         assert api_key_id is None

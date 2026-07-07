@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -404,7 +404,6 @@ app.include_router(security.router)
 app.include_router(rate_limits.router)
 app.include_router(github.router)
 app.include_router(git.router)
-app.include_router(studio.router)
 app.include_router(plugins.router)
 app.include_router(notes.router)
 app.include_router(hooks.router)

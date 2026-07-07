@@ -488,11 +488,37 @@ class ConnectorManager:
     async def handle_permission_response(
         self, request_id: str, session_id: str, approved: bool
     ) -> None:
-        """Forward a permission approval/denial from a messaging platform."""
+        """Forward a permission approval/denial from a messaging platform.
+
+        Connectors (Telegram, Discord, Slack, etc.) send interactive
+        Approve/Deny prompts and invoke this callback when the user presses a
+        button. We translate the boolean into the permission_handler decision
+        and resolve the pending request so the waiting tool call unblocks.
+
+        broadcast_func is None because a connector response has no associated
+        WebSocket UI session; permission_handler tolerates a None broadcaster
+        (all queue-update broadcasts are guarded).
+        """
         logger.info(
             f"Permission response: request={request_id} session={session_id} approved={approved}"
         )
-        # TODO: Wire to permission_handler.respond() when available
+
+        if not request_id or not session_id:
+            logger.warning(
+                "Ignoring connector permission response with missing "
+                f"request_id/session_id (request={request_id!r} session={session_id!r})"
+            )
+            return
+
+        from app.core.permission_handler import permission_handler
+
+        result = await permission_handler.respond(
+            request_id=request_id,
+            session_id=session_id,
+            decision="allow" if approved else "deny",
+            broadcast_func=None,
+        )
+        logger.debug(f"Connector permission response resolved: {result}")
 
     # ------------------------------------------------------------------
     # Public accessors (avoids external code reaching into _connectors)

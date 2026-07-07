@@ -229,3 +229,77 @@ class TestShutdown:
 
         await manager.shutdown_all()
         assert len(manager._connectors) == 0
+
+
+# =============================================================================
+# Permission Response Forwarding
+# =============================================================================
+
+
+class TestPermissionResponse:
+    @pytest.mark.asyncio
+    async def test_approved_forwards_allow(self, manager):
+        """A connector approval calls permission_handler.respond with decision=allow."""
+        with patch(
+            "app.core.permission_handler.permission_handler.respond",
+            new=AsyncMock(return_value={"resolved": True}),
+        ) as mock_respond:
+            await manager.handle_permission_response("req-1", "sess-1", True)
+
+        mock_respond.assert_awaited_once()
+        kwargs = mock_respond.await_args.kwargs
+        assert kwargs["request_id"] == "req-1"
+        assert kwargs["session_id"] == "sess-1"
+        assert kwargs["decision"] == "allow"
+        assert kwargs["broadcast_func"] is None
+
+    @pytest.mark.asyncio
+    async def test_denied_forwards_deny(self, manager):
+        with patch(
+            "app.core.permission_handler.permission_handler.respond",
+            new=AsyncMock(return_value={"resolved": True}),
+        ) as mock_respond:
+            await manager.handle_permission_response("req-2", "sess-2", False)
+
+        assert mock_respond.await_args.kwargs["decision"] == "deny"
+
+    @pytest.mark.asyncio
+    async def test_missing_ids_are_ignored(self, manager):
+        """No respond() call when request_id or session_id is missing."""
+        with patch(
+            "app.core.permission_handler.permission_handler.respond",
+            new=AsyncMock(),
+        ) as mock_respond:
+            await manager.handle_permission_response("", "sess-3", True)
+            await manager.handle_permission_response("req-3", "", True)
+
+        mock_respond.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolves_real_pending_request(self, manager):
+        """End-to-end: a queued request unblocks when the connector approves."""
+        from app.core.permission_handler import permission_handler, PermissionResultAllow
+
+        permission_handler.reset_all()
+
+        async def _broadcast(_msg):
+            return None
+
+        request_task = asyncio.create_task(
+            permission_handler.request_permission(
+                request_id="req-e2e",
+                session_id="sess-e2e",
+                profile_id="prof-e2e",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                broadcast_func=_broadcast,
+            )
+        )
+        # Let the request register in the pending queue
+        await asyncio.sleep(0.05)
+
+        await manager.handle_permission_response("req-e2e", "sess-e2e", True)
+
+        result = await asyncio.wait_for(request_task, timeout=2.0)
+        assert isinstance(result, PermissionResultAllow)
+        permission_handler.reset_all()

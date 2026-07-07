@@ -4,19 +4,19 @@ Rate limits API endpoints.
 Provides endpoints for viewing rate limit status and managing rate limit configurations.
 """
 
-import hashlib
 import logging
 import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.db import database
 from app.core.rate_limiter import rate_limiter
 from app.core.queue_manager import request_queue
-from app.api.auth import require_admin as _require_admin
+from app.api import auth as _auth
+from app.api.auth import require_admin as _require_admin, require_auth as _require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -102,42 +102,43 @@ class QueueStatusResponse(BaseModel):
 require_admin = _require_admin
 
 
-# TODO: Consolidate with centralized auth. This local helper resolves user/api_key
-# identity for rate limit lookups, which require_auth doesn't provide.
-async def get_current_user(
-    session: Optional[str] = Cookie(None),
-    authorization: Optional[str] = Header(None)
-) -> tuple[Optional[str], Optional[str], bool]:
+async def get_current_user(request: Request) -> tuple[Optional[str], Optional[str], bool]:
     """
-    Get current user from session or API key.
+    Resolve (user_id, api_key_id, is_admin) for the current request.
 
-    Returns:
-        Tuple of (user_id, api_key_id, is_admin)
+    Consolidated onto the centralized ``app.api.auth`` primitives:
+      - cookie sessions are validated with ``auth_service.validate_session``
+        (same path require_auth/require_admin use)
+      - ``aih_`` bearer keys are hashed with ``hash_api_key`` and looked up
+        via ``get_api_user_by_key_hash`` (identical to require_auth)
+
+    The opaque API-key *session* token path (non-``aih_`` bearer) is preserved
+    here because ``require_auth`` does not resolve it; keeping it avoids
+    weakening the auth this endpoint accepted before.
+
+    Returns ``(None, None, False)`` when the request is unauthenticated; the
+    caller decides whether to raise 401.
     """
-    user_id = None
-    api_key_id = None
+    user_id: Optional[str] = None
+    api_key_id: Optional[str] = None
     is_admin = False
 
-    # Check session cookie
-    if session:
-        auth_session = database.get_auth_session(session)
-        if auth_session:
-            is_admin = True
-            user_id = "admin"
+    # Cookie session -> admin (canonical validation)
+    token = _auth.get_session_token(request)
+    if token and _auth.auth_service.validate_session(token):
+        is_admin = True
+        user_id = "admin"
 
-    # Check Authorization header
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:]
-        if token.startswith("aih_"):
-            # API key
-            key_hash = hashlib.sha256(token.encode()).hexdigest()
-            api_user = database.get_api_user_by_key_hash(key_hash)
+    # Bearer token: aih_ API key (canonical) or opaque API-key session
+    api_key = _auth.get_api_key(request)
+    if api_key:
+        if api_key.startswith("aih_"):
+            api_user = database.get_api_user_by_key_hash(_auth.hash_api_key(api_key))
             if api_user:
                 api_key_id = api_user["id"]
                 user_id = api_user.get("username") or api_user["name"]
         else:
-            # API key session
-            api_session = database.get_api_key_session(token)
+            api_session = database.get_api_key_session(api_key)
             if api_session:
                 api_user = database.get_api_user(api_session["api_user_id"])
                 if api_user:
@@ -152,16 +153,13 @@ async def get_current_user(
 # =============================================================================
 
 @router.get("", response_model=RateLimitStatusResponse)
-async def get_current_rate_limits(
-    session: Optional[str] = Cookie(None),
-    authorization: Optional[str] = Header(None)
-):
+async def get_current_rate_limits(request: Request):
     """
     Get current user's rate limit status and usage.
 
     Returns the current request counts, limits, and remaining allowances.
     """
-    user_id, api_key_id, is_admin = await get_current_user(session, authorization)
+    user_id, api_key_id, is_admin = await get_current_user(request)
 
     if not user_id and not api_key_id:
         raise HTTPException(
@@ -198,16 +196,13 @@ async def get_current_rate_limits(
 
 
 @router.get("/queue", response_model=QueueStatusResponse)
-async def get_queue_status(
-    session: Optional[str] = Cookie(None),
-    authorization: Optional[str] = Header(None)
-):
+async def get_queue_status(request: Request):
     """
     Get current user's position in the request queue.
 
     If the user has a request queued, returns their position and estimated wait time.
     """
-    user_id, api_key_id, is_admin = await get_current_user(session, authorization)
+    user_id, api_key_id, is_admin = await get_current_user(request)
 
     if not user_id and not api_key_id:
         raise HTTPException(
