@@ -370,6 +370,24 @@ class TaskRegistry:
             return False
         return tool_use_id in self._background_launches.get(session_id, set())
 
+    def get_background_launches(self, session_id: str) -> set:
+        """Return a COPY of the parent launch tool_use_ids the parent issued with
+        run_in_background=true for ``session_id``.
+
+        These outlive the turn that launched them (the set is only cleared with the
+        session), so a FOLLOW-UP turn's streaming loop can seed its per-turn
+        ``task_tool_uses`` map with them — otherwise a background sub-agent's
+        StreamEvents (which still carry ``parent_tool_use_id`` in the later turn)
+        fail the ``parent_tool_id in task_tool_uses`` gate and leak into the
+        MAIN-agent text/thinking/tool handlers.
+
+        Returns a copy so callers can't mutate the registry's internal set.
+        Defensive: a missing ``session_id`` yields an empty set.
+        """
+        if not session_id:
+            return set()
+        return set(self._background_launches.get(session_id, set()))
+
     def start_task(
         self,
         session_id: str,

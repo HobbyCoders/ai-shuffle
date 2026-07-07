@@ -1961,6 +1961,31 @@ async def stream_to_websocket(
         # top-level rows (they'd be orphaned without their parent context).
         subagent_children: Dict[str, List[Dict[str, Any]]] = {}
         task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
+        # Seed cross-turn BACKGROUND sub-agents. Background sub-agents
+        # (run_in_background=true) OUTLIVE the turn that launched them, so in a
+        # FOLLOW-UP turn their StreamEvents/AssistantMessages still arrive with
+        # parent_tool_use_id set — but the launching Agent/Task tool_use block was
+        # seen in a PRIOR turn and would be absent from this fresh empty dict. Every
+        # subagent gate below tests `parent_tool_id in task_tool_uses`, so without
+        # this seed those foreign events fall through to the MAIN-agent handlers:
+        # the sub-agent's tool_use gets appended to the parent's live buffer and a
+        # parent text block is finalized early / split mid-word when a sub-agent
+        # block_start interrupts it (which downstream poisons the FE WS delta
+        # buffer). The registry's _background_launches set (only cleared with the
+        # session) is the durable source of truth for which launch tool_use_ids are
+        # backgrounded, so we re-hydrate an entry for each. Seeded entries carry
+        # run_in_background=True so the ToolResult branches skip subagent_done, and
+        # are flagged _cross_turn so their late children are NOT re-persisted as
+        # this turn's subagent metadata (their parent row was persisted in a prior
+        # turn — see the subagent_children handling below).
+        for _bg_tool_id in task_registry.get_background_launches(session_id):
+            task_tool_uses[_bg_tool_id] = {
+                "agent_type": "Agent",
+                "description": "",
+                "prompt": "",
+                "run_in_background": True,
+                "_cross_turn": True,
+            }
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
         metadata = {}
         interrupted = False
@@ -2434,7 +2459,17 @@ async def stream_to_websocket(
                             }
                         # Check if this tool use is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
-                            # Record as child of the parent subagent (not top-level)
+                            # Record as child of the parent subagent (not top-level).
+                            # For a CROSS-TURN background parent (seeded at turn
+                            # start, flagged _cross_turn), the parent's subagent row
+                            # was already persisted in a PRIOR turn, so there is no
+                            # "subagent" turn_event this turn to embed these children
+                            # into. That is intentional: this child is tagged with
+                            # parent_tool_id below, so persistence SKIPS it as a
+                            # top-level row (no orphan), and its collector is never
+                            # embedded (dropped from persistence) — the live/registry
+                            # subagent_tool_use event below is the only surface it
+                            # needs. It must NEVER reach the main-lane tool handler.
                             child_entry = {
                                 "id": tool_id,
                                 "type": "tool_use",
