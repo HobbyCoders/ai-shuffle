@@ -21,6 +21,7 @@ function makeLiveResponse(opts: {
 	lastUpdateId: number;
 	isStreaming: boolean;
 	messages: Array<Record<string, unknown>>;
+	fullRefreshReason?: string;
 }) {
 	return {
 		ok: true,
@@ -31,6 +32,7 @@ function makeLiveResponse(opts: {
 			messages: opts.messages,
 			initial_message_count: 0,
 			usage: {},
+			...(opts.fullRefreshReason ? { full_refresh_reason: opts.fullRefreshReason } : {}),
 		}),
 	} as unknown as Response;
 }
@@ -483,11 +485,16 @@ describe('session-poller · compaction full-replace safety net', () => {
 
 		// Rewind trims the live store and forces a full refresh, but on an ENDED
 		// session (is_streaming=false). The snapshot legitimately omits tool-1 (and
-		// everything after the checkpoint) — it must NOT be resurrected.
+		// everything after the checkpoint) — it must NOT be resurrected. The real
+		// backend ALWAYS tags rewind snapshots (truncate_after_uuid sets the
+		// one-shot reason AND trim_update_id serves 'rewind' to late pollers), so
+		// the fixture carries the tag; the poller keys the trust-the-snapshot
+		// replace off that reason, not off is_streaming.
 		fetchMock.mockResolvedValue(
 			makeLiveResponse({
 				lastUpdateId: 9,
 				isStreaming: false,
+				fullRefreshReason: 'rewind',
 				messages: [
 					{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
 					{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
@@ -501,6 +508,136 @@ describe('session-poller · compaction full-replace safety net', () => {
 		const ids = session!.messages.map(m => m.id);
 		expect(ids).toEqual(['user-1', 'text-1']);
 		expect(ids).not.toContain('tool-1');
+	});
+
+	it('retains rendered history on an ENDED full-refresh snapshot (turn_end)', async () => {
+		// THE user-reported bug: "message list loses a bunch of messages live;
+		// refresh restores them". end_streaming (and a compaction boundary landing
+		// at turn end) raises the one-shot needs_full_refresh; when the poll that
+		// consumes it already sees is_streaming=false, the old gate skipped the
+		// union-merge and did a wholesale replace — a snapshot with fewer rendered
+		// cards than the client silently DROPPED the difference (DB stayed
+		// complete, so a page refresh brought everything back). A completeness
+		// refresh must union-merge regardless of streaming state.
+		seedMixedRoleHistory();
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: false,
+				fullRefreshReason: 'turn_end',
+				messages: [
+					{ id: 'user-2', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'text-2', role: 'assistant', type: 'text', content: 'final reply', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SID);
+
+		const ids = sessionStateManager.getSession(SID)!.messages.map(m => m.id);
+		// Existing rendered history the short snapshot was missing survives...
+		expect(ids).toContain('text-1');
+		expect(ids).toContain('tool-1');
+		// ...alongside the snapshot's own messages, in order.
+		expect(ids).toContain('user-2');
+		expect(ids).toContain('text-2');
+		expect(ids.indexOf('tool-1')).toBeLessThan(ids.indexOf('user-2'));
+	});
+
+	it('retains rendered history on an ENDED UNATTRIBUTED full snapshot (legacy/compaction)', async () => {
+		// Same drop, no reason field: a compaction one-shot consumed on a poll
+		// after streaming ended (or an older backend that does not attribute).
+		// Unknown/absent reasons must be treated as completeness refreshes.
+		seedMixedRoleHistory();
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: false,
+				messages: [
+					{ id: 'user-2', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'sys-compact', role: 'system', type: 'system', content: 'Context compacted', systemSubtype: 'compact_boundary', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SID);
+
+		const ids = sessionStateManager.getSession(SID)!.messages.map(m => m.id);
+		expect(ids).toContain('text-1');
+		expect(ids).toContain('tool-1');
+		expect(ids).toContain('sys-compact');
+	});
+
+	it('honors a DISCARD full snapshot verbatim (stopped-turn prompt not resurrected)', async () => {
+		// discard_empty_user_turn deliberately REMOVES the trailing user prompt
+		// (Stop before any output) — like rewind, that deletion must propagate,
+		// not be union-merged back in.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				{ id: 'user-2', role: 'user', type: 'text', content: 'stopped prompt', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: false,
+				fullRefreshReason: 'discard',
+				messages: [
+					{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+					{ id: 'text-1', role: 'assistant', type: 'text', content: 'assistant reply', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SID);
+
+		const ids = sessionStateManager.getSession(SID)!.messages.map(m => m.id);
+		expect(ids).toEqual(['user-1', 'text-1']);
+		expect(ids).not.toContain('user-2');
+	});
+
+	it('clears streaming flags on messages the ENDED union-merge splices back in', async () => {
+		// A spliced-back existing message must not keep streaming:true once the
+		// turn has ended, or its card shows the bouncing dots forever.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'text-1', role: 'assistant', type: 'text', content: 'partial reply', streaming: true },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: false,
+				fullRefreshReason: 'turn_end',
+				messages: [
+					{ id: 'user-1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SID);
+
+		const session = sessionStateManager.getSession(SID)!;
+		const spliced = session.messages.find(m => m.id === 'text-1');
+		expect(spliced).toBeDefined();
+		expect(spliced!.streaming).toBe(false);
 	});
 });
 

@@ -122,23 +122,79 @@ class TestCompactionBoundary:
         session = store_with_history.get_session("s1")
         assert session.needs_full_refresh is False
 
-    async def test_compaction_full_refresh_carries_no_reason(self, store_with_history):
-        """A COMPACTION full refresh must stay unattributed — full_refresh_reason
-        is a rewind-only tag (BUG 1). If compaction leaked a reason, the frontend
-        would suppress its union-merge on a legitimate compaction snapshot."""
-        session = store_with_history.get_session("s1")
-        update_id_before = session.last_update_id
+    async def test_compaction_full_refresh_attributed_compaction(self, store_with_history):
+        """A COMPACTION full refresh is attributed "compaction" — a COMPLETENESS
+        reason the frontend union-merges on. (This replaces the older pin that
+        reasons were rewind-only: the client now suppresses its union-merge only
+        on DESTRUCTIVE reasons ("rewind"/"discard"); every other value — or none
+        — still merges, so attributing compaction cannot cause message loss.)"""
+        update_id_before = store_with_history.get_session("s1").last_update_id
 
         await store_with_history.add_system_message(
             "s1", content="Compacted", subtype="compact_boundary",
         )
-        # The compaction setter must not attribute the refresh.
-        assert session.full_refresh_reason is None
+        # get_session returns a snapshot copy — re-fetch after each mutation.
+        assert store_with_history.get_session("s1").full_refresh_reason == "compaction"
 
         result = store_with_history.get_session_since("s1", update_id_before)
         assert result["initial_message_count"] == 0
-        # No reason key on a compaction snapshot (only set when non-None).
-        assert "full_refresh_reason" not in result
+        assert result["full_refresh_reason"] == "compaction"
+        # Consumed alongside the one-shot flag.
+        assert store_with_history.get_session("s1").full_refresh_reason is None
+
+    async def test_end_streaming_full_refresh_attributed_turn_end(self, store_with_history):
+        """end_streaming raises the one-shot full refresh attributed "turn_end"
+        (a COMPLETENESS reason). Pre-fix it was unattributed, and the client's
+        wholesale replace on an ended full snapshot dropped any rendered cards
+        the buffer was momentarily missing — the "message list loses messages
+        live, refresh restores them" bug."""
+        update_id_before = store_with_history.get_session("s1").last_update_id
+
+        await store_with_history.end_streaming("s1")
+        session = store_with_history.get_session("s1")
+        assert session.needs_full_refresh is True
+        assert session.full_refresh_reason == "turn_end"
+
+        result = store_with_history.get_session_since("s1", update_id_before)
+        assert result["initial_message_count"] == 0
+        assert result["full_refresh_reason"] == "turn_end"
+
+    async def test_discard_full_refresh_attributed_discard(self, store):
+        """discard_empty_user_turn attributes "discard" — DESTRUCTIVE, so the
+        client takes the snapshot verbatim and the removed prompt is not
+        union-merged back in."""
+        await store.start_streaming(
+            "s1",
+            initial_messages=[
+                {"id": "h1", "role": "user", "content": "Hello"},
+                {"id": "h2", "role": "assistant", "type": "text", "content": "Hi!"},
+            ],
+        )
+        await store.add_user_message("s1", "stopped prompt", "u-stopped")
+        await store.end_streaming("s1", interrupted=True)
+
+        discarded = await store.discard_empty_user_turn("s1")
+        assert discarded == "stopped prompt"
+        session = store.get_session("s1")
+        assert session.needs_full_refresh is True
+        # end_streaming ran first with "turn_end"; the destructive discard
+        # must have replaced it.
+        assert session.full_refresh_reason == "discard"
+
+    async def test_destructive_reason_not_downgraded_by_turn_end(self, store_with_history):
+        """A pending DESTRUCTIVE reason survives a completeness raiser: rewind
+        mid-turn followed by end_streaming (before any poll consumed the flag)
+        must still ship "rewind" — if "turn_end" won, the client would
+        union-merge the trimmed messages right back (rewind visually no-ops)."""
+        session = store_with_history.get_session("s1")
+
+        session.flag_full_refresh("rewind")
+        session.flag_full_refresh("turn_end")
+        assert session.full_refresh_reason == "rewind"
+
+        # A destructive reason may replace anything (incl. another destructive).
+        session.flag_full_refresh("discard")
+        assert session.full_refresh_reason == "discard"
 
     async def test_delta_poll_skips_history_messages(self, store_with_history):
         """Normal delta polls should skip history messages (optimization).

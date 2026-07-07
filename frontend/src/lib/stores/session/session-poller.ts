@@ -573,12 +573,17 @@ class SessionPoller {
 		const isStreaming = data.is_streaming as boolean;
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
 		const initialMessageCount = (data.initial_message_count as number) || 0;
-		// Why this one-shot full refresh happened, when the backend knows. Only
-		// `"rewind"` is meaningful to the merge: a rewind trim (truncate_after_uuid)
-		// that lands while the session is still streaming produces a full snapshot
-		// that DELIBERATELY drops the trimmed tail — the union-merge below must NOT
-		// resurrect it. Absent (compaction refreshes, ordinary polls) → merge runs.
+		// Why this one-shot full refresh happened, when the backend knows.
+		// DESTRUCTIVE reasons ("rewind" trim, "discard" of a stopped turn's
+		// prompt) mark snapshots that DELIBERATELY drop messages — they must be
+		// taken verbatim, never union-merged, or the deletion is resurrected.
+		// Everything else ("compaction", "turn_end", absent/unknown) is a
+		// COMPLETENESS refresh: the snapshot may momentarily carry fewer rendered
+		// cards than the client, so the union-merge below must rescue the
+		// difference. Unknown/absent defaults to completeness — losing rendered
+		// messages is worse than a rare stale card until reload.
 		const fullRefreshReason = (data.full_refresh_reason as string | undefined) ?? undefined;
+		const isDestructiveRefresh = fullRefreshReason === 'rewind' || fullRefreshReason === 'discard';
 
 		// Active background tasks (sub-agents + shell subprocesses). Always present
 		// on a fresh backend; tolerate a missing field gracefully (treat as []).
@@ -637,32 +642,39 @@ class SessionPoller {
 			const streamingIds = new Set(streamingMessages.map(m => m.id));
 			const safeExisting = existingMessages.filter(m => !streamingIds.has(m.id));
 			messages = [...safeExisting, ...streamingMessages];
-		} else if (isStreaming && existingMessages && existingMessages.length > 0 && fullRefreshReason !== 'rewind') {
-			// FULL REPLACE (initialMessageCount === 0) WHILE STREAMING — the
-			// compaction-refresh safety net.
+		} else if (existingMessages && existingMessages.length > 0 && !isDestructiveRefresh) {
+			// FULL REPLACE (initialMessageCount === 0) — the completeness-refresh
+			// safety net.
 			//
-			// On SDK compaction the backend flags needs_full_refresh, so the next
-			// /live poll returns a FULL snapshot of the in-memory buffer with
-			// initial_message_count=0. If that buffer's seeded history was less
-			// complete than what we already render (an empty/truncated seed slipped
-			// past the backend heal), a blind `messages = streamingMessages` here
-			// WIPES the pre-compaction assistant/tool/thinking history — only the
+			// On SDK compaction AND at every turn end the backend flags
+			// needs_full_refresh, so the next /live poll returns a FULL snapshot of
+			// the in-memory buffer with initial_message_count=0. If that buffer
+			// momentarily carries fewer rendered cards than the client (an
+			// empty/truncated seed slipped past the backend heal, or granularity
+			// drift between live-store and parser cards), a blind
+			// `messages = streamingMessages` here WIPES the difference — only the
 			// user prompts and the compaction card survive the downstream Phase-1
 			// merge (it rescues only client-only system + optimistic user-* ids).
+			// The DB stays complete, so a page refresh "fixes" it — the classic
+			// lose-live/restore-on-refresh symptom.
 			//
 			// Union-merge instead: keep the existing rendered messages the incoming
 			// snapshot is MISSING AHEAD of / interleaved with the snapshot, so a
 			// short snapshot can only ADD, never DROP. Claim-once by id mirrors
-			// Phase 1's semantics.
+			// Phase 1's semantics. This runs REGARDLESS of is_streaming: the
+			// one-shot flag is consumed by whichever poll reads it first, and both
+			// compaction and end_streaming raise it right around the moment
+			// is_streaming flips false — gating on streaming state is what dropped
+			// messages on the poll that landed just after the flip.
 			//
-			// GATED AGAINST REWIND: a rewind trim (truncate_after_uuid) that lands
-			// WHILE streaming also produces a full snapshot with
-			// initial_message_count=0 — but that snapshot deliberately DROPS the
-			// trimmed tail. Union-merging it would re-insert every trimmed message
-			// (id-match), visually no-oping the rewind. The backend tags exactly
-			// that refresh with full_refresh_reason:"rewind"; when present we fall
-			// through to the plain full-replace below so deletions propagate. An
-			// ENDED-session rewind (is_streaming=false) already skips this branch.
+			// GATED AGAINST DESTRUCTIVE REFRESHES: a rewind trim
+			// (truncate_after_uuid) and a stopped-turn discard
+			// (discard_empty_user_turn) also produce full snapshots — but those
+			// snapshots deliberately DROP messages. Union-merging them would
+			// re-insert every removed message (id-match), visually no-oping the
+			// deletion. The backend attributes exactly those refreshes
+			// (full_refresh_reason "rewind" / "discard"); when present we fall
+			// through to the plain full-replace below so deletions propagate.
 			//
 			// ANCHORED INSERTION (not prepend-all): a message is "present in the
 			// snapshot" if its id OR its transcript uuid (jsonlUuid) matches — id
@@ -702,7 +714,13 @@ class SessionPoller {
 							: m.id);
 					continue;
 				}
-				missingEntries.push({ msg: m, anchorId: lastPresentId });
+				// Same belt-and-suspenders as the snapshot map above: once the turn
+				// has ended, a spliced-back message must not keep rendering the
+				// streaming dots.
+				missingEntries.push({
+					msg: !isStreaming && m.streaming ? { ...m, streaming: false } : m,
+					anchorId: lastPresentId,
+				});
 			}
 			if (missingEntries.length > 0) {
 				const idToIndex = new Map<string, number>();

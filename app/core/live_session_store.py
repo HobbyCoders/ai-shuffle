@@ -214,12 +214,15 @@ class LiveSession:
     # full snapshot instead of a stale delta merge.
     needs_full_refresh: bool = False
 
-    # Why the pending needs_full_refresh was raised, when it matters to the
-    # client. Compaction/end-streaming leave this None (an unattributed full
-    # snapshot). A rewind trim sets "rewind" so the frontend can tell a
-    # rewind-truncated snapshot apart from a compaction full-replace and NOT
-    # union-merge its now-trimmed extra messages back in. Consumed and cleared
-    # together with needs_full_refresh in get_session_since.
+    # Why the pending needs_full_refresh was raised. Every raiser attributes
+    # it: "compaction", "turn_end" (end_streaming), "discard"
+    # (discard_empty_user_turn), "rewind" (truncate_after_uuid). The client
+    # splits these into DESTRUCTIVE ("rewind"/"discard" — the snapshot
+    # deliberately dropped messages, take it verbatim) vs COMPLETENESS
+    # (everything else — union-merge, a short snapshot may only ADD). Set via
+    # flag_full_refresh so a pending destructive reason is never downgraded by
+    # a completeness raiser racing it. Consumed and cleared together with
+    # needs_full_refresh in get_session_since.
     full_refresh_reason: Optional[str] = None
 
     # The last_update_id at which a rewind trim cut this buffer. Unlike the
@@ -238,6 +241,28 @@ class LiveSession:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+
+    # Reasons whose snapshot deliberately DROPPED messages; the client must
+    # take it verbatim (no union-merge) so the deletion propagates.
+    DESTRUCTIVE_REFRESH_REASONS = frozenset({"rewind", "discard"})
+
+    def flag_full_refresh(self, reason: str) -> None:
+        """Raise the one-shot full-refresh flag, attributing why.
+
+        A pending DESTRUCTIVE reason ("rewind"/"discard") is never downgraded
+        by a completeness raiser (e.g. rewind mid-turn followed by
+        end_streaming before any poll consumed the flag): if the completeness
+        reason won, the client would union-merge a snapshot that deliberately
+        dropped messages and resurrect the deletion. A destructive reason may
+        replace anything.
+        """
+        self.needs_full_refresh = True
+        if (
+            self.full_refresh_reason in self.DESTRUCTIVE_REFRESH_REASONS
+            and reason not in self.DESTRUCTIVE_REFRESH_REASONS
+        ):
+            return
+        self.full_refresh_reason = reason
 
     def to_dict(self, delta_only: bool = False) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization.
@@ -1007,7 +1032,7 @@ class LiveSessionStore:
                     )
                     return
 
-                session.needs_full_refresh = True
+                session.flag_full_refresh("compaction")
                 logger.debug(
                     f"Compaction boundary: flagged needs_full_refresh "
                     f"for session {session_id}"
@@ -1811,7 +1836,11 @@ class LiveSessionStore:
             # and can drop real streaming messages from the client view.
             # The full-refresh path serializes all messages + initial_message_count=0,
             # matching what a page reload would fetch via since_update_id=0.
-            session.needs_full_refresh = True
+            # Attributed "turn_end" (a COMPLETENESS refresh) so the client
+            # union-merges instead of wholesale-replacing — an unattributed
+            # ended-session full snapshot used to drop any rendered cards the
+            # buffer was momentarily missing (restored only by a page refresh).
+            session.flag_full_refresh("turn_end")
             self._increment_update_id(session)
             context_used = session.input_tokens + session.cache_creation_tokens + session.cache_read_tokens
             logger.warning(
@@ -1865,7 +1894,10 @@ class LiveSessionStore:
             del session.messages[last_idx]
             # Force a full snapshot on the next poll so the removal reaches the
             # frontend (delta polls key off the now-shifted message slice).
-            session.needs_full_refresh = True
+            # "discard" is DESTRUCTIVE: the snapshot deliberately dropped the
+            # prompt, so the client must take it verbatim (union-merging would
+            # resurrect the discarded message).
+            session.flag_full_refresh("discard")
             self._increment_update_id(session)
             logger.info(
                 f"Discarded empty interrupted user turn for session {session_id} "
@@ -1941,14 +1973,11 @@ class LiveSessionStore:
             # the frontend as a clean full snapshot rather than a stale delta.
             if session.initial_message_count > keep_count:
                 session.initial_message_count = keep_count
-            session.needs_full_refresh = True
-            # Attribute this one-shot full refresh so the client can distinguish
-            # it from a compaction full-replace. The compaction branch treats an
-            # unattributed full snapshot as an "impoverished seed" and union-
-            # merges its own extra messages back in — which would resurrect the
-            # very messages this rewind just trimmed. Tagging it "rewind" lets the
-            # frontend take the snapshot as authoritative instead.
-            session.full_refresh_reason = "rewind"
+            # "rewind" is DESTRUCTIVE: the client takes the snapshot as
+            # authoritative instead of union-merging its own extra (now-trimmed)
+            # messages back in — which would resurrect the very messages this
+            # rewind just removed.
+            session.flag_full_refresh("rewind")
             self._increment_update_id(session)
             # Durable marker (vs. the one-shot flag above): every poller whose
             # since_update_id predates this id must get the rewind snapshot,
