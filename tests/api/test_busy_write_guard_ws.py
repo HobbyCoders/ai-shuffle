@@ -9,8 +9,9 @@ whole in-flight turn is lost (messages persist only at turn end), subagents die,
 and the UI is stranded parked. ("Send now" is NOT this path — it goes through
 the two-phase ``interrupt_for_query``.)
 
-These tests pin the fix on BOTH twins (class ``ChatWebSocketHandler`` and the
-live ``/ws/chat`` closure in app/api/websocket.py):
+These tests pin the fix on the unified ``ChatWebSocketHandler`` (since Phase
+6.1 step 7 the ``/ws/chat`` route is a thin shim over it — the legacy inline
+closure twin is gone):
 
 1. ``handle_query`` busy → the message is ENQUEUED via the existing queue
    machinery (never dropped, user gets queue_updated acks) and the live turn is
@@ -20,8 +21,8 @@ live ``/ws/chat`` closure in app/api/websocket.py):
 3. ``_deliver_unpark_impl`` yields (no clobber) when a user query owns the
    session — both at entry and at the late re-check — and clears the
    unpark-pending latch on the late yield.
-4. Closure twin: the real inline route enqueues a busy query and spawns no
-   run_query; source-level parity guards keep the twins aligned.
+4. Route-level: the real /ws/chat entry point enqueues a busy query and spawns
+   no run_query; a source-level guard pins the class implementation.
 
 All heavy collaborators are mocked (mirrors test_chat_ws_adoption.py /
 test_ws_chat_inline_adoption.py); no Postgres / SDK required.
@@ -38,6 +39,14 @@ from fastapi.websockets import WebSocketState
 
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
+
+# Import eagerly so query_engine's module-level ``task_registry`` binding is
+# resolved BEFORE _unpark_patches swaps app.core.task_registry.task_registry
+# for a MagicMock. Without this, _deliver_unpark_impl's lazy import of
+# query_engine (via _build_task_notification_prompt) happens INSIDE the patch
+# window and freezes query_engine.task_registry to the mock for the rest of
+# the pytest process, silently no-op'ing complete_task() in every later test.
+import app.core.query_engine  # noqa: F401
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
