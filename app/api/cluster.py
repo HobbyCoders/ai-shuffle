@@ -20,7 +20,7 @@ relay chain.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel
@@ -281,8 +281,8 @@ async def cluster_pending_permissions(
 class ClusterPermissionResponseRequest(BaseModel):
     """A peer install relaying a user's tool-permission decision for a session we own."""
     request_id: str
-    decision: str  # "allow", "deny", or "defer"
-    remember: Optional[str] = None  # "none", "session", or "profile" (ignored for defer)
+    decision: Literal["allow", "deny", "defer"]
+    remember: Optional[Literal["none", "session", "profile"]] = None  # ignored for defer
     pattern: Optional[str] = None  # optional rule pattern (ignored for defer)
 
 

@@ -189,3 +189,27 @@ async def test_cluster_permission_endpoints_reject_bad_secret(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         cluster_core.require_cluster_auth(_fake_request())
     assert ei.value.status_code == 401
+
+
+# --- payload validation ------------------------------------------------------
+#
+# The request model constrains decision/remember to the same Literals that
+# permission_handler.respond() declares, so a malformed peer payload 422s at
+# the FastAPI boundary instead of flowing into rule-creation logic.
+
+
+def test_permission_response_model_rejects_invalid_decision():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ClusterPermissionResponseRequest(request_id="p-1", decision="banana")
+    with pytest.raises(ValidationError):
+        ClusterPermissionResponseRequest(
+            request_id="p-1", decision="allow", remember="forever"
+        )
+    # The three legal decisions (and legal remember scopes) still construct.
+    for decision in ("allow", "deny", "defer"):
+        ClusterPermissionResponseRequest(request_id="p-1", decision=decision)
+    ClusterPermissionResponseRequest(
+        request_id="p-1", decision="allow", remember="session", pattern="Bash(*)"
+    )
