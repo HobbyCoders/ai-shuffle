@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.websockets import WebSocketState
 
+import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 
 
@@ -146,7 +147,11 @@ def _drive_route_patches(stack: ExitStack, created: _RecordingCreateTask):
     # Capture the spawned run_query coroutine instead of scheduling it.
     stack.enter_context(patch.object(ws_mod.asyncio, "create_task", new=created))
 
+    # Post-flip (STEP 5): the route is a shim over ChatWebSocketHandler, which
+    # resolves collaborators from cwh module globals — mirror the SAME mock
+    # objects into both namespaces.
     sync = stack.enter_context(patch.object(ws_mod, "sync_engine"))
+    stack.enter_context(patch.object(cwh, "sync_engine", new=sync))
     sync.register_user_device = AsyncMock()
     sync.unregister_user_device = AsyncMock()
     sync.register_device = AsyncMock()
@@ -160,12 +165,14 @@ def _drive_route_patches(stack: ExitStack, created: _RecordingCreateTask):
     sync.get_device_count = MagicMock(return_value=1)
 
     store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
+    stack.enter_context(patch.object(cwh, "live_session_store", new=store))
     store.get_session = MagicMock(return_value=None)
     store.has_session = MagicMock(return_value=False)
     store.is_streaming = MagicMock(return_value=False)
     store.cleanup_session = AsyncMock()
 
     db = stack.enter_context(patch.object(ws_mod, "database"))
+    stack.enter_context(patch.object(cwh, "database", new=db))
     db.get_session = MagicMock(return_value={"sdk_session_id": None, "title": "x"})
 
     async def _fake_run_sync(fn, *a, **k):
@@ -174,8 +181,13 @@ def _drive_route_patches(stack: ExitStack, created: _RecordingCreateTask):
         except Exception:
             return None
 
-    stack.enter_context(patch.object(ws_mod, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+    _run_sync = AsyncMock(side_effect=_fake_run_sync)
+    stack.enter_context(patch.object(ws_mod, "run_sync", new=_run_sync))
+    stack.enter_context(patch.object(cwh, "run_sync", new=_run_sync))
     stack.enter_context(patch.object(ws_mod, "cleanup_session_handlers", new=AsyncMock()))
+    # New-session persistence runs inside a DB transaction (atomic
+    # session+message) — stub the context manager so no real DB is touched.
+    stack.enter_context(patch("app.db.base.transaction", new=MagicMock()))
 
     # Isolate the active-session registry + lock.
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new={}))

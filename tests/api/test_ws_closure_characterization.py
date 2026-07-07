@@ -1,37 +1,43 @@
 """
-Frame-by-frame characterization of the LIVE ``/ws/chat`` closure
-(``app.api.websocket.chat_websocket``) — Phase 6.1 STEP 0 of
-docs/STREAMING_UNIFICATION_PLAN.md.
+Frame-by-frame characterization of the ``/ws/chat`` route — the behavioral
+ORACLE for Phase 6.1 of docs/STREAMING_UNIFICATION_PLAN.md.
 
-These tests are the behavioral ORACLE for the streaming-path unification:
-they pin what the closure does TODAY so that later steps can prove the
-class-based ``ChatWebSocketHandler`` is a superset before the route flips.
+Written at STEP 0 against the original nested-closure implementation
+(``app.api.websocket.chat_websocket``); since the STEP 5 route flip the same
+transcripts drive the unified ``ChatWebSocketHandler`` through the flipped
+endpoint, proving the class serves the closure's contract.
 
-Design rules (so the suite survives the flip):
+Design rules (these carried the suite across the flip):
 
-* Every test drives the closure through its PUBLIC entry point
+* Every test drives the route through its PUBLIC entry point
   (``ws_mod.chat_websocket(websocket, token=..., device_id=...)``) with a fake
   WebSocket feeding inbound frames — exactly the contract the route exposes.
-  After the flip, the same entry point (then a thin shim over the handler
-  class) must satisfy the same transcripts.
-* Anything that reaches into closure INTERNALS is confined to:
+  The endpoint is now a thin shim (accept/auth/device_id prologue +
+  ``ChatWebSocketHandler.run()``), so these transcripts exercise the class.
+* Anything that reaches into implementation INTERNALS is confined to:
     - ``_ClosureHarness`` (the mock/patch surface — module-global registries
-      and collaborator boundaries, mirroring test_busy_write_guard_ws.py), and
-    - the tests in the "FLIP-ADAPT" section at the bottom (source-level
-      inventory checks).
-  The flip commit may adapt ONLY those.
+      and collaborator boundaries; each mock is mirrored into BOTH
+      app.api.websocket and app.api.chat_ws_handler, because the class
+      resolves its collaborators from its own module globals), and
+    - the tests in the "FLIP-ADAPT" section at the bottom (dispatch-table
+      inventory checks, now pointed at the handler class).
 * All heavy collaborators are mocked (SDK, DB, sync engine, cloud relay);
   ``run_query`` coroutines are intercepted un-started, so no streaming
-  machinery actually runs. What is asserted is the closure's *observable*
-  contract: outbound frames (exact shapes), collaborator calls, and the
-  module-global registry side effects.
+  machinery actually runs. What is asserted is the *observable* contract:
+  outbound frames (exact shapes), collaborator calls, and the module-global
+  registry side effects.
 
-Known closure-vs-class divergences deliberately PINNED here (see plan doc):
-* ``get_pending_permissions`` replies with key ``requests`` (class: ``pending``
-  + ``deferred``) — pinned so the flip consciously changes it.
-* ``load_session`` runs ``drain_next_queued_if_idle`` on load (recovery for
-  "Send later" messages whose origin socket died) — class has no equivalent.
-* ``watch_session`` and the 6 cloud-relay branches exist ONLY in the closure.
+Closure-vs-class divergences that were PINNED pre-flip and consciously
+resolved to the CLASS shape at flip time (details at each pinning test):
+* every outbound frame now carries a monotonic ``_seq`` diagnostic —
+  stripped AND verified strictly increasing by ``_FakeWebSocket``;
+* ``session_created`` carries ``title`` (class-canonical per plan);
+* ``get_pending_permissions`` replies ``pending`` + ``deferred`` (was
+  ``requests``);
+* the drain-on-load queue reconcile broadcasts via sync_engine only (the
+  closure also direct-sent a sync/queue_updated ack) — see
+  test_chat_ws_handler_queue.py for why that is equivalent at load time;
+* ``history`` may carry ``queuedMessages`` (class-only key, additive).
 
 NOT characterizable in this sandbox (feeds the live gate — see plan "Test
 split"): real seed/history parity under postgres_only, real SDK streaming
@@ -43,7 +49,6 @@ CLI, cross-install relay actually reaching a second install, and ping-loop /
 import asyncio
 import inspect
 import json
-import re
 import uuid
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -52,6 +57,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.websockets import WebSocketState
 
+import app.api.chat_ws_handler as cwh_mod
 import app.api.websocket as ws_mod
 import app.core.cloud_relay as cloud_relay_mod
 
@@ -76,6 +82,7 @@ class _FakeWebSocket:
         self.cookies = {}
         self.accepted = False
         self.closed = None  # (code, reason)
+        self._last_seq = 0
 
     async def accept(self):
         self.accepted = True
@@ -87,7 +94,18 @@ class _FakeWebSocket:
         raise ws_mod.WebSocketDisconnect(code=1000)
 
     async def send_text(self, text: str):
-        self.sent.append(json.loads(text))
+        frame = json.loads(text)
+        # Post-flip pin: the unified handler stamps EVERY outbound frame with a
+        # monotonically increasing `_seq` diagnostic (class-canonical, plan
+        # line "class-canonical behaviors"). Verify it here once, then strip it
+        # so every frame-shape assertion in this file stays byte-exact.
+        seq = frame.pop("_seq", None)
+        assert isinstance(seq, int), f"outbound frame missing _seq: {frame}"
+        assert seq > self._last_seq, (
+            f"_seq must be strictly increasing: got {seq} after {self._last_seq}"
+        )
+        self._last_seq = seq
+        self.sent.append(frame)
 
     async def close(self, code: int = 1000, reason: str = ""):
         self.client_state = WebSocketState.DISCONNECTED
@@ -167,17 +185,27 @@ _ASYNC_SYNC_ENGINE_METHODS = (
 
 
 class _ClosureHarness:
-    """Patches every boundary the /ws/chat closure touches, then drives it.
+    """Patches every boundary the /ws/chat route touches, then drives it.
+
+    Post-flip (STEP 5): the route is a shim over ChatWebSocketHandler, which
+    resolves its collaborators from app.api.chat_ws_handler module globals —
+    so every mock is installed into BOTH ws_mod and cwh_mod (same objects).
+    Names the class imports inline at call time (ping_loop and the registries
+    from app.api.websocket, cloud_relay, interrupt_session, cost_utils,
+    app.db.base.transaction) are patched at their source, which covers both.
 
     Exposes the mocks so tests configure inputs and assert on side effects:
       .auth            authenticate_websocket (AsyncMock -> (ok, api_user))
       .sync            sync_engine (broadcast_* are AsyncMocks)
       .store           live_session_store
-      .db              app.db.database as seen by the closure
+      .db              app.db.database as seen by the route
       .session_row     template row db.get_session returns (None => not found)
       .cloud           cloud_relay boundary (is_remote_session + relay_*)
       .interrupt_session  app.core.query_engine.interrupt_session
       .perm / .uq      permission_handler / user_question_handler
+      .load_messages_from_db  ONE input for history content (post-flip it
+                       feeds a message_resolver.resolve stub returning
+                       source="db", so test bodies are unchanged)
       .registry / .stopped / .interrupt_pending / .draining
                        the module-global control sets, per-test instances
       .created         the selective create_task recorder
@@ -201,14 +229,22 @@ class _ClosureHarness:
         async def _noop_ping(*a, **k):
             return None
 
+        # handler.run() imports ping_loop from app.api.websocket at call time.
         s.enter_context(patch.object(ws_mod, "ping_loop", new=_noop_ping))
+        _rate_factory = lambda **kw: self.rate  # noqa: E731
         s.enter_context(
-            patch.object(ws_mod, "WebSocketRateLimiter", new=lambda **kw: self.rate)
+            patch.object(ws_mod, "WebSocketRateLimiter", new=_rate_factory)
         )
+        s.enter_context(
+            patch.object(cwh_mod, "WebSocketRateLimiter", new=_rate_factory)
+        )
+        # ws_mod.asyncio IS the asyncio module, so this also intercepts the
+        # class's create_task calls (run_query/_safety_cancel by qualname).
         s.enter_context(patch.object(ws_mod.asyncio, "create_task", new=self.created))
 
         # --- sync engine -----------------------------------------------------
         self.sync = s.enter_context(patch.object(ws_mod, "sync_engine"))
+        s.enter_context(patch.object(cwh_mod, "sync_engine", new=self.sync))
         for name in _ASYNC_SYNC_ENGINE_METHODS:
             setattr(self.sync, name, AsyncMock())
         self.sync.get_user_streaming_sessions = MagicMock(return_value=[])
@@ -219,6 +255,7 @@ class _ClosureHarness:
 
         # --- live session store ----------------------------------------------
         self.store = s.enter_context(patch.object(ws_mod, "live_session_store"))
+        s.enter_context(patch.object(cwh_mod, "live_session_store", new=self.store))
         self.store.get_session_dict = MagicMock(return_value=None)
         self.store.has_session = MagicMock(return_value=False)
         self.store.is_streaming = MagicMock(return_value=False)
@@ -240,6 +277,7 @@ class _ClosureHarness:
             return row
 
         self.db = s.enter_context(patch.object(ws_mod, "database"))
+        s.enter_context(patch.object(cwh_mod, "database", new=self.db))
         self.db.get_session = MagicMock(side_effect=_get_session)
         self.db.get_session_by_sdk_id = MagicMock(return_value=None)
         self.db.get_queued_messages = MagicMock(return_value=[])
@@ -251,16 +289,22 @@ class _ClosureHarness:
         async def _fake_run_sync(fn, *a, **k):
             return fn(*a, **k)
 
-        s.enter_context(
-            patch.object(ws_mod, "run_sync", new=AsyncMock(side_effect=_fake_run_sync))
-        )
+        _run_sync = AsyncMock(side_effect=_fake_run_sync)
+        s.enter_context(patch.object(ws_mod, "run_sync", new=_run_sync))
+        s.enter_context(patch.object(cwh_mod, "run_sync", new=_run_sync))
         s.enter_context(patch.object(ws_mod, "cleanup_session_handlers", new=AsyncMock()))
+        # New-session persistence runs inside a DB transaction (atomic
+        # session+message, class-canonical) — stub the context manager.
+        s.enter_context(patch("app.db.base.transaction", new=MagicMock()))
 
         # --- permission / question handlers -----------------------------------
         self.perm = s.enter_context(patch.object(ws_mod, "permission_handler"))
+        s.enter_context(patch.object(cwh_mod, "permission_handler", new=self.perm))
         self.perm.get_pending_requests = MagicMock(return_value=[])
+        self.perm.get_deferred_requests = MagicMock(return_value=[])
         self.perm.respond = AsyncMock(return_value={"ok": True})
         self.uq = s.enter_context(patch.object(ws_mod, "user_question_handler"))
+        s.enter_context(patch.object(cwh_mod, "user_question_handler", new=self.uq))
         self.uq.get_pending_questions = MagicMock(return_value=[])
         self.uq.respond = AsyncMock(return_value=True)
 
@@ -296,11 +340,34 @@ class _ClosureHarness:
         s.enter_context(patch("app.core.cost_utils.attach_cost_metadata", MagicMock()))
         s.enter_context(patch("app.core.cost_utils.get_cached_profile_map", MagicMock(return_value={})))
 
+        # --- message resolution (class load path) ------------------------------
+        # The unified handler loads history through message_resolver.resolve();
+        # wire it through the SAME load_messages_from_db mock (source="db",
+        # no usage) so test bodies keep configuring one history input.
+        self.message_resolver = s.enter_context(
+            patch.object(cwh_mod, "message_resolver")
+        )
+
+        def _resolve(session_id, sdk_session_id, working_dir, force_jsonl=False):
+            messages, _found = self.load_messages_from_db(session_id)
+            return SimpleNamespace(messages=messages, source="db", usage=None)
+
+        self.message_resolver.resolve = MagicMock(side_effect=_resolve)
+        s.enter_context(
+            patch.object(cwh_mod, "resolve_working_dir", new=MagicMock(return_value="/tmp"))
+        )
+
         # --- module-global control-plane registries ----------------------------
+        # The class imports _active_chat_sessions/_active_sessions_lock from
+        # app.api.websocket at call time (patching ws_mod covers it); the
+        # stop/interrupt latches are bound in BOTH module namespaces at import
+        # time, so mirror the same per-test set instances into cwh_mod.
         s.enter_context(patch.object(ws_mod, "_active_chat_sessions", new=self.registry))
         s.enter_context(patch.object(ws_mod, "_active_sessions_lock", new=asyncio.Lock()))
         s.enter_context(patch.object(ws_mod, "_stopped_sessions", new=self.stopped))
+        s.enter_context(patch.object(cwh_mod, "_stopped_sessions", new=self.stopped))
         s.enter_context(patch.object(ws_mod, "_interrupt_pending_sessions", new=self.interrupt_pending))
+        s.enter_context(patch.object(cwh_mod, "_interrupt_pending_sessions", new=self.interrupt_pending))
         s.enter_context(patch.object(ws_mod, "_draining_sessions", new=self.draining))
 
         return self
@@ -313,7 +380,7 @@ class _ClosureHarness:
         return False
 
     async def run(self, frames, device_id="dev-1", token="tok"):
-        """Drive the closure end-to-end over the given inbound frames."""
+        """Drive the route end-to-end over the given inbound frames."""
         ws = _FakeWebSocket(frames)
         self.ws = ws
         await ws_mod.chat_websocket(ws, token=token, device_id=device_id)
@@ -442,7 +509,10 @@ async def test_query_empty_prompt_error():
 async def test_query_new_session_mints_session_and_spawns_run_query():
     """New-session happy path: create_session (title from prompt),
     session_created frame, device registration, user message persisted +
-    broadcast excluding the sender, exactly one run_query registered."""
+    broadcast excluding the sender, exactly one run_query registered.
+
+    CONSCIOUS flip edit (plan: class-canonical): session_created now carries
+    ``title`` so the frontend can show it without a round-trip."""
     with _ClosureHarness() as h:
         ws = await h.run([{
             "type": "query",
@@ -462,6 +532,7 @@ async def test_query_new_session_mints_session_and_spawns_run_query():
     assert created_frames == [{
         "type": "session_created",
         "session_id": sid,
+        "title": "hello there",
         "worktree_id": None,
     }], "no request_id given => key must be OMITTED (adoption-token contract)"
 
@@ -752,14 +823,28 @@ async def test_load_session_idle_history_frame_shape():
 
 
 async def test_load_session_drains_queued_message_on_load():
-    """THE drain-on-load recovery (plan: closure-canonical, class MISSING):
-    loading an idle session with a leftover queued message pops it, persists
-    it (slash-commands classified as role=command), emits queue_updated, and
-    spawns the turn."""
+    """THE drain-on-load recovery (closure-canonical, ported into the class in
+    step 3): loading an idle session with a leftover queued message pops it,
+    persists it (slash-commands classified as role=command), reconciles the
+    queue, and spawns the turn.
+
+    CONSCIOUS flip edit (already pinned in test_chat_ws_handler_queue.py): the
+    closure's drain ALSO direct-sent a sync/queue_updated ack on the origin
+    socket; the class's _process_next_queued reconciles via
+    sync_engine.broadcast_queue_updated ONLY — at load time this device was
+    JUST registered by load_session, so the broadcast reaches it. The
+    reconcile must still happen AFTER the history frame was delivered (the
+    ordering the closure pinned)."""
     with _ClosureHarness() as h:
         h.db.pop_next_queued_message.return_value = {
             "content": "/compact now", "profile_id": None, "project_id": None,
         }
+        frames_at_broadcast: list = []
+        h.sync.broadcast_queue_updated.side_effect = (
+            lambda *a, **k: frames_at_broadcast.append(
+                [f.get("type") for f in h.ws.sent]
+            )
+        )
         ws = await h.run([{"type": "load_session", "session_id": "sess-1"}])
 
     h.db.pop_next_queued_message.assert_called_once_with("sess-1")
@@ -770,15 +855,12 @@ async def test_load_session_drains_queued_message_on_load():
     assert mk["profile_id"] == "claude-code"
     assert h.created.spawns("run_query") == 1
     assert "sess-1" in h.registry
-    # queue_updated ack (post-pop) AFTER the history frame
-    types = [f.get("type") for f in ws.sent]
-    assert types.index("history") < types.index("sync")
-    assert _queue_frames(ws) == [{
-        "type": "sync",
-        "event_type": "queue_updated",
-        "session_id": "sess-1",
-        "data": {"queued_messages": []},
-    }]
+    # Post-pop queue reconcile (now []) broadcast via sync_engine, AFTER the
+    # history frame went out on this socket.
+    assert h.sync.broadcast_queue_updated.await_args.args == ("sess-1", [])
+    assert frames_at_broadcast and "history" in frames_at_broadcast[-1]
+    # class model: no direct sync/queue_updated frame on the origin socket
+    assert _queue_frames(ws) == []
 
 
 async def test_load_session_streaming_uses_live_store_and_skips_drain():
@@ -978,22 +1060,25 @@ async def test_permission_response_invalid_errors():
     h.perm.respond.assert_not_awaited()
 
 
-# ═══ K. get_pending_permissions — PIN the closure's `requests` key ════════════
+# ═══ K. get_pending_permissions — class `pending` + `deferred` shape ══════════
 
 
-async def test_get_pending_permissions_returns_requests_key():
-    """CLOSURE SHAPE (divergence pinned on purpose): the reply carries key
-    ``requests``. The class replies ``pending`` + ``deferred`` — the plan says
-    the class shape wins at flip time; this test forces that change to be a
-    conscious, reviewed edit."""
+async def test_get_pending_permissions_returns_pending_and_deferred():
+    """CONSCIOUS flip edit: the closure replied with key ``requests``; the
+    unified handler replies ``pending`` + ``deferred`` (surfacing deferred
+    requests the closure silently dropped). The pre-flip pin on ``requests``
+    existed exactly to force this change to be a reviewed edit — this is that
+    edit (plan step 5)."""
     with _ClosureHarness() as h:
         h.perm.get_pending_requests.return_value = [{"request_id": "p1", "tool": "Bash"}]
+        h.perm.get_deferred_requests.return_value = [{"request_id": "d1", "tool": "Edit"}]
         ws = await h.run([WATCH, {"type": "get_pending_permissions"}])
 
     assert _frames(ws, "pending_permissions") == [{
         "type": "pending_permissions",
         "session_id": "sess-1",
-        "requests": [{"request_id": "p1", "tool": "Bash"}],
+        "pending": [{"request_id": "p1", "tool": "Bash"}],
+        "deferred": [{"request_id": "d1", "tool": "Edit"}],
     }]
 
 
@@ -1329,7 +1414,7 @@ async def test_unknown_type_is_ignored_and_loop_continues():
     h.sync.register_device.assert_awaited_once()
 
 
-# The parity checklist: every inbound type the closure dispatches today.
+# The parity checklist: every inbound type the pre-flip closure dispatched.
 # The unified handler must cover ALL of these (plus the class-only types:
 # requeue_deferred_permissions, permission_response's "defer" decision).
 CLOSURE_INBOUND_TYPES = [
@@ -1351,31 +1436,40 @@ CLOSURE_INBOUND_TYPES = [
 ]
 
 
-def test_closure_inbound_type_inventory():
-    """FLIP-ADAPT (closure-internal): the closure's dispatch table, in source
-    order. If a branch is added/removed this fails, forcing the parity
+def _bare_handler():
+    """A directly-constructed handler (no I/O) for dispatch-table inventory."""
+    return cwh_mod.ChatWebSocketHandler(
+        websocket=None,  # type: ignore[arg-type]  # headless-style, inventory only
+        device_id="inventory",
+        user_id="admin",
+        api_user_id=None,
+    )
+
+
+def test_unified_handler_inbound_type_inventory():
+    """FLIP-ADAPT (adapted at flip time, per the original pin's instruction):
+    the unified handler's dispatch table must remain a SUPERSET of every
+    inbound type the closure handled, with exactly the known class-only
+    addition. If a type is added/removed this fails, forcing the parity
     checklist above — and the per-type characterization coverage in this
-    file — to be updated in the same commit. At flip time, point this at the
-    unified handler's dispatch (which must be a superset)."""
-    src = inspect.getsource(ws_mod.chat_websocket)
-    dispatched = re.findall(r'msg_type == "(\w+)"', src)
-    assert dispatched == CLOSURE_INBOUND_TYPES
+    file — to be updated in the same commit."""
+    handlers = _bare_handler()._handlers
+    assert set(handlers) >= set(CLOSURE_INBOUND_TYPES)
+    assert set(handlers) - set(CLOSURE_INBOUND_TYPES) == {
+        "requeue_deferred_permissions"
+    }
 
 
-def test_closure_relay_sites_inventory():
-    """FLIP-ADAPT (closure-internal): exactly six msg types consult
-    is_remote_session (the cloud/cluster relay sites the class is missing).
-    Guards against a relay branch being added/dropped without the parity
-    plan noticing."""
-    src = inspect.getsource(ws_mod.chat_websocket)
+def test_unified_handler_relay_sites_inventory():
+    """FLIP-ADAPT (adapted at flip time): exactly six msg types consult
+    is_remote_session — the cloud/cluster relay sites ported into the class
+    in step 4. Guards against a relay branch being added/dropped without the
+    parity plan noticing."""
+    handlers = _bare_handler()._handlers
     relayed = {
-        name
-        for name, body in re.findall(
-            r'(?:el)?if msg_type == "(\w+)":(.*?)(?=\n\s+elif msg_type ==|\Z)',
-            src,
-            re.S,
-        )
-        if "is_remote_session" in body
+        msg_type
+        for msg_type, method in handlers.items()
+        if "is_remote_session" in inspect.getsource(method)
     }
     assert relayed == {
         "query",

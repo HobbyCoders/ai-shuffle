@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 
 from tests.api.test_ws_pending_questions_relay import (
@@ -49,7 +50,11 @@ def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_
 
     stack.enter_context(patch.object(ws_mod, "ping_loop", new=_noop_ping))
 
+    # Post-flip (STEP 5): the route is a shim over ChatWebSocketHandler, which
+    # resolves collaborators from cwh module globals — mirror the SAME mock
+    # objects into both namespaces.
     sync = stack.enter_context(patch.object(ws_mod, "sync_engine"))
+    stack.enter_context(patch.object(cwh, "sync_engine", new=sync))
     sync.register_user_device = AsyncMock()
     sync.unregister_user_device = AsyncMock()
     sync.register_device = AsyncMock()
@@ -60,15 +65,18 @@ def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_
     sync._connections = {}
 
     store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
+    stack.enter_context(patch.object(cwh, "live_session_store", new=store))
     store.get_session = MagicMock(return_value=None)
     store.has_session = MagicMock(return_value=False)
     store.is_streaming = MagicMock(return_value=False)
     store.cleanup_session = AsyncMock()
 
     uqh = stack.enter_context(patch.object(ws_mod, "user_question_handler"))
+    stack.enter_context(patch.object(cwh, "user_question_handler", new=uqh))
     uqh.respond = respond_mock or AsyncMock(return_value=True)
 
     db = stack.enter_context(patch.object(ws_mod, "database"))
+    stack.enter_context(patch.object(cwh, "database", new=db))
     db.get_session = MagicMock(return_value=_REMOTE_SESSION)
     db.get_queued_messages = MagicMock(return_value=[])
 
@@ -78,7 +86,9 @@ def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_
         except Exception:
             return None
 
-    stack.enter_context(patch.object(ws_mod, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+    _run_sync = AsyncMock(side_effect=_fake_run_sync)
+    stack.enter_context(patch.object(ws_mod, "run_sync", new=_run_sync))
+    stack.enter_context(patch.object(cwh, "run_sync", new=_run_sync))
     stack.enter_context(patch.object(ws_mod, "cleanup_session_handlers", new=AsyncMock()))
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new={}))
     stack.enter_context(patch.object(ws_mod, "_active_sessions_lock", new=asyncio.Lock()))

@@ -485,7 +485,11 @@ async def test_closure_query_busy_enqueues_and_never_cancels_live_turn():
             stack.enter_context(patch.object(ws_mod, "ping_loop", new=_noop_ping))
             stack.enter_context(patch.object(ws_mod.asyncio, "create_task", new=created))
 
+            # Post-flip: the route is a shim over ChatWebSocketHandler, which
+            # resolves collaborators from cwh module globals — mirror the SAME
+            # mock objects into both namespaces.
             sync = stack.enter_context(patch.object(ws_mod, "sync_engine"))
+            stack.enter_context(patch.object(cwh, "sync_engine", new=sync))
             sync.register_user_device = AsyncMock()
             sync.unregister_user_device = AsyncMock()
             sync.register_device = AsyncMock()
@@ -497,12 +501,14 @@ async def test_closure_query_busy_enqueues_and_never_cancels_live_turn():
             sync.get_device_count = MagicMock(return_value=1)
 
             store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
+            stack.enter_context(patch.object(cwh, "live_session_store", new=store))
             store.get_session = MagicMock(return_value=None)
             store.has_session = MagicMock(return_value=False)
             store.is_streaming = MagicMock(return_value=False)
             store.cleanup_session = AsyncMock()
 
             db = stack.enter_context(patch.object(ws_mod, "database"))
+            stack.enter_context(patch.object(cwh, "database", new=db))
             db.get_session = MagicMock(return_value={"sdk_session_id": None, "title": "x"})
             db.get_queued_messages = MagicMock(return_value=[{"id": "q1", "content": "second message mid-turn"}])
             db.pop_next_queued_message = MagicMock(return_value=None)
@@ -510,14 +516,20 @@ async def test_closure_query_busy_enqueues_and_never_cancels_live_turn():
             async def _fake_run_sync(fn, *a, **k):
                 return fn(*a, **k)
 
-            stack.enter_context(patch.object(ws_mod, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+            _run_sync = AsyncMock(side_effect=_fake_run_sync)
+            stack.enter_context(patch.object(ws_mod, "run_sync", new=_run_sync))
+            stack.enter_context(patch.object(cwh, "run_sync", new=_run_sync))
             stack.enter_context(patch.object(ws_mod, "cleanup_session_handlers", new=AsyncMock()))
 
             registry = {"sess-busy": live_task}
+            stopped: set = set()
+            interrupt_pending: set = set()
             stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new=registry))
             stack.enter_context(patch.object(ws_mod, "_active_sessions_lock", new=asyncio.Lock()))
-            stack.enter_context(patch.object(ws_mod, "_stopped_sessions", new=set()))
-            stack.enter_context(patch.object(ws_mod, "_interrupt_pending_sessions", new=set()))
+            stack.enter_context(patch.object(ws_mod, "_stopped_sessions", new=stopped))
+            stack.enter_context(patch.object(cwh, "_stopped_sessions", new=stopped))
+            stack.enter_context(patch.object(ws_mod, "_interrupt_pending_sessions", new=interrupt_pending))
+            stack.enter_context(patch.object(cwh, "_interrupt_pending_sessions", new=interrupt_pending))
             stack.enter_context(patch.object(ws_mod, "_draining_sessions", new=set()))
 
             try:

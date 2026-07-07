@@ -31,6 +31,7 @@ from app.core.project_utils import get_project_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
 from app.api.chat_ws_handler import (
+    ChatWebSocketHandler,
     WebSocketRateLimiter,
     # Shared background-agent park→wake ("unpark") machinery. These live in
     # chat_ws_handler so BOTH the class-based headless handler AND this inline
@@ -146,6 +147,25 @@ async def chat_websocket(
     if not device_id:
         device_id = str(uuid.uuid4())
         logger.debug(f"Generated device_id: {device_id}")
+
+    # ── Phase 6.1 STEP 5 (route flip) ────────────────────────────────────
+    # /ws/chat is now served by the unified ChatWebSocketHandler — the same
+    # class that drives headless (background/automation) sessions — so there
+    # is exactly ONE streaming implementation. Only the accept/auth/device_id
+    # prologue above stays endpoint-side; everything from device registration
+    # through the receive loop and disconnect cleanup lives in handler.run().
+    #
+    # The closure body below this `return` is retained UNREACHABLE for a
+    # one-hop revert (delete these 8 lines) until the live parity gates in
+    # docs/STREAMING_UNIFICATION_PLAN.md pass; step 7 deletes it.
+    handler = ChatWebSocketHandler(
+        websocket=websocket,
+        device_id=device_id,
+        user_id=user_id,
+        api_user_id=api_user_id,
+    )
+    await handler.run()
+    return
 
     # Track if connection is healthy (for detecting silent disconnects during streaming)
     connection_healthy = True
