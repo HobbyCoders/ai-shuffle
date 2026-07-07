@@ -1760,6 +1760,35 @@ class ChatWebSocketHandler:
             is_new=False  # Resuming existing session
         )
 
+        # Recover any messages that were left queued while the session was
+        # idle — e.g. a "Send later" message whose drain was dropped because
+        # the originating socket went away (the user reloaded). Ported from
+        # the /ws/chat closure's drain-on-load (drain_next_queued_if_idle,
+        # log_prefix="load-session"). The closure's helper bails on the
+        # stop/interrupt latches BEFORE popping (and never clears them — a
+        # user Stop survives a reload), so mirror those checks here:
+        # _process_next_queued leaves latch checks to its callers, exactly
+        # like run_query's finally-block fallback. The busy guard lives
+        # inside _process_next_queued itself (check-and-register under
+        # _active_sessions_lock, re-queue at the front if preempted) — the
+        # class's equivalent of the closure's _draining_sessions
+        # reservation — so a load racing a turn start can never double-run
+        # the message. Like the closure's drain, this is deliberately
+        # socket-independent (the drained turn streams via the live store +
+        # sync_engine + polling), so it needs no headless websocket-None
+        # guard; HeadlessChatHandler never issues load_session anyway
+        # (headless_query_runner / cluster relay only reach run_query and
+        # handle_queue_message).
+        if (
+            not is_streaming
+            and session_id not in _interrupt_pending_sessions
+            and session_id not in _stopped_sessions
+        ):
+            try:
+                await self._process_next_queued(session_id)
+            except Exception as exc:
+                logger.warning(f"[Queue] Failed to drain on load_session for {session_id}: {exc}")
+
     # ------------------------------------------------------------------
     # handle_watch_session
     # ------------------------------------------------------------------
