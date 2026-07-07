@@ -520,6 +520,64 @@ async def test_run_query_no_pump_when_no_active_agent_task():
 
 
 @pytest.mark.asyncio
+async def test_run_query_starts_pump_when_bg_launch_completed_before_turn_end():
+    """FIX 1 (the 34-minute stale-UI incident): a background sub-agent whose
+    terminal update was consumed in-stream JUST BEFORE the parent ResultMessage
+    flips its registry entry to completed via ``complete_task``. At turn end
+    ``get_active_background_work`` is therefore EMPTY — but the task's terminal
+    TaskNotificationMessage may still be buffered on the pooled client and arrive
+    LATER, needing the pump to read it and unpark. The pump-start gate must
+    therefore ALSO fire when a background launch was RECORDED this session
+    (``get_background_launches`` non-empty), even though nothing is still running.
+
+    Before the fix the gate keyed on ``get_active_background_work`` alone, saw [],
+    and started no pump → the buffered notification was never read → the parent
+    never unparked → the UI went stale forever."""
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+
+    events = [
+        {"type": "task_started", "task_id": "task-1", "description": "bg work"},
+        {"type": "done", "session_id": "sess-1", "metadata": {}},
+    ]
+
+    # The SDK started a background agent this turn AND recorded the parent's
+    # run_in_background launch, THEN its terminal update completed the task
+    # in-stream just before the ResultMessage — so at turn end the running-only
+    # view is empty but the durable background-launch set is not.
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+    task_registry.complete_task("sess-1", "task-1", "completed")
+    assert task_registry.get_active_background_work("sess-1") == []
+    assert task_registry.get_background_launches("sess-1")  # non-empty
+
+    with _run_query_patches(handler, _fake_stream(events)):
+        await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    handler._start_drain_pump.assert_called_once()
+    assert handler._start_drain_pump.call_args.args[0] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_run_query_no_pump_when_no_bg_launches_recorded():
+    """FIX 1 guard: the broadened gate must NOT fire on a plain turn that never
+    launched any background work (no active bg work AND no recorded launches) —
+    otherwise every ordinary turn would leak an idle pump."""
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+
+    events = [{"type": "done", "session_id": "sess-1", "metadata": {}}]
+
+    assert task_registry.get_active_background_work("sess-1") == []
+    assert not task_registry.get_background_launches("sess-1")
+
+    with _run_query_patches(handler, _fake_stream(events)):
+        await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    handler._start_drain_pump.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_query_calls_stop_drain_pump_at_start():
     """Every turn cancels any between-turns pump before reading the client."""
     handler = _make_handler()

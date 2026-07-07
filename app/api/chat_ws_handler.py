@@ -53,14 +53,15 @@ def _log_unpark_decision(
     started_this_turn: Any,
     decision: str,
 ) -> None:
-    """STREAM_DEBUG-gated trace of a single unpark decision.
+    """INFO-level trace of a single unpark decision.
 
-    No-op (just a bool check) unless STREAM_DEBUG/AIHUB_DEBUG_STREAM is set, so it
-    is safe to call on the hot streaming path. ``path`` is "in-stream" or "pump";
-    ``decision`` is a short verb ("stash"/"suppress-orphan"/"deliver"/"dedup"/…).
+    Raised from STREAM_DEBUG to plain INFO (34-min stale-UI incident): on a
+    recurrence the plain logs must show whether the pump reached a terminal task
+    and whether delivery fired ("deliver"/"deliver-killed") vs was suppressed/
+    deduped. These fire once per terminal-task decision (NOT per message/delta), so
+    they are low-frequency and safe to keep at INFO. ``path`` is "in-stream" or
+    "pump"; ``decision`` is a short verb ("stash"/"suppress-orphan"/"deliver"/…).
     """
-    if not _STREAM_DEBUG:
-        return
     try:
         from app.core.task_registry import task_registry
 
@@ -69,7 +70,7 @@ def _log_unpark_decision(
     except Exception:
         reg_status = None
     logger.info(
-        "[STREAM_DEBUG] unpark-decision path=%s session=%s task_id=%s status=%s "
+        "unpark-decision path=%s session=%s task_id=%s status=%s "
         "signature=%s started_this_turn=%s registry_status=%s decision=%s",
         path,
         session_id,
@@ -531,13 +532,24 @@ async def _drain_notifications_impl(
         state = get_session_pool().peek(session_id)  # peek = no LRU promote
         if state is None or not state.adapter.is_alive() or state.is_streaming:
             # A turn owns the client, or the client is gone — nothing to drain.
+            logger.info(
+                "Drain pump: no drainable client (state=%s, alive=%s, streaming=%s) "
+                "— exiting without reading [session=%s]",
+                state is not None,
+                bool(state and state.adapter.is_alive()),
+                bool(state and state.is_streaming),
+                session_id,
+            )
             return
 
         client = state.client
         if client is None:
             return
 
-        ctx.debug(logger, "Drain pump: started reading pooled client between turns")
+        logger.info(
+            "Drain pump: started reading pooled client between turns [session=%s]",
+            session_id,
+        )
 
         # Re-dispatch context for SLOW background sub-agent inner activity. The
         # subagent node already lives in the live_session_store (created in-stream
@@ -841,11 +853,21 @@ async def _drain_notifications_impl(
     if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
-            ctx.debug(logger, "Drain pump: session stopped/interrupting — not delivering unpark")
+            logger.info(
+                "Drain pump: session stopped/interrupting — NOT delivering unpark "
+                "(pending=%d dropped) [session=%s]",
+                len(pending),
+                session_id,
+            )
             # Drop the early latch: no follow-up will stream, so a polling client
             # must not be held in park-poll waiting for one.
             task_registry.clear_unpark_pending(session_id)
             return
+        logger.info(
+            "Drain pump: delivering unpark follow-up [pending=%d, session=%s]",
+            len(pending),
+            session_id,
+        )
         await deliver_unpark(
             pending=pending,
             session_id=session_id,
@@ -875,10 +897,15 @@ def _start_drain_pump_impl(
     existing = _drain_pumps.get(session_id)
     if existing is not None and not existing.done():
         # A pump is already running for this session — leave it.
+        logger.info(
+            "Drain pump: already running — not starting a second [session=%s]",
+            session_id,
+        )
         return
     task = asyncio.create_task(drain_coro_factory())
     task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
     _drain_pumps[session_id] = task
+    logger.info("Drain pump: task created [session=%s]", session_id)
 
 
 class WebSocketRateLimiter:
@@ -2889,11 +2916,25 @@ class ChatWebSocketHandler:
                 and not handed_off_to_queued
             ):
                 _active_bg_work = task_registry.get_active_background_work(session_id)
-                if _active_bg_work:
-                    ctx.debug(
-                        logger,
-                        f"Unpark: {len(_active_bg_work)} background task(s) (agent/shell) "
-                        f"still in flight — starting between-turns drain pump",
+                _bg_launches = task_registry.get_background_launches(session_id)
+                # Broadened gate (34-min stale-UI incident fix): start the pump when
+                # there is STILL-RUNNING background work OR when this session recorded
+                # ANY run_in_background launch. A background task whose terminal
+                # TaskUpdatedMessage was consumed in-stream just before the parent
+                # ResultMessage flips its registry entry to completed, so
+                # get_active_background_work sees [] — but its terminal
+                # TaskNotificationMessage may still be buffered on the pooled client
+                # and arrive LATER with nothing reading it. Gating on the durable
+                # launch set too means the pump is there to catch it. Starting a pump
+                # that never receives a message is safe: it blocks on the pooled
+                # client and is cancelled by stop_drain_pump at the next turn.
+                if _active_bg_work or _bg_launches:
+                    logger.info(
+                        "Unpark: %d active background task(s), %d recorded launch(es) "
+                        "— starting between-turns drain pump [session=%s]",
+                        len(_active_bg_work),
+                        len(_bg_launches),
+                        session_id,
                     )
                     self._start_drain_pump(session_id, profile_id, project_id, worktree_id)
 
@@ -3010,11 +3051,15 @@ class ChatWebSocketHandler:
                 and session_id not in _interrupt_pending_sessions
             ):
                 _active_bg_work = task_registry.get_active_background_work(session_id)
-                if _active_bg_work:
-                    ctx.debug(
-                        logger,
-                        f"Unpark (error path): {len(_active_bg_work)} background task(s) "
-                        f"(agent/shell) still in flight — starting between-turns drain pump",
+                _bg_launches = task_registry.get_background_launches(session_id)
+                # Broadened gate — mirror of the success path (see that comment).
+                if _active_bg_work or _bg_launches:
+                    logger.info(
+                        "Unpark (error path): %d active background task(s), %d recorded "
+                        "launch(es) — starting between-turns drain pump [session=%s]",
+                        len(_active_bg_work),
+                        len(_bg_launches),
+                        session_id,
                     )
                     self._start_drain_pump(session_id, profile_id, project_id, worktree_id)
 
