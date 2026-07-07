@@ -181,6 +181,36 @@ class TestCompactionBoundary:
         # must have replaced it.
         assert session.full_refresh_reason == "discard"
 
+    async def test_discard_reaches_late_pollers_after_flag_consumed(self, store):
+        """The one-shot flag is consumed by whichever device polls first. A
+        SECOND poller whose since_update_id predates the discard must still
+        get a destructive full snapshot without the discarded prompt (via the
+        durable trim marker), not a delta that never mentions the removal."""
+        await store.start_streaming(
+            "s1",
+            initial_messages=[
+                {"id": "h1", "role": "user", "content": "Hello"},
+                {"id": "h2", "role": "assistant", "type": "text", "content": "Hi!"},
+            ],
+        )
+        pre_discard_id = store.get_session("s1").last_update_id
+        await store.add_user_message("s1", "stopped prompt", "u-stopped")
+        await store.end_streaming("s1", interrupted=True)
+        assert await store.discard_empty_user_turn("s1") == "stopped prompt"
+
+        # Device A consumes the one-shot flag.
+        first = store.get_session_since("s1", pre_discard_id)
+        assert first["initial_message_count"] == 0
+        assert first["full_refresh_reason"] in ("discard", "rewind")
+
+        # Device B polls later with pre-discard knowledge: must get the
+        # authoritative destructive snapshot, not a delta.
+        second = store.get_session_since("s1", pre_discard_id)
+        assert second is not None
+        assert second["initial_message_count"] == 0
+        assert second["full_refresh_reason"] in ("discard", "rewind")
+        assert all(m["id"] != "u-stopped" for m in second["messages"])
+
     async def test_destructive_reason_not_downgraded_by_turn_end(self, store_with_history):
         """A pending DESTRUCTIVE reason survives a completeness raiser: rewind
         mid-turn followed by end_streaming (before any poll consumed the flag)

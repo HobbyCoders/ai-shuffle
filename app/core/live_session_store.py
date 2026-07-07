@@ -1899,6 +1899,12 @@ class LiveSessionStore:
             # resurrect the discarded message).
             session.flag_full_refresh("discard")
             self._increment_update_id(session)
+            # Durable marker, mirroring truncate_after_uuid: the one-shot flag is
+            # consumed by whichever device polls first, so a second poller with
+            # pre-discard knowledge would delta-merge and keep the removed prompt.
+            # Late pollers get the trim branch's "rewind" snapshot — a different
+            # label but the same destructive (take-verbatim) client handling.
+            session.trim_update_id = session.last_update_id
             logger.info(
                 f"Discarded empty interrupted user turn for session {session_id} "
                 f"(no assistant output before stop)"
