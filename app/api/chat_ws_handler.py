@@ -104,6 +104,51 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 # (see message-sender.ts).
 _INTERRUPT_DRAIN_TIMEOUT_SECONDS = 8.0
 
+# How long ``handle_stop`` waits after a soft interrupt() before force-cancelling
+# the streaming task (the "SDK didn't stop" safety net). Module-level so the
+# escalation-eviction tests can shrink it.
+_STOP_SAFETY_TIMEOUT_SECONDS = 10.0
+
+
+def _should_evict_after_escalation(session_id: str) -> bool:
+    """Decide whether an interrupt-escalation force-cancel should ALSO evict the
+    pooled client (``remove_broken`` → SIGTERM of the subprocess).
+
+    Interrupt escalation (the stop-safety timer and the drain-timeout branch)
+    force-cancels the wedged parent turn. The bare ``task.cancel()`` is harmless:
+    the streaming generator swallows CancelledError and keeps a connected client
+    pooled — it does NOT touch the subprocess. Only ``remove_broken`` reaches
+    SDK close() → SIGTERM, which kills EVERY background sub-agent/shell parented
+    to that one CLI subprocess (invariant documented at session_pool.py:965-985).
+
+    So escalation must NEVER trade live background work for eviction of a healthy
+    client. We evict only when it is actually safe/necessary:
+
+    * If there is live background work AND the subprocess is still alive, KEEP the
+      client. The turn was cancelled but the CLI is fine and its children are
+      running; the send-now "Fatal error in message reader" crash it guards
+      against is a *next-query* hazard — if the client is genuinely wedged, that
+      next query's error path will evict it, at which point eviction is justified.
+    * If the subprocess is DEAD, evict regardless — the background children are
+      already gone, and a broken client must not stay pooled (preserves the
+      send-now crash fix: a genuinely broken client is never reused).
+    * With no live background work, keep the original behavior: evict.
+    """
+    from app.core.task_registry import task_registry
+    from app.core.session_pool import get_session_pool, is_subprocess_alive
+
+    if not task_registry.has_active_background_work(session_id):
+        return True  # no children to protect — original eviction behavior
+
+    state = get_session_pool().peek(session_id)
+    if state is None:
+        return True  # already gone from the pool — nothing to protect
+
+    # Live background work: only evict (killing the children) if the subprocess
+    # is already dead. A dead subprocess means the children are gone anyway and
+    # the broken entry must not be reused.
+    return not is_subprocess_alive(state)
+
 # Statuses for which a TaskUpdatedMessage-ALONE should UNPARK the parent in the
 # drain pump. Deliberately ONLY the notification-less terminals: a TaskStop emits
 # "killed" (and "stopped" defensively) via a TaskUpdatedMessage with NO following
@@ -1453,11 +1498,11 @@ class ChatWebSocketHandler:
             interrupted = await interrupt_session(session_id)
             logger.debug(f"Interrupt session {session_id}: {interrupted}")
 
-            # Safety timeout: force-cancel if SDK doesn't stop within 10s
+            # Safety timeout: force-cancel if SDK doesn't stop within the budget.
             async with _active_sessions_lock:
                 task = _active_chat_sessions.get(session_id)
             if task and not task.done():
-                    async def _safety_cancel(t, sid, timeout=10.0):
+                    async def _safety_cancel(t, sid, timeout=_STOP_SAFETY_TIMEOUT_SECONDS):
                         try:
                             await asyncio.sleep(timeout)
                             if not t.done():
@@ -1469,9 +1514,14 @@ class ChatWebSocketHandler:
                                     pass
                                 # Same broken-client hazard as interrupt_for_query:
                                 # the CLI never honored the interrupt, so the next
-                                # message must not reuse this pooled client.
-                                from app.core.session_pool import get_session_pool
-                                await get_session_pool().remove_broken(sid)
+                                # message must not reuse this pooled client — UNLESS
+                                # live background work is parented to a still-alive
+                                # subprocess. remove_broken → SIGTERM would kill
+                                # every sub-agent/shell child; never trade live
+                                # background work for eviction of a healthy client.
+                                if _should_evict_after_escalation(sid):
+                                    from app.core.session_pool import get_session_pool
+                                    await get_session_pool().remove_broken(sid)
                         except asyncio.CancelledError:
                             pass
                     _t = asyncio.create_task(_safety_cancel(task, session_id))
@@ -1550,9 +1600,15 @@ class ChatWebSocketHandler:
                     # thinking). The stream's finally keeps connected clients
                     # pooled, so without eviction the follow-up query would
                     # write into a busy subprocess and kill it ("Fatal error
-                    # in message reader"), stopping the session dead.
-                    from app.core.session_pool import get_session_pool
-                    await get_session_pool().remove_broken(session_id)
+                    # in message reader"), stopping the session dead. BUT if
+                    # live background work is parented to a still-alive
+                    # subprocess, remove_broken → SIGTERM would kill every
+                    # sub-agent/shell child; never trade live background work
+                    # for eviction of a healthy client. A truly wedged client
+                    # is evicted by the next query's error path instead.
+                    if _should_evict_after_escalation(session_id):
+                        from app.core.session_pool import get_session_pool
+                        await get_session_pool().remove_broken(session_id)
 
             # Step 3: Confirm to frontend — safe to send the query now
             await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
