@@ -86,12 +86,14 @@ class TestSettingsDefaults:
         """Path settings should default to None before model_post_init."""
         # The deployment env exports DATABASE_URL; clear it so the class-level
         # default (None) is what this test exercises rather than the leaked value.
+        # _env_file=None also blocks pydantic-settings from re-reading a repo-root
+        # .env — popping the env var alone is not hermetic.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DATABASE_URL", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
-                    settings = Settings()
+                    settings = Settings(_env_file=None)
 
                     # After initialization, paths should be set by model_post_init
                     assert settings.data_dir == Path("/mock/data")
@@ -296,12 +298,14 @@ class TestDatabasePaths:
     def test_get_database_url_requires_configuration(self):
         """get_database_url raises when unset: the app is Postgres-only (no SQLite fallback)."""
         # Clear the deployment-leaked DATABASE_URL so the unconfigured path runs.
+        # _env_file=None also blocks pydantic-settings from re-reading a repo-root
+        # .env — popping the env var alone is not hermetic.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DATABASE_URL", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
-                    settings = Settings()
+                    settings = Settings(_env_file=None)
 
                     assert settings.database_url is None
                     with pytest.raises(ValueError, match="DATABASE_URL"):
