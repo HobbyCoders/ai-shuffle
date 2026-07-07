@@ -44,16 +44,34 @@ logger = logging.getLogger(__name__)
 # the exactly-one-candidate rule is what actually guards against mis-linking.
 DEFAULT_WINDOW_SECONDS = 120
 
+# A session is only a heal candidate once it is at least this old. A genuinely
+# orphaned session was left NULL by a crash that already happened, so it will
+# always be older than this floor by the time a sweep runs; a session that is
+# merely mid-FIRST-turn (init landed ~1s ago, end-of-turn persist not reached
+# yet) is younger. Without this floor the reconciler "heals" healthy running
+# sessions — and because the timing heuristic can match the SAME live transcript
+# to two young sessions created seconds apart, it double-relinks them to one
+# sdk_session_id. PR #477's init-time early link starves this for the app's own
+# query paths; the floor + in-sweep/DB uniqueness below defend the reconciler
+# itself.
+MIN_SESSION_AGE_SECONDS = 60
+
 
 def find_orphan_candidates(
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     max_age_days: Optional[int] = None,
+    min_age_seconds: int = MIN_SESSION_AGE_SECONDS,
 ) -> List[Dict[str, Any]]:
     """Return one record per NULL-link session describing its match status.
 
     Each record: {session_id, created_at, confidence, candidates: [...]}.
     ``confidence`` is one of ``"confident"`` (exactly one candidate),
     ``"ambiguous"`` (>1), or ``"none"`` (0). This is read-only.
+
+    Sessions younger than ``min_age_seconds`` are excluded: a NULL link that
+    recent belongs to a session that is still mid-first-turn, not one orphaned
+    by a past crash. Healing it would clobber a live run — and can double-link
+    two young sessions to one live transcript (see ``MIN_SESSION_AGE_SECONDS``).
     """
     results: List[Dict[str, Any]] = []
     with get_db() as conn:
@@ -65,12 +83,18 @@ def find_orphan_candidates(
             age_clause = "AND created_at > now() - (%s || ' days')::interval"
             params.append(str(max_age_days))
 
+        min_age_clause = ""
+        if min_age_seconds and min_age_seconds > 0:
+            min_age_clause = "AND created_at < now() - (%s || ' seconds')::interval"
+            params.append(str(min_age_seconds))
+
         cur.execute(
             f"""
             SELECT id, created_at, status, turn_count, project_id, worktree_id
             FROM sessions
             WHERE sdk_session_id IS NULL
               {age_clause}
+              {min_age_clause}
             ORDER BY created_at DESC
             """,
             params,
@@ -130,11 +154,23 @@ def reconcile_orphaned_sessions(
     Only sessions with exactly one candidate transcript in the window are
     healed. Each heal is logged at ERROR level (recovery implies a prior crash).
     Ambiguous matches are logged at WARNING and left untouched. Safe to call
-    repeatedly; the UPDATE is guarded on ``sdk_session_id IS NULL``.
+    repeatedly; the UPDATE is guarded on ``sdk_session_id IS NULL`` and refuses
+    to assign a transcript that any session already owns (both an in-sweep
+    ``claimed_sdk_ids`` set and a ``NOT EXISTS`` write guard), so it can never
+    double-link two sessions to one ``sdk_session_id``.
     """
     candidates = find_orphan_candidates(window_seconds, max_age_days)
     healed: List[Dict[str, Any]] = []
     ambiguous = 0
+    # sdk_session_ids claimed earlier in THIS sweep. find_orphan_candidates runs
+    # one read pass before any write, so it cannot know that an earlier iteration
+    # already took a transcript: two orphaned sessions created seconds apart can
+    # each list the same lone transcript as their single "confident" candidate.
+    # The per-row ``sdk_session_id IS NULL`` guard protects each TARGET row but
+    # does nothing to stop one transcript being written onto two different rows.
+    # Track claims here and refuse the second — two sessions must never share an
+    # sdk_session_id (it would render the same transcript under both chats).
+    claimed_sdk_ids: set = set()
 
     for rec in candidates:
         if rec["confidence"] == "ambiguous":
@@ -153,24 +189,50 @@ def reconcile_orphaned_sessions(
         sdk_id = cand["session_id"]
         gap = (cand["first_at"] - rec["created_at"]).total_seconds()
 
+        if sdk_id in claimed_sdk_ids:
+            # A transcript already claimed by an earlier session this sweep.
+            # Two sessions matched one transcript — leave this one for manual
+            # review rather than double-link and corrupt both histories.
+            ambiguous += 1
+            logger.warning(
+                "[orphan-reconciler] session %s matched transcript %s which was "
+                "already claimed by another session this sweep — NOT double-"
+                "linking (manual review).",
+                rec["session_id"], sdk_id,
+            )
+            continue
+
         if dry_run:
             logger.info(
                 "[orphan-reconciler] DRY-RUN would heal %s -> %s "
                 "(%d entries, +%.1fs)",
                 rec["session_id"], sdk_id, cand["n"], gap,
             )
+            claimed_sdk_ids.add(sdk_id)
             healed.append({**rec, "sdk_session_id": sdk_id, "entries": cand["n"], "dry_run": True})
             continue
 
         with get_db() as conn:
             cur = get_cursor(conn)
-            # Guard on IS NULL so we never clobber a concurrently-written link.
+            # Two guards, both required:
+            #  - ``id = ... AND sdk_session_id IS NULL`` — never clobber a link
+            #    another writer (a concurrent turn) may have just written.
+            #  - ``NOT EXISTS (... sdk_session_id = %s)`` — never assign a
+            #    transcript that ANOTHER session already owns. This is the
+            #    DB-level twin of the in-sweep ``claimed_sdk_ids`` guard: it also
+            #    stops a concurrent reconcile pass (another process/interval)
+            #    from creating the duplicate we just refused to make in-process.
             cur.execute(
                 "UPDATE sessions SET sdk_session_id = %s "
-                "WHERE id = %s AND sdk_session_id IS NULL",
-                (sdk_id, rec["session_id"]),
+                "WHERE id = %s AND sdk_session_id IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM sessions s3 "
+                "                WHERE s3.sdk_session_id = %s)",
+                (sdk_id, rec["session_id"], sdk_id),
             )
             updated = cur.rowcount
+
+        if updated:
+            claimed_sdk_ids.add(sdk_id)
 
         if updated:
             # ERROR level on purpose: a heal means a session crashed mid-turn and
@@ -187,9 +249,13 @@ def reconcile_orphaned_sessions(
             )
             healed.append({**rec, "sdk_session_id": sdk_id, "entries": cand["n"], "dry_run": False})
         else:
+            # Either the target row was linked by a concurrent turn, or another
+            # session already owns this transcript (the NOT EXISTS guard) — a
+            # concurrent reconcile pass beat us. Both mean "do not double-link".
             logger.info(
-                "[orphan-reconciler] session %s already linked by the time we "
-                "wrote — skipped", rec["session_id"],
+                "[orphan-reconciler] session %s not healed: already linked, or "
+                "transcript %s already owned by another session — skipped",
+                rec["session_id"], sdk_id,
             )
 
     if healed and not dry_run:
