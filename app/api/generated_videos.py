@@ -7,17 +7,16 @@ allowing them to be displayed in the chat UI.
 Videos are stored in 'generated-videos' subdirectories within project
 working directories. The API validates that requested files are within
 allowed workspace paths.
+
+This module is a thin shim over ``app.api.media_serve``; the shared serve
+logic lives there. The symbols below (``settings``, ``is_path_safe``,
+``ALLOWED_EXTENSIONS``, ``MEDIA_TYPES``, ``router`` and the named handlers)
+are preserved for backwards compatibility with importers and tests.
 """
 
-from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from fastapi.responses import FileResponse
-
-from app.core.config import settings
-from app.api.common import is_path_safe
-from app.api.auth import require_auth
-
-router = APIRouter(prefix="/api/generated-videos", tags=["generated-videos"])
+from app.core.config import settings  # noqa: F401  (re-exported; tests patch this)
+from app.api.common import is_path_safe  # noqa: F401  (re-exported for tests)
+from app.api.media_serve import MediaConfig, build_media_module
 
 # Allowed video extensions
 ALLOWED_EXTENSIONS = {'.mp4', '.webm', '.mov', '.avi'}
@@ -27,129 +26,26 @@ MEDIA_TYPES = {
     '.mp4': 'video/mp4',
     '.webm': 'video/webm',
     '.mov': 'video/quicktime',
-    '.avi': 'video/x-msvideo'
+    '.avi': 'video/x-msvideo',
 }
 
+_config = MediaConfig(
+    prefix="/api/generated-videos",
+    tag="generated-videos",
+    directory="generated-videos",
+    allowed_extensions=ALLOWED_EXTENSIONS,
+    media_types=MEDIA_TYPES,
+    default_media_type='video/mp4',
+    list_key="videos",
+    noun="Video",
+    noun_lower="video",
+)
 
-@router.get("/by-path")
-async def get_video_by_path(path: str = Query(..., description="Full path to the video file"), token: str = Depends(require_auth)):
-    """
-    Serve a generated video by its full path.
+# Read this module's own ``settings`` so tests patching
+# ``app.api.generated_videos.settings`` take effect.
+_module = build_media_module(_config, lambda: settings.effective_workspace_dir)
 
-    Security: Only serves video files from within the workspace directory.
-    """
-    file_path = Path(path)
-
-    # Validate extension
-    suffix = file_path.suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type"
-        )
-
-    # Security check: must be within workspace
-    workspace = settings.effective_workspace_dir
-    if not is_path_safe(file_path, workspace):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: file is outside workspace"
-        )
-
-    # Additional check: must be in a 'generated-videos' directory
-    if 'generated-videos' not in file_path.parts:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: not a generated video"
-        )
-
-    # Check file exists
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Video not found"
-        )
-
-    media_type = MEDIA_TYPES.get(suffix, 'video/mp4')
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=file_path.name
-    )
-
-
-@router.get("/{filename}")
-async def get_generated_video(filename: str, token: str = Depends(require_auth)):
-    """
-    Serve a generated video by filename from the default workspace location.
-
-    This is a fallback for simple cases where videos are in the main
-    workspace's generated-videos folder.
-
-    Security: Only serves files from the generated-videos directory,
-    preventing path traversal attacks.
-    """
-    # Sanitize filename - remove any path components
-    safe_filename = Path(filename).name
-
-    # Ensure no path traversal attempts
-    if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-
-    # Only allow video extensions
-    suffix = Path(safe_filename).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type"
-        )
-
-    # Look in default workspace generated-videos directory
-    generated_videos_dir = settings.effective_workspace_dir / "generated-videos"
-    file_path = generated_videos_dir / safe_filename
-
-    # Check if file exists
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Video not found"
-        )
-
-    media_type = MEDIA_TYPES.get(suffix, 'video/mp4')
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=safe_filename
-    )
-
-
-@router.get("/")
-async def list_generated_videos(token: str = Depends(require_auth)):
-    """
-    List generated videos from the default workspace location.
-    For debugging/admin purposes.
-    """
-    generated_videos_dir = settings.effective_workspace_dir / "generated-videos"
-
-    if not generated_videos_dir.exists():
-        return {"videos": []}
-
-    videos = []
-    for f in generated_videos_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-            videos.append({
-                "filename": f.name,
-                "url": f"/api/generated-videos/{f.name}",
-                "size_bytes": f.stat().st_size,
-                "created_at": f.stat().st_ctime
-            })
-
-    # Sort by creation time, newest first
-    videos.sort(key=lambda x: x["created_at"], reverse=True)
-
-    return {"videos": videos}
+router = _module["router"]
+get_video_by_path = _module["by_path"]
+get_generated_video = _module["by_filename"]
+list_generated_videos = _module["list_media"]

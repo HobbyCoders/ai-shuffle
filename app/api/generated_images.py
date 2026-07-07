@@ -8,17 +8,16 @@ in the response (which would exceed context limits).
 Images are stored in 'generated-images' subdirectories within project
 working directories. The API validates that requested files are within
 allowed workspace paths.
+
+This module is a thin shim over ``app.api.media_serve``; the shared serve
+logic lives there. The symbols below (``settings``, ``is_path_safe``,
+``ALLOWED_EXTENSIONS``, ``MEDIA_TYPES``, ``router`` and the named handlers)
+are preserved for backwards compatibility with importers and tests.
 """
 
-from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from fastapi.responses import FileResponse
-
-from app.core.config import settings
-from app.api.common import is_path_safe
-from app.api.auth import require_auth
-
-router = APIRouter(prefix="/api/generated-images", tags=["generated-images"])
+from app.core.config import settings  # noqa: F401  (re-exported; tests patch this)
+from app.api.common import is_path_safe  # noqa: F401  (re-exported for tests)
+from app.api.media_serve import MediaConfig, build_media_module
 
 # Allowed image extensions
 ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
@@ -29,129 +28,26 @@ MEDIA_TYPES = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.gif': 'image/gif',
-    '.webp': 'image/webp'
+    '.webp': 'image/webp',
 }
 
+_config = MediaConfig(
+    prefix="/api/generated-images",
+    tag="generated-images",
+    directory="generated-images",
+    allowed_extensions=ALLOWED_EXTENSIONS,
+    media_types=MEDIA_TYPES,
+    default_media_type='application/octet-stream',
+    list_key="images",
+    noun="Image",
+    noun_lower="image",
+)
 
-@router.get("/by-path")
-async def get_image_by_path(path: str = Query(..., description="Full path to the image file"), token: str = Depends(require_auth)):
-    """
-    Serve a generated image by its full path.
+# Read this module's own ``settings`` so tests patching
+# ``app.api.generated_images.settings`` take effect.
+_module = build_media_module(_config, lambda: settings.effective_workspace_dir)
 
-    Security: Only serves image files from within the workspace directory.
-    """
-    file_path = Path(path)
-
-    # Validate extension
-    suffix = file_path.suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type"
-        )
-
-    # Security check: must be within workspace
-    workspace = settings.effective_workspace_dir
-    if not is_path_safe(file_path, workspace):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: file is outside workspace"
-        )
-
-    # Additional check: must be in a 'generated-images' directory
-    if 'generated-images' not in file_path.parts:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: not a generated image"
-        )
-
-    # Check file exists
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Image not found"
-        )
-
-    media_type = MEDIA_TYPES.get(suffix, 'application/octet-stream')
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=file_path.name
-    )
-
-
-@router.get("/{filename}")
-async def get_generated_image(filename: str, token: str = Depends(require_auth)):
-    """
-    Serve a generated image by filename from the default workspace location.
-
-    This is a fallback for simple cases where images are in the main
-    workspace's generated-images folder.
-
-    Security: Only serves files from the generated-images directory,
-    preventing path traversal attacks.
-    """
-    # Sanitize filename - remove any path components
-    safe_filename = Path(filename).name
-
-    # Ensure no path traversal attempts
-    if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-
-    # Only allow image extensions
-    suffix = Path(safe_filename).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type"
-        )
-
-    # Look in default workspace generated-images directory
-    generated_images_dir = settings.effective_workspace_dir / "generated-images"
-    file_path = generated_images_dir / safe_filename
-
-    # Check if file exists
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Image not found"
-        )
-
-    media_type = MEDIA_TYPES.get(suffix, 'application/octet-stream')
-
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=safe_filename
-    )
-
-
-@router.get("/")
-async def list_generated_images(token: str = Depends(require_auth)):
-    """
-    List generated images from the default workspace location.
-    For debugging/admin purposes.
-    """
-    generated_images_dir = settings.effective_workspace_dir / "generated-images"
-
-    if not generated_images_dir.exists():
-        return {"images": []}
-
-    images = []
-    for f in generated_images_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-            images.append({
-                "filename": f.name,
-                "url": f"/api/generated-images/{f.name}",
-                "size_bytes": f.stat().st_size,
-                "created_at": f.stat().st_ctime
-            })
-
-    # Sort by creation time, newest first
-    images.sort(key=lambda x: x["created_at"], reverse=True)
-
-    return {"images": images}
+router = _module["router"]
+get_image_by_path = _module["by_path"]
+get_generated_image = _module["by_filename"]
+list_generated_images = _module["list_media"]
