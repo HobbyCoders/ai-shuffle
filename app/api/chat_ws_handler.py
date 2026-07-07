@@ -906,6 +906,7 @@ class ChatWebSocketHandler:
             "stop": self.handle_stop,
             "interrupt_for_query": self.handle_interrupt_for_query,
             "load_session": self.handle_load_session,
+            "watch_session": self.handle_watch_session,
             "close_session": self.handle_close_session,
             "permission_response": self.handle_permission_response,
             "get_pending_permissions": self.handle_get_pending_permissions,
@@ -1758,6 +1759,98 @@ class ChatWebSocketHandler:
             device_id=self.device_id,
             is_new=False  # Resuming existing session
         )
+
+    # ------------------------------------------------------------------
+    # handle_watch_session
+    # ------------------------------------------------------------------
+
+    async def handle_watch_session(self, data: dict) -> None:
+        """Handle 'watch_session' — register this device for sync broadcasts.
+
+        Ported verbatim from the live closure (websocket.py, watch_session
+        branch). The frontend sends this on EVERY session switch
+        (session-switcher.ts), so the contract here — including the
+        dead-vs-live duplicate-socket asymmetry — is load-bearing:
+
+        * old socket DEAD  -> replace it (page-refresh recovery)
+        * old socket ALIVE -> skip re-registration (duplicate tab sharing the
+          same device_id; re-registering would evict the live tab and cause a
+          reconnect loop) but STILL bind current_session_id.
+
+        Note the asymmetry vs load_session: load_session REJECTS a duplicate
+        live socket with `session_already_open`; watch_session silently skips.
+        """
+        session_id = data.get("session_id")
+        logger.debug(f"[watch_session] device={self.device_id} session_id={session_id}")
+        if not session_id:
+            return
+
+        # Headless guard (plan step 6): a handler with no websocket must never
+        # register itself as a watcher — sync_engine registration keys on
+        # (device_id, websocket) and a None socket would pollute the watcher
+        # table with an unsendable connection.
+        if self.websocket is None:
+            return
+
+        # Check if this device_id is already registered from a different
+        # WebSocket (e.g., another browser tab sharing localStorage device_id,
+        # or the same device reconnecting after a page refresh).
+        if sync_engine.is_device_watching_session(self.device_id, session_id):
+            existing_conn = sync_engine._connections.get(session_id, {}).get(self.device_id)
+            if existing_conn and existing_conn.websocket is not self.websocket:
+                # Check if the old WS is still alive. If it's dead/closing,
+                # this is a reconnection (e.g., page refresh) — let the new
+                # WS take over. If it's alive, this is likely a duplicate tab
+                # sharing the same device_id — skip to avoid a reconnect loop.
+                old_ws_alive = existing_conn.websocket.client_state == WebSocketState.CONNECTED
+                if old_ws_alive:
+                    logger.debug(
+                        f"Device {self.device_id} already watching session {session_id} "
+                        f"from another live WS, skipping"
+                    )
+                    self.current_session_id = session_id
+                    return
+                else:
+                    logger.debug(
+                        f"Device {self.device_id} reconnecting "
+                        f"(old WS state={existing_conn.websocket.client_state}), replacing"
+                    )
+            # Same WebSocket re-watching — proceed normally
+
+        # Unregister from old session if switching
+        if self.current_session_id and self.current_session_id != session_id:
+            await sync_engine.unregister_device(self.device_id, self.current_session_id)
+
+        await sync_engine.register_device(self.device_id, session_id, self.websocket)
+        self.current_session_id = session_id
+        logger.debug(f"Device {self.device_id} watching session {session_id}")
+
+        # Restore the session's queued messages to this
+        # device. The frontend resets its queue to [] on every
+        # session switch and hydrates session state via HTTP
+        # /live, which does NOT carry queue state (it's
+        # server-side only). Without this, queued messages
+        # vanish from the UI on switch / reconnect even though
+        # they remain in the DB and still fire when the turn
+        # ends. Mirror the queue_updated event emitted by the
+        # queue_message / remove / clear handlers.
+        try:
+            watch_queue = await run_sync(
+                database.get_queued_messages, session_id
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[Queue] Failed to load queued messages for "
+                f"{session_id} on watch: {exc}"
+            )
+            watch_queue = []
+        if watch_queue:
+            await self.send_json({
+                "type": "sync",
+                "event_type": "queue_updated",
+                "session_id": session_id,
+                "data": {"queued_messages": watch_queue},
+            })
 
     # ------------------------------------------------------------------
     # handle_close_session
