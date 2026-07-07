@@ -10,6 +10,7 @@
  * - createStore<T>(): Full store with subscribe/set/update/createDerived
  * - createSubscribers<T>(): Lightweight subscriber machinery only, for stores
  *   that manage their own state (e.g. $state in .svelte.ts files)
+ * - withLoading<S, T>(): Wraps an async operation with loading/error flag management
  */
 
 import { untrack } from 'svelte';
@@ -18,6 +19,52 @@ import { untrack } from 'svelte';
 
 type Subscriber<T> = (value: T) => void;
 type Unsubscribe = () => void;
+
+// ─── withLoading ─────────────────────────────────────────────────────────────
+
+/**
+ * Constraint for states that withLoading can manage.
+ * The state must have `loading: boolean` and `error: string | null`.
+ */
+export type LoadingState = { loading: boolean; error: string | null };
+
+/**
+ * Wraps an async operation with loading/error flag management.
+ *
+ * Sets `loading = true, error = null` before the operation, clears
+ * `loading = false` on success, and sets `loading = false, error = <message>`
+ * on failure — then re-throws so the caller can handle it.
+ *
+ * Usage in a .svelte.ts store:
+ * ```ts
+ * async loadItems(): Promise<Item[]> {
+ *     return withLoading(_update, () => api.getItems(), 'Failed to load items');
+ * }
+ * ```
+ *
+ * @param update  - The store's `_update` function: `(fn: (s: S) => S) => void`
+ * @param operation - The async operation to perform
+ * @param errorMessage - Fallback message string, or a function `(e: unknown) => string`
+ *                       for stores that do custom error extraction
+ */
+export async function withLoading<S extends LoadingState, T>(
+	update: (fn: (s: S) => S) => void,
+	operation: () => Promise<T>,
+	errorMessage: string | ((e: unknown) => string)
+): Promise<T> {
+	update((s) => ({ ...s, loading: true, error: null }));
+	try {
+		const result = await operation();
+		update((s) => ({ ...s, loading: false }));
+		return result;
+	} catch (e) {
+		const error = typeof errorMessage === 'function'
+			? errorMessage(e)
+			: (e instanceof Error ? e.message : errorMessage);
+		update((s) => ({ ...s, error, loading: false }));
+		throw e;
+	}
+}
 
 // ─── createSubscribers ──────────────────────────────────────────────────────
 

@@ -21,7 +21,7 @@ import type {
 	McpScope
 } from '$lib/api/mcp';
 import * as mcpApi from '$lib/api/mcp';
-import { createSubscribers } from './store-utils';
+import { createSubscribers, withLoading } from './store-utils';
 
 // ============================================================================
 // Types
@@ -113,37 +113,21 @@ export const mcp = {
 	 * Load all global MCP servers
 	 */
 	async loadGlobalServers(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const servers = await mcpApi.getGlobalMcpServers();
-			_update((state) => ({ ...state, globalServers: servers, loading: false }));
-		} catch (e) {
-			const error = extractError(e, 'Failed to load global MCP servers');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, globalServers: servers }));
+		}, (e) => extractError(e, 'Failed to load global MCP servers'));
 	},
 
 	/**
 	 * Add a new global MCP server
 	 */
 	async addGlobalServer(config: CreateMcpServerRequest): Promise<McpServerInfo> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const server = await mcpApi.addGlobalMcpServer(config);
-			_update((state) => ({
-				...state,
-				globalServers: [...state.globalServers, server],
-				loading: false
-			}));
+			_update((state) => ({ ...state, globalServers: [...state.globalServers, server] }));
 			return server;
-		} catch (e) {
-			const error = extractError(e, 'Failed to add MCP server');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to add MCP server'));
 	},
 
 	/**
@@ -153,41 +137,27 @@ export const mcp = {
 		serverName: string,
 		config: UpdateMcpServerRequest
 	): Promise<McpServerInfo> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const server = await mcpApi.updateGlobalMcpServer(serverName, config);
 			_update((state) => ({
 				...state,
-				globalServers: state.globalServers.map((s) => (s.name === serverName ? server : s)),
-				loading: false
+				globalServers: state.globalServers.map((s) => (s.name === serverName ? server : s))
 			}));
 			return server;
-		} catch (e) {
-			const error = extractError(e, 'Failed to update MCP server');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to update MCP server'));
 	},
 
 	/**
 	 * Remove a global MCP server
 	 */
 	async removeGlobalServer(serverName: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			await mcpApi.removeGlobalMcpServer(serverName);
 			_update((state) => ({
 				...state,
-				globalServers: state.globalServers.filter((s) => s.name !== serverName),
-				loading: false
+				globalServers: state.globalServers.filter((s) => s.name !== serverName)
 			}));
-		} catch (e) {
-			const error = extractError(e, 'Failed to remove MCP server');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to remove MCP server'));
 	},
 
 	/**
@@ -217,9 +187,8 @@ export const mcp = {
 	 * Load all MCP servers for a project
 	 */
 	async loadProjectServers(projectId: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
-
-		try {
+		_update((state) => ({ ...state, currentProjectId: projectId }));
+		return withLoading(_update, async () => {
 			const response = await mcpApi.getProjectMcpServers(projectId);
 			_update((state) => ({
 				...state,
@@ -228,14 +197,9 @@ export const mcp = {
 					installed: response.installed || [],
 					local: response.local,
 					project: response.project
-				},
-				loading: false
+				}
 			}));
-		} catch (e) {
-			const error = extractError(e, 'Failed to load project MCP servers');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to load project MCP servers'));
 	},
 
 	/**
@@ -245,9 +209,7 @@ export const mcp = {
 		projectId: string,
 		config: CreateProjectMcpServerRequest
 	): Promise<McpServerInfo> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const server = await mcpApi.addProjectMcpServer(projectId, config);
 			_update((state) => {
 				const scope = config.scope as 'installed' | 'local' | 'project';
@@ -256,16 +218,11 @@ export const mcp = {
 					projectServers: {
 						...state.projectServers,
 						[scope]: [...state.projectServers[scope], server]
-					},
-					loading: false
+					}
 				};
 			});
 			return server;
-		} catch (e) {
-			const error = extractError(e, 'Failed to add MCP server');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to add MCP server'));
 	},
 
 	/**
@@ -277,9 +234,7 @@ export const mcp = {
 		config: UpdateMcpServerRequest,
 		scope: 'installed' | 'local' | 'project'
 	): Promise<McpServerInfo> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const server = await mcpApi.updateProjectMcpServer(projectId, serverName, config, scope);
 			_update((state) => ({
 				...state,
@@ -288,15 +243,10 @@ export const mcp = {
 					[scope]: state.projectServers[scope].map((s) =>
 						s.name === serverName ? server : s
 					)
-				},
-				loading: false
+				}
 			}));
 			return server;
-		} catch (e) {
-			const error = extractError(e, 'Failed to update MCP server');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, (e) => extractError(e, 'Failed to update MCP server'));
 	},
 
 	/**
@@ -364,16 +314,10 @@ export const mcp = {
 	 * Load discovered MCP tools
 	 */
 	async loadTools(refresh: boolean = false): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const tools = await mcpApi.getMcpTools(refresh);
-			_update((state) => ({ ...state, tools, loading: false }));
-		} catch (e) {
-			const error = extractError(e, 'Failed to load MCP tools');
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, tools }));
+		}, (e) => extractError(e, 'Failed to load MCP tools'));
 	},
 
 	/**

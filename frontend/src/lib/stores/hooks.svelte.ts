@@ -14,7 +14,7 @@
 
 import type { Hook, HookCreate, HookUpdate, HookTestResult, PluginHookInfo } from '$lib/api/client';
 import * as api from '$lib/api/client';
-import { createSubscribers } from './store-utils';
+import { createSubscribers, withLoading } from './store-utils';
 
 // ============================================================================
 // Types
@@ -79,82 +79,46 @@ export const hooks = {
 	 * Load hooks for a project (includes app-level hooks)
 	 */
 	async loadProjectHooks(projectId: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
-
-		try {
+		_update((state) => ({ ...state, currentProjectId: projectId }));
+		return withLoading(_update, async () => {
 			const hooksData = await api.getProjectHooks(projectId);
-			_update((state) => ({ ...state, hooks: hooksData, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load hooks';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, hooks: hooksData }));
+		}, 'Failed to load hooks');
 	},
 
 	/**
 	 * Load app-level hooks only (no project context)
 	 */
 	async loadAppHooks(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const [appHooksData, pluginHooksData] = await Promise.all([
 				api.getAppHooks(),
 				api.getPluginHooks()
 			]);
-			_update((state) => ({
-				...state,
-				hooks: appHooksData,
-				pluginHooks: pluginHooksData,
-				loading: false
-			}));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load app hooks';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, hooks: appHooksData, pluginHooks: pluginHooksData }));
+		}, 'Failed to load app hooks');
 	},
 
 	/**
 	 * Create a new project-scoped hook
 	 */
 	async createHook(projectId: string, data: HookCreate): Promise<Hook> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const hook = await api.createHook(projectId, data);
-			_update((state) => ({
-				...state,
-				hooks: [hook, ...state.hooks],
-				loading: false
-			}));
+			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to create hook';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, 'Failed to create hook');
 	},
 
 	/**
 	 * Create a new app-level hook (no project)
 	 */
 	async createAppHook(data: HookCreate): Promise<Hook> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const hook = await api.createAppHook(data);
-			_update((state) => ({
-				...state,
-				hooks: [hook, ...state.hooks],
-				loading: false
-			}));
+			_update((state) => ({ ...state, hooks: [hook, ...state.hooks] }));
 			return hook;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to create app hook';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, 'Failed to create app hook');
 	},
 
 	/**
@@ -260,30 +224,18 @@ export const hooks = {
 	 * Load all plugin-contributed hooks
 	 */
 	async loadPluginHooks(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const pluginHooks = await api.getPluginHooks();
-			_update((state) => ({ ...state, pluginHooks, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load plugin hooks';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, pluginHooks }));
+		}, 'Failed to load plugin hooks');
 	},
 
 	/**
 	 * Load all hooks (project + app + plugin)
 	 */
 	async loadAll(projectId: string): Promise<void> {
-		_update((state) => ({
-			...state,
-			loading: true,
-			error: null,
-			currentProjectId: projectId
-		}));
-
-		try {
+		_update((state) => ({ ...state, currentProjectId: projectId }));
+		return withLoading(_update, async () => {
 			// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
 			const [hooksData, globalPluginHooks, projectPluginHooks] = await Promise.all([
 				api.getProjectHooks(projectId),
@@ -294,17 +246,8 @@ export const hooks = {
 			// Combine global and project plugin hooks
 			const pluginHooks = [...globalPluginHooks, ...projectPluginHooks];
 
-			_update((state) => ({
-				...state,
-				hooks: hooksData,
-				pluginHooks,
-				loading: false
-			}));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load hooks';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, hooks: hooksData, pluginHooks }));
+		}, 'Failed to load hooks');
 	},
 
 	// ========================================================================

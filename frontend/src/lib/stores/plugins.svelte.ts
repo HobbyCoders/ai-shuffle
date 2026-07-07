@@ -22,7 +22,7 @@ import type {
 	AutoUpdateSettings
 } from '$lib/api/plugins';
 import * as pluginsApi from '$lib/api/plugins';
-import { createSubscribers } from './store-utils';
+import { createSubscribers, withLoading } from './store-utils';
 
 // ============================================================================
 // Types
@@ -99,58 +99,35 @@ export const plugins = {
 	 * Load all marketplaces
 	 */
 	async loadMarketplaces(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const marketplaces = await pluginsApi.getMarketplaces();
-			_update((state) => ({ ...state, marketplaces, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load marketplaces';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, marketplaces }));
+		}, 'Failed to load marketplaces');
 	},
 
 	/**
 	 * Add a new marketplace
 	 */
 	async addMarketplace(url: string, name: string): Promise<MarketplaceInfo> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const marketplace = await pluginsApi.addMarketplace(url, name);
-			_update((state) => ({
-				...state,
-				marketplaces: [...state.marketplaces, marketplace],
-				loading: false
-			}));
+			_update((state) => ({ ...state, marketplaces: [...state.marketplaces, marketplace] }));
 			return marketplace;
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to add marketplace';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, 'Failed to add marketplace');
 	},
 
 	/**
 	 * Remove a marketplace
 	 */
 	async removeMarketplace(marketplaceId: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			await pluginsApi.removeMarketplace(marketplaceId);
 			_update((state) => ({
 				...state,
 				marketplaces: state.marketplaces.filter((m) => m.id !== marketplaceId),
-				available: state.available.filter((p) => p.marketplace !== marketplaceId),
-				loading: false
+				available: state.available.filter((p) => p.marketplace !== marketplaceId)
 			}));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to remove marketplace';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, 'Failed to remove marketplace');
 	},
 
 	/**
@@ -191,41 +168,27 @@ export const plugins = {
 	 * Load all available plugins
 	 */
 	async loadAvailable(marketplace?: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const available = await pluginsApi.getAvailablePlugins(marketplace);
-			_update((state) => ({ ...state, available, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load available plugins';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, available }));
+		}, 'Failed to load available plugins');
 	},
 
 	/**
 	 * Load all installed plugins
 	 */
 	async loadInstalled(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const installed = await pluginsApi.getInstalledPlugins();
-			_update((state) => ({ ...state, installed, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load installed plugins';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, installed }));
+		}, 'Failed to load installed plugins');
 	},
 
 	/**
 	 * Load all data (marketplaces, available, installed)
 	 */
 	async loadAll(): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const [marketplaces, available, installed, fileBasedAgents, updatesAvailable, autoUpdateSettings] = await Promise.all([
 				pluginsApi.getMarketplaces(),
 				pluginsApi.getAvailablePlugins(),
@@ -242,30 +205,19 @@ export const plugins = {
 				installed,
 				fileBasedAgents,
 				updatesAvailable,
-				autoUpdateSettings,
-				loading: false
+				autoUpdateSettings
 			}));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load plugins data';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+		}, 'Failed to load plugins data');
 	},
 
 	/**
 	 * Get plugin details
 	 */
 	async selectPlugin(pluginId: string): Promise<void> {
-		_update((state) => ({ ...state, loading: true, error: null }));
-
-		try {
+		return withLoading(_update, async () => {
 			const selectedPlugin = await pluginsApi.getPluginDetails(pluginId);
-			_update((state) => ({ ...state, selectedPlugin, loading: false }));
-		} catch (e) {
-			const error = e instanceof Error ? e.message : 'Failed to load plugin details';
-			_update((state) => ({ ...state, error, loading: false }));
-			throw e;
-		}
+			_update((state) => ({ ...state, selectedPlugin }));
+		}, 'Failed to load plugin details');
 	},
 
 	/**
