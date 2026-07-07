@@ -233,8 +233,6 @@ def reconcile_orphaned_sessions(
 
         if updated:
             claimed_sdk_ids.add(sdk_id)
-
-        if updated:
             # ERROR level on purpose: a heal means a session crashed mid-turn and
             # was orphaned. Surface it so the operator knows an issue occurred and
             # can investigate the underlying crash (usually an OOM during a
