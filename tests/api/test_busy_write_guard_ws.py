@@ -566,22 +566,21 @@ async def test_closure_query_busy_enqueues_and_never_cancels_live_turn():
 # ═══ 5. Source-level parity — keep the twins aligned ═════════════════════════
 
 
-def test_busy_guard_twins_source_parity():
-    """Both twins must carry the early busy guard AND the late lock-atomic
-    check-and-register; the class handle_query must contain NO bare cancel."""
-    closure_src = inspect.getsource(ws_mod.chat_websocket)
+def test_busy_guard_source_parity():
+    """The unified handler must carry the early busy guard AND the late
+    lock-atomic check-and-register; handle_query must contain NO bare cancel.
+
+    (Phase 6.1 step 7: the legacy inline ``chat_websocket`` closure twin was
+    deleted, so this now guards the single class implementation only.)"""
     hq_src = inspect.getsource(cwh.ChatWebSocketHandler.handle_query)
     pq_src = inspect.getsource(cwh.ChatWebSocketHandler._process_next_queued)
 
     # Early guards.
-    assert "[BusyGuard]" in closure_src
     assert "[BusyGuard]" in hq_src
     # Late lock-atomic check-and-register (never clobber, never cancel).
-    assert "_query_preempted" in closure_src
     assert "preempted = False" in hq_src
     assert "preempted = False" in pq_src
     # The message is never dropped: busy paths enqueue / requeue.
-    assert "add_queued_message" in closure_src
     assert "add_queued_message" in hq_src
     assert "requeue_message_at_front" in pq_src
     # The old kill vector — bare-cancelling the live turn — must stay dead.

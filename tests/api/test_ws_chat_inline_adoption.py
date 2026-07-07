@@ -39,7 +39,6 @@ No Postgres or real SDK client is required — every boundary is mocked.
 
 import asyncio
 import json
-import inspect
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -291,29 +290,13 @@ async def test_existing_session_query_threads_no_token():
 
 
 # ---------------------------------------------------------------------------
-# 4. Source-wiring guards — signature + deferred-drain call site.
-# ---------------------------------------------------------------------------
-
-
-def test_inline_run_query_signature_accepts_request_id():
-    """The inline run_query must accept a ``request_id`` keyword (default None) so
-    ONLY the explicit client query threads a token; every other caller omits it."""
-    src = inspect.getsource(ws_mod.chat_websocket)
-    assert "request_id: Optional[str] = None" in src, (
-        "inline run_query must take request_id: Optional[str] = None"
-    )
-    assert 'request_id = data.get("request_id")' in src
-    assert "request_id=request_id" in src
-
-
-def test_deferred_drain_call_site_passes_no_token():
-    """The queued-message drain (server-initiated, deferred_delivery=True) must NOT
-    thread a request_id — its start frame must stay non-adoptable. Guard the exact
-    call site so a future edit can't leak a token into it."""
-    src = inspect.getsource(ws_mod.chat_websocket)
-    assert "deferred_delivery=True" in src
-    for line in src.splitlines():
-        if "run_query(" in line and "deferred_delivery=True" in line:
-            assert "request_id" not in line, (
-                f"deferred drain call site must not thread a token: {line.strip()}"
-            )
+# 4. Source-wiring guards — REMOVED at Phase 6.1 step 7 (closure deletion).
+#
+# These asserted against ``inspect.getsource(ws_mod.chat_websocket)`` — the
+# legacy inline closure that ``/ws/chat`` used to run. That closure is gone;
+# the route is now a thin shim over ``ChatWebSocketHandler``. The adoption-token
+# signature/omit-when-none contract for the CLASS is covered behaviorally in
+# tests/api/test_chat_ws_adoption.py (run_query start-frame echo,
+# deferred_delivery omits token, existing-session threads no token). The
+# behavioral tests above (1–3) drive the real route through the shim and so
+# exercise the class directly.

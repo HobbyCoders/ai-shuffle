@@ -11,23 +11,26 @@ would complete but the parent never unparked. Every existing unit test exercised
 the headless class, so they all passed while the browser stayed broken.
 
 The fix extracted the machinery into module-level ``*_impl`` functions in
-``chat_ws_handler`` and wired BOTH handlers through them. These tests assert:
+``chat_ws_handler`` and wired the handler through them.
 
-1. BINDING GUARD: ``websocket.py`` references the SAME shared impl objects as
-   ``chat_ws_handler`` — i.e. the live route uses the shared machinery, not a
-   divergent (or absent) copy.
-2. SOURCE-WIRING GUARD: the live ``run_query`` actually invokes the call sites
-   the fix added (the precise thing that was missing) — and does NOT resurrect
-   the deleted post-turn fast-path follow-up (the 2026-07-02 "task messages
-   surface after the session ends" bug: mid-turn completions are the CLI's to
-   deliver; the app only latches them via ``_latch_terminal_notification``).
-3. LATCH CONTRACT: an in-stream terminal notification for a genuine background
+NOTE (Phase 6.1 step 7): ``/ws/chat`` no longer runs a separate inline
+``run_query`` closure — it is a thin shim over ``ChatWebSocketHandler``, the
+sole owner of the unpark machinery. The old BINDING and SOURCE-WIRING guards
+that inspected the inline closure's source were therefore removed (there is no
+second copy left to drift). What remains here is the behavioral contract that
+matters at runtime, driven directly against the shared ``*_impl`` functions:
+
+1. LATCH CONTRACT: an in-stream terminal notification for a genuine background
    task spends the one-unpark-per-task token (``mark_unparked``) so a later
    drain-pump replay of the same completion delivers NOTHING.
-4. SLOW-PATH CONTRACT: a terminal notification arriving on the pooled client
+2. SLOW-PATH CONTRACT: a terminal notification arriving on the pooled client
    AFTER the turn ended is caught by ``_drain_notifications_impl`` and unparks
    the parent via websocket-style collaborators (a ``_deliver_unpark`` closure
    capturing a connection-local ``run_query`` + ``set_query_task``).
+
+Plus a source tripwire that the unified ``run_query`` finally block guards
+cleanup against a successor turn (``superseded_by_successor``) and does not
+resurrect the deleted post-turn fast-path follow-up.
 
 No Postgres or real SDK client is required — every boundary is mocked.
 """
@@ -45,53 +48,26 @@ from app.core.task_registry import task_registry
 from claude_agent_sdk import TaskNotificationMessage
 
 
-SHARED_SYMBOLS = (
-    "_latch_terminal_notification",
-    "_deliver_unpark_impl",
-    "_drain_notifications_impl",
-    "_start_drain_pump_impl",
-)
-
-
 # ---------------------------------------------------------------------------
-# 1. Binding guard — the live route imports the SHARED machinery
-# ---------------------------------------------------------------------------
-
-def test_ws_chat_imports_shared_unpark_machinery():
-    """websocket.py must bind the EXACT impl objects from chat_ws_handler.
-
-    If the live route ever drifts back to a private/absent copy (the original
-    bug), these identities break.
-    """
-    for name in SHARED_SYMBOLS:
-        assert hasattr(ws_mod, name), f"websocket.py missing shared symbol {name}"
-        assert getattr(ws_mod, name) is getattr(cwh, name), (
-            f"websocket.py.{name} is not chat_ws_handler.{name} — the live route "
-            f"is using a divergent copy of the unpark machinery"
-        )
-
-
-# ---------------------------------------------------------------------------
-# 2. Source-wiring guard — the inline run_query invokes the machinery
+# 1. Binding + source-wiring guards for the LIVE inline route — REMOVED at
+#    Phase 6.1 step 7 (closure deletion).
+#
+# ``test_ws_chat_imports_shared_unpark_machinery`` and
+# ``test_ws_chat_run_query_source_wires_unpark`` asserted that the inline
+# ``/ws/chat`` closure bound / called the shared ``*_impl`` unpark machinery.
+# That closure is gone — ``/ws/chat`` is now a thin shim over
+# ``ChatWebSocketHandler``, which owns the ONLY unpark implementation (the
+# machinery is defined in chat_ws_handler itself, so there is no longer a
+# second copy that could drift). The runtime unpark contract is exercised
+# end-to-end by the LATCH and SLOW-path tests below (they drive
+# ``cwh._drain_notifications_impl`` / ``_latch_terminal_notification``
+# directly). The class run_query's pump/latch/stop_drain_pump wiring is
+# additionally pinned by the finally-guard test below.
 # ---------------------------------------------------------------------------
 
-def test_ws_chat_run_query_source_wires_unpark():
-    """The inline /ws/chat run_query must contain the call sites the fix added.
-    This is the precise wiring that was missing (machinery present in the
-    codebase, never called from the live path)."""
-    import inspect
 
-    src = inspect.getsource(ws_mod.chat_websocket)
-    # In-loop latch of terminal notifications (dedup vs the pump).
-    assert "_latch_terminal_notification(" in src
-    # Between-turns drain pump started on completion.
-    assert "_start_drain_pump_impl(" in src
-    # Single-reader invariant: each turn cancels the pump before reading.
-    assert "stop_drain_pump(session_id)" in src
-
-
-def test_ws_chat_run_query_finally_guards_cleanup_against_successor():
-    """Both run_query ``finally`` blocks must NOT cleanup_session() a live
+def test_run_query_finally_guards_cleanup_against_successor():
+    """The unified run_query ``finally`` block must NOT cleanup_session() a live
     session that a SUCCESSOR turn now owns.
 
     THE BUG THIS GUARDS: a turn's finally runs CONCURRENTLY with a successor
@@ -116,17 +92,15 @@ def test_ws_chat_run_query_finally_guards_cleanup_against_successor():
     """
     import inspect
 
-    for src, label in (
-        (inspect.getsource(ws_mod.chat_websocket), "websocket.py inline run_query"),
-        (inspect.getsource(cwh.ChatWebSocketHandler.run_query), "chat_ws_handler.run_query"),
-    ):
-        occurrences = src.count("await superseded_by_successor(session_id)")
-        assert occurrences >= 2, (
-            f"{label}: expected the ownership guard on BOTH finally cleanup "
-            f"heuristics (streaming-never-ended AND no-devices), found "
-            f"{occurrences} — an unguarded cleanup_session() will race the "
-            f"drain pump's unpark follow-up and wipe its live session"
-        )
+    src = inspect.getsource(cwh.ChatWebSocketHandler.run_query)
+    label = "chat_ws_handler.run_query"
+    occurrences = src.count("await superseded_by_successor(session_id)")
+    assert occurrences >= 2, (
+        f"{label}: expected the ownership guard on BOTH finally cleanup "
+        f"heuristics (streaming-never-ended AND no-devices), found "
+        f"{occurrences} — an unguarded cleanup_session() will race the "
+        f"drain pump's unpark follow-up and wipe its live session"
+    )
 
 
 @pytest.mark.asyncio
@@ -168,7 +142,10 @@ def test_post_turn_fast_path_stays_deleted():
     for mod in (cwh, ws_mod):
         assert not hasattr(mod, "_maybe_unpark_followup_impl")
         assert not hasattr(mod, "_stash_terminal_notification")
-    assert "_maybe_unpark_followup" not in inspect.getsource(ws_mod.chat_websocket)
+    # The unified run_query must not resurrect the post-turn fast-path follow-up.
+    assert "_maybe_unpark_followup" not in inspect.getsource(
+        cwh.ChatWebSocketHandler.run_query
+    )
     # The stash's carrier field is gone too.
     assert not hasattr(MutableStreamState(), "pending_task_notifications")
 
