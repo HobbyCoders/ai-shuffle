@@ -1001,6 +1001,72 @@ describe('ws-message-handlers', () => {
 			// Replaced (length 1), not appended (would be 2 → duplicate modal).
 			expect(updated?.length).toBe(1);
 		});
+
+		it('leaves the open permission modal untouched on a stale reply (cluster relay failed)', () => {
+			// Cross-install bug: on every reconnect/session-switch the client resyncs
+			// via get_pending_permissions. If the relay to the owning install fails, the
+			// backend replies `stale: true` with a non-authoritative (empty) list.
+			// Replacing pendingPermissions with it would wipe a locally-open permission
+			// modal. The handler must skip the replace.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [
+				{
+					session_id: 'session-1',
+					request_id: 'perm-open',
+					tool_name: 'Bash',
+					tool_input: { command: 'rm -rf /' },
+				} as never,
+			];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'pending_permissions',
+				session_id: 'session-1',
+				pending: [], // non-authoritative fallback
+				deferred: [],
+				stale: true,
+			});
+
+			// No state write at all — the modal survives.
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('an authoritative empty reply (no marker) STILL clears the permission modal', () => {
+			// The deliberate stale-modal-clearing path: a SUCCESSFUL relay with zero
+			// items omits the marker and must replace (empty out) pendingPermissions.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [
+				{
+					session_id: 'session-1',
+					request_id: 'perm-open',
+					tool_name: 'Bash',
+					tool_input: { command: 'rm -rf /' },
+				} as never,
+			];
+
+			let updatedPerms: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					updatedPerms = result.pendingPermissions as unknown[];
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'pending_permissions',
+				session_id: 'session-1',
+				pending: [], // authoritative empty — no `stale` marker
+				deferred: [],
+			});
+
+			expect(updatedPerms?.length).toBe(0);
+		});
 	});
 
 	describe('pending_questions handler (reconnect replay)', () => {

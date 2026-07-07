@@ -1124,6 +1124,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'pending_permissions': {
 				const pendingSessionId = data.session_id as string | undefined;
+				// A cross-install relay-read failure replies with `stale: true` and a
+				// non-authoritative (local, empty) list. Replacing pendingPermissions /
+				// deferredPermissions with it would wipe an open permission modal on
+				// every reconnect/switch resync. Leave state untouched; a later
+				// authoritative reply (no marker) reconciles. A successful relay, even
+				// with zero items, is authoritative and omits the marker so it flows
+				// through below.
+				if (data.stale === true) {
+					console.debug('[ws] ignoring stale pending_permissions (relay to owner failed)');
+					break;
+				}
 				// Some backends spell the active-queue field `requests`, others
 				// (per SDK 0.1.81 contract) ship it under `pending`. Accept both.
 				const activeRaw =
