@@ -107,8 +107,9 @@ _stopped_sessions: set[str] = set()
 # ``_active_sessions_lock``. Without this reservation there is a TOCTOU
 # window between "the session looks idle" and "the successor task is
 # registered" during which a second drain (or an incoming query) can start
-# a duplicate/competing query for the same session. Consulted by
-# ``drain_next_queued_if_idle`` so only one drain proceeds at a time.
+# a duplicate/competing query for the same session. Claimed/released by
+# ``ChatWebSocketHandler._process_next_queued`` so only one drain proceeds
+# at a time.
 _draining_sessions: set[str] = set()
 
 
