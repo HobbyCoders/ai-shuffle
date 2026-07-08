@@ -1142,3 +1142,283 @@ async def test_detached_interrupt_exception_retrieved_when_caller_cancelled(monk
         "the detached interrupt task's exception must be retrieved by the "
         "creation-time done-callback"
     )
+
+
+# ─── R1: clean stream end while the stale flag is set must recover, not strand ─
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alive,expect_removal", [(True, "remove_broken"), (False, "remove_dead")])
+async def test_pump_clean_stream_end_with_stale_flag_clears_and_evicts(
+    monkeypatch, alive, expect_removal
+):
+    """R1 regression: StopAsyncIteration (the SDK generator ending CLEANLY)
+    while stale_turn_undrained is set used to break out of the read loop and
+    exit the pump WITHOUT clearing the flag or evicting — unlike the read-error
+    path. A finished stream means the killed turn's ResultMessage will NEVER
+    arrive, and with no pump left running the flag strands the pooled entry
+    behind the refuse-on-stale gates forever (rebricked session). The pump must
+    take the same recovery as the error path: clear the flag and evict
+    (remove_broken when the subprocess is alive, remove_dead when gone)."""
+    from app.api import chat_ws_handler as cwh
+
+    session_id = f"clean-end-stale-{alive}"
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+
+    class _EndsImmediatelyClient:
+        async def receive_messages(self):
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+    state = _fresh_state(_EndsImmediatelyClient())
+    if alive:
+        state.adapter.is_alive = MagicMock(return_value=True)
+    else:
+        # Alive at pump STARTUP (a dead-at-startup subprocess never reaches the
+        # read loop), dead by the time the clean stream end is observed — the
+        # subprocess died mid-drain, which is exactly the remove_dead case.
+        _alive_seq = iter([True])
+        state.adapter.is_alive = MagicMock(
+            side_effect=lambda: next(_alive_seq, False)
+        )
+
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+    pool.remove_broken = AsyncMock()
+    pool.remove_dead = AsyncMock()
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="d1", user_id="u1", api_user_id=None
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(return_value=True)
+    handler._process_next_queued = AsyncMock()
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await asyncio.wait_for(
+            handler._drain_notifications(session_id, "claude-code", None, None),
+            timeout=5.0,
+        )
+
+    assert state.stale_turn_undrained is False, (
+        "a cleanly-ended stream can never deliver the owed ResultMessage — "
+        "the pump must clear the flag on exit instead of stranding it"
+    )
+    if expect_removal == "remove_broken":
+        pool.remove_broken.assert_awaited_once_with(session_id)
+        pool.remove_dead.assert_not_awaited()
+    else:
+        pool.remove_dead.assert_awaited_once_with(session_id)
+        pool.remove_broken.assert_not_awaited()
+
+
+# ─── R2: stale peeks must not queue-route a session whose subprocess is DEAD ──
+
+
+@pytest.mark.asyncio
+async def test_query_with_stale_flag_and_dead_subprocess_falls_through(monkeypatch):
+    """R2 regression (handle_query): a dead subprocess can't be "winding down"
+    — no pump will ever clear stale_turn_undrained, so queue-routing leaves the
+    session in queue-limbo until pool idle eviction. The stale peek must be
+    gated on subprocess aliveness: dead ⇒ clear the flag, drop the dead pool
+    entry, and fall through to the normal path (fresh client)."""
+    from app.api import chat_ws_handler as cwh
+    from app.api import websocket as ws_mod
+
+    session_id = "stale-dead-query-falls-through"
+    state = _fake_state(is_streaming=False, stale_turn_undrained=True)
+    state.adapter.is_alive = MagicMock(return_value=False)  # subprocess DEAD
+    pool = _wire_pool(monkeypatch, session_id, state)
+
+    ws_mod._active_chat_sessions.pop(session_id, None)
+
+    handler, _sent = _make_handler(session_id)
+    handler.api_user_id = None
+    queued: list = []
+
+    async def _fake_queue(data):
+        queued.append(data)
+
+    handler.handle_queue_message = _fake_queue
+
+    launched: list = []
+    run_query_done = asyncio.Event()
+
+    async def _fake_run_query(*a, **k):
+        launched.append(a)
+        run_query_done.set()
+
+    handler.run_query = _fake_run_query
+
+    # Stubs for the normal (fall-through) path after the guard.
+    monkeypatch.setattr(cwh.database, "get_session", lambda sid: {"title": "t"})
+    monkeypatch.setattr(cwh.database, "add_session_message", lambda **kw: None)
+    monkeypatch.setattr(cwh.sync_engine, "broadcast_message_added", AsyncMock())
+
+    try:
+        await handler.handle_query({
+            "session_id": session_id,
+            "prompt": "hello after crash",
+            "profile": "claude-code",
+        })
+        await asyncio.wait_for(run_query_done.wait(), timeout=2.0)
+    finally:
+        _t = ws_mod._active_chat_sessions.pop(session_id, None)
+        if _t is not None:
+            try:
+                await asyncio.wait_for(_t, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                _t.cancel()
+
+    assert queued == [], (
+        "a dead-subprocess session must NOT be queue-routed — nothing will "
+        "ever drain the queue (no pump can clear the flag)"
+    )
+    assert len(launched) == 1, "the query must fall through to a normal launch"
+    assert state.stale_turn_undrained is False
+    assert pool.peek(session_id) is None, (
+        "the dead pool entry must be removed so the launch gets a fresh client"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_next_queued_launches_when_stale_flag_but_dead_subprocess(monkeypatch):
+    """R2 regression (_process_next_queued, early peek): with the flag set but
+    the subprocess DEAD, the drain must NOT re-queue-forever — clear the flag,
+    drop the dead entry, and launch the queued message on a fresh client."""
+    from app.api import chat_ws_handler as cwh
+    from app.api import websocket as ws_mod
+
+    session_id = "stale-dead-queue-drain-launches"
+    state = _fake_state(is_streaming=False, stale_turn_undrained=True)
+    state.adapter.is_alive = MagicMock(return_value=False)  # subprocess DEAD
+    pool = _wire_pool(monkeypatch, session_id, state)
+    ws_mod._active_chat_sessions.pop(session_id, None)
+    ws_mod._draining_sessions.discard(session_id)
+
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+
+    popped = {"content": "queued msg", "profile_id": "claude-code", "project_id": None}
+    requeued: list = []
+
+    monkeypatch.setattr(cwh.database, "pop_next_queued_message", lambda sid: dict(popped))
+    monkeypatch.setattr(
+        cwh.database, "requeue_message_at_front",
+        lambda **kw: requeued.append(kw),
+    )
+    monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [])
+    monkeypatch.setattr(cwh.database, "get_session", lambda sid: {"worktree_id": None})
+    monkeypatch.setattr(cwh.sync_engine, "broadcast_queue_updated", AsyncMock())
+
+    launched: list = []
+    run_query_done = asyncio.Event()
+
+    async def _fake_run_query(*a, **k):
+        launched.append(a)
+        run_query_done.set()
+
+    handler, _sent = _make_handler(session_id)
+    handler.run_query = _fake_run_query
+
+    try:
+        await handler._process_next_queued(session_id)
+        await asyncio.wait_for(run_query_done.wait(), timeout=2.0)
+    finally:
+        _t = ws_mod._active_chat_sessions.pop(session_id, None)
+        if _t is not None:
+            try:
+                await asyncio.wait_for(_t, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                _t.cancel()
+
+    assert requeued == [], (
+        "dead subprocess ⇒ nothing is winding down; re-queuing loops forever"
+    )
+    assert len(launched) == 1
+    assert state.stale_turn_undrained is False
+    assert pool.peek(session_id) is None
+
+
+class _LateFlipState:
+    """stale_turn_undrained reads False on the FIRST peek (the early check) and
+    True on every later read until cleared — exercising ONLY the late re-check
+    under the sessions lock."""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.is_connected = True
+        self.is_streaming = False
+        self._reads = 0
+        self._cleared = False
+
+    @property
+    def stale_turn_undrained(self):
+        if self._cleared:
+            return False
+        self._reads += 1
+        return self._reads >= 2
+
+    @stale_turn_undrained.setter
+    def stale_turn_undrained(self, value):
+        if not value:
+            self._cleared = True
+
+
+@pytest.mark.asyncio
+async def test_process_next_queued_late_recheck_launches_when_dead(monkeypatch):
+    """R2 regression (_process_next_queued, late re-check under the lock): a
+    flag that appears between the early peek and the locked re-check, on a DEAD
+    subprocess, must not re-queue — clear the flag and launch (the turn path's
+    reuse gate requires a live subprocess, so it builds a fresh client)."""
+    from app.api import chat_ws_handler as cwh
+    from app.api import websocket as ws_mod
+
+    session_id = "stale-dead-late-recheck-launches"
+    adapter = MagicMock()
+    adapter.is_alive = MagicMock(return_value=False)  # subprocess DEAD
+    state = _LateFlipState(adapter)
+    _wire_pool(monkeypatch, session_id, state)
+    ws_mod._active_chat_sessions.pop(session_id, None)
+    ws_mod._draining_sessions.discard(session_id)
+
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+
+    popped = {"content": "queued msg", "profile_id": "claude-code", "project_id": None}
+    requeued: list = []
+
+    monkeypatch.setattr(cwh.database, "pop_next_queued_message", lambda sid: dict(popped))
+    monkeypatch.setattr(
+        cwh.database, "requeue_message_at_front",
+        lambda **kw: requeued.append(kw),
+    )
+    monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [])
+    monkeypatch.setattr(cwh.database, "get_session", lambda sid: {"worktree_id": None})
+    monkeypatch.setattr(cwh.sync_engine, "broadcast_queue_updated", AsyncMock())
+
+    launched: list = []
+    run_query_done = asyncio.Event()
+
+    async def _fake_run_query(*a, **k):
+        launched.append(a)
+        run_query_done.set()
+
+    handler, _sent = _make_handler(session_id)
+    handler.run_query = _fake_run_query
+
+    try:
+        await handler._process_next_queued(session_id)
+        await asyncio.wait_for(run_query_done.wait(), timeout=2.0)
+    finally:
+        _t = ws_mod._active_chat_sessions.pop(session_id, None)
+        if _t is not None:
+            try:
+                await asyncio.wait_for(_t, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                _t.cancel()
+
+    assert requeued == [], "dead subprocess at the late re-check must not re-queue"
+    assert len(launched) == 1
+    assert state.stale_turn_undrained is False

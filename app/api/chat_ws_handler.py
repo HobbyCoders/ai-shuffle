@@ -714,6 +714,35 @@ async def _drain_notifications_impl(
                 try:
                     message = _fut.result()
                 except StopAsyncIteration:
+                    # R1: the SDK generator ended CLEANLY. If we were winding
+                    # down a force-cancelled turn, the killed turn's terminal
+                    # ResultMessage will now NEVER arrive (the stream is
+                    # finished) — and this pump is exiting, so nothing else can
+                    # clear the flag. Exiting flagged would strand the pooled
+                    # entry behind the refuse-on-stale gates forever (rebricked
+                    # session). Take the same recovery as the read-error path:
+                    # clear the flag and evict (a finished message stream
+                    # cannot serve another turn anyway).
+                    try:
+                        from app.core.session_pool import (
+                            get_session_pool as _gsp,
+                            is_subprocess_alive as _alive,
+                        )
+                        _cs = _gsp().peek(session_id)
+                        if _cs is not None and _cs.stale_turn_undrained:
+                            _cs.stale_turn_undrained = False
+                            logger.warning(
+                                "Drain pump: stream ended before the killed "
+                                "turn's ResultMessage arrived — clearing "
+                                "stale_turn_undrained and evicting the "
+                                "finished client [session=%s]", session_id
+                            )
+                            if _alive(_cs):
+                                await _gsp().remove_broken(session_id)
+                            else:
+                                await _gsp().remove_dead(session_id)
+                    except Exception:
+                        pass
                     break
 
                 # Feed EVERY message into the registry — this is what unfreezes the
@@ -1505,9 +1534,25 @@ class ChatWebSocketHandler:
             # message auto-fires once the drain pump clears the flag.
             _stale = False
             if active_task is None or active_task.done():
-                from app.core.session_pool import get_session_pool
+                from app.core.session_pool import get_session_pool, is_subprocess_alive
                 _peek = get_session_pool().peek(session_id)
-                _stale = bool(_peek is not None and _peek.stale_turn_undrained)
+                if _peek is not None and _peek.stale_turn_undrained:
+                    if is_subprocess_alive(_peek):
+                        _stale = True
+                    else:
+                        # R2: a DEAD subprocess can't be "winding down" — no
+                        # pump will ever clear the flag, so queue-routing here
+                        # would sit in queue-limbo until pool idle eviction.
+                        # Clear the flag, drop the dead entry, and fall through
+                        # to the normal path (which builds a fresh client).
+                        _peek.stale_turn_undrained = False
+                        await get_session_pool().remove_dead(session_id)
+                        logger.warning(
+                            f"[BusyGuard] session {session_id} carried "
+                            f"stale_turn_undrained on a DEAD subprocess — "
+                            f"cleared flag, removed dead pool entry, "
+                            f"proceeding with a fresh client"
+                        )
             if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
                     f"[BusyGuard] query for session {session_id} arrived while "
@@ -2833,9 +2878,25 @@ class ChatWebSocketHandler:
             # CLI. The drain pump re-kicks this drain once it clears the flag.
             _stale = False
             if active_task is None or active_task.done():
-                from app.core.session_pool import get_session_pool
+                from app.core.session_pool import get_session_pool, is_subprocess_alive
                 _peek = get_session_pool().peek(session_id)
-                _stale = bool(_peek is not None and _peek.stale_turn_undrained)
+                if _peek is not None and _peek.stale_turn_undrained:
+                    if is_subprocess_alive(_peek):
+                        _stale = True
+                    else:
+                        # R2: DEAD subprocess ⇒ nothing is winding down and no
+                        # pump will ever clear the flag — re-queuing would loop
+                        # forever (queue-limbo until idle eviction). Clear the
+                        # flag, drop the dead entry, and launch on a fresh
+                        # client.
+                        _peek.stale_turn_undrained = False
+                        await get_session_pool().remove_dead(session_id)
+                        logger.warning(
+                            f"[Queue] session {session_id} carried "
+                            f"stale_turn_undrained on a DEAD subprocess — "
+                            f"cleared flag, removed dead pool entry, "
+                            f"launching queued message on a fresh client"
+                        )
             if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
                     f"[Queue] Session {session_id} is "
@@ -2886,11 +2947,28 @@ class ChatWebSocketHandler:
                         # flagged winding-down (interrupt escalation) during the
                         # awaits above. Launching now would cross the buffered stale
                         # ResultMessage — re-queue and let the drain pump re-kick.
-                        from app.core.session_pool import get_session_pool
+                        # R2: only a LIVE subprocess can be winding down. On a dead
+                        # one no pump will ever clear the flag (re-queue loops
+                        # forever) — clear it and launch normally; the turn path's
+                        # reuse gate requires a live subprocess, so it builds a
+                        # fresh client (no pool await under this lock).
+                        from app.core.session_pool import get_session_pool, is_subprocess_alive
                         _peek = get_session_pool().peek(session_id)
-                        if _peek is not None and _peek.stale_turn_undrained:
+                        if (
+                            _peek is not None
+                            and _peek.stale_turn_undrained
+                            and is_subprocess_alive(_peek)
+                        ):
                             stale = True
                         else:
+                            if _peek is not None and _peek.stale_turn_undrained:
+                                _peek.stale_turn_undrained = False
+                                logger.warning(
+                                    f"[Queue] session {session_id} carried "
+                                    f"stale_turn_undrained on a DEAD subprocess at "
+                                    f"the late re-check — cleared flag, launching "
+                                    f"on a fresh client"
+                                )
                             task = asyncio.create_task(
                                 self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
                             )
