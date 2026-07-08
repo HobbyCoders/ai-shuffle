@@ -78,15 +78,6 @@ if not root_logger.handlers:
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
 
-# Persistent, crash-surviving on-disk logging: attach a RotatingFileHandler to
-# the root logger + enable faulthandler + a logging excepthook so a crash leaves
-# a post-mortem trail under <data_dir>/logs (durable volume). Additive only —
-# does not touch the ring buffer (app/api/logs.py) or the error_log DB handler.
-# Idempotent and never raises, so it is safe at import time. See
-# app/core/file_logging.py.
-from app.core.file_logging import setup_file_logging, log_startup_banner
-setup_file_logging()
-
 logger = logging.getLogger(__name__)
 
 # Filter out noisy WebSocket connection logs from uvicorn
@@ -137,12 +128,21 @@ async def lifespan(app: FastAPI):
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
 
-    # Persistent-log startup banner (pid/version/instance_id) so restart
-    # boundaries — and the LAST line before a crash — are obvious on disk. Also
-    # route unhandled asyncio-loop exceptions to the file/error_log now that a
-    # running loop exists.
+    # Persistent, crash-surviving on-disk logging: attach a RotatingFileHandler
+    # to the root logger + enable faulthandler + a logging excepthook so a crash
+    # leaves a post-mortem trail under <data_dir>/logs/<instance_id> (durable
+    # volume). Runs HERE, not at import time — a bare `import app.main` (e.g.
+    # pytest collection with the real settings singleton) must never create the
+    # log dir or truncate a previous crash's fatal.log. Additive only — does not
+    # touch the ring buffer (app/api/logs.py) or the error_log DB handler.
+    # Then the startup banner (pid/version/instance_id) so restart boundaries —
+    # and the LAST line before a crash — are obvious on disk, and the asyncio
+    # loop exception handler now that a running loop exists.
+    from app.core.file_logging import (
+        setup_file_logging, log_startup_banner, install_asyncio_exception_handler,
+    )
+    setup_file_logging()
     log_startup_banner()
-    from app.core.file_logging import install_asyncio_exception_handler
     install_asyncio_exception_handler()
 
     logger.info("=" * 60)
@@ -162,8 +162,8 @@ async def lifespan(app: FastAPI):
     from app.core.error_log_handler import install_error_log_handler
     install_error_log_handler()
     # Now the DB handler is attached, persist any pending "previous run crashed"
-    # fatal.log warning to error_log too (the import-time boot-check couldn't —
-    # no DB pool yet).
+    # fatal.log warning to error_log too (the boot-check above ran before the
+    # DB pool existed, so its WARNING couldn't reach error_log then).
     from app.core.file_logging import emit_pending_fatal_warning
     emit_pending_fatal_warning()
 

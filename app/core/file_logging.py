@@ -27,15 +27,31 @@ DB handler:
 4. A startup banner + boot-check that rotates aside any fatal trace left by a
    previous run so each crash's trace is preserved exactly one generation.
 
-The log directory lives under the durable data dir (``/data/logs`` in Docker,
-which is the ``ai-shuffle-data`` named volume; ``%USERPROFILE%\\.ai-shuffle\\logs``
-on a native Windows install), so it survives both an app crash and a container
-recreation. All paths use ``pathlib`` (Windows-safe).
+Layout — the log directory lives under the durable data dir, namespaced PER
+INSTANCE so multiple installs sharing one data dir never fight over rotation
+(two processes rotating the same app.log — or truncating each other's
+fatal.log — would corrupt both, and Windows raises on rename-while-open)::
+
+    <data_dir>/logs/<instance_id>/app.log        (+ .1 .. .N rotations)
+    <data_dir>/logs/<instance_id>/fatal.log      (faulthandler target)
+    <data_dir>/logs/<instance_id>/fatal.log.prev (previous crash's trace)
+
+``<data_dir>`` is ``/data`` in Docker (the ``ai-shuffle-data`` named volume,
+durable across container recreation) and ``%USERPROFILE%\\.ai-shuffle`` on a
+native Windows install. All paths use ``pathlib`` (Windows-safe).
+
+Setup runs from the lifespan startup, NOT at import time: importing
+``app.main`` must never create directories or truncate a previous crash's
+``fatal.log`` — pytest collection imports the module with the REAL settings
+singleton, and a test run destroying a genuine production crash trace is
+exactly the failure mode this module exists to prevent. The ``TESTING=1`` env
+guard in ``setup_file_logging`` is a second line of defense.
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import faulthandler
 import logging
 import os
@@ -62,20 +78,32 @@ _prev_excepthook = None
 
 # Set by the boot-check when a previous run left a non-empty fatal trace. The
 # WARNING is emitted later (once the error_log DB handler is installed) so it
-# also lands durably in the error_log table — the boot-check itself runs at
-# import time, before the DB pool exists. (message, size, path).
+# also lands durably in the error_log table — the boot-check runs at the top of
+# lifespan startup, before the DB pool exists. (message, size, path).
 _pending_fatal_warning: "Optional[tuple[str, int, Path]]" = None
 
 
 def get_log_dir() -> Path:
-    """Return the durable log directory (``<data_dir>/logs``).
+    """Return the durable log directory (``<data_dir>/logs/<instance_id>``).
+
+    Namespaced per instance: multiple installs can share one data dir (shared
+    volume / shared %USERPROFILE%), and two processes rotating the same
+    app.log or truncating each other's fatal.log would corrupt both — on
+    Windows, renaming a file another process holds open raises outright.
+    ``settings.effective_instance_id`` is stable across restarts (persisted
+    ``.instance_id`` file in the data dir), so each install keeps one
+    consistent log lineage.
 
     Deferred settings import keeps this module importable in isolation (tests)
     without eagerly constructing the Settings singleton.
     """
     from app.core.config import settings
 
-    return settings.effective_data_dir / "logs"
+    try:
+        instance = settings.effective_instance_id
+    except Exception:  # noqa: BLE001 — a broken id file must not kill logging
+        instance = settings.service_name
+    return settings.effective_data_dir / "logs" / instance
 
 
 def _boot_check_fatal_log(log_dir: Path) -> None:
@@ -121,11 +149,11 @@ def _boot_check_fatal_log(log_dir: Path) -> None:
 def emit_pending_fatal_warning() -> bool:
     """Re-emit the boot-check fatal warning once the error_log DB handler is up.
 
-    ``setup_file_logging`` runs at import time, before the DB pool and
-    ``ErrorLogDBHandler`` exist, so the boot-check WARNING can't reach the
-    ``error_log`` table then. Call this from the lifespan startup AFTER
-    ``install_error_log_handler()`` to persist it durably. No-ops if there was
-    no previous crash. Returns True if a warning was emitted.
+    ``setup_file_logging`` runs at the top of the lifespan startup, before the
+    DB pool and ``ErrorLogDBHandler`` exist, so the boot-check WARNING can't
+    reach the ``error_log`` table then. Call this from the lifespan startup
+    AFTER ``install_error_log_handler()`` to persist it durably. No-ops if
+    there was no previous crash. Returns True if a warning was emitted.
     """
     global _pending_fatal_warning
     pending = _pending_fatal_warning
@@ -165,13 +193,21 @@ def _install_excepthook() -> None:
 def install_asyncio_exception_handler(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """Install a loop exception handler that logs unhandled async exceptions.
 
-    Called from startup once the running loop exists. Chains to the default
-    handler so the standard "Task exception was never retrieved" behavior is
-    preserved in addition to reaching the file/DB.
+    Called from within the running lifespan startup, so the running loop is
+    used directly (``get_running_loop``, not the deprecated-in-this-context
+    ``get_event_loop``). A failure to install is logged as a WARNING rather
+    than silently swallowed — otherwise unhandled async exceptions would
+    quietly stop reaching the file/DB. Chains to any pre-existing handler so
+    the standard "Task exception was never retrieved" behavior is preserved in
+    addition to reaching the file/DB.
     """
     try:
-        loop = loop or asyncio.get_event_loop()
+        loop = loop or asyncio.get_running_loop()
     except RuntimeError:
+        logger.warning(
+            "install_asyncio_exception_handler called with no running event "
+            "loop — unhandled async exceptions will NOT reach the log file"
+        )
         return
 
     default_handler = loop.get_exception_handler()
@@ -194,13 +230,20 @@ def install_asyncio_exception_handler(loop: Optional[asyncio.AbstractEventLoop] 
 def setup_file_logging() -> Optional[Path]:
     """Attach the rotating file handler + faulthandler + excepthook (idempotent).
 
-    Returns the app.log path if enabled, else ``None`` (disabled). Safe to call
-    more than once (uvicorn may re-import the module); the second call no-ops.
-    Never raises — a logging setup failure must not stop the app from booting.
+    Called from the lifespan startup (never at import time — see module
+    docstring). Returns the app.log path if enabled, else ``None`` (disabled).
+    Safe to call more than once; the second call no-ops. Never raises — a
+    logging setup failure must not stop the app from booting.
     """
     global _file_handler, _fatal_file
 
     from app.core.config import settings
+
+    # Belt-and-braces: never touch the real data dir from a test run. The
+    # pytest conftest sets TESTING=1 before any app import; without this guard
+    # a collection-time import could truncate a genuine production fatal.log.
+    if os.environ.get("TESTING") == "1":
+        return None
 
     if not settings.file_logging_enabled:
         return None
@@ -244,6 +287,14 @@ def setup_file_logging() -> Optional[Path]:
     root.addHandler(handler)
     _file_handler = handler
 
+    # Durability on teardown: flush+close the handler at interpreter exit so
+    # the tail of the log hits disk even when shutdown is cut short (SIGTERM →
+    # uvicorn graceful exit → atexit). The stdlib registers logging.shutdown()
+    # itself, but only for handlers existing when logging was imported wraps
+    # via weakrefs — registering our own explicit flush is cheap insurance and
+    # makes the guarantee local and testable.
+    atexit.register(_flush_and_close_file_handler)
+
     # faulthandler: native traceback on a fatal signal. Keep the fd open for the
     # process lifetime (module-level ref) so it is valid when a crash fires.
     try:
@@ -280,6 +331,33 @@ def log_startup_banner() -> None:
     )
 
 
+def _flush_and_close_file_handler() -> None:
+    """Flush and close the rotating file handler (atexit / shutdown safety).
+
+    Idempotent and never raises: Handler.close() tolerates repeat calls, and a
+    handler that already lost its stream must not turn process exit into a
+    traceback.
+    """
+    handler = _file_handler
+    if handler is None:
+        return
+    try:
+        handler.flush()
+        handler.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def log_shutdown_banner() -> None:
-    """Log a clean shutdown line so a normal stop is distinguishable from a crash."""
+    """Log a clean shutdown line so a normal stop is distinguishable from a crash.
+
+    Flushes the file handler immediately: shutdown can be cut short (SIGTERM
+    grace window), and the whole point of the banner is that its presence or
+    absence on disk distinguishes a clean stop from a crash.
+    """
     logger.info("=== AI Shuffle shutting down (pid=%s) ===", os.getpid())
+    if _file_handler is not None:
+        try:
+            _file_handler.flush()
+        except Exception:  # noqa: BLE001
+            pass

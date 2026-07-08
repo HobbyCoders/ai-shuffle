@@ -2,26 +2,45 @@
 
 Covers:
 - setup_file_logging attaches a RotatingFileHandler with the configured level,
-  rotation sizing, and UTF-8 encoding, under <data_dir>/logs/app.log.
+  rotation sizing, and UTF-8 encoding, under <data_dir>/logs/<instance_id>/app.log
+  (per-instance namespacing so installs sharing a data dir never fight over
+  rotation).
 - the startup banner (pid/version/instance_id) is written to the file.
 - the fatal.log boot-check rotates a non-empty previous trace to fatal.log.prev,
   overwrites an older .prev, and surfaces a WARNING (pending → error_log).
 - FILE_LOGGING_ENABLED=false disables the handler entirely.
+- TESTING=1 makes setup a hard no-op (belt-and-braces: a test run must never
+  create/truncate anything in the real data dir).
+- importing app.main does NOT run setup (it moved to lifespan startup): a bare
+  import at pytest collection previously created the real log dir and truncated
+  a genuine production fatal.log.
+- shutdown banner flushes to disk so the tail survives a cut-short teardown,
+  and setup registers an atexit flush/close.
+- the asyncio loop exception handler installs on the RUNNING loop and warns
+  (not silently returns) when there is no loop.
 
 The module reads ``app.core.config.settings`` lazily inside each function, so we
 patch that singleton with a lightweight fake pointed at a tmp data dir. Each test
-detaches any handler it attaches so the root logger is left clean.
+detaches any handler it attaches so the root logger is left clean. The conftest
+sets TESTING=1 process-wide, which setup_file_logging treats as a no-op — the
+fixture removes it so the code under test actually runs.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import subprocess
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 from app.core import file_logging
+
+_INSTANCE = "ai-shuffle-testinst"
 
 
 class _FakeSettings:
@@ -40,12 +59,25 @@ class _FakeSettings:
 
     @property
     def effective_instance_id(self) -> str:
-        return "ai-shuffle-testinst"
+        return _INSTANCE
+
+
+def _log_dir(tmp_path: Path) -> Path:
+    """The per-instance log dir the module should use for the fake settings."""
+    return tmp_path / "logs" / _INSTANCE
 
 
 @pytest.fixture
 def fake_settings(tmp_path, monkeypatch):
-    """Patch config.settings and reset module-level singletons around each test."""
+    """Patch config.settings and reset module-level singletons around each test.
+
+    Also removes the conftest's process-wide TESTING=1 for the duration of the
+    test: setup_file_logging deliberately no-ops under TESTING (so a test run
+    can never touch the real data dir), but these tests point it at a tmp dir
+    and need it to actually run.
+    """
+    monkeypatch.delenv("TESTING", raising=False)
+
     def _make(**overrides):
         settings = _FakeSettings(tmp_path, **overrides)
         monkeypatch.setattr("app.core.config.settings", settings, raising=True)
@@ -79,7 +111,8 @@ def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_pat
 
     path = file_logging.setup_file_logging()
 
-    assert path == tmp_path / "logs" / "app.log"
+    # Per-instance namespacing: logs/<instance_id>/app.log
+    assert path == _log_dir(tmp_path) / "app.log"
     handler = file_logging._file_handler
     assert isinstance(handler, RotatingFileHandler)
     assert handler.level == logging.WARNING
@@ -88,7 +121,7 @@ def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_pat
     assert handler.encoding == "utf-8"
     # Attached to the ROOT logger so all app/uvicorn/third-party records land here.
     assert handler in logging.getLogger().handlers
-    assert (tmp_path / "logs").is_dir()
+    assert _log_dir(tmp_path).is_dir()
 
 
 def test_setup_is_idempotent(fake_settings, tmp_path):
@@ -110,10 +143,10 @@ def test_records_written_to_file_and_startup_banner(fake_settings, tmp_path):
     logging.getLogger("some.module").info("a distinctive test log line")
     file_logging._file_handler.flush()
 
-    content = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    content = (_log_dir(tmp_path) / "app.log").read_text(encoding="utf-8")
     assert "=== AI Shuffle starting" in content
     assert "version=9.9.9-test" in content
-    assert "instance_id=ai-shuffle-testinst" in content
+    assert f"instance_id={_INSTANCE}" in content
     assert "a distinctive test log line" in content
 
 
@@ -127,18 +160,75 @@ def test_disabled_via_env_flag(fake_settings, tmp_path):
     assert not (tmp_path / "logs").exists()
 
 
+def test_setup_is_noop_under_testing_env(fake_settings, tmp_path, monkeypatch):
+    """TESTING=1 (set by conftest for every test run) makes setup a hard no-op.
+
+    Belt-and-braces for the import-time pollution bug: even if something calls
+    setup_file_logging during a test run with the REAL settings singleton, it
+    must not create the log dir or truncate a previous crash's fatal.log.
+    """
+    fake_settings()
+    monkeypatch.setenv("TESTING", "1")
+
+    path = file_logging.setup_file_logging()
+
+    assert path is None
+    assert file_logging._file_handler is None
+    assert not (tmp_path / "logs").exists()
+
+
+def test_importing_app_main_does_not_touch_log_dir(tmp_path):
+    """Importing app.main must NOT create the log dir or touch fatal.log.
+
+    Regression test for the import-time-setup blocker: pytest collection
+    imports app.main with the real settings singleton; when setup ran at
+    module import it created the real logs dir, TRUNCATED the real fatal.log
+    (open "w"), and ran the boot-check os.replace — destroying a genuine
+    production crash trace. Setup now runs only in the lifespan startup.
+
+    Runs in a subprocess with DATA_DIR pointed at a tmp dir so the assertion
+    is about a fresh interpreter's import side effects, not this process's
+    accumulated state.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    code = (
+        "import app.main\n"
+        "from app.core import file_logging\n"
+        "assert file_logging._file_handler is None, 'file handler attached at import time'\n"
+        "assert file_logging._fatal_file is None, 'fatal.log opened at import time'\n"
+    )
+    env = {
+        **os.environ,
+        "TESTING": "1",
+        "CORS_ORIGINS": "*",
+        "DATA_DIR": str(tmp_path),
+        "PYTHONPATH": str(repo_root),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    # No logs directory materialized anywhere under the data dir.
+    assert not (tmp_path / "logs").exists()
+
+
 def test_faulthandler_fatal_log_opened(fake_settings, tmp_path):
     fake_settings()
     file_logging.setup_file_logging()
     # fatal.log is opened and kept referenced for the process lifetime.
-    assert (tmp_path / "logs" / "fatal.log").exists()
+    assert (_log_dir(tmp_path) / "fatal.log").exists()
     assert file_logging._fatal_file is not None
     assert not file_logging._fatal_file.closed
 
 
 def test_boot_check_rotates_nonempty_previous_fatal_and_warns(fake_settings, tmp_path, caplog):
     fake_settings()
-    log_dir = tmp_path / "logs"
+    log_dir = _log_dir(tmp_path)
     log_dir.mkdir(parents=True)
     fatal = log_dir / "fatal.log"
     fatal.write_text("Fatal Python error: Segmentation fault\n\nThread 0x...\n", encoding="utf-8")
@@ -159,7 +249,7 @@ def test_boot_check_rotates_nonempty_previous_fatal_and_warns(fake_settings, tmp
 
 def test_boot_check_overwrites_older_prev(fake_settings, tmp_path):
     fake_settings()
-    log_dir = tmp_path / "logs"
+    log_dir = _log_dir(tmp_path)
     log_dir.mkdir(parents=True)
     (log_dir / "fatal.log.prev").write_text("OLD stale prev trace", encoding="utf-8")
     (log_dir / "fatal.log").write_text("NEW crash trace here", encoding="utf-8")
@@ -174,7 +264,7 @@ def test_boot_check_overwrites_older_prev(fake_settings, tmp_path):
 
 def test_boot_check_ignores_empty_previous_fatal(fake_settings, tmp_path):
     fake_settings()
-    log_dir = tmp_path / "logs"
+    log_dir = _log_dir(tmp_path)
     log_dir.mkdir(parents=True)
     (log_dir / "fatal.log").write_text("", encoding="utf-8")  # clean prior shutdown
 
@@ -187,7 +277,9 @@ def test_boot_check_ignores_empty_previous_fatal(fake_settings, tmp_path):
 
 def test_emit_pending_fatal_warning_reemits_once(fake_settings, tmp_path, caplog):
     fake_settings()
-    file_logging._pending_fatal_warning = ("boom crash trace 42 bytes", 42, tmp_path / "logs" / "fatal.log.prev")
+    file_logging._pending_fatal_warning = (
+        "boom crash trace 42 bytes", 42, _log_dir(tmp_path) / "fatal.log.prev",
+    )
 
     with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):
         first = file_logging.emit_pending_fatal_warning()
@@ -196,3 +288,59 @@ def test_emit_pending_fatal_warning_reemits_once(fake_settings, tmp_path, caplog
     assert first is True
     assert second is False  # cleared after first emit — no duplicate error_log rows
     assert sum("boom crash trace" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_shutdown_banner_flushes_and_survives_handler_close(fake_settings, tmp_path):
+    """The shutdown banner must hit disk even when teardown is cut short.
+
+    log_shutdown_banner flushes the handler itself (no reliance on a later
+    logging.shutdown), and the atexit-registered _flush_and_close_file_handler
+    closes it cleanly and idempotently.
+    """
+    fake_settings()
+    file_logging.setup_file_logging()
+
+    file_logging.log_shutdown_banner()
+    # No manual flush here — the banner call itself must have flushed.
+    content = (_log_dir(tmp_path) / "app.log").read_text(encoding="utf-8")
+    assert "=== AI Shuffle shutting down" in content
+
+    # The atexit hook closes without raising, and is idempotent.
+    file_logging._flush_and_close_file_handler()
+    file_logging._flush_and_close_file_handler()
+    content = (_log_dir(tmp_path) / "app.log").read_text(encoding="utf-8")
+    assert "=== AI Shuffle shutting down" in content
+
+
+def test_setup_registers_atexit_flush(fake_settings, tmp_path, monkeypatch):
+    registered = []
+    monkeypatch.setattr(file_logging.atexit, "register", lambda fn, *a, **kw: registered.append(fn))
+
+    fake_settings()
+    file_logging.setup_file_logging()
+
+    assert file_logging._flush_and_close_file_handler in registered
+
+
+def test_asyncio_exception_handler_installed_on_running_loop(fake_settings):
+    """install_asyncio_exception_handler uses the RUNNING loop and installs."""
+    fake_settings()
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        assert loop.get_exception_handler() is None  # fresh loop
+        file_logging.install_asyncio_exception_handler()
+        handler = loop.get_exception_handler()
+        assert handler is not None
+        # The installed handler logs the exception (smoke: it must not raise).
+        handler(loop, {"message": "test-context", "exception": RuntimeError("boom")})
+
+    asyncio.run(_run())
+
+
+def test_asyncio_exception_handler_warns_without_running_loop(fake_settings, caplog):
+    """No running loop → WARNING, not a silent no-op."""
+    fake_settings()
+    with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):
+        file_logging.install_asyncio_exception_handler()
+    assert any("no running event loop" in r.getMessage() for r in caplog.records)
