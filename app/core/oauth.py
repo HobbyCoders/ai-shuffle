@@ -23,12 +23,25 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Callable, Optional, Dict, Any, Tuple
 from urllib.parse import urlencode
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Optional module-level hook fired AFTER any successful credentials write.
+# Used by the multi-account feature to sync a rotated credentials file back into
+# the active account's DB row. oauth.py stays dependency-free: the hook is
+# registered from startup (see app.core.startup) and is invoked defensively —
+# it must NEVER be able to fail a credential write or token refresh.
+_post_write_hook: Optional[Callable[[], None]] = None
+
+
+def set_post_write_hook(fn: Optional[Callable[[], None]]) -> None:
+    """Register (or clear with None) the post-credentials-write hook."""
+    global _post_write_hook
+    _post_write_hook = fn
 
 # OAuth configuration - these match Claude Code CLI's OAuth setup
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -53,6 +66,10 @@ class OAuthTokens:
     refresh_token: str
     expires_at: int  # Unix timestamp in milliseconds
     scopes: list
+    # Best-effort account email captured from the token-exchange response, when
+    # Anthropic includes it. Used only to label a newly added account; never
+    # required and never allowed to fail the exchange.
+    account_email: Optional[str] = None
 
 
 class DirectOAuth:
@@ -226,11 +243,20 @@ class DirectOAuth:
                 expires_in = data.get("expires_in", 3600)  # Default 1 hour
                 expires_at = int((time.time() + expires_in) * 1000)
 
+                # Best-effort capture of the account email — never fail the
+                # exchange if the shape isn't what we expect.
+                account_email: Optional[str] = None
+                try:
+                    account_email = (data.get("account") or {}).get("email_address")
+                except Exception:  # noqa: BLE001
+                    account_email = None
+
                 tokens = OAuthTokens(
                     access_token=data["access_token"],
                     refresh_token=data["refresh_token"],
                     expires_at=expires_at,
                     scopes=data.get("scope", "").split() or OAUTH_SCOPES,
+                    account_email=account_email,
                 )
 
                 logger.debug("Successfully exchanged code for tokens")
@@ -245,12 +271,18 @@ class DirectOAuth:
             logger.error(f"Token exchange error: {e}", exc_info=True)
             return None, f"Unexpected error: {str(e)}"
 
-    def write_credentials(self, tokens: OAuthTokens) -> bool:
+    def write_credentials_dict(self, oauth_dict: dict) -> bool:
         """
-        Write tokens to ~/.claude/.credentials.json in CLI-compatible format.
+        Write a full ``claudeAiOauth`` object to ~/.claude/.credentials.json
+        VERBATIM (no field synthesis), in CLI-compatible format.
+
+        This is the low-level writer used by both ``write_credentials`` and the
+        multi-account switch path. Writing the object verbatim matters for
+        account switching: it must never degrade a stored credential (e.g. by
+        clobbering a known ``subscriptionType`` back to None).
 
         Args:
-            tokens: The OAuth tokens to store
+            oauth_dict: The object to store under the ``claudeAiOauth`` key.
 
         Returns:
             True if successful, False otherwise
@@ -261,16 +293,7 @@ class DirectOAuth:
 
             credentials_file = self.config_dir / ".credentials.json"
 
-            # Format matches what Claude CLI expects
-            credentials = {
-                "claudeAiOauth": {
-                    "accessToken": tokens.access_token,
-                    "refreshToken": tokens.refresh_token,
-                    "expiresAt": tokens.expires_at,
-                    "scopes": tokens.scopes,
-                    "subscriptionType": None,  # CLI sets this, we don't know it
-                }
-            }
+            credentials = {"claudeAiOauth": oauth_dict}
 
             # Write with restricted permissions (like the CLI does)
             credentials_file.write_text(json.dumps(credentials))
@@ -280,11 +303,43 @@ class DirectOAuth:
                 os.chmod(credentials_file, 0o600)
 
             logger.debug(f"Wrote credentials to {credentials_file}")
+
+            # Fire the optional post-write hook (multi-account sync-back). This
+            # must NEVER be able to fail the write — it runs downstream of token
+            # refresh, so a raising hook could otherwise break auth entirely.
+            if _post_write_hook is not None:
+                try:
+                    _post_write_hook()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Post-write credentials hook failed (ignored): {e}")
+
             return True
 
         except Exception as e:
             logger.error(f"Failed to write credentials: {e}", exc_info=True)
             return False
+
+    def write_credentials(self, tokens: OAuthTokens) -> bool:
+        """
+        Write tokens to ~/.claude/.credentials.json in CLI-compatible format.
+
+        Args:
+            tokens: The OAuth tokens to store
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Format matches what Claude CLI expects. subscriptionType is left None
+        # here because a freshly exchanged/refreshed token doesn't tell us the
+        # plan; the switch path preserves whatever was stored (see
+        # write_credentials_dict).
+        return self.write_credentials_dict({
+            "accessToken": tokens.access_token,
+            "refreshToken": tokens.refresh_token,
+            "expiresAt": tokens.expires_at,
+            "scopes": tokens.scopes,
+            "subscriptionType": None,
+        })
 
     def ensure_onboarding_complete(self) -> bool:
         """

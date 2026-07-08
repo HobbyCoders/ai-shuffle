@@ -37,6 +37,24 @@ _auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
+def _sync_back_active_account_safe() -> None:
+    """Fire the multi-account sync-back defensively (never breaks status)."""
+    try:
+        from app.core.claude_accounts import sync_back_active_account
+        sync_back_active_account()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Claude account sync-back on status failed (ignored): {e}")
+
+
+def _seed_claude_account_safe() -> None:
+    """Seed the default Claude account after the encryption key becomes available."""
+    try:
+        from app.core.claude_accounts import seed_from_credentials_file
+        seed_from_credentials_file()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Claude account seed failed (ignored): {e}")
+
+
 # Private/loopback networks whose direct connections we trust as reverse proxies
 _TRUSTED_PROXY_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -315,6 +333,10 @@ async def get_auth_status(request: Request):
     # Self-heal an expiring OAuth token before reporting status, so the UI doesn't
     # flip to "unauthorized" when a valid refresh token could silently renew it.
     await direct_oauth.ensure_fresh_credentials()
+    # Observe the on-disk credentials file back into the active account row. This
+    # catches CLI subprocesses self-refreshing the shared file (which bypasses
+    # the post-write hook). The mtime gate makes it a stat() no-op normally.
+    _sync_back_active_account_safe()
 
     return {
         "authenticated": is_admin_authenticated,
@@ -351,6 +373,7 @@ async def setup_admin(request: SetupRequest, response: Response):
         # Set encryption key in memory (derived from password)
         try:
             encryption.set_encryption_key(request.password, db)
+            _seed_claude_account_safe()
         except Exception as e:
             logger.error(f"Failed to set up encryption during admin setup: {e}")
 
@@ -410,6 +433,9 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
         encrypted_count = encryption.encrypt_existing_plaintext_keys(db)
         if encrypted_count > 0:
             logger.info(f"Encrypted {encrypted_count} existing plaintext API keys")
+        # Now that encryption is available, seed the default Claude account from
+        # any existing credentials file (idempotent).
+        _seed_claude_account_safe()
     except Exception as e:
         logger.warning(f"Encryption setup failed during login: {e}")
         encryption_warning = "Encryption setup failed. API key management may be unavailable."
@@ -522,7 +548,19 @@ async def claude_auth_status():
     # Renew an expiring OAuth token (using the refresh token) before reporting,
     # so a short-lived access token doesn't surface as "expired" unnecessarily.
     await direct_oauth.ensure_fresh_credentials()
-    return auth_service.get_claude_auth_info()
+    _sync_back_active_account_safe()
+
+    info = auth_service.get_claude_auth_info()
+    # Extend with multi-account fields (keeping every existing field intact).
+    try:
+        from app.core import claude_accounts as _accounts
+        info["active_account"] = _accounts.get_active_account_summary()
+        info["accounts_count"] = db.count_claude_accounts()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not attach Claude account info to status: {e}")
+        info.setdefault("active_account", None)
+        info.setdefault("accounts_count", 0)
+    return info
 
 
 @router.get("/claude/validate")

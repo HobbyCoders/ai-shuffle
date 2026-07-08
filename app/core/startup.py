@@ -238,8 +238,25 @@ def init_core() -> None:
 
 def init_encryption_and_sessions() -> None:
     """Phase 2: Initialize encryption key and manage sessions."""
+    # Register the multi-account sync-back hook so a rotated credentials file
+    # (login/refresh/switch) is persisted back into the active account row. The
+    # hook is defensive and can never fail a credential write.
+    try:
+        from app.core.oauth import set_post_write_hook
+        from app.core.claude_accounts import sync_back_active_account
+        set_post_write_hook(sync_back_active_account)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not register Claude account post-write hook: {e}")
+
     if encryption.init_encryption_from_env(database):
         logger.info("Encryption initialized from ADMIN_PASSWORD environment variable")
+        # Encryption is available — seed the default account from any existing
+        # credentials file (idempotent, no-op if accounts already exist).
+        try:
+            from app.core.claude_accounts import seed_from_credentials_file
+            seed_from_credentials_file()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Claude account seed on startup failed (ignored): {e}")
     else:
         # Clear all sessions on startup - forces re-login to restore encryption key
         # This is required because the encryption key (derived from admin password)

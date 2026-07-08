@@ -181,13 +181,14 @@ def is_encrypted(value: str) -> bool:
 # change requires re-encrypting EVERY ``enc:``-prefixed value under a key derived
 # from the new password, or those values become permanently undecryptable.
 #
-# The app Fernet-encrypts values in FOUR storage locations (all sharing the same
+# The app Fernet-encrypts values in FIVE storage locations (all sharing the same
 # admin-password-derived key and ``enc:`` prefix):
 #   1. ``system_settings.value``           — e.g. fal_api_key, anthropic_api_key
 #      (plus any orphaned/legacy keys such as cloud_install_api_key).
 #   2. ``automations.triggers`` / ``trigger_config`` (JSONB) — webhook secrets.
 #   3. ``connectors.config`` (JSONB)       — bot tokens / access tokens.
 #   4. ``api_user_credentials.encrypted_value``.
+#   5. ``claude_accounts.credentials``     — full claudeAiOauth JSON per account.
 #
 # Rather than a hardcoded name list (which historically missed 1/2/3/4 entirely
 # and bricked them on every password change), we DISCOVER encrypted values
@@ -198,8 +199,9 @@ class ReencryptPlanItem:
     """One value to re-encrypt, with enough context to write it back.
 
     ``kind`` is one of: ``"system_setting"``, ``"automation"``, ``"connector"``,
-    ``"credential"``. ``ref`` identifies the row (setting key, automation id,
-    connector id, or (api_user_id, credential_type) tuple). ``label`` is a
+    ``"credential"``, ``"claude_account"``. ``ref`` identifies the row (setting
+    key, automation id, connector id, (api_user_id, credential_type) tuple, or
+    claude_account id). ``label`` is a
     human/log-safe identifier that NEVER contains the secret value. For JSONB
     kinds the plan carries the FULL re-encrypted object so the writer can persist
     it wholesale (``new_obj``); scalar kinds carry ``new_value``.
@@ -268,6 +270,8 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
       * ``get_all_connectors()``       -> recursive walk of ``config``.
       * ``get_all_api_users()`` x ``get_all_user_credentials()`` -> every
         credential whose ``encrypted_value`` ``is_encrypted``.
+      * ``get_all_claude_accounts(include_credentials=True)`` -> every account
+        whose ``credentials`` blob ``is_encrypted``.
 
     Nothing here mutates the database or the in-memory key.
     """
@@ -362,6 +366,29 @@ def build_reencryption_plan(old_key: bytes, new_key: bytes, db_module):
                 new_value=f"enc:{base64.b64encode(reenc).decode()}",
             ))
 
+    # (5) claude_accounts — the encrypted full claudeAiOauth JSON per account.
+    try:
+        accounts = db_module.get_all_claude_accounts(include_credentials=True) or []
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to enumerate claude_accounts for re-encryption: %s", e)
+        accounts = []
+    for acct in accounts:
+        aid = acct.get("id")
+        value = acct.get("credentials")
+        if not (isinstance(value, str) and is_encrypted(value)):
+            continue
+        label = f"claude_accounts:{aid}"
+        try:
+            plaintext = old_fernet.decrypt(base64.b64decode(value[4:])).decode()
+        except Exception as e:  # noqa: BLE001
+            failures.append((label, f"decrypt failed: {type(e).__name__}"))
+            continue
+        reenc = new_fernet.encrypt(plaintext.encode())
+        plan.append(ReencryptPlanItem(
+            "claude_account", aid, label,
+            new_value=f"enc:{base64.b64encode(reenc).decode()}",
+        ))
+
     return plan, failures
 
 
@@ -389,6 +416,10 @@ def apply_reencryption_plan(plan, db_module) -> None:
         elif item.kind == "credential":
             uid, ctype = item.ref
             db_module.set_user_credential(uid, ctype, item.new_value)
+        elif item.kind == "claude_account":
+            # Credentials-only update: the plaintext is unchanged, so leave the
+            # fingerprint / expires_at / has_refresh_token columns untouched.
+            db_module.update_claude_account_credentials_only(item.ref, item.new_value)
         else:  # pragma: no cover — defensive
             raise ValueError(f"Unknown re-encryption plan item kind: {item.kind}")
         logger.debug("Re-encrypted %s", item.label)
@@ -399,9 +430,10 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
     Re-encrypt ALL at-rest secrets under a new admin password.
     Called when the admin changes their password.
 
-    Discovers every ``enc:``-prefixed value across all four storage locations
+    Discovers every ``enc:``-prefixed value across all five storage locations
     (system_settings, automations triggers/trigger_config, connectors config,
-    api_user_credentials) — see :func:`build_reencryption_plan` — rather than a
+    api_user_credentials, claude_accounts credentials) — see
+    :func:`build_reencryption_plan` — rather than a
     hardcoded name list. FAILS CLOSED: if ANY discovered value cannot be
     decrypted with the old key, every failure is logged (by table+id, never the
     value) and the function returns ``False`` WITHOUT writing anything, leaving

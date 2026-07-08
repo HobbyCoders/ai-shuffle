@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications
+from app.api import auth, claude_accounts, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, chrome_mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -376,6 +376,7 @@ else:
 # Include API routers
 app.include_router(system.router)
 app.include_router(auth.router)
+app.include_router(claude_accounts.router)
 app.include_router(profiles.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)

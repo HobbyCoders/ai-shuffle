@@ -195,3 +195,64 @@ class TestRekeyDbBacked:
         assert encryption.decrypt_value(db.get_system_setting("fal_api_key")) == "fal-secret"
         # The bricked orphan was left exactly as-is (not touched).
         assert db.get_system_setting("cloud_install_api_key") == bricked
+
+
+class TestReencryptClaudeAccounts:
+    """The 5th storage location: claude_accounts.credentials blobs."""
+
+    def _seed_account(self, db, plaintext="acct-secret"):
+        from app.core import encryption
+        encryption.set_encryption_key("old-pw", db)
+        db.create_claude_account(
+            account_id="acct-1", name="A",
+            credentials=encryption.encrypt_value(plaintext),
+            credential_fingerprint="fp-fixed", expires_at=123,
+            has_refresh_token=True,
+        )
+
+    def test_plan_discovers_claude_account_rows(self, mock_db):
+        from app.core import encryption
+        from app.db import database as db
+
+        self._seed_account(db)
+        old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
+        new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
+        plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
+        assert failures == []
+        kinds = [item.kind for item in plan]
+        assert "claude_account" in kinds
+
+    def test_apply_handles_new_kind_and_preserves_metadata(self, mock_db):
+        from app.core import encryption
+        from app.db import database as db
+
+        self._seed_account(db)
+        before = db.get_claude_account("acct-1")
+        old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
+        new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
+        plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
+        assert not failures
+        encryption.apply_reencryption_plan(plan, db)
+
+        # Fingerprint / expires_at are untouched (credentials-only update).
+        after = db.get_claude_account("acct-1", include_credentials=True)
+        assert after["credential_fingerprint"] == before["credential_fingerprint"]
+        assert after["expires_at"] == before["expires_at"]
+        # New key decrypts the re-encrypted blob.
+        encryption._encryption_key = new_key
+        assert encryption.decrypt_value(after["credentials"]) == "acct-secret"
+
+    def test_fail_closed_on_undecryptable_account(self, mock_db):
+        from app.core import encryption
+        from app.db import database as db
+
+        encryption.set_encryption_key("old-pw", db)
+        db.create_claude_account(
+            account_id="acct-bad", name="Bad",
+            credentials="enc:" + base64.b64encode(b"garbage").decode(),
+            credential_fingerprint="fp", expires_at=1, has_refresh_token=True,
+        )
+        old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
+        new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
+        plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
+        assert any("claude_accounts:acct-bad" in label for label, _ in failures)

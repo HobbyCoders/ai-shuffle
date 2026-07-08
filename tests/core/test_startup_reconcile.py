@@ -227,15 +227,18 @@ async def test_stray_cli_sweep_suppressed_under_testing(mock_db, monkeypatch):
 
 
 # =============================================================================
-# Schema: v51 parity + parked_task_kind column
+# Schema: version parity + parked_task_kind column
 # =============================================================================
 
 def test_schema_version_parity_v51():
     from app.db.database import SCHEMA_VERSION as db_version
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
-    assert db_version == 51
-    assert pg_version == 51
+    # database.py and schema_postgres.py must agree on the schema version.
+    # Bumped to 52 for the claude_accounts table (multi-account switching).
+    assert db_version == 52
+    assert pg_version == 52
+    assert db_version == pg_version
 
 
 def test_column_exists_after_create_postgres_schema(test_db):

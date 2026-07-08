@@ -86,7 +86,8 @@ def _safe_json(value):
 # v49: Add notifications table (unified banner/notification history for the bell)
 # v50: Add automation_fires table (atomic cross-install claim per scheduled fire)
 # v51: Add sessions.parked_task_kind (durable parked marker, cleared by boot reconcile)
-SCHEMA_VERSION = 51
+# v52: Add claude_accounts table (multiple Anthropic OAuth accounts + in-app switching)
+SCHEMA_VERSION = 52
 
 
 def _run_column_migrations(cursor):
@@ -493,6 +494,31 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("installs")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)")
+
+    # claude_accounts (v52). Multiple Anthropic OAuth accounts + in-app switching.
+    # The account list is shared; the active pointer is per-install and lives in
+    # system_settings (key claude_active_account:{instance_id}), so no is_active
+    # column here. Idempotent so upgrades from any older version land the table
+    # without needing the SCHEMA_VERSION bump to fire the bootstrap path (same
+    # defensive pattern as the SessionStore / error_log / installs blocks above).
+    if not table_exists(cursor, "claude_accounts"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS claude_accounts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT,
+                subscription_type TEXT,
+                credentials TEXT,
+                credential_fingerprint TEXT,
+                expires_at BIGINT,
+                has_refresh_token BOOLEAN DEFAULT TRUE,
+                sync_pending BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_used_at TIMESTAMP WITH TIME ZONE
+            )
+        """)
+        migrations_applied.append("claude_accounts")
 
     # projects.link_group_id (Phase D). Groups same-repo project rows across
     # installs into one logical project on the shared-DB sessions board. The id
@@ -921,6 +947,19 @@ from app.db.connectors import (  # noqa: F401
     get_connector_session_by_id,
     get_connector_sessions_for_ai_session,
     update_connector_session_ai_session,
+)
+
+from app.db.claude_accounts import (  # noqa: F401
+    create_claude_account,
+    get_claude_account,
+    get_all_claude_accounts,
+    update_claude_account_credentials,
+    update_claude_account_credentials_only,
+    rename_claude_account,
+    delete_claude_account,
+    mark_claude_account_sync_pending,
+    touch_claude_account_last_used,
+    count_claude_accounts,
 )
 
 from app.db.rate_limits import (  # noqa: F401

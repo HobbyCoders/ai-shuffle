@@ -15,7 +15,13 @@
 	import { api } from '$lib/api/client';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
-	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword, startClaudeLogin, completeClaudeLogin } from '$lib/api/auth';
+	import {
+		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword,
+		startClaudeLogin, completeClaudeLogin,
+		listClaudeAccounts, startAddClaudeAccount, completeAddClaudeAccount,
+		activateClaudeAccount, renameClaudeAccount, deleteClaudeAccount,
+		type ClaudeAccount
+	} from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
@@ -100,6 +106,27 @@
 	let claudeCompletingLogin = $state(false);
 	let githubUser: string | null = $state(null);
 
+	// ----- Multiple Claude accounts -----
+	// The active-account list is server-side + encrypted; we load it on mount and
+	// after every mutation so the UI always mirrors the server. `encryptionReady`
+	// gates the whole list: when false the store can't be opened (admin re-login
+	// needed) and ConnectionsSection shows a banner instead of rows.
+	let claudeAccounts: ClaudeAccount[] = $state([]);
+	let activeAccountId: string | null = $state(null);
+	let accountsEncryptionReady = $state(true);
+	let accountsLoading = $state(false);
+	let accountsError = $state('');
+	// Add-account flow (mirrors the connect flow but never disturbs the active login).
+	let addAccountOAuthUrl: string | null = $state(null);
+	let addAccountState: string | null = $state(null);
+	let addAccountCode = $state('');
+	let addAccountName = $state('');
+	let addAccountMakeActive = $state(false);
+	let addAccountLoading = $state(false);
+	let addAccountCompleting = $state(false);
+	// The account row currently being switched to (drives its inline spinner).
+	let switchingAccountId: string | null = $state(null);
+
 	// Password change
 	let currentPassword = $state('');
 	let newPassword = $state('');
@@ -153,7 +180,8 @@
 			loadData(),
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
-			loadSecurityInstructions()
+			loadSecurityInstructions(),
+			loadClaudeAccounts()
 		]);
 	}
 
@@ -373,6 +401,132 @@
 		}
 	}
 
+	// ----- Multiple Claude accounts -----
+
+	// Refresh the account list. Called on mount and after every mutation so the
+	// UI stays a mirror of the server (switching is instant server-side). Never
+	// throws — a locked store just flips `accountsEncryptionReady` false.
+	async function loadClaudeAccounts() {
+		accountsLoading = true;
+		accountsError = '';
+		try {
+			const res = await listClaudeAccounts();
+			claudeAccounts = res.accounts;
+			activeAccountId = res.active_account_id;
+			accountsEncryptionReady = res.encryption_ready;
+		} catch (e: any) {
+			// A locked store surfaces as a friendly banner via the flag, not an
+			// error toast; only genuinely unexpected failures set accountsError.
+			accountsError = e?.detail || 'Failed to load Claude accounts';
+		} finally {
+			accountsLoading = false;
+		}
+	}
+
+	// Start OAuth for ADDING an account — opens the browser popup exactly like the
+	// primary connect flow, but hits the /accounts/start endpoint so the current
+	// login is untouched.
+	async function startAddAccount() {
+		addAccountLoading = true;
+		accountsError = '';
+		try {
+			const result = await startAddClaudeAccount();
+			if (result.success && result.oauth_url && result.state) {
+				addAccountOAuthUrl = result.oauth_url;
+				addAccountState = result.state;
+				addAccountCode = '';
+				window.open(result.oauth_url, '_blank', 'width=600,height=700');
+			} else {
+				accountsError = result.error || result.message || 'Failed to start sign-in';
+			}
+		} catch (e: any) {
+			accountsError = e?.detail || 'Failed to start sign-in';
+		} finally {
+			addAccountLoading = false;
+		}
+	}
+
+	async function completeAddAccount() {
+		if (!addAccountCode.trim() || !addAccountState) return;
+		addAccountCompleting = true;
+		accountsError = '';
+		try {
+			await completeAddClaudeAccount(
+				addAccountCode.trim(),
+				addAccountState,
+				addAccountName.trim() || undefined,
+				addAccountMakeActive
+			);
+			// Reset the add-account flow.
+			addAccountOAuthUrl = null;
+			addAccountState = null;
+			addAccountCode = '';
+			addAccountName = '';
+			const wasMadeActive = addAccountMakeActive;
+			addAccountMakeActive = false;
+			await loadClaudeAccounts();
+			// If the new account became active, the app's live credentials changed —
+			// refresh the token-valid stores.
+			if (wasMadeActive) await auth.checkAuth();
+		} catch (e: any) {
+			// 409 = encryption locked while completing.
+			accountsError = e?.detail || 'Failed to add account';
+		} finally {
+			addAccountCompleting = false;
+		}
+	}
+
+	function cancelAddAccount() {
+		addAccountOAuthUrl = null;
+		addAccountState = null;
+		addAccountCode = '';
+		addAccountName = '';
+		addAccountMakeActive = false;
+		accountsError = '';
+	}
+
+	// Switch the active account, then re-check auth: the credentials the app runs
+	// with just changed, so the token-valid stores must be refreshed.
+	async function activateAccount(id: string) {
+		switchingAccountId = id;
+		accountsError = '';
+		try {
+			await activateClaudeAccount(id);
+			await loadClaudeAccounts();
+			await auth.checkAuth();
+		} catch (e: any) {
+			// 409 = encryption locked, 404 = unknown id.
+			accountsError = e?.detail || 'Failed to switch account';
+		} finally {
+			switchingAccountId = null;
+		}
+	}
+
+	async function renameAccount(id: string, name: string) {
+		accountsError = '';
+		try {
+			await renameClaudeAccount(id, name);
+			await loadClaudeAccounts();
+		} catch (e: any) {
+			accountsError = e?.detail || 'Failed to rename account';
+		}
+	}
+
+	// Delete surfaces the server's 409 "switch first" message verbatim so the user
+	// knows why an active-account delete was refused. Deleting the active account
+	// changed the app's credentials → re-check auth after a successful delete.
+	async function deleteAccount(id: string) {
+		accountsError = '';
+		const wasActive = id === activeAccountId;
+		try {
+			await deleteClaudeAccount(id);
+			await loadClaudeAccounts();
+			if (wasActive) await auth.checkAuth();
+		} catch (e: any) {
+			accountsError = e?.detail || 'Failed to delete account';
+		}
+	}
+
 	async function connectGithub() {
 		if (!githubToken.trim()) return;
 		githubLoginLoading = true;
@@ -477,6 +631,27 @@
 							onStartClaudeOAuth={() => startClaudeOAuth(false)}
 							onStartClaudeReauth={startClaudeReauth}
 							onCompleteClaudeOAuth={completeClaudeOAuth}
+							{claudeAccounts}
+							{activeAccountId}
+							{accountsEncryptionReady}
+							{accountsLoading}
+							{accountsError}
+							{addAccountOAuthUrl}
+							{addAccountCode}
+							onAddAccountCodeChange={(v) => addAccountCode = v}
+							{addAccountName}
+							onAddAccountNameChange={(v) => addAccountName = v}
+							{addAccountMakeActive}
+							onAddAccountMakeActiveChange={(v) => addAccountMakeActive = v}
+							{addAccountLoading}
+							{addAccountCompleting}
+							{switchingAccountId}
+							onStartAddAccount={startAddAccount}
+							onCompleteAddAccount={completeAddAccount}
+							onCancelAddAccount={cancelAddAccount}
+							onActivateAccount={activateAccount}
+							onRenameAccount={renameAccount}
+							onDeleteAccount={deleteAccount}
 							onConnectGithub={connectGithub}
 							onDisconnectGithub={disconnectGithub}
 						/>

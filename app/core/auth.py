@@ -515,6 +515,13 @@ class AuthService:
 
         # Success if either CLI succeeded or file was deleted/doesn't exist
         if cli_success or file_deleted or not creds_file.exists():
+            # Clear the per-install active-account pointer so status reflects the
+            # logout. Rows are intentionally KEPT — logout != forget accounts.
+            try:
+                from app.core import claude_accounts as _accounts
+                _accounts._set_active_account_id(None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not clear active Claude account on logout: {e}")
             return {
                 "success": True,
                 "message": "Logged out from Claude Code"
@@ -975,6 +982,14 @@ class AuthService:
                 # Also ensure onboarding is marked complete
                 self._ensure_onboarding_complete()
                 logger.debug("Direct OAuth login completed successfully")
+                # Land this fresh single-account login in the DB. If an active
+                # account row already exists, the post-write hook has already
+                # synced it; otherwise this seeds a default account. Never fatal.
+                try:
+                    from app.core.claude_accounts import seed_from_credentials_file
+                    seed_from_credentials_file()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Claude account seed after login failed (ignored): {e}")
 
             return result
 

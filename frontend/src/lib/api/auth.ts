@@ -72,6 +72,102 @@ export async function pollClaudeLogin(): Promise<{
 	return api.get('/auth/claude/login/poll');
 }
 
+// ---------------------------------------------------------------------------
+// Multiple Claude accounts
+//
+// The app can hold several Claude Code OAuth sign-ins at once and switch which
+// one it authenticates with, without re-doing the browser flow each time. The
+// list lives server-side, encrypted with the admin password — so it can only be
+// read/switched while `encryption_ready` is true (i.e. the admin has logged in
+// this session). These client functions use the shared `api` client, which
+// throws `{ detail, status }` on non-2xx; callers inspect `.status === 409`
+// (encryption locked / can't-delete-active) and surface `.detail`.
+// ---------------------------------------------------------------------------
+
+export interface ClaudeAccount {
+	id: string;
+	name: string;
+	email: string;
+	subscription_type: string;
+	is_active: boolean;
+	/** Unix epoch milliseconds, or null when the token has no known expiry. */
+	expires_at: number | null;
+	has_refresh_token: boolean;
+	/** True when the latest refreshed tokens couldn't be persisted (encryption
+	 *  was locked during a refresh) — the account still works this session but
+	 *  the stored copy is stale until the admin logs in again. */
+	sync_pending: boolean;
+	/** Unix epoch milliseconds of last use, or null if never used. */
+	last_used_at: number | null;
+	created_at: number | null;
+}
+
+export interface ClaudeAccountsResponse {
+	accounts: ClaudeAccount[];
+	active_account_id: string | null;
+	/** False when the encrypted store can't be opened (admin must re-login). */
+	encryption_ready: boolean;
+}
+
+export async function listClaudeAccounts(): Promise<ClaudeAccountsResponse> {
+	return api.get('/auth/claude/accounts');
+}
+
+/** Begin an OAuth PKCE flow that ADDS a new account without disturbing the
+ *  currently-active login. Returns the URL to open in the browser + the state
+ *  to pass back to `completeAddClaudeAccount`. */
+export async function startAddClaudeAccount(): Promise<{
+	success: boolean;
+	oauth_url?: string;
+	state?: string;
+	error?: string;
+	message?: string;
+}> {
+	return api.post('/auth/claude/accounts/start');
+}
+
+/** Finish adding an account with the pasted browser code. `makeActive` switches
+ *  the app to the new account immediately. Throws `{ status: 409, detail }` when
+ *  encryption is locked. */
+export async function completeAddClaudeAccount(
+	code: string,
+	state: string,
+	name?: string,
+	makeActive?: boolean
+): Promise<{
+	success: boolean;
+	account: ClaudeAccount;
+	active_account_id: string | null;
+}> {
+	const body: Record<string, unknown> = { code, state };
+	if (name) body.name = name;
+	if (makeActive !== undefined) body.make_active = makeActive;
+	return api.post('/auth/claude/accounts/complete', body);
+}
+
+/** Switch the app to authenticate with account `id`. Throws `{ status: 409 }`
+ *  when encryption is locked, `{ status: 404 }` for an unknown id. */
+export async function activateClaudeAccount(id: string): Promise<{
+	success: boolean;
+	active_account_id: string | null;
+}> {
+	return api.post(`/auth/claude/accounts/${id}/activate`);
+}
+
+export async function renameClaudeAccount(id: string, name: string): Promise<{
+	success: boolean;
+	account: ClaudeAccount;
+}> {
+	return api.patch(`/auth/claude/accounts/${id}`, { name });
+}
+
+/** Remove an account. Throws `{ status: 409, detail }` when deleting the active
+ *  account while others remain ("switch first"). Deleting the sole account logs
+ *  the app out of Claude entirely. */
+export async function deleteClaudeAccount(id: string): Promise<{ success: boolean } | void> {
+	return api.delete<{ success: boolean }>(`/auth/claude/accounts/${id}`);
+}
+
 // GitHub auth
 export async function startGithubWebLogin(): Promise<{
 	success: boolean;
