@@ -83,6 +83,34 @@ def _log_unpark_decision(
     )
 
 
+def _normalize_relay_remember(remember: Any) -> Optional[str]:
+    """Coerce a `remember` value to the strict cluster enum before relaying.
+
+    The local ``permission_handler.respond`` accepts a loose ``remember`` (a
+    boolean from legacy callers), but the owning install's cluster endpoint
+    validates it against Literal 'none'|'session'|'profile' and 422s otherwise.
+    Match local respond() semantics EXACTLY so a relayed decision behaves the
+    same as a local one:
+
+    * ``None`` / ``'none'`` (or any falsy) → ``'none'`` (no rule created).
+      respond() short-circuits on ``if remember and remember != "none"``.
+    * ``'session'`` / ``'profile'`` → passed through (valid enum strings).
+    * boolean ``True`` (or any truthy non-enum value) → ``'profile'``.
+      In respond(), a truthy non-"session" value enters the rule branch and,
+      not matching ``remember == "session"``, falls to the profile-persist
+      else — i.e. legacy ``remember=True`` means "remember for this profile".
+    """
+    if remember is None:
+        return None
+    if remember in ("none", "session", "profile"):
+        return remember  # already a valid enum string
+    if not remember:
+        # falsy (False, "", 0) → local respond() creates no rule
+        return "none"
+    # truthy but not an enum string (legacy remember=True) → profile scope
+    return "profile"
+
+
 # Shared module-level sets tracking sessions with a pending two-phase
 # ``interrupt_for_query`` or a user-initiated stop.  Checked by run_query's
 # finally block to decide whether to auto-process the next queued message.
@@ -2030,6 +2058,20 @@ class ChatWebSocketHandler:
             eff_remember = remember if decision != "defer" else None
             eff_pattern = pattern if decision != "defer" else None
 
+            # Protocol asymmetry guard: the local respond() tolerates loose
+            # `remember` values (a boolean, per legacy callers) but the OWNER's
+            # cluster endpoint validates `remember` against the strict Literal
+            # 'none'|'session'|'profile' (hardened in 061dc947), so a boolean
+            # forwarded verbatim 422s and — without this — collapses to the
+            # RETRYABLE 'relay_offline' ack, making the frontend re-send the
+            # same rejected payload forever. Normalize to the enum string here,
+            # matching local respond() semantics exactly: falsy → no rule
+            # ('none'); truthy-but-not-an-enum-string → the profile scope (a
+            # legacy remember=True persists a profile-level rule, since
+            # respond() enters the rule branch, isn't "session", and so falls
+            # to the profile-persist else). Real enum strings pass through.
+            eff_remember = _normalize_relay_remember(eff_remember)
+
             # Cross-install session: the pending permission request and the
             # coroutine awaiting it live on the OWNING install, so responding
             # locally would just log "Request not found" and the owner's prompt
@@ -2059,6 +2101,21 @@ class ChatWebSocketHandler:
                 except cloud_relay.InstallOffline as e:
                     fail_reason = "relay_offline"
                     logger.debug(f"Cluster relay_permission_response offline for {response_session_id}: {e}")
+                except cloud_relay.CloudRelayError as e:
+                    # The peer was REACHED but rejected the request. A 4xx is an
+                    # authoritative, non-retryable verdict (schema rejection /
+                    # gone request) — surfacing it as 'relay_offline' would make
+                    # the frontend re-send the same doomed payload forever. Only
+                    # a 5xx (or an unknown status) is retryable → 'relay_offline'.
+                    status = getattr(e, "status_code", None)
+                    if status is not None and 400 <= status < 500:
+                        fail_reason = "invalid_response"
+                    else:
+                        fail_reason = "relay_offline"
+                    logger.warning(
+                        f"Cluster relay_permission_response rejected for "
+                        f"{response_session_id} (status={status}): {e}"
+                    )
                 except Exception as e:  # noqa: BLE001
                     fail_reason = "relay_offline"
                     logger.warning(f"Cluster relay_permission_response failed for {response_session_id}: {e}")

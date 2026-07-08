@@ -950,6 +950,97 @@ async def test_permission_response_remote_not_pending_reason():
     assert ack["reason"] == "not_pending"
 
 
+async def test_permission_response_remote_bool_remember_false_coerced_to_none():
+    """Protocol asymmetry: the local path tolerates a boolean ``remember`` (a
+    falsy value = "don't remember"), but the OWNER's cluster endpoint validates
+    ``remember`` against Literal 'none'|'session'|'profile' and 422s on a bool.
+    The handler must coerce ``remember=False`` to the enum string ``'none'``
+    (matching local semantics: falsy → no rule) BEFORE relaying."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "deny",
+            "remember": False,
+        })
+
+    kw = h.cloud.relay_permission_response.await_args.kwargs
+    assert kw["remember"] == "none", (
+        "boolean False must be coerced to the 'none' enum string, never "
+        "forwarded verbatim (owner would 422)"
+    )
+
+
+async def test_permission_response_remote_bool_remember_true_coerced_to_profile():
+    """Local semantics: ``remember=True`` is truthy and not "session", so the
+    local ``respond`` falls into the else branch and persists a PROFILE-level
+    rule. Match that mapping exactly — True → 'profile'."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "allow",
+            "remember": True,
+        })
+
+    kw = h.cloud.relay_permission_response.await_args.kwargs
+    assert kw["remember"] == "profile", (
+        "boolean True maps to the profile scope, matching local respond()"
+    )
+
+
+async def test_permission_response_remote_peer_validation_reason():
+    """A peer 4xx (schema rejection — e.g. the owner 422s an out-of-contract
+    payload) must NOT collapse to the retryable 'relay_offline' reason (the
+    frontend would keep re-sending the same bad payload forever). Distinguish
+    it with a non-retryable reason 'invalid_response'."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_permission_response.side_effect = (
+            cloud_relay_mod.CloudRelayError(
+                "Peer install cluster permission_response failed (422): bad",
+                status_code=422,
+                detail="bad",
+            )
+        )
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "allow",
+        })
+
+    ack = _frames(h.ws, "permission_response_ack")[0]
+    assert ack["success"] is False
+    assert ack["reason"] == "invalid_response", (
+        "a peer 4xx is authoritative & non-retryable — must not be 'relay_offline'"
+    )
+
+
+async def test_permission_response_remote_peer_5xx_is_relay_offline():
+    """A peer 5xx (transient server error) is retryable — it must still map to
+    'relay_offline' so the frontend keeps the modal for a retry."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        h.cloud.relay_permission_response.side_effect = (
+            cloud_relay_mod.CloudRelayError(
+                "Peer install cluster permission_response failed (503): down",
+                status_code=503,
+                detail="down",
+            )
+        )
+        await h.make_handler().handle_permission_response({
+            "request_id": "p1",
+            "session_id": "sess-r",
+            "decision": "allow",
+        })
+
+    ack = _frames(h.ws, "permission_response_ack")[0]
+    assert ack["success"] is False
+    assert ack["reason"] == "relay_offline"
+
+
 async def test_permission_response_local_does_not_relay():
     with _HandlerHarness() as h:
         await h.make_handler().handle_permission_response({
