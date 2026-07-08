@@ -18,6 +18,16 @@
 set -e
 
 CHROME_BIN="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}"
+
+# No system dbus daemon runs in this container, so Chromium logs
+# "Failed to connect to the bus: /run/dbus/system_bus_socket" on startup. That
+# line is normally harmless, but some Chromium components (e.g. the
+# ComponentUpdater/RemoteAllocator and platform-integration features) can trip a
+# CHECK/DCHECK and abort with SIGTRAP ("Trace/breakpoint trap") when the bus is
+# missing. Point DBus at an empty address so Chromium takes its no-bus fallback
+# path instead of trying (and failing) to reach the well-known system socket.
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
+export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SYSTEM_BUS_ADDRESS:-disabled:}"
 PROFILE="$HOME/chrome-profile"
 NM_DIR="$HOME/.config/google-chrome/NativeMessagingHosts"
 mkdir -p "$PROFILE" "$NM_DIR"
@@ -86,12 +96,17 @@ fi
 # Claude-in-Chrome CRX. With it set, the extension NEVER force-installs (no CRX
 # fetch at all), so /chrome can't connect. (Same reason Puppeteer, which ships
 # that flag by default, can't force-install extensions.)
+# --disable-features list also drops dbus-coupled subsystems that have no daemon
+# to talk to in this container (a suspected trigger of the startup SIGTRAP):
+#   DBus                              Chromium's platform dbus integration
+#   MediaSessionService               publishes MPRIS over the (absent) session bus
+# Kept together with the memory features so there is a single --disable-features.
 MEM_ARGS=(
     --js-flags=--max-old-space-size=512
     --renderer-process-limit=2
     --disk-cache-size=33554432
     --disable-software-rasterizer
-    --disable-features=Translate,BackForwardCache
+    --disable-features=Translate,BackForwardCache,DBus,MediaSessionService
 )
 
 # --ozone-platform=headless: full browser (extensions, native messaging)

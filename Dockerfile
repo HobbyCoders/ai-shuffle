@@ -45,6 +45,7 @@ RUN apt-get update && \
     gnupg \
     git \
     gosu \
+    tini \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -162,4 +163,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=120s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/health/ready || exit 1
 
-ENTRYPOINT ["/entrypoint.sh"]
+# tini runs as PID 1 so orphaned/zombie processes (e.g. the many short-lived
+# grandchildren of a crash-looping headless Chromium) are reaped by a real init.
+# Without this, the app process (PID 1) inherits every orphan but never wait()s
+# on them, so defunct chromium/chrome_crashpad corpses accumulate until the
+# container's pids cgroup fills and ALL forks fail (SDK spawns, git worktree,
+# even `docker exec`). `-g` forwards signals to the whole process group so a
+# `docker stop` shuts the app down cleanly.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
