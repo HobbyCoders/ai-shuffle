@@ -554,6 +554,7 @@ async def _drain_notifications_impl(
     from app.core.query_engine import (
         _record_task_message,
         _subagent_events_from_message,
+        _task_status_events_from_message,
         _task_notification_frame,
         _task_update_terminal_status,
         ResultMessage,
@@ -760,6 +761,21 @@ async def _drain_notifications_impl(
                         await dispatch_event(_sub_ev, sub_ectx, sub_state)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
+
+                # RC2: deliver a PARKED-state "Task Updated" chip. In-stream a
+                # TaskUpdatedMessage (a SystemMessage subclass) yields a
+                # {"type": "system", ...} event → handle_system → add_system_message
+                # → live-store update_id bump → the chip renders. The pump had no
+                # equivalent, so a status patch that arrives while parked was
+                # structurally undeliverable (the park-poller keys on update_id and
+                # had nothing to fetch). Convert + dispatch through the SAME handler
+                # chain here. If the live store has no session (cleanup raced),
+                # add_system_message logs + drops it — must not crash the pump.
+                try:
+                    for _status_ev in _task_status_events_from_message(message):
+                        await dispatch_event(_status_ev, sub_ectx, sub_state)
+                except Exception as _exc:
+                    ctx.debug(logger, f"Drain pump: task-status chip re-dispatch failed: {_exc}")
 
                 # STALE-TURN TERMINAL FRAME: the killed turn's own ResultMessage is
                 # buffered on the pooled client's read loop. Consuming it here is what

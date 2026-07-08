@@ -1346,3 +1346,143 @@ async def test_unpark_pending_cleared_when_stop_guard_abandons_delivery():
 
     handler._deliver_unpark.assert_not_awaited()
     assert task_registry.is_unpark_pending("sess-1") is False
+
+
+# ---------------------------------------------------------------------------
+# 11. RC1: ACK-armed AGENT completion unparks via the pump (test A, pump level).
+#     The CLI launches Agent tasks async WITHOUT run_in_background in the tool
+#     input; the launch ACK is what arms mark_background_launch (in-stream), so a
+#     genuine agent completion caught between turns must UNPARK — not be suppressed
+#     as foreground. The complementary in-stream ACK-arming is covered in
+#     tests/core/test_subagent_inner_output.py::TestLaunchAckArmsBackgroundGate.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_unparks_ack_armed_agent_completion():
+    """Test A (pump): an agent task whose launch was armed from the ACK
+    (mark_background_launch recorded for its launch tool_use_id) DOES unpark on its
+    terminal notification — was_background_launch is the gate that used to suppress
+    every genuine agent completion when the input flag was absent."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
+    # In-stream, the ACK sniffer armed the launch gate for the launch tool_use_id.
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["task_id"] == "task-1"
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_agent_completion_without_ack_arm():
+    """Test B (pump): an agent whose launch was NEVER armed (a SYNCHRONOUS
+    sub-agent whose real result returned inline, so the ACK sniffer never matched)
+    must NOT unpark from the pump — pins the #470/e83551e6 foreground semantics."""
+    task_registry.start_task("sess-1", "task-1", "agent", "sync agent")
+    # NOTE: no mark_background_launch — a synchronous sub-agent.
+    assert task_registry.was_background_launch("sess-1", "tu-1") is False
+
+    # hang=False: the suppression `continue`s, so the stream must end for the pump
+    # to terminate.
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Indicator still cleared, but NO unpark for the synchronous sub-agent.
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 12. RC2: parked-state "Task Updated" chip delivery (test C).
+#     A non-terminal TaskUpdatedMessage (e.g. a running→ still-running status patch)
+#     drained BETWEEN turns must be converted into the SAME {"type": "system",
+#     "subtype": "task_updated", ...} event the in-stream loop yields for it and
+#     dispatched through handle_system → add_system_message so a system message
+#     lands in the live store and its update_id increments — otherwise the
+#     park-poller (keyed on update_id) has nothing to fetch and the chip never
+#     renders while parked.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_delivers_task_updated_chip_to_live_store():
+    from app.core.live_session_store import live_session_store, LiveSession
+
+    session_id = "sess-chip"
+    # A genuine background agent is still running (keeps the pump on its normal
+    # unpark duty); the TaskUpdatedMessage is a non-terminal progress patch on it.
+    task_registry.start_task(session_id, "task-1", "agent", "bg agent")
+    task_registry.mark_background_launch(session_id, "tu-1")
+
+    # Seed a real live-store session so add_system_message has somewhere to land.
+    session = LiveSession(session_id=session_id)
+    session.last_update_id = 5
+    live_session_store._sessions[session_id] = session
+    baseline_update_id = session.last_update_id
+    baseline_msg_count = len(session.messages)
+
+    # A non-terminal (running) TaskUpdatedMessage, then a terminal notification so
+    # the pump terminates cleanly (hang=True would block forever otherwise).
+    upd = _updated("task-1", status="running", uuid="uu-run")
+    notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
+    client = _FakeClient([upd, notif], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    # Keep live_session_store REAL (assert its state), but stub the broadcaster in
+    # ws_event_handlers so handle_system doesn't hit real sync fan-out.
+    import app.api.ws_event_handlers as weh
+    try:
+        with _patch_pool(state), patch.object(weh, "sync_engine", new=MagicMock(
+            broadcast_stream_start=AsyncMock(),
+            broadcast_stream_chunk=AsyncMock(),
+        )):
+            await handler._drain_notifications(session_id, "claude-code", None, None)
+
+        # (a) a system message with subtype "task_updated" landed in the live store.
+        sys_msgs = [m for m in session.messages if m.type == "system"]
+        assert any(m.system_subtype == "task_updated" for m in sys_msgs), (
+            f"no task_updated system message landed: "
+            f"{[getattr(m, 'system_subtype', None) for m in session.messages]}"
+        )
+        assert len(session.messages) > baseline_msg_count
+        # (b) update_id incremented so the park-poll (keyed on it) will fetch it.
+        assert session.last_update_id > baseline_update_id
+    finally:
+        live_session_store._sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_pump_task_updated_chip_survives_missing_live_session():
+    """RC2 robustness: if the live store has no session (cleanup raced), the chip
+    dispatch must NOT crash the pump — add_system_message logs + drops the message,
+    and the pump still completes its normal unpark duty."""
+    session_id = "sess-chip-missing"
+    task_registry.start_task(session_id, "task-1", "agent", "bg agent")
+    task_registry.mark_background_launch(session_id, "tu-1")
+    # NOTE: no live-store session seeded.
+
+    upd = _updated("task-1", status="running", uuid="uu-run")
+    notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
+    client = _FakeClient([upd, notif], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    import app.api.ws_event_handlers as weh
+    with _patch_pool(state), patch.object(weh, "sync_engine", new=MagicMock(
+        broadcast_stream_start=AsyncMock(),
+        broadcast_stream_chunk=AsyncMock(),
+    )):
+        # Must not raise — the pump still delivers the terminal unpark.
+        await handler._drain_notifications(session_id, "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
