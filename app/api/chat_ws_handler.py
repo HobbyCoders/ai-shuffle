@@ -199,6 +199,21 @@ _UNPARK_ON_TASK_UPDATE_STATUSES = frozenset({"killed", "stopped"})
 # this to a tiny value; read fresh at the call site so monkeypatching takes effect.
 _UNPARK_BATCH_WINDOW_SECONDS = 1.5
 
+# Wedge-poll interval for the drain pump while it is winding down a force-cancelled
+# turn (stale_turn_undrained). The killed turn's terminal ResultMessage usually
+# arrives promptly, but if the CLI itself is wedged it may never come; on each
+# expiry the pump re-checks whether the background work that made us keep the
+# client has resolved, and evicts the now-idle/broken client if so. Read fresh at
+# the call site so tests can shrink it.
+_STALE_DRAIN_WEDGE_POLL_SECONDS = 30.0
+
+# One startup retry for a pump started by interrupt escalation: the force-cancelled
+# turn's finally (which flips is_streaming back to False) runs on deferred generator
+# finalization and may not have landed yet when the escalation handler starts the
+# pump. Exiting immediately would strand stale_turn_undrained with nothing left to
+# clear it. Read fresh at the call site so tests can shrink it.
+_STALE_STARTUP_RETRY_SECONDS = 0.25
+
 
 # Guidance attached to every consolidated <task-notification> follow-up turn. The
 # app now fires AT MOST ONE unpark per background task (see
@@ -512,6 +527,8 @@ async def _drain_notifications_impl(
     user_id: str,
     send_json: "Callable[[dict], Awaitable[bool]]",
     deliver_unpark: "Callable[..., Awaitable[bool]]",
+    process_next_queued: "Optional[Callable[[str], Awaitable[None]]]" = None,
+    suppress_queue_kick: bool = False,
 ) -> None:
     """Between-turns reader that catches a SLOW sub-agent's terminal
     ``TaskNotificationMessage`` and unparks the parent.
@@ -539,6 +556,7 @@ async def _drain_notifications_impl(
         _subagent_events_from_message,
         _task_notification_frame,
         _task_update_terminal_status,
+        ResultMessage,
         TaskNotificationMessage,
         TaskUpdatedMessage,
     )
@@ -558,8 +576,28 @@ async def _drain_notifications_impl(
     pending: List[Dict[str, Any]] = []
     try:
         state = get_session_pool().peek(session_id)  # peek = no LRU promote
+        if (
+            state is not None
+            and state.is_streaming
+            and getattr(state, "stale_turn_undrained", False)
+        ):
+            # Escalation-started pump raced the killed turn's finally (which
+            # flips is_streaming False on deferred generator finalization).
+            # Retry once before giving up — exiting now would strand the stale
+            # flag with nothing left to clear it.
+            await asyncio.sleep(_STALE_STARTUP_RETRY_SECONDS)
+            state = get_session_pool().peek(session_id)
         if state is None or not state.adapter.is_alive() or state.is_streaming:
             # A turn owns the client, or the client is gone — nothing to drain.
+            if state is not None and getattr(state, "stale_turn_undrained", False):
+                logger.warning(
+                    "Drain pump: exiting at startup with stale_turn_undrained still "
+                    "set (alive=%s, streaming=%s) — the flag may strand until the "
+                    "next query's error path evicts the client [session=%s]",
+                    bool(state.adapter.is_alive()),
+                    bool(state.is_streaming),
+                    session_id,
+                )
             logger.info(
                 "Drain pump: no drainable client (state=%s, alive=%s, streaming=%s) "
                 "— exiting without reading [session=%s]",
@@ -596,84 +634,257 @@ async def _drain_notifications_impl(
 
         agen = client.receive_messages()
         batch_deadline: Optional[float] = None
-        while True:
-            if batch_deadline is None:
-                # No deliverable yet — block for the next pooled-client message.
+        # PERSISTENT READ FUTURE (F1): every timed read below uses ONE future per
+        # __anext__ call, kept alive across timeouts via ``asyncio.wait`` (which,
+        # unlike ``wait_for``, never cancels it). Cancelling a pending __anext__
+        # throws CancelledError INTO the generator frame, closing it permanently —
+        # the next read then raises StopAsyncIteration and the pump exits with the
+        # stale flag still set (bricked session); on anyio a delivery-then-cancel
+        # window can also silently DROP a just-delivered message. Two concurrent
+        # __anext__ calls on one generator raise RuntimeError, so the wedge-poll
+        # read and the batch-window read MUST share this single pending future.
+        next_fut: "Optional[asyncio.Future]" = None
+
+        def _stale_flag_set() -> bool:
+            _s = get_session_pool().peek(session_id)
+            return bool(_s is not None and getattr(_s, "stale_turn_undrained", False))
+
+        try:
+            while True:
+                if next_fut is None:
+                    next_fut = asyncio.ensure_future(agen.__anext__())
+                if batch_deadline is None:
+                    # No deliverable yet — block for the next pooled-client message.
+                    # WEDGE POLICY: while this pump is winding down a force-cancelled
+                    # turn (stale_turn_undrained), do NOT block indefinitely — the
+                    # killed turn's terminal frame may never arrive if the CLI itself
+                    # wedged. Wait with a periodic timeout and, on each expiry,
+                    # re-check whether the background work that made us KEEP the
+                    # client has finished (or the subprocess died); once so, evict
+                    # the now-idle/broken client and exit. The pending read future is
+                    # left UNTOUCHED across expiries (see F1 note above).
+                    if _stale_flag_set():
+                        done, _ = await asyncio.wait(
+                            {next_fut}, timeout=_STALE_DRAIN_WEDGE_POLL_SECONDS
+                        )
+                        if not done:
+                            from app.core.session_pool import (
+                                get_session_pool as _gsp,
+                                is_subprocess_alive as _alive,
+                            )
+                            _st = _gsp().peek(session_id)
+                            if _st is None:
+                                break  # already gone from the pool — nothing to drain
+                            if not _should_evict_after_escalation(session_id):
+                                # Background work still running on a live subprocess —
+                                # keep waiting for the killed turn's terminal frame.
+                                continue
+                            # Background work finished or subprocess died → the kept
+                            # client is now safe/necessary to evict.
+                            logger.info(
+                                "Drain pump: stale-turn wedge — background work resolved, "
+                                "evicting winding-down client [session=%s]", session_id
+                            )
+                            if not _alive(_st):
+                                await _gsp().remove_dead(session_id)
+                            else:
+                                await _gsp().remove_broken(session_id)
+                            break
+                    else:
+                        await asyncio.wait({next_fut})
+                else:
+                    # At least one completion is already queued for delivery — keep
+                    # draining any FURTHER completions that are buffered (or land within
+                    # the consolidation window) so near-simultaneous completions fold
+                    # into ONE follow-up turn instead of one turn per completion
+                    # (Bug 1, policy #3). The backlog that piled up while the previous
+                    # turn was streaming is already queued, so it drains near-instantly.
+                    _wait = batch_deadline - time.monotonic()
+                    if _wait <= 0:
+                        break
+                    done, _ = await asyncio.wait({next_fut}, timeout=_wait)
+                    if not done:
+                        # Window elapsed — deliver what we have. The pending read is
+                        # cancelled by the exit cleanup below; a message still
+                        # buffered on the anyio receive stream is re-read by the next
+                        # pump run and re-deduped via mark_unparked.
+                        break
+
+                _fut, next_fut = next_fut, None
                 try:
-                    message = await agen.__anext__()
+                    message = _fut.result()
                 except StopAsyncIteration:
+                    # R1: the SDK generator ended CLEANLY. If we were winding
+                    # down a force-cancelled turn, the killed turn's terminal
+                    # ResultMessage will now NEVER arrive (the stream is
+                    # finished) — and this pump is exiting, so nothing else can
+                    # clear the flag. Exiting flagged would strand the pooled
+                    # entry behind the refuse-on-stale gates forever (rebricked
+                    # session). Take the same recovery as the read-error path:
+                    # clear the flag and evict (a finished message stream
+                    # cannot serve another turn anyway).
+                    try:
+                        from app.core.session_pool import (
+                            get_session_pool as _gsp,
+                            is_subprocess_alive as _alive,
+                        )
+                        _cs = _gsp().peek(session_id)
+                        if _cs is not None and _cs.stale_turn_undrained:
+                            _cs.stale_turn_undrained = False
+                            logger.warning(
+                                "Drain pump: stream ended before the killed "
+                                "turn's ResultMessage arrived — clearing "
+                                "stale_turn_undrained and evicting the "
+                                "finished client [session=%s]", session_id
+                            )
+                            if _alive(_cs):
+                                await _gsp().remove_broken(session_id)
+                            else:
+                                await _gsp().remove_dead(session_id)
+                    except Exception:
+                        pass
                     break
-            else:
-                # At least one completion is already queued for delivery — keep
-                # draining any FURTHER completions that are buffered (or land within
-                # the consolidation window) so near-simultaneous completions fold
-                # into ONE follow-up turn instead of one turn per completion
-                # (Bug 1, policy #3). The backlog that piled up while the previous
-                # turn was streaming is already queued, so it drains near-instantly.
-                _wait = batch_deadline - time.monotonic()
-                if _wait <= 0:
-                    break
+
+                # Feed EVERY message into the registry — this is what unfreezes the
+                # indicator (start/update/complete_task) for the terminal
+                # notification even before we deliver the unpark.
+                _record_task_message(session_id, message)
+
+                # Re-dispatch a SLOW background sub-agent's inner activity (assistant
+                # text + tool calls/results, identified by parent_tool_use_id) into the
+                # SAME subagent inner group it would have filled in-stream. Without this
+                # the node renders "completed / no activity recorded" because the parent
+                # turn's receive_response() already returned before these arrived.
                 try:
-                    message = await asyncio.wait_for(agen.__anext__(), timeout=_wait)
-                except (asyncio.TimeoutError, StopAsyncIteration):
-                    # Window elapsed (or stream ended) — deliver what we have. A
-                    # message still buffered on the anyio receive stream is left
-                    # intact (a cancelled receive does not consume an item), so the
-                    # next pump run re-reads it and re-dedupes via mark_unparked.
-                    break
+                    for _sub_ev in _subagent_events_from_message(message):
+                        await dispatch_event(_sub_ev, sub_ectx, sub_state)
+                except Exception as _exc:
+                    ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
-            # Feed EVERY message into the registry — this is what unfreezes the
-            # indicator (start/update/complete_task) for the terminal
-            # notification even before we deliver the unpark.
-            _record_task_message(session_id, message)
+                # STALE-TURN TERMINAL FRAME: the killed turn's own ResultMessage is
+                # buffered on the pooled client's read loop. Consuming it here is what
+                # lets us clear stale_turn_undrained — the CLI is now genuinely idle, so
+                # a follow-up query can safely reuse the client. Placed BEFORE the
+                # TaskUpdatedMessage branch since a ResultMessage is neither a task
+                # update nor a notification.
+                if isinstance(message, ResultMessage):
+                    _rs_state = get_session_pool().peek(session_id)
+                    if _rs_state is not None and _rs_state.stale_turn_undrained:
+                        _rs_state.stale_turn_undrained = False
+                        logger.info(
+                            "Drain pump: consumed killed turn's terminal ResultMessage — "
+                            "cleared stale_turn_undrained [session=%s]", session_id
+                        )
+                        if pending:
+                            # Completions HELD during the wind-down (F2): the batch
+                            # window was deliberately NOT armed while the flag was
+                            # set (delivering mid-wind-down gets refused by the
+                            # stale reuse gate, and the mark_unparked dedup would
+                            # lose the result forever). Arm it NOW so the post-loop
+                            # delivery fires with the flag cleared.
+                            if batch_deadline is None:
+                                batch_deadline = (
+                                    time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
+                                )
+                            continue
+                        if (
+                            not suppress_queue_kick
+                            and session_id not in _stopped_sessions
+                            and session_id not in _interrupt_pending_sessions
+                            and process_next_queued is not None
+                        ):
+                            try:
+                                _queue = await run_sync(database.get_queued_messages, session_id)
+                            except Exception:
+                                _queue = []
+                            if _queue:
+                                # A queued (e.g. send-now replacement) message is
+                                # waiting — the client is idle now, so kick the queue.
+                                # Remove ourselves first (same self-deadlock guard as the
+                                # unpark path) since _process_next_queued may start a turn
+                                # whose stop_drain_pump would otherwise cancel/await us.
+                                logger.info(
+                                    "Drain pump: stale turn drained + queue non-empty — "
+                                    "kicking _process_next_queued [session=%s]", session_id
+                                )
+                                _drop_drain_pump_self(session_id, _drain_pumps)
+                                await process_next_queued(session_id)
+                                return
+                        if suppress_queue_kick:
+                            # Stop-origin pump (F4): the user pressed Stop — a stop
+                            # "does NOT auto-fire queued messages", and the
+                            # _stopped_sessions latch cannot carry that intent here
+                            # (run_query's finally consumed it before this pump
+                            # started). The queue stays intact for manual sending.
+                            logger.info(
+                                "Drain pump: stale turn drained (stop-origin) — queue "
+                                "kick suppressed [session=%s]", session_id
+                            )
+                        # No pending unpark, no deliverable queue (or Stop/interrupt
+                        # latched / stop-origin) — keep looping on normal unpark duty.
+                        continue
 
-            # Re-dispatch a SLOW background sub-agent's inner activity (assistant
-            # text + tool calls/results, identified by parent_tool_use_id) into the
-            # SAME subagent inner group it would have filled in-stream. Without this
-            # the node renders "completed / no activity recorded" because the parent
-            # turn's receive_response() already returned before these arrived.
-            try:
-                for _sub_ev in _subagent_events_from_message(message):
-                    await dispatch_event(_sub_ev, sub_ectx, sub_state)
-            except Exception as _exc:
-                ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
-
-            # THE GAP: a killed/stopped (TaskStop) background task can terminate via
-            # a TaskUpdatedMessage ALONE — no following TaskNotificationMessage. The
-            # registry indicator already cleared above (_record_task_message handles
-            # ALL terminal updates), but without this branch the parent would hang
-            # silently. Deliver a minimal unpark so the parent acknowledges the stop.
-            # We trigger ONLY on killed/stopped (the notification-less terminals): a
-            # normally completed/failed task ALSO emits a TaskNotificationMessage
-            # carrying the full result, which drives the rich unpark below — so we
-            # must NOT also fire here for those, or the parent would unpark twice.
-            # A killed task has NO output_file/result, so we build a result-free
-            # pending payload; the unpark prompt builder tolerates an empty
-            # output_file (reads "" off disk).
-            if (
-                not isinstance(message, TaskNotificationMessage)
-                and isinstance(message, TaskUpdatedMessage)
-            ):
-                _u_status = _task_update_terminal_status(message)
-                if _u_status not in _UNPARK_ON_TASK_UPDATE_STATUSES:
-                    # Non-terminal, or a completed/failed update whose unpark is
-                    # owned by the forthcoming notification — registry already
-                    # cleared the indicator, nothing more to do here.
-                    continue
-                _u_task_id = getattr(message, "task_id", None)
-                _u_uuid = getattr(message, "uuid", None)
-                _u_signature = _u_uuid or f":{_u_status}"
-                # SUPPRESS PHANTOM TOP-LEVEL REST (Bug 1, policy #1): the newer CLI
-                # emits a killed/stopped TaskUpdatedMessage when the SESSION'S OWN
-                # top-level agent comes to rest — a phantom that was never a tracked
-                # background task. Unlike the notification path below, this branch has
-                # no background-launch gate, so without this check that phantom would
-                # storm the session with "nothing to act on" unparks. A genuine
-                # user-killed background task WAS started via the registry, so it has
-                # a live record (complete_task keeps it, only flipping status); a
-                # phantom self-rest has none. Gate on a record so only real tracked
-                # tasks unpark.
-                if task_registry.get_task(session_id, _u_task_id) is None:
+                # THE GAP: a killed/stopped (TaskStop) background task can terminate via
+                # a TaskUpdatedMessage ALONE — no following TaskNotificationMessage. The
+                # registry indicator already cleared above (_record_task_message handles
+                # ALL terminal updates), but without this branch the parent would hang
+                # silently. Deliver a minimal unpark so the parent acknowledges the stop.
+                # We trigger ONLY on killed/stopped (the notification-less terminals): a
+                # normally completed/failed task ALSO emits a TaskNotificationMessage
+                # carrying the full result, which drives the rich unpark below — so we
+                # must NOT also fire here for those, or the parent would unpark twice.
+                # A killed task has NO output_file/result, so we build a result-free
+                # pending payload; the unpark prompt builder tolerates an empty
+                # output_file (reads "" off disk).
+                if (
+                    not isinstance(message, TaskNotificationMessage)
+                    and isinstance(message, TaskUpdatedMessage)
+                ):
+                    _u_status = _task_update_terminal_status(message)
+                    if _u_status not in _UNPARK_ON_TASK_UPDATE_STATUSES:
+                        # Non-terminal, or a completed/failed update whose unpark is
+                        # owned by the forthcoming notification — registry already
+                        # cleared the indicator, nothing more to do here.
+                        continue
+                    _u_task_id = getattr(message, "task_id", None)
+                    _u_uuid = getattr(message, "uuid", None)
+                    _u_signature = _u_uuid or f":{_u_status}"
+                    # SUPPRESS PHANTOM TOP-LEVEL REST (Bug 1, policy #1): the newer CLI
+                    # emits a killed/stopped TaskUpdatedMessage when the SESSION'S OWN
+                    # top-level agent comes to rest — a phantom that was never a tracked
+                    # background task. Unlike the notification path below, this branch has
+                    # no background-launch gate, so without this check that phantom would
+                    # storm the session with "nothing to act on" unparks. A genuine
+                    # user-killed background task WAS started via the registry, so it has
+                    # a live record (complete_task keeps it, only flipping status); a
+                    # phantom self-rest has none. Gate on a record so only real tracked
+                    # tasks unpark.
+                    if task_registry.get_task(session_id, _u_task_id) is None:
+                        _log_unpark_decision(
+                            path="pump",
+                            session_id=session_id,
+                            task_id=_u_task_id,
+                            status=_u_status,
+                            signature=_u_signature,
+                            started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                            decision="suppress-untracked",
+                        )
+                        continue
+                    # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
+                    # for its whole life, regardless of the per-rest uuid the newer CLI
+                    # re-stamps on each at-rest re-emission.
+                    if not task_registry.mark_unparked(session_id, _u_task_id):
+                        # Already drove an unpark for this task — keep draining.
+                        _log_unpark_decision(
+                            path="pump",
+                            session_id=session_id,
+                            task_id=_u_task_id,
+                            status=_u_status,
+                            signature=_u_signature,
+                            started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                            decision="dedup",
+                        )
+                        continue
                     _log_unpark_decision(
                         path="pump",
                         session_id=session_id,
@@ -681,132 +892,124 @@ async def _drain_notifications_impl(
                         status=_u_status,
                         signature=_u_signature,
                         started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
-                        decision="suppress-untracked",
+                        decision="deliver-killed",
+                    )
+                    pending.append({
+                        "task_id": _u_task_id,
+                        "status": _u_status,
+                        "summary": None,
+                        "output_file": None,
+                        "uuid": _u_uuid,
+                        "usage": None,
+                        "tool_use_id": None,
+                    })
+                    # Latch unpark-pending the MOMENT the completion is consumed —
+                    # see the notification path below for why this cannot wait until
+                    # ``_deliver_unpark_impl``.
+                    task_registry.mark_unpark_pending(session_id)
+                    # Consolidate (Bug 1, policy #3): keep draining within the batch
+                    # window instead of breaking, so completions landing close together
+                    # fold into ONE follow-up turn.
+                    # F2: while winding down a force-cancelled turn, HOLD the
+                    # pending completion — do NOT arm the batch window. Delivering
+                    # before the stale ResultMessage clears the flag would be
+                    # refused by the stale reuse gate, and the mark_unparked dedup
+                    # means it never re-fires. The ResultMessage branch arms the
+                    # window once the flag clears.
+                    if batch_deadline is None and not _stale_flag_set():
+                        batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
+                    continue
+
+                if not isinstance(message, TaskNotificationMessage):
+                    continue
+
+                frame = _task_notification_frame(message)
+                status = frame.get("status")
+                if status not in _TERMINAL_TASK_STATUSES:
+                    continue
+
+                # Complete the matching subagent node (keyed by tool_use_id). The node
+                # was kept RUNNING at launch (the launch-ACK no longer completes it), so
+                # the terminal notification is what marks it done/errored — mirrors the
+                # in-stream task_notification path for FAST sub-agents. Idempotent:
+                # no-ops if the node was already completed in-stream or isn't a subagent.
+                _notif_tool_use_id = frame.get("tool_use_id")
+                if _notif_tool_use_id:
+                    try:
+                        await dispatch_event(
+                            {
+                                "type": "task_notification",
+                                "tool_use_id": _notif_tool_use_id,
+                                "status": status,
+                                "usage": frame.get("usage"),
+                            },
+                            sub_ectx,
+                            sub_state,
+                        )
+                    except Exception as _exc:
+                        ctx.debug(logger, f"Drain pump: subagent completion dispatch failed: {_exc}")
+
+                # Optional best-effort FE nudge; registry + poll already clear the
+                # indicator, so failure here is harmless.
+                try:
+                    await send_json(dict(frame, session_id=session_id))
+                except Exception:
+                    pass
+
+                # SPURIOUS-UNPARK GATE (synchronous sub-agent fix): the SDK emits an
+                # at-rest TaskNotificationMessage for EVERY sub-agent when the parent
+                # comes to rest — including SYNCHRONOUS ones whose full result was
+                # already delivered INLINE as a tool_result during the turn, and
+                # grandchild background tasks a SUB-AGENT launched (which the parent
+                # never tracked). Only a notification whose tool_use_id the PARENT
+                # recorded as a run_in_background=true launch represents genuinely-
+                # backgrounded work the parent has NOT yet seen and therefore warrants
+                # the wake-up follow-up turn. For anything else, suppress the unpark and
+                # keep draining (do NOT break/deliver). The indicator already cleared
+                # above via _record_task_message, and the subagent node was already
+                # completed via the dispatch above, so suppressing here only drops the
+                # spurious follow-up turn — nothing strands.
+                #
+                # Fallback for backgrounded local_bash shells (the actual slow-path bug):
+                # the SDK does not reliably set tool_use_id on a shell's terminal
+                # notification, so also accept a task recorded in _sdk_background_tasks
+                # (keyed by the always-present task_id). This is the path that wakes a
+                # session parked on a backgrounded Bash/PowerShell command.
+                if not (
+                    task_registry.was_background_launch(session_id, frame.get("tool_use_id"))
+                    or task_registry.is_sdk_background_task(session_id, frame.get("task_id"))
+                ):
+                    _log_unpark_decision(
+                        path="pump",
+                        session_id=session_id,
+                        task_id=frame.get("task_id"),
+                        status=status,
+                        signature=frame.get("uuid") or f"{frame.get('output_file')}:{status}",
+                        started_this_turn=task_registry.was_started_this_turn(session_id, frame.get("task_id")),
+                        decision="suppress-foreground",
                     )
                     continue
+
+                task_id = frame.get("task_id")
+                output_file = frame.get("output_file")
+                signature = frame.get("uuid") or f"{output_file}:{status}"
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
-                # for its whole life, regardless of the per-rest uuid the newer CLI
-                # re-stamps on each at-rest re-emission.
-                if not task_registry.mark_unparked(session_id, _u_task_id):
+                # for its whole life. The newer CLI re-emits a terminal notification
+                # with a FRESH uuid each time the agent comes to rest, which used to
+                # re-arm the old (task_id, signature) latch and storm the session.
+                if not task_registry.mark_unparked(session_id, task_id):
                     # Already drove an unpark for this task — keep draining.
                     _log_unpark_decision(
                         path="pump",
                         session_id=session_id,
-                        task_id=_u_task_id,
-                        status=_u_status,
-                        signature=_u_signature,
-                        started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                        task_id=task_id,
+                        status=status,
+                        signature=signature,
+                        started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
                         decision="dedup",
                     )
                     continue
-                _log_unpark_decision(
-                    path="pump",
-                    session_id=session_id,
-                    task_id=_u_task_id,
-                    status=_u_status,
-                    signature=_u_signature,
-                    started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
-                    decision="deliver-killed",
-                )
-                pending.append({
-                    "task_id": _u_task_id,
-                    "status": _u_status,
-                    "summary": None,
-                    "output_file": None,
-                    "uuid": _u_uuid,
-                    "usage": None,
-                    "tool_use_id": None,
-                })
-                # Latch unpark-pending the MOMENT the completion is consumed —
-                # see the notification path below for why this cannot wait until
-                # ``_deliver_unpark_impl``.
-                task_registry.mark_unpark_pending(session_id)
-                # Consolidate (Bug 1, policy #3): keep draining within the batch
-                # window instead of breaking, so completions landing close together
-                # fold into ONE follow-up turn.
-                if batch_deadline is None:
-                    batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
-                continue
 
-            if not isinstance(message, TaskNotificationMessage):
-                continue
-
-            frame = _task_notification_frame(message)
-            status = frame.get("status")
-            if status not in _TERMINAL_TASK_STATUSES:
-                continue
-
-            # Complete the matching subagent node (keyed by tool_use_id). The node
-            # was kept RUNNING at launch (the launch-ACK no longer completes it), so
-            # the terminal notification is what marks it done/errored — mirrors the
-            # in-stream task_notification path for FAST sub-agents. Idempotent:
-            # no-ops if the node was already completed in-stream or isn't a subagent.
-            _notif_tool_use_id = frame.get("tool_use_id")
-            if _notif_tool_use_id:
-                try:
-                    await dispatch_event(
-                        {
-                            "type": "task_notification",
-                            "tool_use_id": _notif_tool_use_id,
-                            "status": status,
-                            "usage": frame.get("usage"),
-                        },
-                        sub_ectx,
-                        sub_state,
-                    )
-                except Exception as _exc:
-                    ctx.debug(logger, f"Drain pump: subagent completion dispatch failed: {_exc}")
-
-            # Optional best-effort FE nudge; registry + poll already clear the
-            # indicator, so failure here is harmless.
-            try:
-                await send_json(dict(frame, session_id=session_id))
-            except Exception:
-                pass
-
-            # SPURIOUS-UNPARK GATE (synchronous sub-agent fix): the SDK emits an
-            # at-rest TaskNotificationMessage for EVERY sub-agent when the parent
-            # comes to rest — including SYNCHRONOUS ones whose full result was
-            # already delivered INLINE as a tool_result during the turn, and
-            # grandchild background tasks a SUB-AGENT launched (which the parent
-            # never tracked). Only a notification whose tool_use_id the PARENT
-            # recorded as a run_in_background=true launch represents genuinely-
-            # backgrounded work the parent has NOT yet seen and therefore warrants
-            # the wake-up follow-up turn. For anything else, suppress the unpark and
-            # keep draining (do NOT break/deliver). The indicator already cleared
-            # above via _record_task_message, and the subagent node was already
-            # completed via the dispatch above, so suppressing here only drops the
-            # spurious follow-up turn — nothing strands.
-            #
-            # Fallback for backgrounded local_bash shells (the actual slow-path bug):
-            # the SDK does not reliably set tool_use_id on a shell's terminal
-            # notification, so also accept a task recorded in _sdk_background_tasks
-            # (keyed by the always-present task_id). This is the path that wakes a
-            # session parked on a backgrounded Bash/PowerShell command.
-            if not (
-                task_registry.was_background_launch(session_id, frame.get("tool_use_id"))
-                or task_registry.is_sdk_background_task(session_id, frame.get("task_id"))
-            ):
-                _log_unpark_decision(
-                    path="pump",
-                    session_id=session_id,
-                    task_id=frame.get("task_id"),
-                    status=status,
-                    signature=frame.get("uuid") or f"{frame.get('output_file')}:{status}",
-                    started_this_turn=task_registry.was_started_this_turn(session_id, frame.get("task_id")),
-                    decision="suppress-foreground",
-                )
-                continue
-
-            task_id = frame.get("task_id")
-            output_file = frame.get("output_file")
-            signature = frame.get("uuid") or f"{output_file}:{status}"
-            # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
-            # for its whole life. The newer CLI re-emits a terminal notification
-            # with a FRESH uuid each time the agent comes to rest, which used to
-            # re-arm the old (task_id, signature) latch and storm the session.
-            if not task_registry.mark_unparked(session_id, task_id):
-                # Already drove an unpark for this task — keep draining.
                 _log_unpark_decision(
                     path="pump",
                     session_id=session_id,
@@ -814,48 +1017,57 @@ async def _drain_notifications_impl(
                     status=status,
                     signature=signature,
                     started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
-                    decision="dedup",
+                    decision="deliver",
                 )
+                pending.append({
+                    "task_id": task_id,
+                    "status": status,
+                    "summary": frame.get("summary"),
+                    "output_file": output_file,
+                    "uuid": frame.get("uuid"),
+                    "usage": frame.get("usage"),
+                    "tool_use_id": frame.get("tool_use_id"),
+                })
+                # Latch unpark-pending the MOMENT the completion is consumed.
+                # ``complete_task`` (via ``_record_task_message`` above) already
+                # dropped the task from ``get_active``, so from here until the
+                # follow-up's ``start_streaming`` a /live poll would read
+                # (is_streaming=false, activeTasks=[]) — indistinguishable from
+                # idle. Latching only inside ``_deliver_unpark_impl`` (after the
+                # consolidation window + its DB writes) left that gap >= the whole
+                # 1.5s window — LONGER than the client's 1.5s park-poll interval —
+                # so every successful unpark landed a poll in the gap, STOPPED the
+                # poller, and the follow-up streamed into a stranded UI (stuck
+                # showing parked + a stale running task). Idempotent with the
+                # deliver-time latch, which stays as the last-line re-assert after
+                # its own ``end_streaming`` (that call clears the latch).
+                task_registry.mark_unpark_pending(session_id)
+                # Consolidate (Bug 1, policy #3): keep draining within the batch window
+                # instead of breaking, so completions landing close together fold into
+                # ONE follow-up turn.
+                # F2: while the stale flag is set, HOLD the pending unpark — do
+                # NOT arm the batch window. Delivering mid-wind-down gets refused
+                # by the stale reuse gate and ``mark_unparked``'s dedup loses the
+                # result forever. The ResultMessage branch arms the window the
+                # moment it clears the flag.
+                if batch_deadline is None and not _stale_flag_set():
+                    batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
                 continue
-
-            _log_unpark_decision(
-                path="pump",
-                session_id=session_id,
-                task_id=task_id,
-                status=status,
-                signature=signature,
-                started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
-                decision="deliver",
-            )
-            pending.append({
-                "task_id": task_id,
-                "status": status,
-                "summary": frame.get("summary"),
-                "output_file": output_file,
-                "uuid": frame.get("uuid"),
-                "usage": frame.get("usage"),
-                "tool_use_id": frame.get("tool_use_id"),
-            })
-            # Latch unpark-pending the MOMENT the completion is consumed.
-            # ``complete_task`` (via ``_record_task_message`` above) already
-            # dropped the task from ``get_active``, so from here until the
-            # follow-up's ``start_streaming`` a /live poll would read
-            # (is_streaming=false, activeTasks=[]) — indistinguishable from
-            # idle. Latching only inside ``_deliver_unpark_impl`` (after the
-            # consolidation window + its DB writes) left that gap >= the whole
-            # 1.5s window — LONGER than the client's 1.5s park-poll interval —
-            # so every successful unpark landed a poll in the gap, STOPPED the
-            # poller, and the follow-up streamed into a stranded UI (stuck
-            # showing parked + a stale running task). Idempotent with the
-            # deliver-time latch, which stays as the last-line re-assert after
-            # its own ``end_streaming`` (that call clears the latch).
-            task_registry.mark_unpark_pending(session_id)
-            # Consolidate (Bug 1, policy #3): keep draining within the batch window
-            # instead of breaking, so completions landing close together fold into
-            # ONE follow-up turn.
-            if batch_deadline is None:
-                batch_deadline = time.monotonic() + _UNPARK_BATCH_WINDOW_SECONDS
-            continue
+        finally:
+            # Pump exit (return/break/cancel/error): cancel the read future we
+            # own so no detached __anext__ keeps running against the client
+            # (F1: the loop itself never cancels it); if it already completed,
+            # consume its result/exception so nothing logs "exception was
+            # never retrieved".
+            if next_fut is not None:
+                if not next_fut.done():
+                    next_fut.cancel()
+                else:
+                    try:
+                        next_fut.result()
+                    except BaseException:
+                        pass
+                next_fut = None
     except asyncio.CancelledError:
         # Stopped by stop_drain_pump (a new turn is starting) — exit without
         # firing. Drop our early latch (if any): no follow-up will stream for the
@@ -870,6 +1082,25 @@ async def _drain_notifications_impl(
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
         if pending:
             task_registry.clear_unpark_pending(session_id)
+        # If we were winding down a force-cancelled turn when the read stream died,
+        # evict: a dead read loop makes the client broken by definition — its stale
+        # frame will never be consumed, so it must not stay pooled behind the
+        # refuse-on-stale gate forever. remove_dead if the subprocess is gone,
+        # else remove_broken (subprocess alive but read loop unusable).
+        try:
+            from app.core.session_pool import (
+                get_session_pool as _gsp,
+                is_subprocess_alive as _alive,
+            )
+            _es = _gsp().peek(session_id)
+            if _es is not None and _es.stale_turn_undrained:
+                _es.stale_turn_undrained = False
+                if _alive(_es):
+                    await _gsp().remove_broken(session_id)
+                else:
+                    await _gsp().remove_dead(session_id)
+        except Exception:
+            pass
         _drop_drain_pump_self(session_id, _drain_pumps)
         return
 
@@ -1296,10 +1527,37 @@ class ChatWebSocketHandler:
         if session_id:
             async with _active_sessions_lock:
                 active_task = _active_chat_sessions.get(session_id)
-            if active_task is not None and not active_task.done():
+            # Route to the queue when a turn is live OR when the pooled client is
+            # still winding down a force-cancelled turn (stale_turn_undrained): a
+            # follow-up query would cross the buffered stale ResultMessage / write
+            # into a possibly mid-turn CLI. Queuing keeps the send-now UX — the
+            # message auto-fires once the drain pump clears the flag.
+            _stale = False
+            if active_task is None or active_task.done():
+                from app.core.session_pool import get_session_pool, is_subprocess_alive
+                _peek = get_session_pool().peek(session_id)
+                if _peek is not None and _peek.stale_turn_undrained:
+                    if is_subprocess_alive(_peek):
+                        _stale = True
+                    else:
+                        # R2: a DEAD subprocess can't be "winding down" — no
+                        # pump will ever clear the flag, so queue-routing here
+                        # would sit in queue-limbo until pool idle eviction.
+                        # Clear the flag, drop the dead entry, and fall through
+                        # to the normal path (which builds a fresh client).
+                        _peek.stale_turn_undrained = False
+                        await get_session_pool().remove_dead(session_id)
+                        logger.warning(
+                            f"[BusyGuard] session {session_id} carried "
+                            f"stale_turn_undrained on a DEAD subprocess — "
+                            f"cleared flag, removed dead pool entry, "
+                            f"proceeding with a fresh client"
+                        )
+            if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
-                    f"[BusyGuard] query for session {session_id} arrived mid-turn — "
-                    f"enqueueing instead of cancelling the live turn"
+                    f"[BusyGuard] query for session {session_id} arrived while "
+                    f"{'mid-turn' if not _stale else 'winding down a cancelled turn'} "
+                    f"— enqueueing instead of cancelling/crossing the turn"
                 )
                 await self.handle_queue_message({
                     "session_id": session_id,
@@ -1307,6 +1565,15 @@ class ChatWebSocketHandler:
                     "profile": data.get("profile"),
                     "project": project_id,
                 })
+                # F5: ack the auto-route. The client sent this query expecting a
+                # turn to start (e.g. the send-now replacement right after
+                # interrupt_confirmed); without an explicit ack it sits on its
+                # optimistic streaming state forever (unbounded spinner — the
+                # poller discards idle polls while interruptPending is latched).
+                # queue_updated (broadcast above) carries the queue contents; this
+                # frame tells THIS client its query was queued, not started. The
+                # exact session_id matters: the FE ignores cross-session frames.
+                await self.send_json({"type": "query_queued", "session_id": session_id})
                 return
 
         # Create or get session
@@ -1590,11 +1857,6 @@ class ChatWebSocketHandler:
                             await asyncio.sleep(timeout)
                             if not t.done():
                                 logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
-                                t.cancel()
-                                try:
-                                    await t
-                                except (asyncio.CancelledError, Exception):
-                                    pass
                                 # Same broken-client hazard as interrupt_for_query:
                                 # the CLI never honored the interrupt, so the next
                                 # message must not reuse this pooled client — UNLESS
@@ -1602,9 +1864,36 @@ class ChatWebSocketHandler:
                                 # subprocess. remove_broken → SIGTERM would kill
                                 # every sub-agent/shell child; never trade live
                                 # background work for eviction of a healthy client.
-                                if _should_evict_after_escalation(sid):
+                                _keep = not _should_evict_after_escalation(sid)
+                                # Flag stale BEFORE cancelling: the cancelled task's
+                                # finally flips is_streaming back to False (disarming
+                                # the busy gate), so this flag is the only signal that
+                                # the pooled client is still winding down the killed
+                                # turn's buffered frames. Guard on the pre-cancel
+                                # is_streaming so a fresh replacement client (a
+                                # concurrent escalation already evicted+recreated) is
+                                # never mis-flagged.
+                                _flagged = self._flag_stale_if_keeping(sid, keep=_keep)
+                                t.cancel()
+                                try:
+                                    await t
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                if not _keep:
                                     from app.core.session_pool import get_session_pool
                                     await get_session_pool().remove_broken(sid)
+                                elif _flagged:
+                                    # Keep branch: start the between-turns drain pump
+                                    # to consume the killed turn's terminal frame and
+                                    # clear the stale flag. STOP-origin (F4): the
+                                    # _stopped_sessions latch was already consumed by
+                                    # the cancelled task's finally during `await t`,
+                                    # so the no-auto-fire intent must ride an explicit
+                                    # flag — a user Stop never surprise-drains the
+                                    # message queue.
+                                    await self._start_drain_pump_for_session(
+                                        sid, suppress_queue_kick=True
+                                    )
                         except asyncio.CancelledError:
                             pass
                     _t = asyncio.create_task(_safety_cancel(task, session_id))
@@ -1659,6 +1948,12 @@ class ChatWebSocketHandler:
         # Mark as interrupt-pending so the old task's finally block skips queue processing
         _interrupt_pending_sessions.add(session_id)
 
+        # F6: when the drain-timeout keep-branch flags the client, the pump start
+        # is deferred until AFTER the interrupt_confirmed send — the confirm is
+        # what unblocks the user's replacement query and must never wait on the
+        # pump start's run_sync(database.get_session) read.
+        _start_pump_after_confirm = False
+
         try:
             # Step 1: Interrupt the SDK-level streaming
             interrupted = await interrupt_session(session_id)
@@ -1673,11 +1968,6 @@ class ChatWebSocketHandler:
                 done, pending = await asyncio.wait({task}, timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS)
                 if pending:
                     logger.warning(f"interrupt_for_query: drain timed out for {session_id}, force cancelling")
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
                     # Drain timeout means the CLI never acknowledged the
                     # interrupt and is likely still mid-turn (e.g. extended
                     # thinking). The stream's finally keeps connected clients
@@ -1689,13 +1979,35 @@ class ChatWebSocketHandler:
                     # sub-agent/shell child; never trade live background work
                     # for eviction of a healthy client. A truly wedged client
                     # is evicted by the next query's error path instead.
-                    if _should_evict_after_escalation(session_id):
+                    _keep = not _should_evict_after_escalation(session_id)
+                    # Flag stale BEFORE cancelling (see handle_stop): the
+                    # cancelled task's finally clears is_streaming, so this flag
+                    # is the only remaining signal that the kept client is still
+                    # winding down the killed turn's buffered frames.
+                    _flagged = self._flag_stale_if_keeping(session_id, keep=_keep)
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    if not _keep:
                         from app.core.session_pool import get_session_pool
                         await get_session_pool().remove_broken(session_id)
+                    elif _flagged:
+                        # Keep branch: start the between-turns drain pump to
+                        # consume the killed turn's terminal frame and clear the
+                        # stale flag (then re-kick any queued send-now message) —
+                        # but only AFTER the confirm below (F6).
+                        _start_pump_after_confirm = True
 
             # Step 3: Confirm to frontend — safe to send the query now
             await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
             logger.debug(f"interrupt_for_query: confirmed for session {session_id}")
+
+            if _start_pump_after_confirm:
+                # Send-now origin: the queue kick stays enabled so the queued
+                # replacement message auto-fires once the pump clears the flag.
+                await self._start_drain_pump_for_session(session_id)
 
         except Exception as e:
             logger.error(f"interrupt_for_query failed for {session_id}: {e}")
@@ -2560,10 +2872,36 @@ class ChatWebSocketHandler:
             # back at the front — the post-turn queue drain picks it up.
             async with _active_sessions_lock:
                 active_task = _active_chat_sessions.get(session_id)
-            if active_task is not None and not active_task.done():
+            # Re-queue when a turn is live OR the pooled client is still winding
+            # down a force-cancelled turn (stale_turn_undrained) — launching now
+            # would cross the buffered stale ResultMessage / write into a mid-turn
+            # CLI. The drain pump re-kicks this drain once it clears the flag.
+            _stale = False
+            if active_task is None or active_task.done():
+                from app.core.session_pool import get_session_pool, is_subprocess_alive
+                _peek = get_session_pool().peek(session_id)
+                if _peek is not None and _peek.stale_turn_undrained:
+                    if is_subprocess_alive(_peek):
+                        _stale = True
+                    else:
+                        # R2: DEAD subprocess ⇒ nothing is winding down and no
+                        # pump will ever clear the flag — re-queuing would loop
+                        # forever (queue-limbo until idle eviction). Clear the
+                        # flag, drop the dead entry, and launch on a fresh
+                        # client.
+                        _peek.stale_turn_undrained = False
+                        await get_session_pool().remove_dead(session_id)
+                        logger.warning(
+                            f"[Queue] session {session_id} carried "
+                            f"stale_turn_undrained on a DEAD subprocess — "
+                            f"cleared flag, removed dead pool entry, "
+                            f"launching queued message on a fresh client"
+                        )
+            if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
-                    f"[Queue] Session {session_id} has a live turn — re-queuing "
-                    f"instead of cancelling it"
+                    f"[Queue] Session {session_id} is "
+                    f"{'mid-turn' if not _stale else 'winding down a cancelled turn'} "
+                    f"— re-queuing instead of cancelling/crossing it"
                 )
                 await run_sync(
                     database.requeue_message_at_front,
@@ -2594,6 +2932,7 @@ class ChatWebSocketHandler:
                 # (the latch itself is left set for its owner to consume).
                 preempted = False
                 latched = False
+                stale = False
                 async with _active_sessions_lock:
                     existing_task = _active_chat_sessions.get(session_id)
                     if existing_task is not None and not existing_task.done():
@@ -2604,14 +2943,41 @@ class ChatWebSocketHandler:
                     ):
                         latched = True
                     else:
-                        task = asyncio.create_task(
-                            self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
-                        )
-                        _active_chat_sessions[session_id] = task
-                if preempted or latched:
+                        # Late stale-turn re-check: the pooled client may have been
+                        # flagged winding-down (interrupt escalation) during the
+                        # awaits above. Launching now would cross the buffered stale
+                        # ResultMessage — re-queue and let the drain pump re-kick.
+                        # R2: only a LIVE subprocess can be winding down. On a dead
+                        # one no pump will ever clear the flag (re-queue loops
+                        # forever) — clear it and launch normally; the turn path's
+                        # reuse gate requires a live subprocess, so it builds a
+                        # fresh client (no pool await under this lock).
+                        from app.core.session_pool import get_session_pool, is_subprocess_alive
+                        _peek = get_session_pool().peek(session_id)
+                        if (
+                            _peek is not None
+                            and _peek.stale_turn_undrained
+                            and is_subprocess_alive(_peek)
+                        ):
+                            stale = True
+                        else:
+                            if _peek is not None and _peek.stale_turn_undrained:
+                                _peek.stale_turn_undrained = False
+                                logger.warning(
+                                    f"[Queue] session {session_id} carried "
+                                    f"stale_turn_undrained on a DEAD subprocess at "
+                                    f"the late re-check — cleared flag, launching "
+                                    f"on a fresh client"
+                                )
+                            task = asyncio.create_task(
+                                self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+                            )
+                            _active_chat_sessions[session_id] = task
+                if preempted or latched or stale:
                     reason = (
                         "preempted before launch" if preempted
-                        else "stop/interrupt latched mid-drain"
+                        else "stop/interrupt latched mid-drain" if latched
+                        else "client winding down a cancelled turn"
                     )
                     logger.info(
                         f"[Queue] Drain {reason} for session {session_id} — "
@@ -2737,6 +3103,7 @@ class ChatWebSocketHandler:
         profile_id: str,
         project_id: Optional[str],
         worktree_id: Optional[str],
+        suppress_queue_kick: bool = False,
     ) -> None:
         """Thin wrapper → ``_drain_notifications_impl`` (shared with /ws/chat).
 
@@ -2752,6 +3119,8 @@ class ChatWebSocketHandler:
             user_id=self.user_id,
             send_json=self.send_json,
             deliver_unpark=self._deliver_unpark,
+            process_next_queued=self._process_next_queued,
+            suppress_queue_kick=suppress_queue_kick,
         )
 
     @staticmethod
@@ -2765,17 +3134,75 @@ class ChatWebSocketHandler:
         profile_id: str,
         project_id: Optional[str],
         worktree_id: Optional[str],
+        suppress_queue_kick: bool = False,
     ) -> None:
         """Thin wrapper → ``_start_drain_pump_impl`` (shared with /ws/chat).
 
         Binds a factory producing a fresh ``self._drain_notifications`` coroutine
         so the pump reads the pooled client via THIS handler.
+        ``suppress_queue_kick=True`` marks a STOP-origin pump (F4): it still
+        drains the stale frames and clears the flag, but never auto-fires the
+        message queue — a user Stop must not surprise-drain queued messages.
         """
         _start_drain_pump_impl(
             session_id,
             drain_coro_factory=lambda: self._drain_notifications(
-                session_id, profile_id, project_id, worktree_id
+                session_id, profile_id, project_id, worktree_id,
+                suppress_queue_kick=suppress_queue_kick,
             ),
+        )
+
+    @staticmethod
+    def _flag_stale_if_keeping(session_id: str, *, keep: bool) -> bool:
+        """Flag the pooled state ``stale_turn_undrained`` for the keep branch.
+
+        Set only when we are KEEPING the client (``keep``) AND the peeked pool
+        state is actually mid-turn at fire time (``is_streaming`` True) — the
+        guard prevents flagging a FRESH replacement client that a concurrent
+        escalation already evicted-and-recreated. Returns True iff the flag was
+        set. MUST be called BEFORE ``task.cancel()``: the cancelled task's finally
+        flips ``is_streaming`` back to False, after which the pre-cancel guard can
+        no longer be evaluated.
+        """
+        if not keep:
+            return False
+        from app.core.session_pool import get_session_pool
+        state = get_session_pool().peek(session_id)
+        if state is None or not state.is_streaming:
+            return False
+        state.stale_turn_undrained = True
+        logger.info(
+            "Interrupt escalation kept the client — flagged stale_turn_undrained "
+            "[session=%s]", session_id
+        )
+        return True
+
+    async def _start_drain_pump_for_session(
+        self, session_id: str, *, suppress_queue_kick: bool = False
+    ) -> None:
+        """Start the between-turns drain pump from an escalation site.
+
+        The escalation handlers lack the profile/project/worktree ids, so derive
+        them from the durable session row (which carries all three). NEVER inject a
+        ``or "claude-code"`` sentinel default here — that sentinel must never cross
+        into remote/relay paths; the pump only uses profile_id when delivering an
+        unpark follow-up, and a genuine session always has its real profile_id.
+
+        ``suppress_queue_kick=True`` = STOP-origin (see ``_start_drain_pump``).
+        """
+        session_row = await run_sync(database.get_session, session_id)
+        if session_row is None:
+            logger.warning(
+                "Cannot start drain pump after escalation — session row gone "
+                "[session=%s]", session_id
+            )
+            return
+        self._start_drain_pump(
+            session_id,
+            session_row.get("profile_id"),
+            session_row.get("project_id"),
+            session_row.get("worktree_id"),
+            suppress_queue_kick=suppress_queue_kick,
         )
 
     # ------------------------------------------------------------------

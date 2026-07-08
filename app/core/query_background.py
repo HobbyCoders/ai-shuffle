@@ -134,6 +134,38 @@ async def _run_background_query(
         session_id=session_id
     )
 
+    # --- Stale-turn early gate (F3) ---
+    # Check stale_turn_undrained BEFORE stopping the drain pump: the pump is the
+    # ONLY thing that can clear the flag (by consuming the killed turn's buffered
+    # ResultMessage). Stopping the pump first and then refusing would orphan the
+    # flag forever — every subsequent query refused, session bricked. Refuse
+    # early and leave the running pump untouched; the late gate below stays as a
+    # backstop for races where the flag is set after this peek.
+    _pre_state = get_session_pool().peek(session_id)
+    if (
+        _pre_state is not None
+        and _pre_state.is_connected
+        and is_subprocess_alive(_pre_state)
+        and getattr(_pre_state, "stale_turn_undrained", False)
+    ):
+        error_msg = (
+            "Session is still winding down a cancelled response; "
+            "try again shortly."
+        )
+        logger.warning(
+            f"[Background] Pooled client for session {session_id} is winding "
+            f"down a cancelled response — refusing early, drain pump left "
+            f"running (stale-turn guard)"
+        )
+        await sync_engine.broadcast_stream_end(
+            session_id=session_id,
+            message_id=message_id or f"error-{session_id}",
+            metadata={"error": error_msg},
+            interrupted=True,
+            source_device_id=device_id
+        )
+        return
+
     # --- Single-reader invariant (Bug D) ---
     # Before this background turn becomes a reader of the pooled SDK client
     # (reuse + client.query() + receive_response() below), cancel any between-turns
@@ -165,6 +197,27 @@ async def _run_background_query(
             logger.warning(
                 f"[Background] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent background query (busy-write guard)"
+            )
+            await sync_engine.broadcast_stream_end(
+                session_id=session_id,
+                message_id=message_id or f"error-{session_id}",
+                metadata={"error": error_msg},
+                interrupted=True,
+                source_device_id=device_id
+            )
+            return
+        if existing_state.stale_turn_undrained:
+            # A force-cancelled turn's terminal ResultMessage is still buffered on
+            # the pooled client's read loop; the drain pump clears this flag once it
+            # consumes the stale frame. Refuse until then — same fail-safe as the
+            # busy-write gate, and likewise leave the live store untouched.
+            error_msg = (
+                "Session is still winding down a cancelled response; "
+                "try again shortly."
+            )
+            logger.warning(
+                f"[Background] Pooled client for session {session_id} is winding "
+                f"down a cancelled response — refusing (stale-turn guard)"
             )
             await sync_engine.broadcast_stream_end(
                 session_id=session_id,

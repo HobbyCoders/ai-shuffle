@@ -964,6 +964,39 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
+			case 'query_queued': {
+				// Send-now replacement routed to the queue (Finding F5). The user
+				// clicked "Send now" mid-stream: sendMessage sent interrupt_for_query,
+				// latched internal.interruptPending, and set optimistic isStreaming=true.
+				// The backend confirmed the interrupt, we sent the query — but the pooled
+				// client was still winding down the force-cancelled turn, so the backend
+				// queued the query instead of starting a turn and acked with this frame
+				// (the queue chip is driven by the separate queue_updated broadcast).
+				//
+				// Without this handler interruptPending stays latched and isStreaming
+				// stays optimistically true, so session-init's poll callback discards
+				// every idle (isStreaming=false) poll as a stale interrupt poll → the
+				// spinner never clears. Release the latch, drop the optimistic streaming
+				// state, clean the streaming-session map (mirrors the done/stopped
+				// terminal frames), and poll so the poller truth-ups from /live.
+				const queuedSessionId = data.session_id as string | undefined;
+				const queuedState = getState();
+				if (!queuedSessionId || queuedSessionId !== queuedState.sessionId) break;
+
+				internal.interruptPending = false;
+				internal.pendingTools.clear();
+				clearStopTimeout();
+				update(s => ({ ...s, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+				streamingSessions.update(map => {
+					if (!map.has(queuedSessionId)) return map;
+					const newMap = new Map(map);
+					newMap.delete(queuedSessionId);
+					return newMap;
+				});
+				sessionPoller.pollNow(queuedSessionId);
+				break;
+			}
+
 			case 'message_queued':
 			case 'queued_message_processing':
 				// Legacy — replaced by queue_updated

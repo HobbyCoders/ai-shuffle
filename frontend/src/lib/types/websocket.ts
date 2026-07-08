@@ -572,6 +572,17 @@ export interface WsServerQueuedMessageProcessing {
 	session_id?: string;
 }
 
+/**
+ * Ack that a "Send now" replacement query was routed to the message queue rather
+ * than started as a turn — the pooled client was still winding down the
+ * force-cancelled turn. The FE clears its optimistic interrupt/streaming state so
+ * the poller can truth-up; the queue chip is driven by the queue_updated broadcast.
+ */
+export interface WsServerQueryQueued {
+	type: 'query_queued';
+	session_id: string;
+}
+
 /** Plugin message from an MCP plugin or similar. */
 export interface WsServerPluginMessage {
 	type: 'plugin_message';
@@ -807,6 +818,7 @@ export type ServerMessage =
 	// Message queue
 	| WsServerMessageQueued
 	| WsServerQueuedMessageProcessing
+	| WsServerQueryQueued
 	// Plugins
 	| WsServerPluginMessage
 	// Usage

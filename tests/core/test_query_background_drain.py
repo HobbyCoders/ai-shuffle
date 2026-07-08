@@ -7,11 +7,18 @@ single-reader invariant as the WebSocket turn loop.
 reader, `receive_messages()`) may be reading that SAME client when the background
 query arrives. Two coroutines reading one anyio message stream loses/corrupts
 messages, so the background path MUST cancel any live drain pump BEFORE it touches
-the pooled client — exactly what every WS turn does via stop_drain_pump() at turn
-start.
+the pooled client's message stream — exactly what every WS turn does via
+stop_drain_pump() at turn start.
 
-These tests pin that ordering: stop_drain_pump(session_id) is awaited before the
-session pool is acquired (i.e. before this turn becomes a reader).
+Ordering nuance (F3): the stale-turn early gate performs a read-only
+``get_session_pool().peek(session_id)`` BEFORE stop_drain_pump — deliberately.
+The pump is the only thing that can clear ``stale_turn_undrained``, so the
+refusal must happen while the pump is still running (stopping first would orphan
+the flag forever). A peek never touches the client's message stream, so the
+single-reader invariant is untouched.
+
+These tests pin that ordering: peek (non-reader, stale gate) → stop_drain_pump →
+pool acquisition (the first place this turn becomes a reader).
 """
 
 import pytest
@@ -23,10 +30,11 @@ from app.core.query_background import _run_background_query
 def _preamble_patches(stop_mock, *, pool_side_effect):
     """Patch every collaborator between function entry and the pool acquisition.
 
-    `get_session_pool` is given `pool_side_effect` so the function halts the moment
-    it reaches the pool section — that boundary is the first place this turn would
-    become a reader of the pooled client, so halting there lets us assert the pump
-    was already stopped without mocking the entire streaming loop.
+    `get_session_pool` is given `pool_side_effect` so the caller controls both
+    the early stale-gate peek and the pool-acquisition boundary — the latter is
+    the first place this turn would become a reader of the pooled client, so
+    halting there lets us assert the pump was already stopped without mocking
+    the entire streaming loop.
     """
     sync_mock = MagicMock()
     sync_mock.broadcast_message_added = AsyncMock()
@@ -47,12 +55,32 @@ def _preamble_patches(stop_mock, *, pool_side_effect):
     ]
 
 
-async def test_run_background_query_stops_drain_pump_before_pool_access():
-    """The pump is cancelled before the pooled client is acquired."""
-    stop_mock = AsyncMock()
-    sentinel = RuntimeError("__halt_at_pool__")
+def _peek_then_halt(calls=None):
+    """get_session_pool side effect: first call (stale-gate peek) returns a pool
+    whose peek() finds no pooled state; the second call (pool acquisition — the
+    reader boundary) raises the halt sentinel."""
+    state = {"n": 0}
 
-    patches = _preamble_patches(stop_mock, pool_side_effect=sentinel)
+    def _pool():
+        state["n"] += 1
+        if state["n"] == 1:
+            if calls is not None:
+                calls.append(("peek", None))
+            pool = MagicMock()
+            pool.peek = MagicMock(return_value=None)
+            return pool
+        if calls is not None:
+            calls.append(("pool", None))
+        raise RuntimeError("__halt_at_pool__")
+
+    return _pool
+
+
+async def test_run_background_query_stops_drain_pump_before_pool_access():
+    """The pump is cancelled before the pooled client is acquired (reader boundary)."""
+    stop_mock = AsyncMock()
+
+    patches = _preamble_patches(stop_mock, pool_side_effect=_peek_then_halt())
     for p in patches:
         p.start()
     try:
@@ -71,15 +99,11 @@ async def test_run_background_query_stops_drain_pump_before_pool_access():
 
 
 async def test_run_background_query_pump_stop_precedes_pool_call_order():
-    """stop_drain_pump is invoked strictly before get_session_pool()."""
+    """Order is: stale-gate peek (non-reader) → stop_drain_pump → pool acquisition."""
     calls = []
     stop_mock = AsyncMock(side_effect=lambda sid: calls.append(("stop", sid)))
 
-    def _pool():
-        calls.append(("pool", None))
-        raise RuntimeError("__halt_at_pool__")
-
-    patches = _preamble_patches(stop_mock, pool_side_effect=_pool)
+    patches = _preamble_patches(stop_mock, pool_side_effect=_peek_then_halt(calls))
     for p in patches:
         p.start()
     try:
@@ -92,4 +116,4 @@ async def test_run_background_query_pump_stop_precedes_pool_call_order():
         for p in patches:
             p.stop()
 
-    assert calls == [("stop", "sess-9"), ("pool", None)]
+    assert calls == [("peek", None), ("stop", "sess-9"), ("pool", None)]

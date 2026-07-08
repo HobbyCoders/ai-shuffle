@@ -47,6 +47,16 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
+    # Set by interrupt escalation (Stop safety timer / send-now drain timeout) in
+    # the KEEP-CLIENT branch: the wedged turn was force-cancelled but the client
+    # stays pooled (live background work on an alive subprocess). The SDK's detached
+    # read loop is still buffering the cancelled turn's frames — INCLUDING its
+    # terminal ResultMessage — and the cancelled task's finally already flipped
+    # is_streaming back to False, disarming the busy-write gate. While this is True
+    # the reuse gates refuse a follow-up query (it would terminate on the stale
+    # ResultMessage / be written into a possibly mid-turn CLI); the between-turns
+    # drain pump clears it once it consumes that terminal frame.
+    stale_turn_undrained: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     streaming_started_at: Optional[datetime] = None  # Track when streaming began (for timeout detection)
     background_task: Optional[asyncio.Task] = None
