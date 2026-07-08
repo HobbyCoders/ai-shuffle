@@ -55,6 +55,15 @@ async def interrupt_session(session_id: str) -> bool:
     # every subsequent control call. Shielding lets the wait_for time out while the
     # underlying interrupt keeps running to completion in the background.
     interrupt_task = asyncio.create_task(state.client.interrupt())
+    # Attach the swallow/log done-callback AT CREATION (F8): if the CALLER of
+    # this coroutine is cancelled while awaiting the shielded wait below, the
+    # except branches never run and a later interrupt() failure would surface
+    # as an "exception was never retrieved" event-loop warning. Registering
+    # the retriever up-front covers every exit path (retrieving .exception()
+    # here does not interfere with the awaits below).
+    interrupt_task.add_done_callback(
+        lambda t: t.cancelled() or t.exception()
+    )
     try:
         await asyncio.wait_for(asyncio.shield(interrupt_task), timeout=_SDK_INTERRUPT_TIMEOUT_SECONDS)
         # Don't set is_streaming = False here. The streaming loop will set it
@@ -64,12 +73,9 @@ async def interrupt_session(session_id: str) -> bool:
         logger.debug(f"Successfully interrupted session {session_id}")
         return True
     except asyncio.TimeoutError:
-        # Leave the detached interrupt running; attach a done-callback that
-        # retrieves (and swallows) its eventual result/exception so the event
-        # loop never logs an "exception was never retrieved" warning.
-        interrupt_task.add_done_callback(
-            lambda t: t.cancelled() or t.exception()
-        )
+        # Leave the detached interrupt running; the done-callback attached at
+        # creation retrieves (and swallows) its eventual result/exception so
+        # the event loop never logs an "exception was never retrieved" warning.
         # interrupt_requested stays set — the streaming loop's failsafe check
         # can still end the turn, and the caller's drain/force-cancel handles
         # the truly wedged case.

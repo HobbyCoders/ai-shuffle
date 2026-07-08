@@ -425,7 +425,8 @@ async def test_drain_timeout_keep_branch_flags_stale_and_starts_drainer(monkeypa
     started: list = []
     monkeypatch.setattr(
         cwh.ChatWebSocketHandler, "_start_drain_pump",
-        lambda self, sid, pid, prj, wt: started.append((sid, pid, prj, wt)),
+        lambda self, sid, pid, prj, wt, suppress_queue_kick=False:
+            started.append((sid, pid, prj, wt, suppress_queue_kick)),
     )
 
     task = await _stubborn_task()
@@ -446,7 +447,55 @@ async def test_drain_timeout_keep_branch_flags_stale_and_starts_drainer(monkeypa
     assert any(m.get("type") == "interrupt_confirmed" for m in sent), sent
     assert pool.peek(session_id) is state  # kept
     assert state.stale_turn_undrained is True
-    assert started == [(session_id, "claude-code", "proj-1", "wt-1")], started
+    # Send-now origin: the queue kick stays ENABLED (suppress_queue_kick=False) —
+    # the queued replacement message must auto-fire once the flag clears.
+    assert started == [(session_id, "claude-code", "proj-1", "wt-1", False)], started
+
+
+@pytest.mark.asyncio
+async def test_interrupt_confirmed_sent_before_pump_start(monkeypatch):
+    """F6: interrupt_confirmed must reach the frontend BEFORE the pump start's
+    DB read — the confirm is what unblocks the user's replacement query, and it
+    must never wait on run_sync(database.get_session)."""
+    from app.api import chat_ws_handler as cwh
+    from app.api import websocket as ws_mod
+
+    session_id = "confirm-before-pump-session"
+    state = _fake_state(is_streaming=True)
+    _bg_alive_patches(monkeypatch, session_id, state)
+    monkeypatch.setattr(cwh, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.05, raising=True)
+
+    order: list = []
+    monkeypatch.setattr(
+        cwh.ChatWebSocketHandler, "_start_drain_pump",
+        lambda self, sid, pid, prj, wt, suppress_queue_kick=False:
+            order.append("pump"),
+    )
+
+    task = await _stubborn_task()
+    ws_mod._active_chat_sessions[session_id] = task
+    handler, _sent = _make_handler(session_id)
+    _orig_send = handler.send_json
+
+    async def _ordered_send(data):
+        if data.get("type") == "interrupt_confirmed":
+            order.append("confirm")
+        return await _orig_send(data)
+
+    handler.send_json = _ordered_send
+
+    try:
+        with patch("app.core.query_engine.interrupt_session", new=AsyncMock(return_value=True)):
+            await asyncio.wait_for(
+                handler.handle_interrupt_for_query({"session_id": session_id}),
+                timeout=5.0,
+            )
+    finally:
+        ws_mod._active_chat_sessions.pop(session_id, None)
+        if not task.done():
+            task.cancel()
+
+    assert order == ["confirm", "pump"], order
 
 
 @pytest.mark.asyncio
@@ -465,7 +514,8 @@ async def test_stop_safety_keep_branch_flags_stale_and_starts_drainer(monkeypatc
     started: list = []
     monkeypatch.setattr(
         cwh.ChatWebSocketHandler, "_start_drain_pump",
-        lambda self, sid, pid, prj, wt: started.append((sid, pid, prj, wt)),
+        lambda self, sid, pid, prj, wt, suppress_queue_kick=False:
+            started.append((sid, pid, prj, wt, suppress_queue_kick)),
     )
 
     task = await _stubborn_task()
@@ -487,7 +537,11 @@ async def test_stop_safety_keep_branch_flags_stale_and_starts_drainer(monkeypatc
     assert task.done()
     assert pool.peek(session_id) is state
     assert state.stale_turn_undrained is True
-    assert started == [(session_id, "claude-code", "proj-1", "wt-1")], started
+    # F4: user Stop must NEVER surprise-drain the queue. The run_query finally
+    # consumes the _stopped_sessions latch during `await t` — BEFORE the pump
+    # starts — so the pump's latch check can't see it; the stop-origin intent
+    # must ride an explicit suppress_queue_kick=True instead.
+    assert started == [(session_id, "claude-code", "proj-1", "wt-1", True)], started
 
 
 @pytest.mark.asyncio
@@ -510,7 +564,8 @@ async def test_evict_branch_does_not_flag_or_start_drainer(monkeypatch):
     started: list = []
     monkeypatch.setattr(
         cwh.ChatWebSocketHandler, "_start_drain_pump",
-        lambda self, sid, pid, prj, wt: started.append((sid, pid, prj, wt)),
+        lambda self, sid, pid, prj, wt, suppress_queue_kick=False:
+            started.append((sid, pid, prj, wt, suppress_queue_kick)),
     )
 
     task = await _stubborn_task()
@@ -536,50 +591,57 @@ async def test_evict_branch_does_not_flag_or_start_drainer(monkeypatch):
 # ─── drain pump: clears the flag on the stale ResultMessage + kicks the queue ─
 
 
+def _make_result():
+    from app.core.query_engine import ResultMessage
+
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="sdk-1",
+        total_cost_usd=0.0,
+        usage={},
+        result="done",
+    )
+
+
+class _FakeClient:
+    def __init__(self, messages):
+        self._messages = list(messages)
+
+    async def receive_messages(self):
+        for m in self._messages:
+            yield m
+        await asyncio.Event().wait()  # then hang
+
+
+def _fresh_state(client):
+    st = MagicMock()
+    st.is_streaming = False
+    st.stale_turn_undrained = True
+    st.client = client
+    adapter = MagicMock()
+    adapter.is_alive = MagicMock(return_value=True)
+    st.adapter = adapter
+    return st
+
+
 @pytest.mark.asyncio
 async def test_drainer_clears_flag_on_stale_result_and_kicks_queue(monkeypatch):
     """The pump, reading a fake client that yields ONE stale ResultMessage while
     stale_turn_undrained is set + a queued message waits, must clear the flag and
-    invoke _process_next_queued. When _stopped_sessions is latched it must NOT
-    kick the queue."""
+    invoke _process_next_queued. A STOP-origin pump (suppress_queue_kick=True)
+    must clear the flag but NOT kick the queue (F4: user Stop never
+    surprise-drains the queue — the stop latch is consumed by the cancelled
+    turn's finally before the pump ever starts, so the origin rides a flag)."""
     from app.api import chat_ws_handler as cwh
-    from app.core.query_engine import ResultMessage
 
     session_id = "drainer-clears-session"
 
-    def _make_result():
-        return ResultMessage(
-            subtype="success",
-            duration_ms=1,
-            duration_api_ms=1,
-            is_error=False,
-            num_turns=1,
-            session_id="sdk-1",
-            total_cost_usd=0.0,
-            usage={},
-            result="done",
-        )
-
-    class _FakeClient:
-        def __init__(self, messages):
-            self._messages = list(messages)
-
-        async def receive_messages(self):
-            for m in self._messages:
-                yield m
-            await asyncio.Event().wait()  # then hang
-
-    def _fresh_state(client):
-        st = MagicMock()
-        st.is_streaming = False
-        st.stale_turn_undrained = True
-        st.client = client
-        adapter = MagicMock()
-        adapter.is_alive = MagicMock(return_value=True)
-        st.adapter = adapter
-        return st
-
-    # Case A: queue non-empty, no stop latch → kick the queue after clearing.
+    # Case A: queue non-empty, interrupt-origin (kick enabled) → kick the queue
+    # after clearing.
     state_a = _fresh_state(_FakeClient([_make_result()]))
     pool_a = MagicMock()
     pool_a.peek = MagicMock(return_value=state_a)
@@ -614,13 +676,16 @@ async def test_drainer_clears_flag_on_stale_result_and_kicks_queue(monkeypatch):
     assert state_a.stale_turn_undrained is False
     assert kicked == [session_id]
 
-    # Case B: same, but _stopped_sessions latched → NO queue kick.
+    # Case B: same, but STOP-origin (suppress_queue_kick=True) → NO queue kick.
+    # (The old latched-_stopped_sessions variant pinned an unreachable state:
+    # run_query's finally discards the latch during `await t`, before the pump
+    # starts, so the pump can never observe it for a Stop.)
     state_b = _fresh_state(_FakeClient([_make_result()]))
     pool_b = MagicMock()
     pool_b.peek = MagicMock(return_value=state_b)
     kicked_b: list = []
 
-    monkeypatch.setattr(cwh, "_stopped_sessions", {session_id}, raising=True)
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
     monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [{"id": "q1"}])
 
     handler_b = cwh.ChatWebSocketHandler(
@@ -631,9 +696,11 @@ async def test_drainer_clears_flag_on_stale_result_and_kicks_queue(monkeypatch):
     handler_b._process_next_queued = AsyncMock(side_effect=lambda sid: kicked_b.append(sid))
 
     with patch("app.core.session_pool.get_session_pool", return_value=pool_b):
-        # The pump loops (flag stays, but no kick); cancel it after a beat.
+        # The pump keeps looping after clearing (no kick); cancel it after a beat.
         pump = asyncio.create_task(
-            handler_b._drain_notifications(session_id, "claude-code", None, None)
+            handler_b._drain_notifications(
+                session_id, "claude-code", None, None, suppress_queue_kick=True
+            )
         )
         await asyncio.sleep(0.1)
         pump.cancel()
@@ -645,6 +712,260 @@ async def test_drainer_clears_flag_on_stale_result_and_kicks_queue(monkeypatch):
     # Flag cleared (stale frame consumed) but the queue was NOT kicked.
     assert state_b.stale_turn_undrained is False
     assert kicked_b == []
+
+
+# ─── F1: the wedge poll must never cancel the generator read ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_pump_survives_multiple_wedge_timeouts_and_consumes_late_result(monkeypatch):
+    """F1 BLOCKER regression: while winding down, the pump polls the read with a
+    timeout. The old ``asyncio.wait_for(agen.__anext__(), ...)`` CANCELLED the
+    read on expiry, throwing CancelledError into the generator frame and closing
+    it permanently — the very next read raised StopAsyncIteration and the pump
+    exited with the flag still set (session bricked; the late ResultMessage
+    lost). The persistent-future read must survive 2+ wedge expiries and still
+    consume the stale ResultMessage: flag cleared + queue kicked, nothing lost."""
+    from app.api import chat_ws_handler as cwh
+    from app.core import task_registry as tr_mod
+
+    session_id = "wedge-survivor-session"
+
+    wedge = 0.05
+    monkeypatch.setattr(cwh, "_STALE_DRAIN_WEDGE_POLL_SECONDS", wedge, raising=True)
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+    # Keep conditions: live background work + alive subprocess, so every wedge
+    # expiry decides KEEP (the pump must keep waiting, not evict).
+    monkeypatch.setattr(
+        tr_mod.task_registry, "has_active_background_work", lambda sid: True
+    )
+    monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [{"id": "q1"}])
+
+    class _LateResultClient:
+        """Hangs past 3 wedge expiries, THEN yields the stale ResultMessage."""
+
+        async def receive_messages(self):
+            await asyncio.sleep(wedge * 3.5)
+            yield _make_result()
+            await asyncio.Event().wait()
+
+    state = _fresh_state(_LateResultClient())
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+
+    kicked: list = []
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="d1", user_id="u1", api_user_id=None
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(return_value=True)
+
+    async def _fake_process(sid):
+        kicked.append(sid)
+
+    handler._process_next_queued = AsyncMock(side_effect=_fake_process)
+
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await asyncio.wait_for(
+            handler._drain_notifications(session_id, "claude-code", None, None),
+            timeout=5.0,
+        )
+
+    assert state.stale_turn_undrained is False, (
+        "pump must survive wedge expiries and consume the late ResultMessage"
+    )
+    assert kicked == [session_id]
+
+
+# ─── F2: pending unpark collected during wind-down is HELD until the flag clears ─
+
+
+@pytest.mark.asyncio
+async def test_pump_holds_pending_unpark_until_stale_flag_clears(monkeypatch):
+    """F2 regression: a background-task completion consumed while
+    stale_turn_undrained is set must NOT be delivered on the batch-window
+    deadline — the delivery's run_query would be refused by the stale reuse gate
+    and the ``mark_unparked`` dedup means it never re-fires (result lost
+    forever). The pump must HOLD the pending completion until the stale
+    ResultMessage clears the flag, then deliver exactly once."""
+    from claude_agent_sdk import TaskNotificationMessage
+    from app.api import chat_ws_handler as cwh
+    from app.core import task_registry as tr_mod
+    from app.core.task_registry import task_registry
+
+    session_id = "hold-pending-session"
+
+    window = 0.05
+    monkeypatch.setattr(cwh, "_UNPARK_BATCH_WINDOW_SECONDS", window, raising=True)
+    monkeypatch.setattr(cwh, "_STALE_DRAIN_WEDGE_POLL_SECONDS", window, raising=True)
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+    # Live background work remains (a second task still runs), so the wedge
+    # re-checks keep deciding KEEP while the flag is set.
+    monkeypatch.setattr(
+        tr_mod.task_registry, "has_active_background_work", lambda sid: True
+    )
+    monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [])
+
+    # Real registry wiring so the notification passes the background-launch gate
+    # and the mark_unparked dedup.
+    task_registry.reset_all()
+    task_registry.start_task(session_id, "task-1", "agent", "bg work")
+    task_registry.mark_background_launch(session_id, "tu-1")
+
+    notif = TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id="task-1",
+        status="completed",
+        output_file="",
+        summary="done",
+        uuid="u-1",
+        session_id="sdk-1",
+        tool_use_id="tu-1",
+        usage=None,
+    )
+
+    class _NotifThenLateResultClient:
+        """Yields the completion immediately (flag still set), hangs past
+        several window/wedge expiries, THEN yields the stale ResultMessage."""
+
+        async def receive_messages(self):
+            yield notif
+            await asyncio.sleep(window * 4)
+            yield _make_result()
+            await asyncio.Event().wait()
+
+    state = _fresh_state(_NotifThenLateResultClient())
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+
+    deliveries: list = []
+
+    async def _capture_deliver(**kwargs):
+        deliveries.append(
+            {"flag_at_delivery": state.stale_turn_undrained, "pending": kwargs["pending"]}
+        )
+        return True
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="d1", user_id="u1", api_user_id=None
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(side_effect=_capture_deliver)
+    handler._process_next_queued = AsyncMock()
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await asyncio.wait_for(
+            handler._drain_notifications(session_id, "claude-code", None, None),
+            timeout=5.0,
+        )
+
+    assert len(deliveries) == 1, deliveries
+    assert deliveries[0]["flag_at_delivery"] is False, (
+        "the pending unpark must be HELD until the stale flag clears — "
+        "delivering mid-wind-down gets refused by the stale reuse gate and the "
+        "mark_unparked dedup loses the result forever"
+    )
+    assert [p["task_id"] for p in deliveries[0]["pending"]] == ["task-1"]
+    assert state.stale_turn_undrained is False
+
+
+# ─── F7: pump startup retries once when the cancelled turn hasn't wound down ──
+
+
+@pytest.mark.asyncio
+async def test_pump_startup_retries_when_streaming_flag_briefly_lags(monkeypatch, caplog):
+    """F7: the force-cancelled turn's finally (which flips is_streaming False)
+    may not have run yet when the escalation starts the pump — generator
+    finalization is deferred. Exiting immediately would strand the stale flag
+    with nothing left to clear it. The pump must retry once after a beat."""
+    from app.api import chat_ws_handler as cwh
+    from app.core import task_registry as tr_mod
+
+    session_id = "startup-retry-session"
+
+    monkeypatch.setattr(cwh, "_STALE_STARTUP_RETRY_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cwh, "_STALE_DRAIN_WEDGE_POLL_SECONDS", 0.05, raising=True)
+    monkeypatch.setattr(cwh, "_stopped_sessions", set(), raising=True)
+    monkeypatch.setattr(cwh, "_interrupt_pending_sessions", set(), raising=True)
+    monkeypatch.setattr(
+        tr_mod.task_registry, "has_active_background_work", lambda sid: True
+    )
+    monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [])
+
+    state = _fresh_state(_FakeClient([_make_result()]))
+    state.is_streaming = True  # the killed turn's finally hasn't run yet
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="d1", user_id="u1", api_user_id=None
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(return_value=True)
+    handler._process_next_queued = AsyncMock()
+
+    # The finally lands shortly after the pump's first peek.
+    asyncio.get_running_loop().call_later(0.02, setattr, state, "is_streaming", False)
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        pump = asyncio.create_task(
+            handler._drain_notifications(session_id, "claude-code", None, None)
+        )
+        # Enough beats for retry + read + clear; then cancel the idling pump.
+        await asyncio.sleep(0.3)
+        pump.cancel()
+        try:
+            await asyncio.wait_for(pump, timeout=2.0)
+        except asyncio.CancelledError:
+            pass
+
+    assert state.stale_turn_undrained is False, (
+        "pump must retry startup and drain the stale frame once is_streaming clears"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pump_startup_warns_when_still_streaming_with_stale_flag(monkeypatch, caplog):
+    """F7: if the retry also finds is_streaming True, the pump gives up — but it
+    must WARN that the stale flag is stranding (diagnosability)."""
+    import logging
+
+    from app.api import chat_ws_handler as cwh
+
+    session_id = "startup-strand-session"
+    monkeypatch.setattr(cwh, "_STALE_STARTUP_RETRY_SECONDS", 0.02, raising=False)
+
+    state = _fresh_state(_FakeClient([]))
+    state.is_streaming = True  # never clears
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="d1", user_id="u1", api_user_id=None
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(return_value=True)
+    handler._process_next_queued = AsyncMock()
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        with caplog.at_level(logging.WARNING, logger="app.api.chat_ws_handler"):
+            await asyncio.wait_for(
+                handler._drain_notifications(session_id, "claude-code", None, None),
+                timeout=2.0,
+            )
+
+    assert state.stale_turn_undrained is True  # stranded — but loudly
+    assert any(
+        r.levelno >= logging.WARNING and "stale_turn_undrained" in r.getMessage()
+        for r in caplog.records
+    ), caplog.records
 
 
 # ─── query during stale drain enqueues; _process_next_queued re-queues on flag ─
@@ -683,6 +1004,12 @@ async def test_query_during_stale_drain_is_enqueued_not_run(monkeypatch):
 
     assert len(queued) == 1, queued
     assert queued[0]["content"] == "hello during drain"
+    # F5: the client sent this query expecting a turn to start (e.g. the
+    # send-now replacement after interrupt_confirmed) — without an explicit
+    # query_queued ack it sits on its optimistic streaming state forever
+    # (unbounded spinner). The ack must carry the exact session_id (the FE
+    # ignores cross-session frames).
+    assert {"type": "query_queued", "session_id": session_id} in _sent, _sent
 
 
 @pytest.mark.asyncio
@@ -765,3 +1092,53 @@ async def test_interrupt_session_timeout_leaves_sdk_interrupt_uncancelled(monkey
     release.set()
     await asyncio.sleep(0.05)
     assert observed["completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_detached_interrupt_exception_retrieved_when_caller_cancelled(monkeypatch):
+    """F8: the swallow/log done-callback must be attached to the detached
+    interrupt task AT CREATION — the timeout branch is not the only way the
+    caller lets go of the task. If the CALLER is cancelled mid-wait (before the
+    timeout), the shielded task keeps running detached; when it later fails, an
+    unattached callback means 'Task exception was never retrieved' at GC."""
+    import gc
+
+    state = _fake_state()
+    release = asyncio.Event()
+
+    async def _late_fail():
+        await release.wait()
+        raise RuntimeError("late interrupt failure")
+
+    state.adapter.sdk_client.interrupt = AsyncMock(side_effect=_late_fail)
+    monkeypatch.setattr(lifecycle, "_SDK_INTERRUPT_TIMEOUT_SECONDS", 5.0)
+
+    captured: list = []
+    loop = asyncio.get_running_loop()
+    prev_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda l, ctx: captured.append(ctx))
+    try:
+        with patch.object(lifecycle, "get_session_pool", return_value=_StubPool(state)):
+            caller = asyncio.create_task(lifecycle.interrupt_session("s1"))
+            await asyncio.sleep(0.02)  # inside wait_for(shield(...)) now
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+
+        # Let the detached interrupt task fail, then force the GC sweep that
+        # triggers the "never retrieved" report for an unretrieved exception.
+        release.set()
+        await asyncio.sleep(0.05)
+        gc.collect()
+        await asyncio.sleep(0.02)
+    finally:
+        loop.set_exception_handler(prev_handler)
+
+    unretrieved = [
+        c for c in captured
+        if "never retrieved" in (c.get("message") or "")
+    ]
+    assert unretrieved == [], (
+        "the detached interrupt task's exception must be retrieved by the "
+        "creation-time done-callback"
+    )

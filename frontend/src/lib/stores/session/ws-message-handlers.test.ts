@@ -1554,6 +1554,91 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('query_queued handler (send-now replacement routed to the queue)', () => {
+		// Finding F5: the user clicks "Send now" while a turn is streaming. The FE
+		// sends interrupt_for_query, latches internal.interruptPending, and sets
+		// optimistic isStreaming=true. The backend confirms, the FE sends the query
+		// — but the pooled client is still winding down the force-cancelled turn, so
+		// the backend routes the query to the queue and acks with `query_queued`
+		// (plus the usual queue_updated broadcast for the chip). Without a handler,
+		// interruptPending stays latched and isStreaming stays optimistically true;
+		// session-init's poll callback then discards every idle (isStreaming=false)
+		// poll as a stale interrupt poll → unbounded spinner. The handler must clear
+		// interruptPending, drop the optimistic streaming state + streaming-session
+		// map entry, and poll so the poller truth-ups from /live.
+
+		function interruptedState() {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true; // optimistic streaming set by the interrupt path
+			return state;
+		}
+
+		it('clears interruptPending, drops isStreaming, cleans the streaming map, and polls', () => {
+			const state = interruptedState();
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			deps.internal.interruptPending = true;
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'query_queued', session_id: 'session-1' });
+
+			// The interrupt latch is released so the poll callback stops discarding
+			// idle polls (the root cause of the unbounded spinner).
+			expect(deps.internal.interruptPending).toBe(false);
+			// Optimistic streaming state cleared so the poller's idle truth wins.
+			expect(applied?.isStreaming).toBe(false);
+			expect(applied?.streamStartTime).toBeNull();
+			// Streaming-session map entry removed (mirrors done/stopped terminal frames).
+			const fn = (deps.streamingSessions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+			expect(fn).toBeDefined();
+			expect(fn(new Map([['session-1', { projectId: null, worktreeId: null }]])).has('session-1')).toBe(false);
+			// Poll so the poller re-fetches authoritative /live state.
+			expect(deps.sessionPoller.pollNow).toHaveBeenCalledWith('session-1');
+		});
+
+		it('lets the poller resume accepting idle polls after the queue-route (no more stale-discard)', () => {
+			// End-to-end of the fix's intent: while interruptPending is latched, the
+			// session-init poll callback drops idle (isStreaming=false) polls. After
+			// query_queued clears the latch, an idle poll must be ACCEPTED. We assert
+			// the state the poll callback keys on: interruptPending is false and
+			// isStreaming is false, which is exactly what makes the callback's
+			// `if (interruptPending) { if (!data.isStreaming) return; }` guard fall
+			// through instead of swallowing the poll.
+			const state = interruptedState();
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => Object.assign(state, fn(state))),
+			});
+			deps.internal.interruptPending = true;
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'query_queued', session_id: 'session-1' });
+
+			// Simulate the guard in session-init.onPollApplied for an idle poll.
+			const idlePollWouldBeDiscarded =
+				deps.internal.interruptPending && state.isStreaming === false;
+			expect(idlePollWouldBeDiscarded).toBe(false);
+		});
+
+		it('ignores a query_queued for a non-active session', () => {
+			const state = interruptedState();
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.interruptPending = true;
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'query_queued', session_id: 'some-other-session' });
+
+			// Cross-session safety: the active session's latch/streaming/state untouched.
+			expect(deps.internal.interruptPending).toBe(true);
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.sessionPoller.pollNow).not.toHaveBeenCalledWith('some-other-session');
+		});
+	});
+
 	describe('parked-watcher recovery (Bug 2)', () => {
 		// A watcher whose session parked on a long-running background task has
 		// isStreaming=false (it stopped streaming when the turn parked). When the

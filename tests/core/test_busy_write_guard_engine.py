@@ -410,12 +410,17 @@ async def test_stream_query_refuses_stale_undrained_client():
 
 
 async def test_background_query_refuses_stale_undrained_client():
+    """F3: the stale refusal must happen BEFORE stop_drain_pump — the pump is
+    the only thing that can clear the flag, so killing it first and then
+    refusing would orphan the flag forever (bricked session). The running pump
+    must be left untouched."""
     state = _fake_state(is_streaming=False, stale_turn_undrained=True)
     pool = _StubPool(state)
 
     sync = _fake_sync_engine()
     store = MagicMock()
     store.cleanup_session = AsyncMock()
+    stop_pump = AsyncMock()
 
     async def _fake_run_sync(fn, *a, **k):
         return {"id": "row-1"}
@@ -434,7 +439,7 @@ async def test_background_query_refuses_stale_undrained_client():
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
         stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
         stack.enter_context(patch.object(qb, "live_session_store", new=store))
-        stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=AsyncMock()))
+        stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=stop_pump))
 
         await qb._run_background_query(
             "sess-stale", "hello", {"id": "claude-code"}, None, None, None, None, None,
@@ -447,6 +452,9 @@ async def test_background_query_refuses_stale_undrained_client():
     kwargs = sync.broadcast_stream_end.await_args.kwargs
     assert "winding down" in (kwargs.get("metadata") or {}).get("error", "").lower()
     store.cleanup_session.assert_not_awaited()
+    # F3: the between-turns drain pump must be left RUNNING — it is what clears
+    # the flag. Stopping it before the refusal orphaned the flag forever.
+    stop_pump.assert_not_awaited()
 
 
 async def test_cleared_flag_allows_normal_reuse():

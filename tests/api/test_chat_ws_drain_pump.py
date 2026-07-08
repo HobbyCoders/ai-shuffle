@@ -122,6 +122,9 @@ class _FakeClient:
 def _fake_state(client, *, is_streaming=False, alive=True):
     state = MagicMock()
     state.is_streaming = is_streaming
+    # Real SessionState defaults this to False; a bare MagicMock attribute is
+    # truthy and would trip the pump's stale-turn hold (F2) in every test.
+    state.stale_turn_undrained = False
     state.client = client
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=alive)
