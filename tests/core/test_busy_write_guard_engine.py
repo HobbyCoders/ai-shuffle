@@ -370,6 +370,103 @@ async def test_chat_claim_window_exception_clears_flag():
     state.adapter.sdk_client.query.assert_not_awaited()
 
 
+# ─── stale_turn_undrained: a force-cancelled turn's client is still winding ──
+# ─── down its stale terminal frame — refuse a follow-up query even though the ─
+# ─── cancelled task's finally already flipped is_streaming back to False.     ─
+
+
+async def test_stream_to_websocket_refuses_stale_undrained_client():
+    """The exact bug-2 repro: after interrupt escalation KEEPS the client (live
+    background work), the cancelled turn's finally set is_streaming=False, so the
+    busy gate no longer trips — but the SDK read loop is still buffering the old
+    turn's frames. The follow-up query must be refused on ``stale_turn_undrained``
+    so it is never written into a possibly mid-turn CLI."""
+    state = _fake_state(is_streaming=False, stale_turn_undrained=True)
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        _chat_patches(stack, pool)
+        events = await _collect(qe.stream_to_websocket("hi", "sess-stale", "claude-code"))
+
+    assert any(e.get("type") == "error" and "winding down" in e.get("message", "").lower()
+               for e in events), events
+    state.adapter.sdk_client.query.assert_not_awaited()
+    # The rejection must not touch the still-set drain flag.
+    assert state.stale_turn_undrained is True
+
+
+async def test_stream_query_refuses_stale_undrained_client():
+    state = _fake_state(is_streaming=False, stale_turn_undrained=True)
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        _rest_patches(stack, pool)
+        events = await _collect(qe.stream_query("hi", "claude-code", session_id="sess-stale"))
+
+    assert any(e.get("type") == "error" and "winding down" in e.get("message", "").lower()
+               for e in events), events
+    state.adapter.sdk_client.query.assert_not_awaited()
+    assert state.stale_turn_undrained is True
+
+
+async def test_background_query_refuses_stale_undrained_client():
+    state = _fake_state(is_streaming=False, stale_turn_undrained=True)
+    pool = _StubPool(state)
+
+    sync = _fake_sync_engine()
+    store = MagicMock()
+    store.cleanup_session = AsyncMock()
+
+    async def _fake_run_sync(fn, *a, **k):
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+        stack.enter_context(patch.object(qb, "sync_engine", new=sync))
+        oauth = MagicMock()
+        oauth.ensure_fresh_credentials = AsyncMock()
+        stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
+        options = MagicMock()
+        stack.enter_context(patch.object(
+            qb, "build_options_from_profile", return_value=(options, {})
+        ))
+        stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
+        stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
+        stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
+        stack.enter_context(patch.object(qb, "live_session_store", new=store))
+        stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=AsyncMock()))
+
+        await qb._run_background_query(
+            "sess-stale", "hello", {"id": "claude-code"}, None, None, None, None, None,
+            message_id="msg-1",
+        )
+
+    state.adapter.sdk_client.query.assert_not_awaited()
+    assert state.stale_turn_undrained is True
+    sync.broadcast_stream_end.assert_awaited_once()
+    kwargs = sync.broadcast_stream_end.await_args.kwargs
+    assert "winding down" in (kwargs.get("metadata") or {}).get("error", "").lower()
+    store.cleanup_session.assert_not_awaited()
+
+
+async def test_cleared_flag_allows_normal_reuse():
+    """Once the drain pump clears ``stale_turn_undrained`` (stale terminal frame
+    consumed), a follow-up query reuses the client normally — no refusal."""
+    state = _fake_state(is_streaming=False, stale_turn_undrained=False)
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        _chat_patches(stack, pool)
+        events = await _collect(qe.stream_to_websocket("hi", "sess-ok", "claude-code"))
+
+    assert not any(
+        e.get("type") == "error" and "winding down" in e.get("message", "").lower()
+        for e in events
+    ), events
+    # The client was reused: query was written into the (now idle) CLI.
+    state.adapter.sdk_client.query.assert_awaited()
+
+
 async def test_chat_claim_window_cancel_clears_flag():
     """Same window, CancelledError (except Exception would MISS it — the guard
     must be BaseException-wide): the claim is released and the cancel propagates."""

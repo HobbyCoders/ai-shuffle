@@ -199,6 +199,14 @@ _UNPARK_ON_TASK_UPDATE_STATUSES = frozenset({"killed", "stopped"})
 # this to a tiny value; read fresh at the call site so monkeypatching takes effect.
 _UNPARK_BATCH_WINDOW_SECONDS = 1.5
 
+# Wedge-poll interval for the drain pump while it is winding down a force-cancelled
+# turn (stale_turn_undrained). The killed turn's terminal ResultMessage usually
+# arrives promptly, but if the CLI itself is wedged it may never come; on each
+# expiry the pump re-checks whether the background work that made us keep the
+# client has resolved, and evicts the now-idle/broken client if so. Read fresh at
+# the call site so tests can shrink it.
+_STALE_DRAIN_WEDGE_POLL_SECONDS = 30.0
+
 
 # Guidance attached to every consolidated <task-notification> follow-up turn. The
 # app now fires AT MOST ONE unpark per background task (see
@@ -512,6 +520,7 @@ async def _drain_notifications_impl(
     user_id: str,
     send_json: "Callable[[dict], Awaitable[bool]]",
     deliver_unpark: "Callable[..., Awaitable[bool]]",
+    process_next_queued: "Optional[Callable[[str], Awaitable[None]]]" = None,
 ) -> None:
     """Between-turns reader that catches a SLOW sub-agent's terminal
     ``TaskNotificationMessage`` and unparks the parent.
@@ -539,6 +548,7 @@ async def _drain_notifications_impl(
         _subagent_events_from_message,
         _task_notification_frame,
         _task_update_terminal_status,
+        ResultMessage,
         TaskNotificationMessage,
         TaskUpdatedMessage,
     )
@@ -599,10 +609,53 @@ async def _drain_notifications_impl(
         while True:
             if batch_deadline is None:
                 # No deliverable yet — block for the next pooled-client message.
-                try:
-                    message = await agen.__anext__()
-                except StopAsyncIteration:
-                    break
+                # WEDGE POLICY: while this pump is winding down a force-cancelled
+                # turn (stale_turn_undrained), do NOT block indefinitely — the
+                # killed turn's terminal frame may never arrive if the CLI itself
+                # wedged. Read with a periodic timeout and, on each expiry, re-check
+                # whether the background work that made us KEEP the client has
+                # finished (or the subprocess died); once so, evict the now-idle/
+                # broken client and exit. A timed-out receive does NOT consume a
+                # buffered item (mirrors the batch-window read below).
+                _stale_state = get_session_pool().peek(session_id)
+                _winding_down = bool(
+                    _stale_state is not None and _stale_state.stale_turn_undrained
+                )
+                if _winding_down:
+                    try:
+                        message = await asyncio.wait_for(
+                            agen.__anext__(), timeout=_STALE_DRAIN_WEDGE_POLL_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        from app.core.session_pool import (
+                            get_session_pool as _gsp,
+                            is_subprocess_alive as _alive,
+                        )
+                        _st = _gsp().peek(session_id)
+                        if _st is None:
+                            break  # already gone from the pool — nothing to drain
+                        if not _should_evict_after_escalation(session_id):
+                            # Background work still running on a live subprocess —
+                            # keep waiting for the killed turn's terminal frame.
+                            continue
+                        # Background work finished or subprocess died → the kept
+                        # client is now safe/necessary to evict.
+                        logger.info(
+                            "Drain pump: stale-turn wedge — background work resolved, "
+                            "evicting winding-down client [session=%s]", session_id
+                        )
+                        if not _alive(_st):
+                            await _gsp().remove_dead(session_id)
+                        else:
+                            await _gsp().remove_broken(session_id)
+                        break
+                    except StopAsyncIteration:
+                        break
+                else:
+                    try:
+                        message = await agen.__anext__()
+                    except StopAsyncIteration:
+                        break
             else:
                 # At least one completion is already queued for delivery — keep
                 # draining any FURTHER completions that are buffered (or land within
@@ -637,6 +690,50 @@ async def _drain_notifications_impl(
                     await dispatch_event(_sub_ev, sub_ectx, sub_state)
             except Exception as _exc:
                 ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
+
+            # STALE-TURN TERMINAL FRAME: the killed turn's own ResultMessage is
+            # buffered on the pooled client's read loop. Consuming it here is what
+            # lets us clear stale_turn_undrained — the CLI is now genuinely idle, so
+            # a follow-up query can safely reuse the client. Placed BEFORE the
+            # TaskUpdatedMessage branch since a ResultMessage is neither a task
+            # update nor a notification.
+            if isinstance(message, ResultMessage):
+                _rs_state = get_session_pool().peek(session_id)
+                if _rs_state is not None and _rs_state.stale_turn_undrained:
+                    _rs_state.stale_turn_undrained = False
+                    logger.info(
+                        "Drain pump: consumed killed turn's terminal ResultMessage — "
+                        "cleared stale_turn_undrained [session=%s]", session_id
+                    )
+                    if pending:
+                        # Completions collected during the wind-down — fall through
+                        # to the existing post-loop unpark delivery.
+                        continue
+                    if (
+                        session_id not in _stopped_sessions
+                        and session_id not in _interrupt_pending_sessions
+                        and process_next_queued is not None
+                    ):
+                        try:
+                            _queue = await run_sync(database.get_queued_messages, session_id)
+                        except Exception:
+                            _queue = []
+                        if _queue:
+                            # A queued (e.g. send-now replacement) message is
+                            # waiting — the client is idle now, so kick the queue.
+                            # Remove ourselves first (same self-deadlock guard as the
+                            # unpark path) since _process_next_queued may start a turn
+                            # whose stop_drain_pump would otherwise cancel/await us.
+                            logger.info(
+                                "Drain pump: stale turn drained + queue non-empty — "
+                                "kicking _process_next_queued [session=%s]", session_id
+                            )
+                            _drop_drain_pump_self(session_id, _drain_pumps)
+                            await process_next_queued(session_id)
+                            return
+                    # No pending unpark, no deliverable queue (or Stop/interrupt
+                    # latched) — keep looping on normal unpark duty.
+                    continue
 
             # THE GAP: a killed/stopped (TaskStop) background task can terminate via
             # a TaskUpdatedMessage ALONE — no following TaskNotificationMessage. The
@@ -870,6 +967,25 @@ async def _drain_notifications_impl(
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
         if pending:
             task_registry.clear_unpark_pending(session_id)
+        # If we were winding down a force-cancelled turn when the read stream died,
+        # evict: a dead read loop makes the client broken by definition — its stale
+        # frame will never be consumed, so it must not stay pooled behind the
+        # refuse-on-stale gate forever. remove_dead if the subprocess is gone,
+        # else remove_broken (subprocess alive but read loop unusable).
+        try:
+            from app.core.session_pool import (
+                get_session_pool as _gsp,
+                is_subprocess_alive as _alive,
+            )
+            _es = _gsp().peek(session_id)
+            if _es is not None and _es.stale_turn_undrained:
+                _es.stale_turn_undrained = False
+                if _alive(_es):
+                    await _gsp().remove_broken(session_id)
+                else:
+                    await _gsp().remove_dead(session_id)
+        except Exception:
+            pass
         _drop_drain_pump_self(session_id, _drain_pumps)
         return
 
@@ -1296,10 +1412,21 @@ class ChatWebSocketHandler:
         if session_id:
             async with _active_sessions_lock:
                 active_task = _active_chat_sessions.get(session_id)
-            if active_task is not None and not active_task.done():
+            # Route to the queue when a turn is live OR when the pooled client is
+            # still winding down a force-cancelled turn (stale_turn_undrained): a
+            # follow-up query would cross the buffered stale ResultMessage / write
+            # into a possibly mid-turn CLI. Queuing keeps the send-now UX — the
+            # message auto-fires once the drain pump clears the flag.
+            _stale = False
+            if active_task is None or active_task.done():
+                from app.core.session_pool import get_session_pool
+                _peek = get_session_pool().peek(session_id)
+                _stale = bool(_peek is not None and _peek.stale_turn_undrained)
+            if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
-                    f"[BusyGuard] query for session {session_id} arrived mid-turn — "
-                    f"enqueueing instead of cancelling the live turn"
+                    f"[BusyGuard] query for session {session_id} arrived while "
+                    f"{'mid-turn' if not _stale else 'winding down a cancelled turn'} "
+                    f"— enqueueing instead of cancelling/crossing the turn"
                 )
                 await self.handle_queue_message({
                     "session_id": session_id,
@@ -1590,11 +1717,6 @@ class ChatWebSocketHandler:
                             await asyncio.sleep(timeout)
                             if not t.done():
                                 logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
-                                t.cancel()
-                                try:
-                                    await t
-                                except (asyncio.CancelledError, Exception):
-                                    pass
                                 # Same broken-client hazard as interrupt_for_query:
                                 # the CLI never honored the interrupt, so the next
                                 # message must not reuse this pooled client — UNLESS
@@ -1602,9 +1724,29 @@ class ChatWebSocketHandler:
                                 # subprocess. remove_broken → SIGTERM would kill
                                 # every sub-agent/shell child; never trade live
                                 # background work for eviction of a healthy client.
-                                if _should_evict_after_escalation(sid):
+                                _keep = not _should_evict_after_escalation(sid)
+                                # Flag stale BEFORE cancelling: the cancelled task's
+                                # finally flips is_streaming back to False (disarming
+                                # the busy gate), so this flag is the only signal that
+                                # the pooled client is still winding down the killed
+                                # turn's buffered frames. Guard on the pre-cancel
+                                # is_streaming so a fresh replacement client (a
+                                # concurrent escalation already evicted+recreated) is
+                                # never mis-flagged.
+                                _flagged = self._flag_stale_if_keeping(sid, keep=_keep)
+                                t.cancel()
+                                try:
+                                    await t
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                if not _keep:
                                     from app.core.session_pool import get_session_pool
                                     await get_session_pool().remove_broken(sid)
+                                elif _flagged:
+                                    # Keep branch: start the between-turns drain pump
+                                    # to consume the killed turn's terminal frame and
+                                    # clear the stale flag (then re-kick any queue).
+                                    await self._start_drain_pump_for_session(sid)
                         except asyncio.CancelledError:
                             pass
                     _t = asyncio.create_task(_safety_cancel(task, session_id))
@@ -1673,11 +1815,6 @@ class ChatWebSocketHandler:
                 done, pending = await asyncio.wait({task}, timeout=_INTERRUPT_DRAIN_TIMEOUT_SECONDS)
                 if pending:
                     logger.warning(f"interrupt_for_query: drain timed out for {session_id}, force cancelling")
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
                     # Drain timeout means the CLI never acknowledged the
                     # interrupt and is likely still mid-turn (e.g. extended
                     # thinking). The stream's finally keeps connected clients
@@ -1689,9 +1826,25 @@ class ChatWebSocketHandler:
                     # sub-agent/shell child; never trade live background work
                     # for eviction of a healthy client. A truly wedged client
                     # is evicted by the next query's error path instead.
-                    if _should_evict_after_escalation(session_id):
+                    _keep = not _should_evict_after_escalation(session_id)
+                    # Flag stale BEFORE cancelling (see handle_stop): the
+                    # cancelled task's finally clears is_streaming, so this flag
+                    # is the only remaining signal that the kept client is still
+                    # winding down the killed turn's buffered frames.
+                    _flagged = self._flag_stale_if_keeping(session_id, keep=_keep)
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    if not _keep:
                         from app.core.session_pool import get_session_pool
                         await get_session_pool().remove_broken(session_id)
+                    elif _flagged:
+                        # Keep branch: start the between-turns drain pump to
+                        # consume the killed turn's terminal frame and clear the
+                        # stale flag (then re-kick any queued send-now message).
+                        await self._start_drain_pump_for_session(session_id)
 
             # Step 3: Confirm to frontend — safe to send the query now
             await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
@@ -2560,10 +2713,20 @@ class ChatWebSocketHandler:
             # back at the front — the post-turn queue drain picks it up.
             async with _active_sessions_lock:
                 active_task = _active_chat_sessions.get(session_id)
-            if active_task is not None and not active_task.done():
+            # Re-queue when a turn is live OR the pooled client is still winding
+            # down a force-cancelled turn (stale_turn_undrained) — launching now
+            # would cross the buffered stale ResultMessage / write into a mid-turn
+            # CLI. The drain pump re-kicks this drain once it clears the flag.
+            _stale = False
+            if active_task is None or active_task.done():
+                from app.core.session_pool import get_session_pool
+                _peek = get_session_pool().peek(session_id)
+                _stale = bool(_peek is not None and _peek.stale_turn_undrained)
+            if (active_task is not None and not active_task.done()) or _stale:
                 logger.info(
-                    f"[Queue] Session {session_id} has a live turn — re-queuing "
-                    f"instead of cancelling it"
+                    f"[Queue] Session {session_id} is "
+                    f"{'mid-turn' if not _stale else 'winding down a cancelled turn'} "
+                    f"— re-queuing instead of cancelling/crossing it"
                 )
                 await run_sync(
                     database.requeue_message_at_front,
@@ -2594,6 +2757,7 @@ class ChatWebSocketHandler:
                 # (the latch itself is left set for its owner to consume).
                 preempted = False
                 latched = False
+                stale = False
                 async with _active_sessions_lock:
                     existing_task = _active_chat_sessions.get(session_id)
                     if existing_task is not None and not existing_task.done():
@@ -2604,14 +2768,24 @@ class ChatWebSocketHandler:
                     ):
                         latched = True
                     else:
-                        task = asyncio.create_task(
-                            self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
-                        )
-                        _active_chat_sessions[session_id] = task
-                if preempted or latched:
+                        # Late stale-turn re-check: the pooled client may have been
+                        # flagged winding-down (interrupt escalation) during the
+                        # awaits above. Launching now would cross the buffered stale
+                        # ResultMessage — re-queue and let the drain pump re-kick.
+                        from app.core.session_pool import get_session_pool
+                        _peek = get_session_pool().peek(session_id)
+                        if _peek is not None and _peek.stale_turn_undrained:
+                            stale = True
+                        else:
+                            task = asyncio.create_task(
+                                self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+                            )
+                            _active_chat_sessions[session_id] = task
+                if preempted or latched or stale:
                     reason = (
                         "preempted before launch" if preempted
-                        else "stop/interrupt latched mid-drain"
+                        else "stop/interrupt latched mid-drain" if latched
+                        else "client winding down a cancelled turn"
                     )
                     logger.info(
                         f"[Queue] Drain {reason} for session {session_id} — "
@@ -2752,6 +2926,7 @@ class ChatWebSocketHandler:
             user_id=self.user_id,
             send_json=self.send_json,
             deliver_unpark=self._deliver_unpark,
+            process_next_queued=self._process_next_queued,
         )
 
     @staticmethod
@@ -2776,6 +2951,54 @@ class ChatWebSocketHandler:
             drain_coro_factory=lambda: self._drain_notifications(
                 session_id, profile_id, project_id, worktree_id
             ),
+        )
+
+    @staticmethod
+    def _flag_stale_if_keeping(session_id: str, *, keep: bool) -> bool:
+        """Flag the pooled state ``stale_turn_undrained`` for the keep branch.
+
+        Set only when we are KEEPING the client (``keep``) AND the peeked pool
+        state is actually mid-turn at fire time (``is_streaming`` True) — the
+        guard prevents flagging a FRESH replacement client that a concurrent
+        escalation already evicted-and-recreated. Returns True iff the flag was
+        set. MUST be called BEFORE ``task.cancel()``: the cancelled task's finally
+        flips ``is_streaming`` back to False, after which the pre-cancel guard can
+        no longer be evaluated.
+        """
+        if not keep:
+            return False
+        from app.core.session_pool import get_session_pool
+        state = get_session_pool().peek(session_id)
+        if state is None or not state.is_streaming:
+            return False
+        state.stale_turn_undrained = True
+        logger.info(
+            "Interrupt escalation kept the client — flagged stale_turn_undrained "
+            "[session=%s]", session_id
+        )
+        return True
+
+    async def _start_drain_pump_for_session(self, session_id: str) -> None:
+        """Start the between-turns drain pump from an escalation site.
+
+        The escalation handlers lack the profile/project/worktree ids, so derive
+        them from the durable session row (which carries all three). NEVER inject a
+        ``or "claude-code"`` sentinel default here — that sentinel must never cross
+        into remote/relay paths; the pump only uses profile_id when delivering an
+        unpark follow-up, and a genuine session always has its real profile_id.
+        """
+        session_row = await run_sync(database.get_session, session_id)
+        if session_row is None:
+            logger.warning(
+                "Cannot start drain pump after escalation — session row gone "
+                "[session=%s]", session_id
+            )
+            return
+        self._start_drain_pump(
+            session_id,
+            session_row.get("profile_id"),
+            session_row.get("project_id"),
+            session_row.get("worktree_id"),
         )
 
     # ------------------------------------------------------------------
