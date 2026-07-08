@@ -270,7 +270,10 @@ def _queue_frames(ws):
 async def test_query_remote_session_relays_and_confirms():
     """Oracle: prompt relayed with (session_row, prompt, profile, overrides),
     device registered for the mirror stream, cloud_forwarded sent, NOTHING runs
-    locally (no persist, no run_query)."""
+    locally (no persist, no run_query). The 'claude-code' default-profile
+    sentinel is NOT a real profile row — it must never cross the relay (the
+    owner would die on an unlogged "Profile not found"); it is stripped to
+    None so the owner falls back to the session's own profile."""
     with _HandlerHarness() as h:
         h.cloud.is_remote_session.return_value = True
         handler = h.make_handler()
@@ -283,7 +286,7 @@ async def test_query_remote_session_relays_and_confirms():
 
     args = h.cloud.relay_message.await_args.args
     assert args[0]["id"] == "sess-r"
-    assert args[1:] == ("remote hello", "claude-code", {"model": "opus"})
+    assert args[1:] == ("remote hello", None, {"model": "opus"})
     assert _frames(h.ws, "cloud_forwarded") == [
         {"type": "cloud_forwarded", "session_id": "sess-r"}
     ]
@@ -292,6 +295,34 @@ async def test_query_remote_session_relays_and_confirms():
     assert handler.current_session_id == "sess-r"
     h.db.add_session_message.assert_not_called()
     assert h.created.spawns("run_query") == 0
+
+
+async def test_query_remote_relays_real_profile_verbatim():
+    """An explicitly selected profile is forwarded unchanged."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_query({
+            "prompt": "remote hello",
+            "session_id": "sess-r",
+            "profile": "default-ai",
+        })
+
+    args = h.cloud.relay_message.await_args.args
+    assert args[1:] == ("remote hello", "default-ai", None)
+
+
+async def test_query_remote_omitted_profile_relays_none():
+    """No profile key at all → the handler's internal 'claude-code' default
+    must not leak across the relay either."""
+    with _HandlerHarness() as h:
+        h.cloud.is_remote_session.return_value = True
+        await h.make_handler().handle_query({
+            "prompt": "remote hello",
+            "session_id": "sess-r",
+        })
+
+    args = h.cloud.relay_message.await_args.args
+    assert args[1:] == ("remote hello", None, None)
 
 
 async def test_query_remote_offline_error_frame():
@@ -644,7 +675,8 @@ async def test_queue_message_remote_relays_and_reads_back():
 
     args = h.cloud.relay_queue_message.await_args.args
     assert args[0]["id"] == "sess-r"
-    assert args[1:] == ("later", "claude-code", "proj-1")
+    assert args[1:] == ("later", None, "proj-1"), \
+        "the 'claude-code' sentinel must be stripped before crossing the relay"
     h.db.add_queued_message.assert_not_called()
     h.db.pop_next_queued_message.assert_not_called()
     assert "sess-r" in h.stopped, "remote queue op must not clear the local latch"

@@ -1235,8 +1235,13 @@ class ChatWebSocketHandler:
                     await sync_engine.register_device(self.device_id, session_id, self.websocket)
                     self.current_session_id = session_id
                 try:
+                    # 'claude-code' is this handler's "no explicit profile"
+                    # default, not a real profile row — never send it across
+                    # the relay (the owner would fail get_profile on it).
                     await cloud_relay.relay_message(
-                        cloud_sess, prompt, profile_id, overrides
+                        cloud_sess, prompt,
+                        profile_id if profile_id != "claude-code" else None,
+                        overrides,
                     )
                     await self.send_json({"type": "cloud_forwarded", "session_id": session_id})
                 except cloud_relay.InstallOffline as e:
@@ -2326,8 +2331,12 @@ class ChatWebSocketHandler:
             if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
                 relay_error: Optional[str] = None
                 try:
+                    # Strip the 'claude-code' no-profile sentinel here too —
+                    # the queued row's profile drives the owner-side drain.
                     await cloud_relay.relay_queue_message(
-                        cloud_sess, content, profile_id, project_id
+                        cloud_sess, content,
+                        profile_id if profile_id != "claude-code" else None,
+                        project_id,
                     )
                 except cloud_relay.InstallOffline as e:
                     relay_error = f"Device offline — cannot queue: {e}"

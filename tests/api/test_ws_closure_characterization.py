@@ -616,7 +616,8 @@ async def test_query_remote_session_relays_and_confirms():
 
     args = h.cloud.relay_message.await_args.args
     assert args[0]["id"] == "sess-r"
-    assert args[1:] == ("remote hello", "claude-code", {"model": "opus"})
+    assert args[1:] == ("remote hello", None, {"model": "opus"}), \
+        "the 'claude-code' sentinel must be stripped before crossing the relay"
     assert _frames(ws, "cloud_forwarded") == [
         {"type": "cloud_forwarded", "session_id": "sess-r"}
     ]
@@ -1320,7 +1321,8 @@ async def test_queue_message_remote_relays_and_reads_back():
         }])
 
     args = h.cloud.relay_queue_message.await_args.args
-    assert args[1:] == ("later", "claude-code", "proj-1")
+    assert args[1:] == ("later", None, "proj-1"), \
+        "the 'claude-code' sentinel must be stripped before crossing the relay"
     h.db.add_queued_message.assert_not_called()
     h.db.pop_next_queued_message.assert_not_called()
     assert _queue_frames(ws) == [{

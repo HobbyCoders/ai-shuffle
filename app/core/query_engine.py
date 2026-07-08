@@ -777,9 +777,14 @@ async def stream_query(
     - Reuse existing client if available, create new one with 'resume' if needed
     """
 
-    # Get profile
+    # Get profile. Log at ERROR: consumers may have no surface for this yield
+    # (headless path has no 'error' dispatch handler and force-cleans the live
+    # store), so the log line can be the only trace of the refusal.
     profile = get_profile(profile_id)
     if not profile:
+        logger.error(
+            f"[WS] Profile not found: {profile_id} (session {session_id}) — refusing query"
+        )
         yield {"type": "error", "message": f"Profile not found: {profile_id}"}
         return
 
@@ -788,6 +793,9 @@ async def stream_query(
     if project_id:
         project = await run_sync(database.get_project, project_id)
         if not project:
+            logger.error(
+                f"[WS] Project not found: {project_id} (session {session_id}) — refusing query"
+            )
             yield {"type": "error", "message": f"Project not found: {project_id}"}
             return
 
@@ -1413,9 +1421,14 @@ async def stream_to_websocket(
         user_id: Optional user ID for user-level broadcasts (e.g. lighting up the
             "awaiting input" indicator on every one of the user's devices)
     """
-    # Get profile
+    # Get profile. Log at ERROR: consumers may have no surface for this yield
+    # (headless path has no 'error' dispatch handler and force-cleans the live
+    # store), so the log line can be the only trace of the refusal.
     profile = get_profile(profile_id)
     if not profile:
+        logger.error(
+            f"[WS] Profile not found: {profile_id} (session {session_id}) — refusing query"
+        )
         yield {"type": "error", "message": f"Profile not found: {profile_id}"}
         return
 
@@ -1424,6 +1437,9 @@ async def stream_to_websocket(
     if project_id:
         project = await run_sync(database.get_project, project_id)
         if not project:
+            logger.error(
+                f"[WS] Project not found: {project_id} (session {session_id}) — refusing query"
+            )
             yield {"type": "error", "message": f"Project not found: {project_id}"}
             return
 

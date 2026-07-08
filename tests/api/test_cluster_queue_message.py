@@ -22,8 +22,13 @@ async def _passthrough_run_sync(fn, *args, **kwargs):
 
 
 async def test_queue_message_forwards_to_local_queue_handler(monkeypatch):
-    """Trims content, falls back to the session's project, runs as admin."""
-    fake_session = {"id": "sess-1", "project_id": "proj-A", "instance_id": "owner"}
+    """Trims content, falls back to the session's project, runs as admin.
+    The 'claude-code' default-profile sentinel is not a real profile — it
+    resolves to the session's own profile."""
+    fake_session = {
+        "id": "sess-1", "project_id": "proj-A", "instance_id": "owner",
+        "profile_id": "default-ai",
+    }
     monkeypatch.setattr(cluster_api, "run_sync", _passthrough_run_sync)
     monkeypatch.setattr(cluster_api.database, "get_session", lambda sid: fake_session)
 
@@ -54,7 +59,7 @@ async def test_queue_message_forwards_to_local_queue_handler(monkeypatch):
     assert captured["data"] == {
         "session_id": "sess-1",
         "content": "build it",
-        "profile": "claude-code",
+        "profile": "default-ai",
         "project": "proj-A",
     }
 

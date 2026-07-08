@@ -70,7 +70,12 @@ async def cluster_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    profile_id = body.profile_id or session.get("profile_id") or "claude-code"
+    # 'claude-code' is the controller's "no explicit profile" sentinel, not a
+    # real profile row — treat it as absent so the session's own profile wins
+    # (stream_to_websocket would error-yield "Profile not found" on it, which
+    # the headless path has no surface for).
+    body_profile = body.profile_id if body.profile_id != "claude-code" else None
+    profile_id = body_profile or session.get("profile_id") or "claude-code"
     msg_role, msg_meta = _detect_command_meta(prompt)
 
     await run_sync(
@@ -147,7 +152,10 @@ async def cluster_queue_message(
         await handler.handle_queue_message({
             "session_id": session_id,
             "content": content,
-            "profile": body.profile_id,
+            # Same sentinel handling as cluster_message: the queued row's
+            # profile_id drives the eventual drain, so it must be real.
+            "profile": (body.profile_id if body.profile_id != "claude-code" else None)
+                       or session.get("profile_id"),
             "project": body.project_id or session.get("project_id"),
         })
     except Exception as e:  # noqa: BLE001
