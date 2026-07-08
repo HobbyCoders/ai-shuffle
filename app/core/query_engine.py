@@ -255,6 +255,22 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
                 tuid = getattr(message, "tool_use_id", None)
                 if tuid and task_registry.was_background_launch(session_id, tuid):
                     task_registry.mark_sdk_background_task(session_id, message.task_id)
+            else:
+                # Belt-and-braces for genuine BACKGROUND sub-agents. The CLI
+                # (2.1.195+) launches Agent/Task subagents ASYNC without
+                # run_in_background in the tool input — the launch tool_result is
+                # only an ACK — so the launch gate is armed from that ACK sniff
+                # (see the ToolResult branches below). If a launch WAS recorded
+                # for this agent's launch tool_use_id, pin the parked session in
+                # the pool the same way a background shell does; otherwise the
+                # idle sweeper can evict the pooled client and drop the eventual
+                # completion → the frontend never unparks. Guarded strictly on a
+                # RECORDED launch so a synchronous sub-agent (result returns
+                # inline this turn, never armed) is NOT resurrected as background
+                # work (that reintroduced the #470 stale-follow-up-turn bug).
+                tuid = getattr(message, "tool_use_id", None)
+                if tuid and task_registry.was_background_launch(session_id, tuid):
+                    task_registry.mark_sdk_background_task(session_id, message.task_id)
             # Scope the in-stream unpark stash to THIS turn: record that this
             # background task's TaskStartedMessage arrived during the turn now
             # streaming. Only a task in this set may fire an in-stream unpark when
@@ -364,6 +380,38 @@ def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
                 "is_error": getattr(block, "is_error", False),
             })
     return events
+
+
+def _task_status_events_from_message(message: Any) -> List[Dict[str, Any]]:
+    """Convert a drained task-status SystemMessage into the SAME ``system`` event
+    the in-stream loop yields for it.
+
+    RC2 (parked-state "Task Updated" chip): in-stream, a ``TaskUpdatedMessage``
+    (a SystemMessage subclass) falls through to the generic SystemMessage branch
+    in ``stream_to_websocket`` and yields
+    ``{"type": "system", "subtype": <subtype>, "data": <data>}`` → ``handle_system``
+    → ``add_system_message`` → live-store ``update_id`` bump → the chip renders.
+    The between-turns drain pump had no equivalent, so a status patch that arrives
+    while the session is PARKED was structurally undeliverable (the park-poller,
+    keyed on ``update_id``, had nothing to fetch). This mirrors the in-stream shape
+    so the pump can dispatch it through the identical handler chain.
+
+    Only NON-init task-status system frames are converted (``init`` carries the SDK
+    session id and is handled specially in-stream — never forwarded as a chip).
+    ``TaskNotificationMessage`` / ``TaskProgressMessage`` / ``TaskStartedMessage``
+    are NOT SystemMessage-shaped chips and are handled by their own pump branches,
+    so they are excluded here. Returns ``[]`` for anything else.
+    """
+    if not isinstance(message, TaskUpdatedMessage):
+        return []
+    subtype = getattr(message, "subtype", None)
+    if subtype == "init":
+        return []
+    return [{
+        "type": "system",
+        "subtype": subtype,
+        "data": getattr(message, "data", None),
+    }]
 
 
 def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
@@ -2464,6 +2512,21 @@ async def stream_to_websocket(
                             )
                         ):
                             task_registry.mark_background_launch(session_id, tool_id)
+                            logger.info(
+                                "task-launch-classification session=%s tool_id=%s "
+                                "classification=background-flag",
+                                session_id, tool_id,
+                            )
+                        elif tool_id and not tool_entry["parent_tool_id"] and block.name in ("Task", "Agent"):
+                            # A top-level Agent/Task launch WITHOUT the input flag: it
+                            # is provisionally foreground here. The CLI (2.1.195+) may
+                            # still reveal it as async via its launch-ACK ToolResult,
+                            # which re-classifies it as background-ack below.
+                            logger.info(
+                                "task-launch-classification session=%s tool_id=%s "
+                                "classification=foreground",
+                                session_id, tool_id,
+                            )
 
                         # Check if this is a subagent invocation (SDK ≤0.1.30 "Task", SDK ≥0.1.48 "Agent")
                         if block.name in ("Task", "Agent"):
@@ -2580,6 +2643,33 @@ async def stream_to_websocket(
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
+                            # RC1: the CLI (2.1.195+) launches Agent/Task subagents
+                            # ASYNC WITHOUT run_in_background in the tool input — the
+                            # launch ToolResult here is only the async launch ACK, so
+                            # the input-flag arm above never fired and the launch gate
+                            # stayed empty → the drain pump suppressed every genuine
+                            # agent completion as foreground. Arm the launch gate from
+                            # the ACK sniff for a TOP-LEVEL launch whose result reads
+                            # like the async-launch placeholder. A synchronous
+                            # sub-agent's full result text does NOT match the sniffer,
+                            # so it is never armed — preserving the #470/e83551e6
+                            # foreground-suppression semantics.
+                            _is_top_level_launch = (
+                                tool_use_id
+                                and not result_entry.get("parent_tool_id")
+                            )
+                            if (
+                                _is_top_level_launch
+                                and not task_info.get("run_in_background")
+                                and _looks_like_subagent_launch_ack(output)
+                            ):
+                                task_info["run_in_background"] = True
+                                task_registry.mark_background_launch(session_id, tool_use_id)
+                                logger.info(
+                                    "task-launch-classification session=%s tool_id=%s "
+                                    "classification=background-ack",
+                                    session_id, tool_use_id,
+                                )
                             # A backgrounded sub-agent's FIRST ToolResult is only the
                             # launch ACK, not its real output — keep the node RUNNING
                             # (its inner activity streams via parent_tool_use_id and it
@@ -2799,6 +2889,31 @@ async def stream_to_websocket(
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
+                            # RC1 (UserMessage lane): the CLI (2.1.195+) launches
+                            # Agent/Task subagents ASYNC without run_in_background in
+                            # the tool input — the launch ToolResult here is only the
+                            # async launch ACK, so the input-flag arm never fired and
+                            # the drain pump suppressed every genuine agent completion
+                            # as foreground. Arm the launch gate from the ACK sniff for
+                            # a TOP-LEVEL launch. A synchronous sub-agent's full result
+                            # text does NOT match the sniffer, so it is never armed —
+                            # preserving the #470/e83551e6 foreground semantics.
+                            _is_top_level_launch = (
+                                tool_use_id
+                                and not result_entry.get("parent_tool_id")
+                            )
+                            if (
+                                _is_top_level_launch
+                                and not task_info.get("run_in_background")
+                                and _looks_like_subagent_launch_ack(output)
+                            ):
+                                task_info["run_in_background"] = True
+                                task_registry.mark_background_launch(session_id, tool_use_id)
+                                logger.info(
+                                    "task-launch-classification session=%s tool_id=%s "
+                                    "classification=background-ack",
+                                    session_id, tool_use_id,
+                                )
                             # Backgrounded sub-agent: this ToolResult is only the launch
                             # ACK ("Async agent launched successfully …"), not the real
                             # result. Keep the node RUNNING — its inner activity streams

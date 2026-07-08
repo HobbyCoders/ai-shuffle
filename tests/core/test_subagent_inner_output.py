@@ -369,3 +369,253 @@ class TestRecordTaskStartedKind:
         # a foreground shell's notification is classified against THIS turn.
         _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
         assert task_registry.was_started_this_turn("sess-1", "t-bash") is True
+
+    # --- RC1 belt-and-braces: agent TaskStarted with a recorded background launch
+    #     also arms mark_sdk_background_task (test E). The CLI now launches Agent
+    #     tasks async WITHOUT the run_in_background input flag, so the ONLY signal
+    #     that an agent is genuinely backgrounded is that its launch tool_use_id was
+    #     armed from the launch ACK (mark_background_launch). This fallback covers a
+    #     terminal notification/update that arrives WITHOUT a tool_use_id (the
+    #     always-present task_id then carries the unpark gate via is_sdk_background).
+    def test_agent_started_with_recorded_launch_arms_sdk_background(self):
+        # The launch ACK (or run_in_background flag) recorded the parent's launch
+        # tool_use_id "tu-1" — the TaskStarted for this agent carries the same id.
+        task_registry.mark_background_launch("sess-1", "tu-1")
+        _record_task_message(
+            "sess-1", _started("t-agent", task_type="local_agent", tool_use_id="tu-1")
+        )
+        assert task_registry.get_task("sess-1", "t-agent")["kind"] == "agent"
+        assert task_registry.is_sdk_background_task("sess-1", "t-agent") is True
+
+    def test_agent_started_without_recorded_launch_does_not_arm_sdk_background(self):
+        # No mark_background_launch for this agent's tool_use_id — a synchronous
+        # sub-agent (result inline). Arming it would resurrect the #470 foreground
+        # spurious-unpark bug, so is_sdk_background_task must stay False.
+        _record_task_message(
+            "sess-1", _started("t-agent", task_type="local_agent", tool_use_id="tu-1")
+        )
+        assert task_registry.is_sdk_background_task("sess-1", "t-agent") is False
+
+    def test_agent_started_without_tool_use_id_does_not_arm_sdk_background(self):
+        # Even with a recorded launch, an agent TaskStarted lacking a tool_use_id
+        # can't be confirmed against it → no arming.
+        task_registry.mark_background_launch("sess-1", "tu-1")
+        _record_task_message(
+            "sess-1", _started("t-agent", task_type="local_agent", tool_use_id=None)
+        )
+        assert task_registry.is_sdk_background_task("sess-1", "t-agent") is False
+
+
+# ---------------------------------------------------------------------------
+# RC1: arm the unpark gate from the launch ACK (tests A, B, D).
+#
+# The bundled CLI (2.1.195+) launches Agent/Task sub-agents ASYNC by DEFAULT with
+# NO run_in_background/runInBackground key in the tool input — the launch
+# tool_result is just an ACK ("Async agent launched successfully … working in the
+# background … notified automatically"). Because mark_background_launch used to
+# fire ONLY on the input flag, _background_launches stayed empty and the drain
+# pump suppressed every genuine agent completion as suppress-foreground.
+#
+# The fix arms the gate from the ACK: at the ToolResult branch, a TOP-LEVEL Task
+# tool_use whose result reads like a launch ACK records mark_background_launch.
+# A SYNCHRONOUS agent's tool_result carries the FULL result text (the ACK sniffer
+# does not match) so it must NOT arm the gate — this pins the #470/e83551e6
+# foreground-suppression semantics. A NESTED (grandchild) launch must not arm the
+# PARENT gate.
+#
+# Harness mirrors tests/core/test_cross_turn_background_subagent_routing.py:
+# drive stream_to_websocket over a scripted SDK message sequence, no Postgres /
+# real SDK, then assert the registry side-effect (was_background_launch).
+# ---------------------------------------------------------------------------
+
+from contextlib import ExitStack as _ExitStack  # noqa: E402
+from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock, patch as _patch  # noqa: E402
+
+import app.core.query_engine as _qe  # noqa: E402
+from app.core.session_pool import SessionState as _SessionState  # noqa: E402
+
+
+_ACK_TEXT = (
+    "Async agent launched successfully. agentId: a2c0deadbeef. The agent is "
+    "working in the background. You will be notified automatically when it "
+    "completes."
+)
+
+
+def _ack_state(messages, **overrides) -> _SessionState:
+    adapter = _MagicMock()
+    adapter.is_alive = _MagicMock(return_value=True)
+    adapter.sdk_client = _MagicMock()
+    adapter.sdk_client.query = _AsyncMock()
+
+    async def _response():
+        for m in messages:
+            yield m
+
+    adapter.sdk_client.receive_response = _MagicMock(side_effect=lambda: _response())
+    state = _SessionState(adapter=adapter, is_connected=True)
+    for key, value in overrides.items():
+        setattr(state, key, value)
+    return state
+
+
+class _AckStubPool:
+    def __init__(self, state=None):
+        self.state = state
+
+    def get(self, session_id):
+        return self.state
+
+    def peek(self, session_id):
+        return self.state
+
+    def put(self, session_id, state):
+        self.state = state
+
+    def admission_check(self):
+        return None
+
+    async def evict_if_needed(self):
+        return None
+
+    async def remove(self, session_id):
+        self.state = None
+
+    async def remove_dead(self, session_id):
+        self.state = None
+
+    async def remove_broken(self, session_id):
+        self.state = None
+
+
+def _ack_chat_patches(stack, pool):
+    stack.enter_context(_patch.object(
+        _qe, "get_profile", return_value={"id": "claude-code", "config": {}}
+    ))
+
+    async def _fake_run_sync(fn, *a, **k):
+        return {"id": "row-1"}
+
+    stack.enter_context(_patch.object(_qe, "run_sync", new=_AsyncMock(side_effect=_fake_run_sync)))
+    oauth = _MagicMock()
+    oauth.ensure_fresh_credentials = _AsyncMock()
+    stack.enter_context(_patch.object(_qe, "direct_oauth", new=oauth))
+    options = _MagicMock()
+    options.include_partial_messages = True
+    options.cwd = None
+    stack.enter_context(_patch.object(
+        _qe, "build_options_from_profile", return_value=(options, {})
+    ))
+    stack.enter_context(_patch.object(_qe, "get_session_pool", return_value=pool))
+    stack.enter_context(_patch.object(_qe, "is_subprocess_alive", return_value=True))
+    stack.enter_context(_patch.object(_qe, "requires_reconnect", return_value=False))
+    stack.enter_context(_patch.object(_qe, "credentials_rotated", return_value=False))
+    stack.enter_context(_patch.object(_qe, "mark_subprocess_oom_killable", new=_MagicMock()))
+    stack.enter_context(_patch.object(_qe, "resolve_note_references", side_effect=lambda p: p))
+    stack.enter_context(_patch.object(_qe, "_persist_turn_results", new=_AsyncMock()))
+    stack.enter_context(_patch.object(_qe, "push_memory", new=_AsyncMock()))
+    sync = _MagicMock()
+    sync.broadcast_message_added = _AsyncMock()
+    sync.broadcast_stream_start = _AsyncMock()
+    sync.broadcast_stream_chunk = _AsyncMock()
+    sync.broadcast_stream_end = _AsyncMock()
+    stack.enter_context(_patch.object(_qe, "sync_engine", new=sync))
+    return options
+
+
+async def _drain(agen):
+    async for _ in agen:
+        pass
+
+
+def _agent_launch_msg(tool_id, *, parent_tool_use_id=None, run_in_background=False):
+    tool_input = {"subagent_type": "Explore", "description": "bg work", "prompt": "go"}
+    if run_in_background:
+        tool_input["run_in_background"] = True
+    return AssistantMessage(
+        content=[ToolUseBlock(id=tool_id, name="Agent", input=tool_input)],
+        model="claude",
+        parent_tool_use_id=parent_tool_use_id,
+    )
+
+
+def _tool_result_user_msg(tool_use_id, text, *, parent_tool_use_id=None):
+    return UserMessage(
+        content=[ToolResultBlock(tool_use_id=tool_use_id, content=text, is_error=False)],
+        parent_tool_use_id=parent_tool_use_id,
+    )
+
+
+class TestLaunchAckArmsBackgroundGate:
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_ack_tool_result_arms_background_launch(self):
+        """Test A: an Agent tool_use launched WITHOUT run_in_background in its input,
+        whose tool_result is the async launch ACK, ARMS mark_background_launch for
+        the launch tool_use_id — so its later terminal notification unparks."""
+        session_id = "sess-ack-a"
+        messages = [
+            _agent_launch_msg("toolu_bg"),
+            _tool_result_user_msg("toolu_bg", _ACK_TEXT),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_background_launch(session_id, "toolu_bg") is True
+
+    @pytest.mark.asyncio
+    async def test_real_synchronous_result_does_not_arm_gate(self):
+        """Test B: the SAME Agent launch but whose tool_result is a REAL synchronous
+        result (not ACK text) must NOT arm the gate — pins the #470/e83551e6
+        foreground-suppression semantics so a synchronous sub-agent never unparks."""
+        session_id = "sess-ack-b"
+        real_result = "All three commands ran successfully: STEP-1 then STEP-2 then STEP-3."
+        messages = [
+            _agent_launch_msg("toolu_sync"),
+            _tool_result_user_msg("toolu_sync", real_result),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_background_launch(session_id, "toolu_sync") is False
+
+    @pytest.mark.asyncio
+    async def test_nested_grandchild_ack_does_not_arm_parent_gate(self):
+        """Test D: a grandchild Agent launch (parent_tool_use_id set) whose result is
+        an ACK must NOT arm the PARENT gate — only TOP-LEVEL launches pin/unpark."""
+        session_id = "sess-ack-d"
+        # A real top-level background parent so its inner grandchild launch has a
+        # tracked parent to nest under (parent_tool_use_id == the parent's tool_id).
+        parent_id = "toolu_parent"
+        grandchild_id = "toolu_grandchild"
+        messages = [
+            _agent_launch_msg(parent_id, run_in_background=True),
+            _tool_result_user_msg(parent_id, _ACK_TEXT),
+            # The grandchild launch + its ACK arrive nested under the parent.
+            _agent_launch_msg(grandchild_id, parent_tool_use_id=parent_id),
+            _tool_result_user_msg(grandchild_id, _ACK_TEXT, parent_tool_use_id=parent_id),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        # The top-level parent IS armed (run_in_background flag path).
+        assert task_registry.was_background_launch(session_id, parent_id) is True
+        # The nested grandchild is NOT armed on the parent gate.
+        assert task_registry.was_background_launch(session_id, grandchild_id) is False

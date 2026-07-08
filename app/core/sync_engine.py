@@ -142,7 +142,7 @@ class SyncEngine:
             )
             self._connections[session_id][device_id] = connection
 
-            logger.debug(f"Device {device_id} registered to watch session {session_id}")
+            logger.info(f"Device {device_id} registered to watch session {session_id}")
             return connection
 
     async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
@@ -166,7 +166,7 @@ class SyncEngine:
                             return
 
                     del self._connections[session_id][device_id]
-                    logger.debug(f"Device {device_id} unregistered from session {session_id}")
+                    logger.info(f"Device {device_id} unregistered from session {session_id}")
 
                 # Clean up empty session entries
                 if not self._connections[session_id]:
