@@ -77,7 +77,9 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          no-cache: ${{ inputs.no_cache }}
+          # inputs.no_cache is '' on push triggers; coerce to a strict boolean
+          # (the action rejects anything but YAML true/false literals).
+          no-cache: ${{ inputs.no_cache == true }}
           build-args: |
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
           # Layer caching is automatic via Blacksmith's sticky disk:
