@@ -399,9 +399,21 @@ class TaskRegistry:
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
-        Re-registering preserves the original ``started_at`` and any existing
-        terminal status: a late ``start`` for an already-finished task must not
-        flip it back to running.
+        Re-registering preserves the original ``started_at``. A fresh
+        ``TaskStartedMessage`` for a CLEANLY-COMPLETED task is a genuine RESUME
+        (the SDK re-emits TaskStartedMessage when a background sub-agent is
+        continued via the SendMessage tool under the SAME task_id), so its status
+        is flipped BACK to "running" — otherwise the resumed run stayed
+        "completed" and vanished from ``get_active``/``get_visible`` (the poll's
+        ``activeTasks``), leaving a genuinely-running agent invisible in the UI
+        while a chat Stop still killed the live SDK query. On revival the stale
+        completed snapshot in ``_recent_terminal`` is also dropped so the row
+        can't double-count or resurrect as "completed".
+
+        A FAILURE terminal status ("error"/"killed") is NOT revived: a re-emitted
+        start for such a task is the force-cleanup / dead-pooled-client stale
+        leak (see ``_recent_terminal`` / ``test_reaped_failure_resnapshots_status``),
+        and reviving it would falsely show a dead task as running.
         """
         if not session_id or not task_id:
             return
@@ -415,6 +427,15 @@ class TaskRegistry:
             if summary is not None:
                 existing["summary"] = summary
             existing["kind"] = kind or existing.get("kind")
+            # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
+            # back to running (failures stay terminal — that's a stale leak).
+            if existing.get("status") == "completed":
+                existing["status"] = "running"
+                retained = self._recent_terminal.get(session_id)
+                if retained is not None:
+                    retained.pop(task_id, None)
+                    if not retained:
+                        self._recent_terminal.pop(session_id, None)
             existing["updated_at"] = now
             return
         bucket[task_id] = {

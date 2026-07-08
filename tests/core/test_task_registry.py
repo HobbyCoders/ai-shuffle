@@ -95,6 +95,44 @@ class TestLifecycle:
         assert reg.get_active("s1") == []
         assert reg.get_all("s1")[0]["status"] == status
 
+    def test_resume_revives_completed_task_to_running(self, reg):
+        # Regression (task #13, live 2026-07-08): a background sub-agent that
+        # completed and is RESUMED via the SendMessage tool re-emits a
+        # TaskStartedMessage under the SAME task_id. It must reappear as active
+        # (running) — otherwise the resumed run is invisible in /live activeTasks
+        # while genuinely executing, and Stop still kills the live SDK query.
+        reg.start_task("s1", "t1", "agent", "background work")
+        reg.complete_task("s1", "t1", "completed")
+        assert reg.get_active("s1") == []  # completed -> not active (baseline)
+        # Resume: fresh TaskStartedMessage for the same task_id.
+        reg.start_task("s1", "t1", "agent", "background work")
+        active = reg.get_active("s1")
+        assert [t["id"] for t in active] == ["t1"]
+        assert active[0]["status"] == "running"
+        # And it shows on the DISPLAY view too (no stale "completed" snapshot).
+        visible = reg.get_visible("s1")
+        assert [t["id"] for t in visible] == ["t1"]
+        assert visible[0]["status"] == "running"
+
+    def test_resume_revival_preserves_started_at(self, reg):
+        reg.start_task("s1", "t1", "agent", "work")
+        started_at = reg.get_active("s1")[0]["startedAt"]
+        reg.complete_task("s1", "t1", "completed")
+        reg.start_task("s1", "t1", "agent", "work")
+        assert reg.get_active("s1")[0]["startedAt"] == started_at
+
+    def test_resume_does_not_revive_failed_task(self, reg):
+        # A re-emitted start for a FAILED/killed task is the force-cleanup /
+        # dead-pooled-client stale leak, NOT a resume — it must stay terminal.
+        for status in ("error", "killed"):
+            reg.start_task("s2", "t", "agent", "x")
+            reg.complete_task("s2", "t", status)
+            reg.start_task("s2", "t", "agent", "late start")
+            assert reg.get_active("s2") == []
+            assert reg.get_visible("s2")[0]["status"] == status
+            reg.clear_session("s2")
+            reg.reset_all()
+
 
 # =============================================================================
 # Filtering & ordering
