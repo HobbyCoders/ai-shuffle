@@ -122,6 +122,9 @@ docker compose up -d
 | `START_CHROME` | `1` | Launch headless Chrome for Claude in Chrome (`0` to disable) |
 | `CHROME_CDP` | `1` | Bind Chrome's DevTools port to `127.0.0.1` so the in-app **Set up browser** panel works (`0` to disable) |
 | `CHROME_DEBUG` | `0` | Legacy: also expose DevTools on `:9222` over the network (not needed — the in-app panel replaces it) |
+| `CHROME_MAX_RESTARTS` | `8` | Circuit breaker: after this many *rapid* Chrome crash-restarts the supervisor gives up and disables Claude in Chrome for the container's lifetime (protects the PID budget). `0` = retry forever |
+| `CHROME_HEALTHY_SECS` | `60` | A Chrome that stays up at least this long counts as healthy and resets the crash counter/backoff |
+| `CHROME_BACKOFF_MAX` | `300` | Cap (seconds) on the exponential backoff between rapid Chrome restarts |
 
 ### Claude in Chrome (Docker)
 
