@@ -667,6 +667,143 @@ class TestGetSession:
 
 
 # =============================================================================
+# Test per-message profile_id is persisted end-to-end through the read paths
+# =============================================================================
+
+class TestSessionMessageProfileId:
+    """The chat UI labels each user bubble with the profile that produced it.
+
+    That requires the GET /{session_id} response to carry a per-message profile
+    id. Before the fix the SessionMessage response model omitted the field, so
+    FastAPI stripped it from every message and the frontend fell back to the
+    session's CURRENT profile for the whole transcript. These tests pin the
+    per-message value on both response paths, including a mid-session profile
+    switch (distinct prompts) and a repeated identical prompt under two
+    profiles (ordered resolution).
+    """
+
+    USAGE = {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "last_input_tokens": 0,
+        "total_tokens_in": 0,
+        "total_tokens_out": 0,
+    }
+
+    def _get_jsonl(self, client, mock_database, sample_session, jsonl_messages, profile_map):
+        """Drive the JSONL read path (disabled mode) with a fixed profile map."""
+        from app.core.config import settings
+
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+
+        with patch.object(settings, "session_store_mode", "disabled"), \
+                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value=profile_map), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
+            mock_parse.return_value = (jsonl_messages, dict(self.USAGE))
+            resp = client.get("/api/v1/sessions/test-session-id")
+        return resp
+
+    def test_jsonl_path_carries_per_message_profile_id(
+        self, client, mock_database, sample_session
+    ):
+        """A user message's own profile id survives serialization (both keys)."""
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "Hello", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "Hi!", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages, {"Hello": ["profile-x"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-x"
+        assert msgs[0]["profile_id"] == "profile-x"
+        # Assistant rows have no per-message profile.
+        assert msgs[1]["profileId"] is None
+
+    def test_jsonl_path_mid_session_profile_change(
+        self, client, mock_database, sample_session
+    ):
+        """Distinct prompts sent under different profiles each keep their own."""
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "First", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "a", "type": "text", "metadata": {}},
+            {"id": 3, "role": "user", "content": "Second", "type": "text", "metadata": {}},
+            {"id": 4, "role": "assistant", "content": "b", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages,
+            {"First": ["profile-a"], "Second": ["profile-b"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-a"
+        assert msgs[2]["profileId"] == "profile-b"
+
+    def test_jsonl_path_repeated_prompt_resolves_in_order(
+        self, client, mock_database, sample_session
+    ):
+        """Same prompt text twice under two profiles → ordered, not collapsed.
+
+        A content-keyed single-value lookup (the old code) would give BOTH
+        occurrences the last profile. The ordered queue pairs each occurrence to
+        its own row.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "repeat", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "a", "type": "text", "metadata": {}},
+            {"id": 3, "role": "user", "content": "repeat", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages,
+            {"repeat": ["profile-1", "profile-2"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-1"
+        assert msgs[2]["profileId"] == "profile-2"
+
+    def test_legacy_db_path_carries_per_message_profile_id(
+        self, client, mock_database, sample_session
+    ):
+        """Legacy session_messages rows expose each row's own profile_id.
+
+        The legacy fallback runs when there is no JSONL sdk id (mirror/disabled).
+        Each row already stores profile_id; the response must surface it (camel
+        + snake), including a mid-session profile change across rows.
+        """
+        from app.core.config import settings
+
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 1, "role": "user", "content": "First", "tool_name": None, "profile_id": "profile-a"},
+            {"id": 2, "role": "assistant", "content": "ok", "tool_name": None, "profile_id": None},
+            {"id": 3, "role": "user", "content": "Second", "tool_name": None, "profile_id": "profile-b"},
+        ]
+
+        with patch.object(settings, "session_store_mode", "disabled"), \
+                patch("app.core.cost_utils.attach_cost_metadata"):
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-a"
+        assert msgs[0]["profile_id"] == "profile-a"
+        assert msgs[2]["profileId"] == "profile-b"
+        assert msgs[2]["profile_id"] == "profile-b"
+
+
+# =============================================================================
 # Test session_store_mode read-cutover isolation (PR C.1)
 # =============================================================================
 

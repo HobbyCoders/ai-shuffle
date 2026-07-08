@@ -2083,15 +2083,20 @@ class ChatWebSocketHandler:
         logger.debug(f"Loaded {len(messages)} messages from {resolved.source} for session {session_id}")
 
         # Post-processing: merge profile_id for JSONL-sourced messages
-        # (DB and live_store messages already include profile_id)
+        # (DB and live_store messages already include profile_id). Consume the
+        # ordered per-content queue so each user message gets its own profile even
+        # when the same prompt repeats under a changed profile. Emit both the
+        # snake_case and camelCase keys the frontend may read.
         if resolved.source == "jsonl":
-            from app.core.cost_utils import get_cached_profile_map
-            db_profile_map = get_cached_profile_map(session_id)
+            from app.core.cost_utils import build_profile_queues
+            profile_queues = build_profile_queues(session_id)
             for msg in messages:
                 if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if content in db_profile_map:
-                        msg["profile_id"] = db_profile_map[content]
+                    queue = profile_queues.get(msg.get("content", ""))
+                    if queue:
+                        pid = queue.popleft()
+                        msg["profile_id"] = pid
+                        msg["profileId"] = pid
 
         # Enrich session with usage/token data from resolver
         if resolved.usage:

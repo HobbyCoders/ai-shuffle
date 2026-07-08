@@ -279,6 +279,13 @@ class SessionMessage(BaseModel):
     toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
     toolScreenshot: Optional[str] = None  # data: URI of an inline screenshot (Chrome/computer-use, Read of image)
     metadata: Optional[Dict[str, Any]] = None
+    # Profile that was active when this (user) message was created. Both keys are
+    # emitted: snake_case for API/DB parity, camelCase for the frontend message
+    # store (which reads `profileId`). Without these on the model, FastAPI's
+    # response_model strips the per-message profile and the chat UI falls back to
+    # the session's CURRENT profile for every bubble.
+    profile_id: Optional[str] = None
+    profileId: Optional[str] = None
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
     # Subagent-specific fields (for type='subagent')
     agentId: Optional[str] = None  # The subagent's unique ID
