@@ -79,6 +79,22 @@ echo "extension in via the in-app 'Set up browser' panel, then click"
 echo "'Pair this browser' — see the 'Claude in Chrome (Docker)' docs."
 
 echo
+echo "Known issue: intermittent Chrome SIGTRAP at launch"
+echo "--------------------------------------------------"
+echo "Chromium here sometimes dies with rc=133 (SIGTRAP) at ~0s uptime and no"
+echo "FATAL log line. It is flag-independent (dbus/GPU/crashpad/shm/sandbox/zygote"
+echo "all ruled out) and comes in 'crash windows' that can last 15+ minutes"
+echo "(often right after container boot), then clear on their own with CDP fully"
+echo "working. The supervisor (chrome-supervisor) no longer disables Chrome for"
+echo "the container's lifetime: after CHROME_MAX_RESTARTS rapid failures it enters"
+echo "slow-retry mode and self-heals once the window passes. Watch it recover in"
+echo "/home/appuser/.config/chrome.log."
+echo "The host-level experiment most likely to eliminate it entirely is running"
+echo "the container with '--security-opt seccomp=unconfined'. UNVERIFIED — a"
+echo "suspicion only, and it weakens container isolation (drops the seccomp"
+echo "syscall filter), so weigh that trade-off before using it."
+
+echo
 if [ -n "$FAILED" ]; then
     echo "Fix the marked items top to bottom, then retry."
 else

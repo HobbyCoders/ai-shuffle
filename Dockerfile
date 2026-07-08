@@ -139,8 +139,9 @@ COPY --chown=appuser:appuser .env.example .
 # Copy entrypoint + Claude in Chrome helper scripts
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
+COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
-RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-doctor
+RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
 
 # Ensure /app is owned by appuser
 RUN chown appuser:appuser /app

@@ -243,64 +243,23 @@ if [ "${START_CHROME:-1}" = "1" ]; then
         chown -R appuser:appuser /home/appuser/.config/chromium 2>/dev/null || true
     fi
     echo "Starting Chrome for Claude in Chrome (CHROME_DEBUG=${CHROME_DEBUG:-0})..."
-    # Supervisor hardening (root cause of the pids-cgroup exhaustion outage):
-    #   * Capture the REAL child exit status. The old loop ran `start-chrome ||
-    #     true` and then read `$?`, which is always 0 (the status of `|| true`) —
-    #     so a Chrome that died by SIGTRAP was logged as "rc=0 (clean)" and
-    #     respawned every 5s forever, leaking unreaped grandchildren each time.
-    #   * Circuit breaker: after CHROME_MAX_RESTARTS *rapid* failures (each within
-    #     CHROME_HEALTHY_SECS of starting) stop retrying and log loudly. A Chrome
-    #     that can't even start must never be able to spin the fork loop that
-    #     starves the app of PIDs. Set CHROME_MAX_RESTARTS=0 to retry forever.
-    #   * Exponential backoff between rapid failures (5s → 10s → 20s ... capped)
-    #     instead of a flat 5s, so even below the cap the leak/spin rate is bounded.
-    # Note: tini (PID 1) now reaps orphans regardless, so this is defence in depth.
-    CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}"
-    CHROME_HEALTHY_SECS="${CHROME_HEALTHY_SECS:-60}"
-    CHROME_BACKOFF_MAX="${CHROME_BACKOFF_MAX:-300}"
-    (
-        # This subshell must NOT inherit `set -e`: a failing start-chrome would
-        # abort the whole loop before we ever capture its exit status, silently
-        # killing the supervisor (and hiding crashes). Explicitly disable it.
-        set +e
-        fails=0
-        backoff=5
-        while true; do
-            start=$(date +%s)
-            setpriv --reuid=appuser --regid=appuser --init-groups \
-                env HOME=/home/appuser \
-                    CHROME_CDP="${CHROME_CDP:-1}" \
-                    CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
-                    CHROME_DEBUG="${CHROME_DEBUG:-0}" \
-                    CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
-                    CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
-                    start-chrome
-            rc=$?
-            ran=$(( $(date +%s) - start ))
-            if [ "$ran" -ge "$CHROME_HEALTHY_SECS" ]; then
-                # Chrome stayed up long enough to count as healthy — a later exit
-                # is a normal restart, so reset the failure counter and backoff.
-                echo "Chrome exited (rc=$rc) after ${ran}s. Restarting in 5s..."
-                fails=0
-                backoff=5
-                sleep 5
-                continue
-            fi
-            fails=$((fails + 1))
-            echo "Chrome exited (rc=$rc) after only ${ran}s — rapid failure ${fails}/${CHROME_MAX_RESTARTS}."
-            if [ "$CHROME_MAX_RESTARTS" -gt 0 ] && [ "$fails" -ge "$CHROME_MAX_RESTARTS" ]; then
-                echo "!!! Chrome crash-looped ${fails} times (rc=$rc). GIVING UP to protect the container's PID budget."
-                echo "!!! Claude in Chrome is now DISABLED for this container's lifetime."
-                echo "!!! Diagnose with: docker exec -u appuser -e HOME=/home/appuser <container> chrome-doctor"
-                echo "!!! To retry after fixing, restart the container (or set CHROME_MAX_RESTARTS=0 to retry forever, START_CHROME=0 to disable)."
-                break
-            fi
-            echo "Restarting Chrome in ${backoff}s (exponential backoff)..."
-            sleep "$backoff"
-            backoff=$((backoff * 2))
-            [ "$backoff" -gt "$CHROME_BACKOFF_MAX" ] && backoff="$CHROME_BACKOFF_MAX"
-        done
-    ) > /home/appuser/.config/chrome.log 2>&1 &
+    # The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
+    # docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
+    # applies the circuit breaker + exponential backoff, and (crucially) drops
+    # into slow-retry instead of permanently disabling Chrome so it self-heals
+    # when the intermittent-SIGTRAP crash window passes. We launch it here
+    # backgrounded with the same log redirection and pass the same env defaults
+    # through; the supervisor itself does the setpriv drop to appuser.
+    CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}" \
+    CHROME_HEALTHY_SECS="${CHROME_HEALTHY_SECS:-60}" \
+    CHROME_BACKOFF_MAX="${CHROME_BACKOFF_MAX:-300}" \
+    CHROME_SLOW_RETRY_SECS="${CHROME_SLOW_RETRY_SECS:-300}" \
+    CHROME_CDP="${CHROME_CDP:-1}" \
+    CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
+    CHROME_DEBUG="${CHROME_DEBUG:-0}" \
+    CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
+    CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
+        chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
     echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor"
 else
     echo "START_CHROME=0 — skipping Chrome launch (Claude in Chrome will be unavailable)"
