@@ -69,6 +69,22 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    # Persistent on-disk logging (app.core.file_logging). Survives an app crash
+    # and container recreation, unlike the in-memory ring buffer behind
+    # /api/v1/logs (lost on crash) and docker stdout (lost on container
+    # recreation). Files land under <data_dir>/logs, which is the durable data
+    # volume in Docker (ai-shuffle-data:/data) and %USERPROFILE%\.ai-shuffle on
+    # a native Windows install.
+    #   - file_logging_enabled: master switch. FILE_LOGGING_ENABLED=false to
+    #     disable the rotating file handler + faulthandler entirely.
+    #   - file_log_level: minimum level for the on-disk file (independent of the
+    #     console/ring-buffer level so you can capture more or less on disk).
+    #   - file_log_max_bytes / file_log_backup_count: RotatingFileHandler sizing.
+    file_logging_enabled: bool = True
+    file_log_level: str = "INFO"
+    file_log_max_bytes: int = 10 * 1024 * 1024  # 10MB per file
+    file_log_backup_count: int = 5
+
     # Service info
     service_name: str = "ai-shuffle"
     version: str = "1.2.1"

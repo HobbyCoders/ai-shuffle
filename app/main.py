@@ -128,6 +128,23 @@ async def lifespan(app: FastAPI):
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
 
+    # Persistent, crash-surviving on-disk logging: attach a RotatingFileHandler
+    # to the root logger + enable faulthandler + a logging excepthook so a crash
+    # leaves a post-mortem trail under <data_dir>/logs/<instance_id> (durable
+    # volume). Runs HERE, not at import time — a bare `import app.main` (e.g.
+    # pytest collection with the real settings singleton) must never create the
+    # log dir or truncate a previous crash's fatal.log. Additive only — does not
+    # touch the ring buffer (app/api/logs.py) or the error_log DB handler.
+    # Then the startup banner (pid/version/instance_id) so restart boundaries —
+    # and the LAST line before a crash — are obvious on disk, and the asyncio
+    # loop exception handler now that a running loop exists.
+    from app.core.file_logging import (
+        setup_file_logging, log_startup_banner, install_asyncio_exception_handler,
+    )
+    setup_file_logging()
+    log_startup_banner()
+    install_asyncio_exception_handler()
+
     logger.info("=" * 60)
     logger.info(f"Starting AI Hub v{settings.version}")
     logger.info("=" * 60)
@@ -144,6 +161,11 @@ async def lifespan(app: FastAPI):
     # the GetAppErrors MCP tool and admin UI can surface them.
     from app.core.error_log_handler import install_error_log_handler
     install_error_log_handler()
+    # Now the DB handler is attached, persist any pending "previous run crashed"
+    # fatal.log warning to error_log too (the boot-check above ran before the
+    # DB pool existed, so its WARNING couldn't reach error_log then).
+    from app.core.file_logging import emit_pending_fatal_warning
+    emit_pending_fatal_warning()
 
     # Reconcile from durable truth BEFORE any session machinery starts: a
     # previous run's crash can leave sessions durably marked parked (stuck
@@ -219,6 +241,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     logger.info("Shutting down AI Hub...")
+    from app.core.file_logging import log_shutdown_banner
+    log_shutdown_banner()
 
 
 # Create FastAPI application
