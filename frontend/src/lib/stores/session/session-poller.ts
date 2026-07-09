@@ -701,13 +701,28 @@ class SessionPoller {
 			// splice in a second pass keyed off the snapshot's current positions —
 			// matching the two-phase splice in session-init.ts so overlapping runs
 			// keep their relative order.
+			// Anchor each missing card to the id of its IMMEDIATE predecessor in the
+			// existing array — a present neighbor's snapshot id, OR (when the
+			// predecessor was itself missing) that just-placed card's own id. Then
+			// splice by looking the anchor up in the LIVE (mutating) array.
+			//
+			// Why not a precomputed index + single global offset: that shortcut is
+			// only correct when the anchors are monotonic in SNAPSHOT order. At a
+			// compaction/turn boundary the snapshot re-seeds from the durable
+			// transcript, so present messages arrive uuid-matched under a different id
+			// family AND can be RE-ORDERED relative to the client array. A later
+			// missing card then anchors to a present message that sits EARLIER in the
+			// snapshot than an earlier card's anchor; the global offset shoves it past
+			// its anchor and the cards "jump around" (settling only on refresh, which
+			// takes the snapshot verbatim into an empty client). Chaining + a live
+			// index lookup keeps every card behind its own anchor regardless of order.
 			const missingEntries: Array<{ msg: ChatMessage; anchorId: string | null }> = [];
-			let lastPresentId: string | null = null;
+			let lastPlacedId: string | null = null;
 			for (const m of existingMessages) {
 				if (inSnapshot(m)) {
-					// Anchor subsequent missing messages to this present neighbor's
+					// Present: subsequent missing cards anchor to this neighbor's
 					// snapshot id (id-match wins; else the snapshot msg sharing its uuid).
-					lastPresentId = snapshotIds.has(m.id)
+					lastPlacedId = snapshotIds.has(m.id)
 						? m.id
 						: (m.jsonlUuid
 							? streamingMessages.find(s => s.jsonlUuid === m.jsonlUuid)?.id ?? m.id
@@ -717,28 +732,20 @@ class SessionPoller {
 				// Same belt-and-suspenders as the snapshot map above: once the turn
 				// has ended, a spliced-back message must not keep rendering the
 				// streaming dots.
-				missingEntries.push({
-					msg: !isStreaming && m.streaming ? { ...m, streaming: false } : m,
-					anchorId: lastPresentId,
-				});
+				const placed = !isStreaming && m.streaming ? { ...m, streaming: false } : m;
+				missingEntries.push({ msg: placed, anchorId: lastPlacedId });
+				// Chain the next missing card AFTER this one so a contiguous missing
+				// run keeps its relative order (and never reverses when several share
+				// one anchor).
+				lastPlacedId = placed.id;
 			}
-			if (missingEntries.length > 0) {
-				const idToIndex = new Map<string, number>();
-				for (let i = 0; i < messages.length; i++) {
-					if (messages[i].id) idToIndex.set(messages[i].id, i);
+			for (const { msg, anchorId } of missingEntries) {
+				let insertIdx = 0;
+				if (anchorId) {
+					const idx = messages.findIndex(x => x.id === anchorId);
+					insertIdx = idx >= 0 ? idx + 1 : 0;
 				}
-				let offset = 0;
-				for (const { msg, anchorId } of missingEntries) {
-					let insertIdx: number;
-					if (anchorId && idToIndex.has(anchorId)) {
-						insertIdx = idToIndex.get(anchorId)! + 1 + offset;
-					} else {
-						insertIdx = 0 + offset;
-					}
-					insertIdx = Math.min(insertIdx, messages.length);
-					messages.splice(insertIdx, 0, msg);
-					offset++;
-				}
+				messages.splice(insertIdx, 0, msg);
 			}
 		} else {
 			messages = streamingMessages;
