@@ -218,8 +218,6 @@
 	.git-progress :global(.warned) { color: var(--warning, #e8a735); }
 	.git-progress :global(.skipped) { color: var(--muted-foreground); opacity: 0.6; }
 	.git-progress :global(.pending) { color: var(--muted-foreground); opacity: 0.5; }
-	.gp-head-icon.done { color: var(--success); }
-	.gp-head-icon.errored { color: var(--destructive); }
 
 	.git-progress :global(svg) {
 		flex-shrink: 0;

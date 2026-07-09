@@ -20,6 +20,10 @@
 	interface Props {
 		projectId: string;
 		isStreaming?: boolean;
+		/** True while a git operation (commit/push/PR/finish/ship) is in flight.
+		 *  Disables the mutating action buttons + branch switch so the user can't
+		 *  fire a second action while work is running. */
+		operationInProgress?: boolean;
 		isGitRepo?: boolean;
 		/** Show the branch checkout selector. Disabled when the branch pill is
 		 *  hosted elsewhere (e.g. the context pill bar above the chat input). */
@@ -45,7 +49,12 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, operationInProgress = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+
+	// Mutating git buttons are blocked while streaming OR while another git
+	// operation is in flight — the user must never fire a second action while
+	// work is running.
+	const actionsBusy = $derived(isStreaming || operationInProgress);
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -143,8 +152,9 @@
 	const showSearch = $derived(localBranches.length + remoteBranches().length > 5);
 
 	// Can the user interact with the branch selector?
-	// In worktree mode, branch is always locked (read-only display)
-	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
+	// In worktree mode, branch is always locked (read-only display). Also locked
+	// while an action is in flight so a checkout can't race a running operation.
+	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut || operationInProgress);
 
 	function toggleDropdown() {
 		if (branchLocked) return;
@@ -303,7 +313,7 @@
 			class="git-btn pull-btn"
 			class:diverged={isDiverged}
 			onclick={onClickPull}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming
 				? 'Cannot pull during streaming'
 				: isDiverged
@@ -321,7 +331,7 @@
 		<button
 			class="git-btn push-btn"
 			onclick={onClickPush}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming
 				? 'Cannot push during streaming'
 				: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
@@ -337,7 +347,7 @@
 		<button
 			class="git-btn"
 			onclick={onClickCommit}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming ? 'Cannot commit during streaming' : 'Send a commit request to the chat'}
 		>
 			<GitCommitHorizontal size={14} strokeWidth={1.5} />
@@ -347,7 +357,7 @@
 		<button
 			class="git-btn"
 			onclick={onClickFinish}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming ? 'Cannot finish during streaming' : `Send a request to merge PR #${openPR.number}`}
 		>
 			<CheckCircle2 size={14} strokeWidth={1.5} />
@@ -357,7 +367,7 @@
 		<button
 			class="git-btn"
 			onclick={onClickCreatePR}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming ? 'Cannot create PR during streaming' : `Send a request to open a PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
 		>
 			<GitPullRequest size={14} strokeWidth={1.5} />
@@ -382,7 +392,7 @@
 		<button
 			class="git-btn ship-it-btn"
 			onclick={onClickShipIt}
-			disabled={isStreaming}
+			disabled={actionsBusy}
 			title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
 		>
 			<Rocket size={13} strokeWidth={1.5} />
