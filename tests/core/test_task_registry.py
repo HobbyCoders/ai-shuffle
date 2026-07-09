@@ -135,6 +135,39 @@ class TestLifecycle:
 
 
 # =============================================================================
+# tool_use_id plumbing (subagent-card reconcile on /live fresh load)
+# =============================================================================
+
+class TestToolUseId:
+    def test_start_stores_tool_use_id(self, reg):
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_abc")
+        assert reg._tasks["s1"]["t1"]["tool_use_id"] == "toolu_abc"
+
+    def test_to_wire_emits_tool_use_id(self, reg):
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_abc")
+        wire = reg.get_active("s1")[0]
+        assert wire["toolUseId"] == "toolu_abc"
+
+    def test_tool_use_id_defaults_none(self, reg):
+        # Not supplied -> record carries None, wire emits None (None-safe).
+        reg.start_task("s1", "t1", "agent", "bg")
+        assert reg._tasks["s1"]["t1"]["tool_use_id"] is None
+        assert reg.get_active("s1")[0]["toolUseId"] is None
+
+    def test_reregister_binds_missing_tool_use_id(self, reg):
+        # First start had no id; a later re-register carries it -> now bound.
+        reg.start_task("s1", "t1", "agent", "bg")
+        assert reg._tasks["s1"]["t1"]["tool_use_id"] is None
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_late")
+        assert reg._tasks["s1"]["t1"]["tool_use_id"] == "toolu_late"
+
+    def test_reregister_never_clobbers_existing_tool_use_id(self, reg):
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_first")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_second")
+        assert reg._tasks["s1"]["t1"]["tool_use_id"] == "toolu_first"
+
+
+# =============================================================================
 # Filtering & ordering
 # =============================================================================
 
@@ -332,6 +365,7 @@ class TestToWire:
             "title": "Do work",
             "status": "running",
             "summary": "in progress",
+            "tool_use_id": "toolu_abc",
             "started_at": "2024-01-01T00:00:00+00:00",
             "updated_at": "2024-01-01T00:05:00+00:00",
         }
@@ -344,10 +378,12 @@ class TestToWire:
             "summary": "in progress",
             "startedAt": "2024-01-01T00:00:00+00:00",
             "updatedAt": "2024-01-01T00:05:00+00:00",
+            "toolUseId": "toolu_abc",
         }
         # Exact key set — no snake_case leak, no extras.
         assert set(wire.keys()) == {
-            "id", "subject", "status", "kind", "summary", "startedAt", "updatedAt"
+            "id", "subject", "status", "kind", "summary", "startedAt",
+            "updatedAt", "toolUseId",
         }
 
 
@@ -843,7 +879,8 @@ class TestTaskListTool:
         # Each task uses the camelCase wire shape.
         sample = payload["tasks"][0]
         assert set(sample.keys()) == {
-            "id", "subject", "status", "kind", "summary", "startedAt", "updatedAt"
+            "id", "subject", "status", "kind", "summary", "startedAt",
+            "updatedAt", "toolUseId",
         }
 
         # include_finished=False -> only running tasks.
@@ -1068,7 +1105,8 @@ class TestGetTask:
         assert wire["kind"] == "agent"
         assert wire["subject"] == "do work"
         assert set(wire.keys()) == {
-            "id", "subject", "status", "kind", "summary", "startedAt", "updatedAt"
+            "id", "subject", "status", "kind", "summary", "startedAt",
+            "updatedAt", "toolUseId",
         }
 
     def test_returns_none_for_unknown(self, reg):

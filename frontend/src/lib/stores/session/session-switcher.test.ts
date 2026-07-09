@@ -171,6 +171,7 @@ describe('session-switcher · switchSession isolation', () => {
 			status: 'running' as const,
 			kind: 'shell' as const,
 			summary: null,
+			toolUseId: null,
 			startedAt: '2026-06-26T00:00:00Z',
 			updatedAt: '2026-06-26T00:00:01Z',
 		}];

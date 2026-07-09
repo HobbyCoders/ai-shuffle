@@ -1301,15 +1301,20 @@ class LiveSessionStore:
         tool_use_id: str,
         is_error: bool = False,
         usage: Optional[Dict[str, Any]] = None,
+        result_text: Optional[str] = None,
     ) -> bool:
         """Mark a subagent complete, matched by its parent ``tool_use_id``.
 
         The SDK's ``TaskNotificationMessage`` identifies the finished sub-agent by
         ``tool_use_id`` (not ``agent_id``), so this mirrors ``complete_subagent``
         but matches on ``tool_id`` and optionally applies final usage stats.
-        Does NOT overwrite the subagent's accumulated content (the result text is
-        delivered to the parent via the unpark turn, not stuffed into the card).
-        Returns True if a matching subagent was found.
+
+        The FULL result text still goes to the parent via the unpark turn; the card
+        only gets the short ``result_text`` summary, and ONLY when its own content
+        is still empty (a backgrounded sub-agent card starts blank and its output
+        streams into children, so top-level content is the launch placeholder). We
+        never clobber content a card already accumulated. Returns True if a
+        matching subagent was found.
         """
         async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
@@ -1324,6 +1329,8 @@ class LiveSessionStore:
                     msg.streaming = False
                     if usage:
                         msg.agent_usage = usage
+                    if result_text and not (msg.content or "").strip():
+                        msg.content = result_text
                     if msg.agent_children:
                         for child in msg.agent_children:
                             child.streaming = False

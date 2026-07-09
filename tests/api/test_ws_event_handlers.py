@@ -931,6 +931,8 @@ class TestHandleTaskNotification:
             assert call_kwargs["tool_use_id"] == "tu-1"
             assert call_kwargs["is_error"] is False
             assert call_kwargs["usage"] == {"total_tokens": 10, "tool_uses": 2, "duration_ms": 100}
+            # The summary flows through as the card's short result text.
+            assert call_kwargs["result_text"] == "did the thing"
             # The Bug-2 artifact must never appear.
             mock_store.add_system_message.assert_not_called()
 

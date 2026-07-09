@@ -1049,6 +1049,71 @@ class TestSubagentMessages:
         assert msg.content == "Found 5 files"
         assert msg.streaming is False
 
+    @pytest.mark.asyncio
+    async def test_complete_by_tool_id_sets_content_when_empty(self, streaming_session):
+        """A parked-completion notification fills the blank card with the summary."""
+        await streaming_session.add_subagent_start(
+            "session-1", agent_id="agent-1", agent_type="Explore",
+            description="Search", prompt="Find", tool_id="tool-1",
+        )
+        found = await streaming_session.complete_subagent_by_tool_id(
+            "session-1", tool_use_id="tool-1",
+            usage={"total_tokens": 10, "tool_uses": 1, "duration_ms": 5},
+            result_text="the short summary",
+        )
+        assert found is True
+        msg = streaming_session.get_session("session-1").messages[0]
+        assert msg.agent_status == "completed"
+        assert msg.content == "the short summary"
+        assert msg.agent_usage == {"total_tokens": 10, "tool_uses": 1, "duration_ms": 5}
+        assert msg.streaming is False
+
+    @pytest.mark.asyncio
+    async def test_complete_by_tool_id_does_not_clobber_existing_content(self, streaming_session):
+        """Never overwrite content a card already accumulated."""
+        await streaming_session.add_subagent_start(
+            "session-1", agent_id="agent-1", agent_type="Explore",
+            description="Search", prompt="Find", tool_id="tool-1",
+        )
+        session = streaming_session.get_session("session-1")
+        session.messages[0].content = "already here"
+        await streaming_session.complete_subagent_by_tool_id(
+            "session-1", tool_use_id="tool-1", result_text="new summary",
+        )
+        assert session.messages[0].content == "already here"
+
+    @pytest.mark.asyncio
+    async def test_complete_by_tool_id_no_result_leaves_content_empty(self, streaming_session):
+        """Without result_text the blank card stays blank (usage still applied)."""
+        await streaming_session.add_subagent_start(
+            "session-1", agent_id="agent-1", agent_type="Explore",
+            description="Search", prompt="Find", tool_id="tool-1",
+        )
+        await streaming_session.complete_subagent_by_tool_id(
+            "session-1", tool_use_id="tool-1",
+            usage={"total_tokens": 3},
+        )
+        msg = streaming_session.get_session("session-1").messages[0]
+        assert msg.content == ""
+        assert msg.agent_usage == {"total_tokens": 3}
+
+    @pytest.mark.asyncio
+    async def test_complete_by_tool_id_idempotent_double_completion(self, streaming_session):
+        """A second completion must not clobber the summary set by the first."""
+        await streaming_session.add_subagent_start(
+            "session-1", agent_id="agent-1", agent_type="Explore",
+            description="Search", prompt="Find", tool_id="tool-1",
+        )
+        await streaming_session.complete_subagent_by_tool_id(
+            "session-1", tool_use_id="tool-1", result_text="first summary",
+        )
+        await streaming_session.complete_subagent_by_tool_id(
+            "session-1", tool_use_id="tool-1", result_text="second summary",
+        )
+        msg = streaming_session.get_session("session-1").messages[0]
+        assert msg.content == "first summary"
+        assert msg.agent_status == "completed"
+
 
 # =============================================================================
 # Integration-Style Tests

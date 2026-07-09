@@ -205,6 +205,19 @@
 		)
 	);
 
+	// Launch tool_use ids of background tasks the registry reports as currently
+	// running (from the /live `activeTasks`). Passed to <SubagentMessage> so a
+	// card whose `toolId` matches a running task is forced to the spinner even
+	// when the server-supplied agentStatus is stale (e.g. fresh loads of parked
+	// sessions). See utils/subagent-status.ts.
+	const runningToolIds = $derived(
+		new Set(
+			($activeSession.activeTasks ?? [])
+				.filter(t => t.status === 'running' && t.toolUseId)
+				.map(t => t.toolUseId as string)
+		)
+	);
+
 	// --- Tool call grouping ---
 	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
 	// TodoWrite, Task, and Agent tools are excluded from grouping.
@@ -1098,7 +1111,7 @@
 					{:else if message.type === 'subagent'}
 						<div class="w-full">
 							<div class="min-w-0">
-								<SubagentMessage {message} />
+								<SubagentMessage {message} {runningToolIds} />
 							</div>
 						</div>
 					{:else if message.type === 'team_member'}

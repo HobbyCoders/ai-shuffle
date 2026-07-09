@@ -249,7 +249,8 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             task_type = getattr(message, "task_type", None)
             kind = "shell" if task_type == "local_bash" else "agent"
             task_registry.start_task(
-                session_id, message.task_id, kind, getattr(message, "description", None)
+                session_id, message.task_id, kind, getattr(message, "description", None),
+                tool_use_id=getattr(message, "tool_use_id", None),
             )
             if kind == "shell":
                 tuid = getattr(message, "tool_use_id", None)

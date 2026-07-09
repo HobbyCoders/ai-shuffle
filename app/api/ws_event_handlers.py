@@ -624,6 +624,7 @@ async def handle_task_notification(
             tool_use_id=tool_use_id,
             is_error=is_error,
             usage=event.get("usage"),
+            result_text=event.get("summary"),
         )
 
 
