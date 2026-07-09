@@ -524,6 +524,18 @@ export interface WsServerRateLimit {
 	session_id?: string;
 }
 
+/**
+ * Account-level Claude usage snapshot broadcast by the backend usage poller.
+ * Carries every rate-limit window (utilization already 0–100 percent) and drives
+ * the `UsageLimitIndicator` pill + popover. Not tied to a session.
+ */
+export interface WsServerUsageSnapshot {
+	type: 'usage_snapshot';
+	windows: Array<{ type: string; utilization: number; resets_at?: string | null }>;
+	fetched_at?: number | null;
+	available: boolean;
+}
+
 /** User question from the SDK (interactive questions for the user). */
 export interface WsServerUserQuestion {
 	type: 'user_question';
@@ -823,6 +835,7 @@ export type ServerMessage =
 	| WsServerPluginMessage
 	// Usage
 	| WsServerUsageUpdate
+	| WsServerUsageSnapshot
 	// User-level broadcasts
 	| WsServerTabsSync
 	| WsServerUserSessionCreated

@@ -413,6 +413,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		if (msgType === 'tabs_sync') return;
 
+		// Account-level Claude usage snapshot from the backend poller (not tied to
+		// the active session). Feeds the usage-limits store that drives the header
+		// pill + popover.
+		if (msgType === 'usage_snapshot') {
+			rateLimit.applySnapshot({
+				windows: (data.windows as { type: string; utilization: number; resets_at?: string | null }[]) ?? [],
+				fetched_at: (data.fetched_at as number | null) ?? null,
+				available: (data.available as boolean) ?? false,
+			});
+			return;
+		}
+
 		if (msgType === 'user_session_created') {
 			appLoadSessions();
 			appLoadApiUserSessions();
@@ -1061,9 +1073,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'rate_limit': {
-				// Slice C: pipe to the rate-limit store. UsageLimitIndicator reads
-				// reactively and renders a compact 5-hour usage pill + countdown.
-				rateLimit.set({
+				// Live SDK rate-limit event — refines a single usage window. The
+				// UsageLimitIndicator pill/popover read the store reactively.
+				rateLimit.applyLiveEvent({
 					status: (data.status as string) ?? 'unknown',
 					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',
 					resets_at: data.resets_at as string | undefined,

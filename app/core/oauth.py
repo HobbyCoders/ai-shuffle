@@ -542,6 +542,16 @@ class DirectOAuth:
             logger.warning(f"Could not read credentials for refresh check: {e}")
             return None
 
+    def get_access_token(self) -> Optional[str]:
+        """Return the current OAuth access token, or None if not logged in.
+
+        Reads straight from the on-disk credential (no expiry check). Callers
+        that need a *valid* token should await ``ensure_fresh_credentials()``
+        first. NEVER log or expose the returned value.
+        """
+        oauth_data = self._read_oauth_data() or {}
+        return oauth_data.get("accessToken") or None
+
     async def ensure_fresh_credentials(self, buffer_seconds: int = 600) -> bool:
         """Proactively refresh the access token when it is at/near expiry.
 

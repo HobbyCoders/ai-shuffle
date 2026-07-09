@@ -1,78 +1,98 @@
 /**
- * UsageLimitIndicator — render behaviour.
+ * UsageLimitIndicator — render + interaction behaviour.
  *
- * Core contract: the pill takes up toolbar space ~90% of the time when empty,
- * so it must render NOTHING until a five-hour reading actually arrives, then
- * stay visible afterwards (including after the window rolls over to 0%).
- *
- * The `rateLimit` store is a singleton whose persisted `lastFiveHour` has no
- * public reset, and it starts `null` (localStorage is empty under jsdom). The
- * "hidden" cases therefore run FIRST, before any five-hour reading is set, and
- * the suite is ordered accordingly (vitest runs in-file tests sequentially).
+ * The pill surfaces the highest-utilization Claude usage window and opens a
+ * popover listing all windows. It renders nothing until at least one window is
+ * known. The `rateLimit` store is a singleton; each test resets it to a known
+ * state via `applySnapshot` (which replaces the window map).
  */
-import { render, cleanup } from '@testing-library/svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { render, cleanup, fireEvent } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
 
+const future = () => new Date(Date.now() + 3_600_000).toISOString();
+const past = () => new Date(Date.now() - 1_000).toISOString();
+
+beforeEach(() => {
+	// Reset to an empty-but-available snapshot (clears any prior windows).
+	rateLimit.applySnapshot({ windows: [], available: true });
+});
 afterEach(() => cleanup());
 
 describe('UsageLimitIndicator', () => {
-	it('renders nothing before any five-hour reading arrives', () => {
+	it('renders nothing when no windows are known', () => {
 		const { container } = render(UsageLimitIndicator);
 		expect(container.querySelector('.usage-indicator')).toBeNull();
-		// Crucially: no stray "—" placeholder taking up space either.
 		expect(container.textContent?.trim()).toBe('');
 	});
 
-	it('ignores non-five-hour readings (stays hidden)', () => {
-		rateLimit.set({
-			status: 'allowed_warning',
-			rate_limit_type: 'weekly',
-			utilization: 0.8,
-			resets_at: new Date(Date.now() + 3_600_000).toISOString(),
-		});
-		const { container } = render(UsageLimitIndicator);
-		expect(container.querySelector('.usage-indicator')).toBeNull();
-	});
-
-	it('renders the pill once a five-hour reading arrives', () => {
-		rateLimit.set({
-			status: 'allowed',
-			rate_limit_type: 'five_hour',
-			utilization: 0.42, // SDK fraction → 42%
-			resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+	it('renders the pill with the window percentage (snapshot is 0–100)', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
 		});
 		const { container } = render(UsageLimitIndicator);
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		expect(container.querySelector('.usage-text')?.textContent).toBe('42%');
 	});
 
-	it('stays visible at 0% after the window has rolled over', () => {
-		rateLimit.set({
+	it('normalises a live SDK fraction (0–1) to a percentage', () => {
+		rateLimit.applyLiveEvent({
 			status: 'allowed',
 			rate_limit_type: 'five_hour',
-			utilization: 0.42,
-			resets_at: new Date(Date.now() - 1_000).toISOString(), // already passed
+			utilization: 0.42, // SDK fraction → 42%
+			resets_at: future(),
+		});
+		const { container } = render(UsageLimitIndicator);
+		expect(container.querySelector('.usage-text')?.textContent).toBe('42%');
+	});
+
+	it('shows 0% once a window has rolled over', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: past() }],
 		});
 		const { container } = render(UsageLimitIndicator);
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		expect(container.querySelector('.usage-text')?.textContent).toBe('0%');
 	});
 
-	it('stays hidden for a data-less reading (utilization=null) even after its window rolls over', () => {
-		// Regression (#372 gap): the CLI emits five-hour events with utilization=null
-		// before any usage is recorded. Such a reading carries no data, so the pill
-		// must stay hidden — including after resets_at passes, which previously forced
-		// the display to a hollow "0%" and resurrected the empty pill.
-		rateLimit.set({
-			status: 'allowed',
-			rate_limit_type: 'five_hour',
-			utilization: null as unknown as number,
-			resets_at: new Date(Date.now() - 1_000).toISOString(), // window already rolled over
+	it('surfaces the highest-utilization window in the pill', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [
+				{ type: 'five_hour', utilization: 12, resets_at: future() },
+				{ type: 'seven_day_overage_included', utilization: 77, resets_at: future() },
+			],
 		});
 		const { container } = render(UsageLimitIndicator);
-		expect(container.querySelector('.usage-indicator')).toBeNull();
-		expect(container.textContent?.trim()).toBe('');
+		// Headline is the 77% Fable window (also drives the warning severity).
+		expect(container.querySelector('.usage-text')?.textContent).toBe('77%');
+		expect(container.querySelector('.usage-indicator.warning')).not.toBeNull();
+	});
+
+	it('opens a popover listing all windows on click', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [
+				{ type: 'five_hour', utilization: 12, resets_at: future() },
+				{ type: 'seven_day', utilization: 17, resets_at: future() },
+				{ type: 'seven_day_overage_included', utilization: 24, resets_at: future() },
+			],
+		});
+		const { container } = render(UsageLimitIndicator);
+		expect(container.querySelector('.usage-popover')).toBeNull();
+
+		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
+		await fireEvent.click(pill);
+
+		expect(container.querySelector('.usage-popover')).not.toBeNull();
+		const rows = container.querySelectorAll('.popover-row');
+		expect(rows.length).toBe(3);
+		// Labels are humanised per the known-type map.
+		expect(container.textContent).toContain('5-hour limit');
+		expect(container.textContent).toContain('Weekly (all models)');
+		expect(container.textContent).toContain('Fable 5 limit');
 	});
 });

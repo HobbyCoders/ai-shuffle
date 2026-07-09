@@ -679,6 +679,18 @@ async def execute_query(
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                # Headless/automation turns have no per-session WS stream to yield
+                # this onto (unlike the streaming paths), so feed the live reading
+                # into the usage monitor and broadcast a usage_snapshot so open
+                # clients still reflect the change.
+                _rli = message.rate_limit_info
+                try:
+                    from app.core.usage_limits import usage_limits_monitor
+                    await usage_limits_monitor.apply_live_event_and_broadcast(
+                        _rli.rate_limit_type, _rli.utilization, _rli.resets_at,
+                    )
+                except Exception as _usage_err:  # noqa: BLE001 — never break the turn
+                    logger.debug(f"usage monitor live-event update skipped: {_usage_err}")
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
