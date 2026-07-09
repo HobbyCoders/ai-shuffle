@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import app.api.git_operations as gitops
+import app.api.git_helpers as git_helpers
 from app.api.git_operations import (
     Operation,
     _execute_finish,
@@ -133,6 +134,7 @@ class TestExecuteFinish:
                 op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
                 pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
                 merge_method="squash", cleanup=True, session_id="s1",
+                status={"is_clean": True, "ahead": 3},
             )
 
         assert op.status == "done"
@@ -261,6 +263,79 @@ class TestExecuteFinish:
         assert _step_status(op, "cleanup") == "warning"
         mock_worktree_manager.cleanup_worktree.assert_not_called()
 
+    async def test_cleanup_guard_worktree_other_session_background_work_only(
+        self, mock_git_service, mock_github_service, mock_worktree_manager
+    ):
+        """A PARKED sibling session (not streaming) with live background work
+        must still block worktree cleanup — the liveness guard counts
+        task_registry.has_active_background_work, not just is_session_streaming.
+        """
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        op = _finish_op(session_id="me")
+
+        mock_sync = MagicMock()
+        mock_sync.is_session_streaming.return_value = False  # nobody is streaming
+        mock_reg = MagicMock()
+        mock_reg.has_active_background_work.side_effect = lambda sid: sid == "other"
+        mock_db = MagicMock()
+        mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
+
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
+             patch("app.core.task_registry.task_registry", mock_reg), \
+             patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
+            await _execute_finish(
+                op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id="me",
+                status={"ahead": 0},
+            )
+
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == "warning"
+        mock_worktree_manager.cleanup_worktree.assert_not_called()
+
+    async def test_cleanup_guard_project_mode_other_streaming_session(
+        self, mock_git_service, mock_github_service, mock_worktree_manager
+    ):
+        """Project-mode cleanup (no worktree) rewrites the shared main checkout;
+        it must refuse when another of the project's sessions is streaming.
+        """
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        op = _finish_op(project_id="p1", session_id="me")
+
+        mock_sync = MagicMock()
+        mock_sync.is_session_streaming.side_effect = lambda sid: sid == "other"
+        mock_reg = MagicMock()
+        mock_reg.has_active_background_work.return_value = False
+        mock_db = MagicMock()
+        mock_db.get_sessions.return_value = [{"id": "me"}, {"id": "other"}]
+
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
+             patch("app.core.task_registry.task_registry", mock_reg), \
+             patch("app.db.database.get_sessions", mock_db.get_sessions):
+            await _execute_finish(
+                op, working_dir="/wd", worktree_id=None, repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id="me",
+                status={"ahead": 0},
+            )
+
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == "warning"
+        # The dangerous ops must NOT have run.
+        mock_git_service.checkout.assert_not_called()
+        mock_git_service.delete_branch.assert_not_called()
+
 
 # =============================================================================
 # Executor: ship (step-set construction)
@@ -306,7 +381,7 @@ class TestExecuteShip:
             worktree_manager=mock_worktree_manager,
             generate_commit_message_for_dir=gen_msg,
             generate_pr_description_for_dir=gen_pr,
-        ):
+        ), patch.object(git_helpers, "git_service", mock_git_service):
             await _execute_ship(
                 op, working_dir="/wd", worktree_id=None, repo="o/r",
                 feature_branch="feat/x", default_branch="main", base_branch="main",
@@ -445,6 +520,19 @@ class TestFinishEndpoint:
         assert op_client.post("/api/v1/projects/p1/git/finish", json={}).status_code == 200
         assert op_client.post("/api/v1/projects/p2/git/finish", json={}).status_code == 200
 
+    def test_worktree_id_from_body_reaches_working_dir(self, op_client):
+        """Regression: worktree_id is a BODY field (the frontend sends it in the
+        JSON body). It must reach get_working_dir so worktree ops run against the
+        worktree, not the main repo. (Previously declared as a query param → the
+        body value was silently dropped and every op hit the main checkout.)
+        """
+        resp = op_client.post(
+            "/api/v1/projects/p1/git/finish",
+            json={"worktree_id": "wt-1", "cleanup": True},
+        )
+        assert resp.status_code == 200
+        gitops.get_working_dir.assert_any_call("p1", "wt-1")
+
 
 class TestShipEndpoint:
     def test_lifecycle_returns_running(self, op_client):
@@ -457,6 +545,31 @@ class TestShipEndpoint:
     def test_not_a_repo_400(self, op_client, mock_git_service):
         mock_git_service.is_git_repo.return_value = False
         resp = op_client.post("/api/v1/projects/p1/git/ship", json={})
+        assert resp.status_code == 400
+
+    def test_worktree_id_from_body_reaches_working_dir(self, op_client):
+        resp = op_client.post(
+            "/api/v1/projects/p1/git/ship",
+            json={"worktree_id": "wt-9"},
+        )
+        assert resp.status_code == 200
+        gitops.get_working_dir.assert_any_call("p1", "wt-9")
+
+    def test_head_equals_base_400(self, op_client, mock_git_service):
+        """Backstop: can't ship the base branch onto itself (head == base)."""
+        mock_git_service.get_current_branch.return_value = "main"
+        mock_git_service.get_default_branch.return_value = "main"
+        resp = op_client.post("/api/v1/projects/p1/git/ship", json={})
+        assert resp.status_code == 400
+        assert "base branch" in resp.json()["detail"]
+        # Guard failure must not leave a placeholder op registered.
+        assert not gitops._operations
+
+    def test_head_equals_base_explicit_base_400(self, op_client, mock_git_service):
+        mock_git_service.get_current_branch.return_value = "release"
+        resp = op_client.post(
+            "/api/v1/projects/p1/git/ship", json={"base_branch": "release"}
+        )
         assert resp.status_code == 400
 
 
@@ -477,3 +590,39 @@ class TestGetOperationEndpoint:
         op_id = created["operation_id"]
         resp = op_client.get(f"/api/v1/projects/p2/git/operations/{op_id}")
         assert resp.status_code == 404
+
+
+# =============================================================================
+# Guard race: check + register must be atomic
+# =============================================================================
+
+class TestConcurrentGuardRace:
+    async def test_two_concurrent_finish_posts_exactly_one_200_one_409(
+        self, op_app, mock_git_service, mock_github_service, mock_worktree_manager
+    ):
+        """Two overlapping requests for the same project must not both start an
+        op: the active-op check and _register are now adjacent (no await between
+        them), so exactly one gets 200 and the other 409.
+        """
+        import httpx
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(gitops, "git_service", mock_git_service))
+            stack.enter_context(patch.object(gitops, "github_service", mock_github_service))
+            stack.enter_context(patch.object(gitops, "worktree_manager", mock_worktree_manager))
+            stack.enter_context(patch.object(gitops, "check_project_access", MagicMock()))
+            stack.enter_context(patch.object(gitops, "get_working_dir", MagicMock(return_value="/wd")))
+            stack.enter_context(patch.object(gitops.asyncio, "create_task", _no_run))
+
+            transport = httpx.ASGITransport(app=op_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                import asyncio as _asyncio
+                r1, r2 = await _asyncio.gather(
+                    client.post("/api/v1/projects/pracey/git/finish", json={}),
+                    client.post("/api/v1/projects/pracey/git/finish", json={}),
+                )
+
+        codes = sorted([r1.status_code, r2.status_code])
+        assert codes == [200, 409]
+        # Exactly one op registered for the project.
+        assert sum(1 for o in gitops._operations.values() if o.project_id == "pracey") == 1

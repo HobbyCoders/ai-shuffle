@@ -37,7 +37,7 @@ from app.core.github_service import github_service
 from app.core.worktree_manager import worktree_manager
 from app.api.auth import require_auth
 from app.api.common import check_project_access
-from app.api.git_helpers import run_git, get_working_dir
+from app.api.git_helpers import run_git, get_working_dir, stage_and_commit
 from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
@@ -56,6 +56,9 @@ class FinishRequest(BaseModel):
     """Body for the Finish flow (merge the reviewed PR as-is)."""
     merge_method: str = Field(default="squash", pattern="^(merge|squash|rebase)$")
     cleanup: bool = Field(default=False, description="Remove the worktree / delete the local branch after merge")
+    worktree_id: Optional[str] = Field(
+        default=None, description="Worktree to operate in (defaults to the main project checkout)"
+    )
     session_id: Optional[str] = Field(
         default=None, description="Requesting session, excluded from the cleanup liveness guard"
     )
@@ -68,6 +71,9 @@ class ShipRequest(BaseModel):
     base_branch: Optional[str] = Field(default=None, description="PR base (defaults to the repo default branch)")
     draft: bool = Field(default=False, description="Open the pull request as a draft")
     cleanup: bool = Field(default=False, description="Remove the worktree / delete the local branch after merge")
+    worktree_id: Optional[str] = Field(
+        default=None, description="Worktree to operate in (defaults to the main project checkout)"
+    )
     session_id: Optional[str] = Field(
         default=None, description="Requesting session, excluded from the cleanup liveness guard"
     )
@@ -98,6 +104,10 @@ class Operation:
     status: str = "running"  # running | done | error
     result: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.monotonic)
+    # The background asyncio.Task driving this operation. Stored so a reference
+    # is retained for the task's lifetime (asyncio only holds a weak reference,
+    # so an un-referenced task can be garbage-collected mid-flight).
+    task: Optional["asyncio.Task"] = field(default=None, repr=False)
 
     def set_step(
         self,
@@ -144,7 +154,12 @@ def _sweep_expired(now: Optional[float] = None) -> None:
         if op.status in ("done", "error") and (now - op.created_at) > _OP_TTL_SECONDS
     ]
     for op_id in stale:
-        _operations.pop(op_id, None)
+        op = _operations.pop(op_id, None)
+        # Terminal ops only: their driving task should already be finished, but
+        # cancel defensively to release any lingering reference. A *running*
+        # op is never swept, so its task is never cancelled here.
+        if op is not None and op.task is not None and not op.task.done():
+            op.task.cancel()
 
 
 def _has_active_op(project_id: str) -> bool:
@@ -187,12 +202,35 @@ def _find_open_pr_for_branch(repo: str, branch: str):
     return None
 
 
-def _worktree_has_other_streaming_session(worktree_id: str, exclude_session_id: Optional[str]) -> bool:
-    """True if a session other than *exclude_session_id* is bound to the
-    worktree and currently streaming — the cleanup step must not yank a
-    worktree out from under a live SDK turn.
+def _session_is_busy(session_id: Optional[str]) -> bool:
+    """True if *session_id* is mid-SDK-turn OR has live background work.
+
+    A parked session with a running sub-agent or backgrounded shell still counts
+    as busy — the cleanup step must not yank its worktree/branch out from under
+    that work, even though the session itself is not actively streaming.
     """
+    if not session_id:
+        return False
     from app.core.sync_engine import sync_engine
+    from app.core.task_registry import task_registry
+
+    try:
+        if sync_engine.is_session_streaming(session_id):
+            return True
+    except Exception:
+        logger.exception("liveness: is_session_streaming failed for %s", session_id)
+    try:
+        if task_registry.has_active_background_work(session_id):
+            return True
+    except Exception:
+        logger.exception("liveness: has_active_background_work failed for %s", session_id)
+    return False
+
+
+def _worktree_has_other_active_session(worktree_id: str, exclude_session_id: Optional[str]) -> bool:
+    """True if a session other than *exclude_session_id* is bound to the
+    worktree and busy (streaming or running background work).
+    """
     from app.db import database
 
     try:
@@ -203,7 +241,29 @@ def _worktree_has_other_streaming_session(worktree_id: str, exclude_session_id: 
 
     for s in sessions:
         sid = s.get("id")
-        if sid and sid != exclude_session_id and sync_engine.is_session_streaming(sid):
+        if sid and sid != exclude_session_id and _session_is_busy(sid):
+            return True
+    return False
+
+
+def _project_has_other_active_session(project_id: str, exclude_session_id: Optional[str]) -> bool:
+    """True if a session other than *exclude_session_id* in this project is busy.
+
+    Project-mode cleanup checks out the default branch and deletes the feature
+    branch in the shared main checkout, so it must not run while another of the
+    project's sessions is mid-turn or holds live background work.
+    """
+    from app.db import database
+
+    try:
+        sessions = database.get_sessions(project_id=project_id, limit=500)
+    except Exception:
+        logger.exception("Failed to look up sessions for project %s", project_id)
+        return False
+
+    for s in sessions:
+        sid = s.get("id") if isinstance(s, dict) else getattr(s, "id", None)
+        if sid and sid != exclude_session_id and _session_is_busy(sid):
             return True
     return False
 
@@ -221,15 +281,25 @@ async def _do_cleanup(
     """
     op.set_step("cleanup", STEP_RUNNING)
 
-    # Liveness guard (worktree mode only): never remove a worktree another
-    # session is actively streaming in.
-    if worktree_id and _worktree_has_other_streaming_session(worktree_id, session_id):
-        op.set_step(
-            "cleanup",
-            STEP_WARNING,
-            detail="Skipped: another session is active in this worktree",
-        )
-        return
+    # Liveness guard: never remove a worktree / rewrite the main checkout while
+    # another session is busy (streaming or running background work). Applies to
+    # BOTH modes — the operation still counts as done (merge already landed).
+    if worktree_id:
+        if _worktree_has_other_active_session(worktree_id, session_id):
+            op.set_step(
+                "cleanup",
+                STEP_WARNING,
+                detail="Skipped: another session is active in this worktree",
+            )
+            return
+    else:
+        if _project_has_other_active_session(op.project_id, session_id):
+            op.set_step(
+                "cleanup",
+                STEP_WARNING,
+                detail="Skipped: another session is active in this project",
+            )
+            return
 
     try:
         if worktree_id:
@@ -279,12 +349,14 @@ async def _execute_finish(
     merge_method: str,
     cleanup: bool,
     session_id: Optional[str],
+    status: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
         # --- push (only if the branch is ahead) ------------------------------
+        # The endpoint already fetched status during its guard phase; reuse it
+        # rather than issuing a second get_status.
         op.set_step("push", STEP_RUNNING)
-        st = await run_git(git_service.get_status, working_dir)
-        ahead = (st or {}).get("ahead", 0) or 0
+        ahead = (status or {}).get("ahead", 0) or 0
         if ahead > 0:
             ok, err = await run_git(
                 git_service.push, working_dir, branch=feature_branch, set_upstream=True
@@ -343,14 +415,15 @@ async def _execute_ship(
                 op.set_step("commit", STEP_ERROR, error=str(e.detail))
                 op.status = "error"
                 return
-            if include_unstaged:
-                if not await run_git(git_service.stage_files, working_dir, ["."]):
-                    op.set_step("commit", STEP_ERROR, error="Failed to stage changes")
-                    op.status = "error"
-                    return
-            ok, sha_or_err = await run_git(git_service.commit, working_dir, message)
+            ok, sha_or_err, reason = await stage_and_commit(working_dir, message, include_unstaged)
             if not ok:
-                op.set_step("commit", STEP_ERROR, error=sha_or_err or "Failed to commit")
+                if reason == "stage_failed":
+                    err = "Failed to stage changes"
+                elif reason == "no_staged":
+                    err = "No staged changes to commit"
+                else:
+                    err = sha_or_err or "Failed to commit"
+                op.set_step("commit", STEP_ERROR, error=err)
                 op.status = "error"
                 return
             op.set_step("commit", STEP_DONE, detail=message.split("\n")[0])
@@ -433,18 +506,24 @@ async def _merge_step(op: Operation, repo: str, pr_number: int, merge_method: st
 # Endpoints
 # =============================================================================
 
-@router.post("/finish")
-async def finish(
+async def _prepare_operation(
     request: Request,
     project_id: str,
-    body: FinishRequest,
-    worktree_id: Optional[str] = None,
-    token: str = Depends(require_auth),
+    worktree_id: Optional[str],
+    session_id: Optional[str],
+    kind: str,
+    steps: List[Dict[str, Any]],
 ):
-    """Merge the reviewed PR for the current branch, then optionally clean up.
+    """Shared guard + atomic registration for finish() and ship().
 
-    Guard (synchronous, returns 400): must be a git repo, must have an open PR
-    whose head is the current branch, and the tree must be clean.
+    Runs the common synchronous guards (access, repo check), then registers a
+    placeholder Operation BEFORE the awaited GitHub lookups so a second
+    concurrent request sees the active op and 409s — closing the race between
+    the ``_has_active_op`` check and ``_register`` (which used to be separated
+    by several awaits). On ANY guard failure the placeholder is unregistered
+    before the HTTPException propagates.
+
+    Returns ``(working_dir, current_branch, repo, op)``.
     """
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
@@ -452,56 +531,90 @@ async def finish(
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Project is not a git repository")
 
+    # Atomic check + register: there is NO await between the active-op check and
+    # _register, so two concurrent requests can never both pass this gate.
     if _has_active_op(project_id):
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Another git operation is already running for this project")
-
-    current_branch = await run_git(git_service.get_current_branch, working_dir)
-    if not current_branch:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not determine the current branch")
-
-    repo = github_service.get_repo_from_remote(working_dir)
-    if not repo:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Could not determine GitHub repository. Ensure the project has a GitHub remote.",
+            status.HTTP_409_CONFLICT,
+            detail="Another git operation is already running for this project",
         )
-
-    pr = _find_open_pr_for_branch(repo, current_branch)
-    if pr is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"No open pull request found for branch '{current_branch}'",
-        )
-
-    st = await run_git(git_service.get_status, working_dir)
-    if not (st or {}).get("is_clean", False):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Working tree has uncommitted changes — commit or discard changes first",
-        )
-
-    default_branch = await run_git(git_service.get_default_branch, working_dir)
-
     _sweep_expired()
-    op = Operation(
-        project_id=project_id,
-        kind="finish",
-        session_id=body.session_id,
-        steps=[
+    op = Operation(project_id=project_id, kind=kind, session_id=session_id, steps=steps)
+    _register(op)
+
+    try:
+        current_branch = await run_git(git_service.get_current_branch, working_dir)
+        if not current_branch:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not determine the current branch")
+
+        # get_repo_from_remote shells out to git — keep it off the event loop.
+        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        if not repo:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="Could not determine GitHub repository. Ensure the project has a GitHub remote.",
+            )
+    except BaseException:
+        _operations.pop(op.id, None)
+        raise
+
+    return working_dir, current_branch, repo, op
+
+
+@router.post("/finish")
+async def finish(
+    request: Request,
+    project_id: str,
+    body: FinishRequest,
+    token: str = Depends(require_auth),
+):
+    """Merge the reviewed PR for the current branch, then optionally clean up.
+
+    Guard (synchronous, returns 400): must be a git repo, must have an open PR
+    whose head is the current branch, and the tree must be clean.
+    """
+    working_dir, current_branch, repo, op = await _prepare_operation(
+        request,
+        project_id,
+        body.worktree_id,
+        body.session_id,
+        "finish",
+        [
             _step("guard", "Validate branch and pull request"),
             _step("push", "Push commits"),
             _step("merge", "Merge pull request"),
             _step("cleanup", "Clean up branch"),
         ],
     )
-    op.set_step("guard", STEP_DONE)  # validated above
-    _register(op)
 
-    asyncio.create_task(
+    try:
+        # list_pulls shells out to gh — keep it off the event loop.
+        pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+        if pr is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"No open pull request found for branch '{current_branch}'",
+            )
+
+        st = await run_git(git_service.get_status, working_dir)
+        if not (st or {}).get("is_clean", False):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="Working tree has uncommitted changes — commit or discard changes first",
+            )
+
+        default_branch = await run_git(git_service.get_default_branch, working_dir)
+    except BaseException:
+        _operations.pop(op.id, None)
+        raise
+
+    op.set_step("guard", STEP_DONE)  # validated above
+
+    op.task = asyncio.create_task(
         _execute_finish(
             op,
             working_dir=working_dir,
-            worktree_id=worktree_id,
+            worktree_id=body.worktree_id,
             repo=repo,
             pr_number=pr.number,
             pr_url=pr.url,
@@ -510,6 +623,7 @@ async def finish(
             merge_method=body.merge_method,
             cleanup=body.cleanup,
             session_id=body.session_id,
+            status=st,
         )
     )
     return op.snapshot()
@@ -520,44 +634,16 @@ async def ship(
     request: Request,
     project_id: str,
     body: ShipRequest,
-    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth),
 ):
     """Commit everything, open a PR (if needed), merge it, then optionally clean up."""
-    check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
-
-    if not await run_git(git_service.is_git_repo, working_dir):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Project is not a git repository")
-
-    if _has_active_op(project_id):
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Another git operation is already running for this project")
-
-    current_branch = await run_git(git_service.get_current_branch, working_dir)
-    if not current_branch:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not determine the current branch")
-
-    repo = github_service.get_repo_from_remote(working_dir)
-    if not repo:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Could not determine GitHub repository. Ensure the project has a GitHub remote.",
-        )
-
-    st = await run_git(git_service.get_status, working_dir)
-    dirty = not (st or {}).get("is_clean", False)
-
-    default_branch = await run_git(git_service.get_default_branch, working_dir)
-    base_branch = body.base_branch or default_branch
-
-    existing_pr = _find_open_pr_for_branch(repo, current_branch)
-
-    _sweep_expired()
-    op = Operation(
-        project_id=project_id,
-        kind="ship",
-        session_id=body.session_id,
-        steps=[
+    working_dir, current_branch, repo, op = await _prepare_operation(
+        request,
+        project_id,
+        body.worktree_id,
+        body.session_id,
+        "ship",
+        [
             _step("commit", "Commit changes"),
             _step("push", "Push commits"),
             _step("create_pr", "Create pull request"),
@@ -565,13 +651,33 @@ async def ship(
             _step("cleanup", "Clean up branch"),
         ],
     )
-    _register(op)
 
-    asyncio.create_task(
+    try:
+        st = await run_git(git_service.get_status, working_dir)
+        dirty = not (st or {}).get("is_clean", False)
+
+        default_branch = await run_git(git_service.get_default_branch, working_dir)
+        base_branch = body.base_branch or default_branch
+
+        # Backstop (mirrors the dirty-tree guard): can't open a PR from the base
+        # branch onto itself — head == base has nothing to ship.
+        if current_branch == base_branch:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"Current branch '{current_branch}' is the base branch — switch to a feature branch first",
+            )
+
+        # list_pulls shells out to gh — keep it off the event loop.
+        existing_pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+    except BaseException:
+        _operations.pop(op.id, None)
+        raise
+
+    op.task = asyncio.create_task(
         _execute_ship(
             op,
             working_dir=working_dir,
-            worktree_id=worktree_id,
+            worktree_id=body.worktree_id,
             repo=repo,
             feature_branch=current_branch,
             default_branch=default_branch,

@@ -109,6 +109,36 @@ _coalescer = _RequestCoalescer()
 # Helper Functions
 # =============================================================================
 
+async def stage_and_commit(
+    working_dir: str, message: str, include_unstaged: bool
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Stage (optionally everything) and commit — shared by the ``/commit``
+    endpoint and the Ship-It flow so both enforce the same rules.
+
+    When *include_unstaged* is True, stages all changes first. When False,
+    requires pre-staged changes (mirrors ``create_commit``'s "no staged changes"
+    validation) instead of silently producing an empty commit.
+
+    Returns ``(ok, sha_or_error, reason)``:
+    * success -> ``(True, <commit sha>, None)``
+    * failure -> ``(False, <error or None>, reason)`` where reason is one of
+      ``"stage_failed"``, ``"no_staged"``, ``"commit_failed"`` so each caller can
+      map it to its own error surface (HTTP 400 vs. an op step error).
+    """
+    if include_unstaged:
+        if not await run_git(git_service.stage_files, working_dir, ["."]):
+            return False, None, "stage_failed"
+    else:
+        status_data = await run_git(git_service.get_status, working_dir)
+        if not status_data.get("staged"):
+            return False, None, "no_staged"
+
+    ok, sha_or_error = await run_git(git_service.commit, working_dir, message)
+    if not ok:
+        return False, sha_or_error, "commit_failed"
+    return True, sha_or_error, None
+
+
 def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[str]:
     """Get the filesystem path for a project.
 
