@@ -1200,6 +1200,95 @@ class TestBackgroundedSubagentStatus:
         assert subs[0]["agentStatus"] == "completed"
 
 
+class TestTaskNotificationEnrichment:
+    """`_apply_task_notification_status` recovers usage + result on reload.
+
+    A backgrounded sub-agent that finished while the parent was PARKED persists
+    its terminal notification as a <task-notification> user message. On reload the
+    card must show its status, token/tool/duration stats AND the result text —
+    not a bare checkmark.
+    """
+
+    @staticmethod
+    def _msgs(tool_id="task-1", content="", type_="subagent"):
+        messages = [{
+            "type": type_, "toolId": tool_id, "content": content,
+            "agentStatus": "running",
+        }]
+        return messages, {tool_id: 0}
+
+    @staticmethod
+    def _body(tool_id="task-1", status="completed", summary="short summary",
+              result="FULL RESULT TEXT", tokens="1234", tool_uses="5",
+              duration="6789", include_usage=True, include_result=True):
+        usage = ""
+        if include_usage:
+            usage = (f"  <usage>\n"
+                     f"    <subagent_tokens>{tokens}</subagent_tokens>\n"
+                     f"    <tool_uses>{tool_uses}</tool_uses>\n"
+                     f"    <duration_ms>{duration}</duration_ms>\n"
+                     f"  </usage>\n")
+        result_xml = f"  <result>{result}</result>\n" if include_result else ""
+        return (f"<task-notification>\n"
+                f"  <tool-use-id>{tool_id}</tool-use-id>\n"
+                f"  <status>{status}</status>\n"
+                f"  <summary>{summary}</summary>\n"
+                f"{result_xml}"
+                f"{usage}"
+                f"</task-notification>")
+
+    def test_usage_fields_populate_agent_usage(self):
+        messages, index = self._msgs()
+        jsonl_parser._apply_task_notification_status(self._body(), messages, index)
+        assert messages[0]["agentUsage"] == {
+            "total_tokens": 1234, "tool_uses": 5, "duration_ms": 6789,
+        }
+
+    def test_result_sets_content_truncated_to_2000(self):
+        messages, index = self._msgs()
+        big = "R" * 5000
+        jsonl_parser._apply_task_notification_status(
+            self._body(result=big), messages, index)
+        assert messages[0]["content"] == "R" * 2000
+
+    def test_summary_fallback_when_no_result(self):
+        messages, index = self._msgs()
+        jsonl_parser._apply_task_notification_status(
+            self._body(include_result=False, summary="the summary"), messages, index)
+        assert messages[0]["content"] == "the summary"
+
+    def test_missing_usage_leaves_no_agent_usage_key_and_content_untouched(self):
+        messages, index = self._msgs(content="")
+        body = self._body(include_usage=False, include_result=False, summary="")
+        jsonl_parser._apply_task_notification_status(body, messages, index)
+        assert "agentUsage" not in messages[0]
+        # No result and empty summary → content stays as it was.
+        assert messages[0]["content"] == ""
+
+    def test_blank_usage_values_omitted(self):
+        messages, index = self._msgs()
+        body = self._body(tokens="", tool_uses="", duration="")
+        jsonl_parser._apply_task_notification_status(body, messages, index)
+        assert "agentUsage" not in messages[0]
+
+    def test_error_status_mapping_unchanged(self):
+        for status in ("failed", "stopped", "error"):
+            messages, index = self._msgs()
+            jsonl_parser._apply_task_notification_status(
+                self._body(status=status), messages, index)
+            assert messages[0]["agentStatus"] == "error"
+        messages, index = self._msgs()
+        jsonl_parser._apply_task_notification_status(
+            self._body(status="completed"), messages, index)
+        assert messages[0]["agentStatus"] == "completed"
+
+    def test_non_subagent_target_untouched(self):
+        messages, index = self._msgs(type_="tool_use")
+        jsonl_parser._apply_task_notification_status(self._body(), messages, index)
+        assert "agentUsage" not in messages[0]
+        assert messages[0]["content"] == ""
+
+
 class TestToolResultContentVariants:
     """Test various tool result content formats."""
 

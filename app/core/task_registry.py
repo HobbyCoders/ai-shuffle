@@ -90,6 +90,10 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         "summary": record.get("summary"),
         "startedAt": record.get("started_at"),
         "updatedAt": record.get("updated_at"),
+        # Parent launch tool_use_id — lets /live match a running task to the
+        # subagent CARD (whose toolId is that same launch tool_use id) so a
+        # store-loaded card can be reconciled back to "running" on a fresh load.
+        "toolUseId": record.get("tool_use_id"),
     }
 
 
@@ -396,6 +400,7 @@ class TaskRegistry:
         title: Optional[str],
         *,
         summary: Optional[str] = None,
+        tool_use_id: Optional[str] = None,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -427,6 +432,11 @@ class TaskRegistry:
             if summary is not None:
                 existing["summary"] = summary
             existing["kind"] = kind or existing.get("kind")
+            # Bind the parent launch tool_use_id once — a later re-register (e.g.
+            # a resume) may carry it when the first start did not; never clobber
+            # an id already recorded.
+            if tool_use_id and not existing.get("tool_use_id"):
+                existing["tool_use_id"] = tool_use_id
             # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
@@ -444,6 +454,7 @@ class TaskRegistry:
             "title": title,
             "status": "running",
             "summary": summary,
+            "tool_use_id": tool_use_id,
             "started_at": now,
             "updated_at": now,
         }

@@ -363,3 +363,157 @@ async def test_idle_fresh_load_count_tie_still_serves_store():
     # agentChildren — the stale-buffer heal for crashed/empty-seeded turns.
     assert result["last_update_id"] == 0
     assert result["messages"][1]["agentChildren"] == [{"id": "c1"}]
+
+
+# =============================================================================
+# Subagent-card reconcile on a fresh load of a PARKED session (the fix).
+#
+# On a fresh page load of a parked session the STORE transcript wins the
+# completeness heal (store is >= the buffer, or the buffer is gone). A store /
+# legacy subagent card defaults agentStatus to "completed", so a sub-agent that
+# is STILL running renders as done. Two independent recoveries:
+#   (a) registry reconcile: a running task whose toolUseId == the card's toolId
+#       forces agentStatus back to "running" — even with no buffer present.
+#   (b) buffer overlay: when a (shorter/equal) buffer IS present but discarded,
+#       its in-place-mutated card fields (agentStatus/agentChildren/agentUsage/
+#       content) are grafted onto the store card by toolId.
+# Non-matching cards (legacy transcripts, no live task) stay exactly as loaded.
+# =============================================================================
+
+def _store_only_patches(session, store_messages, buffer=None):
+    """Fresh-load store-wins path: DB loader returns store_messages; the buffer
+    (if any) is shorter/equal so the store wins the heal."""
+    ctx = [
+        patch("app.core.config.settings.session_store_mode", "mirror"),
+        patch("app.core.db_message_loader.load_messages_from_db",
+              return_value=(store_messages, True)),
+        patch.object(live_session_store, "has_session",
+                     return_value=buffer is not None),
+        patch.object(live_session_store, "is_streaming", return_value=False),
+        patch.object(live_session_store, "get_session_dict", return_value=buffer),
+    ]
+    return ctx
+
+
+async def _fresh_load_store_wins(session_id, session, store_messages, buffer=None):
+    patches = _owner_path_patches(session)
+    for p in patches:
+        p.start()
+    ctx = _store_only_patches(session, store_messages, buffer)
+    for c in ctx:
+        c.start()
+    try:
+        return await get_live_session(
+            request=MagicMock(), session_id=session_id,
+            since_update_id=0, token="tok",
+        )
+    finally:
+        for c in ctx:
+            c.stop()
+        for p in patches:
+            p.stop()
+
+
+async def test_fresh_load_running_task_reconciles_card_to_running():
+    """Store-wins fresh load: a subagent card whose toolId matches a RUNNING
+    registry task is forced back to 'running'; a non-matching card stays as
+    loaded."""
+    session_id = "recon-run"
+    session = {"id": session_id, "title": "Parked", "sdk_session_id": None,
+               "total_tokens_out": 0}
+    # No buffer at all (buffer-gone-but-tasks-alive). A running task carries the
+    # launch tool_use id that equals the live card's toolId.
+    task_registry.start_task(session_id, "task-live", "agent", "bg",
+                             tool_use_id="toolu_live")
+    store_messages = [
+        {"id": "m1", "role": "user", "type": "text", "content": "go",
+         "streaming": False},
+        {"id": "m2", "role": "assistant", "type": "subagent", "content": "",
+         "streaming": False, "toolId": "toolu_live", "agentStatus": "completed"},
+        {"id": "m3", "role": "assistant", "type": "subagent", "content": "",
+         "streaming": False, "toolId": "toolu_other", "agentStatus": "completed"},
+    ]
+    try:
+        result = await _fresh_load_store_wins(session_id, session, store_messages)
+    finally:
+        task_registry.clear_session(session_id)
+
+    assert isinstance(result, dict)
+    msgs = {m["id"]: m for m in result["messages"]}
+    # Matching card revived to running.
+    assert msgs["m2"]["agentStatus"] == "running"
+    # Non-matching card untouched (legacy transcript stays completed).
+    assert msgs["m3"]["agentStatus"] == "completed"
+
+
+async def test_fresh_load_buffer_overlay_grafts_card_fields():
+    """Store-wins fresh load with a discarded buffer: the buffer's fresher
+    subagent-card fields (agentStatus/agentChildren/agentUsage/content) graft
+    onto the store card by toolId."""
+    session_id = "recon-overlay"
+    session = {"id": session_id, "title": "Parked", "sdk_session_id": None,
+               "total_tokens_out": 0}
+    # A shorter buffer (loses the heal) but strictly fresher for the card.
+    buffer = {
+        "session_id": session_id,
+        "is_streaming": False,
+        "last_update_id": 9,
+        "initial_message_count": 0,
+        "messages": [
+            {"id": "m2", "role": "assistant", "type": "subagent",
+             "content": "partial output", "streaming": False,
+             "toolId": "toolu_live", "agentStatus": "running",
+             "agentChildren": [{"id": "c1"}, {"id": "c2"}],
+             "agentUsage": {"input_tokens": 10}},
+        ],
+    }
+    store_messages = [
+        {"id": "m1", "role": "user", "type": "text", "content": "go",
+         "streaming": False},
+        {"id": "m2", "role": "assistant", "type": "subagent", "content": "",
+         "streaming": False, "toolId": "toolu_live", "agentStatus": "completed",
+         "agentChildren": [{"id": "c1"}]},
+    ]
+    task_registry.clear_session(session_id)  # no live task — overlay is the driver
+    result = await _fresh_load_store_wins(session_id, session, store_messages, buffer)
+
+    assert isinstance(result, dict)
+    # Store won the count heal (2 msgs vs buffer's 1) but the card got grafted.
+    assert result["last_update_id"] == 0
+    card = {m["id"]: m for m in result["messages"]}["m2"]
+    assert card["agentStatus"] == "running"
+    assert card["agentChildren"] == [{"id": "c1"}, {"id": "c2"}]
+    assert card["agentUsage"] == {"input_tokens": 10}
+    # Non-empty buffer content grafted over the store's blank.
+    assert card["content"] == "partial output"
+
+
+async def test_fresh_load_overlay_preserves_store_content_when_buffer_blank():
+    """Buffer content is grafted ONLY when non-empty — a blank buffer card never
+    blanks a persisted store body."""
+    session_id = "recon-blank"
+    session = {"id": session_id, "title": "Parked", "sdk_session_id": None,
+               "total_tokens_out": 0}
+    buffer = {
+        "session_id": session_id,
+        "is_streaming": False,
+        "last_update_id": 9,
+        "initial_message_count": 0,
+        "messages": [
+            {"id": "m2", "role": "assistant", "type": "subagent", "content": "",
+             "streaming": False, "toolId": "toolu_live", "agentStatus": "running"},
+        ],
+    }
+    store_messages = [
+        {"id": "m1", "role": "user", "type": "text", "content": "go",
+         "streaming": False},
+        {"id": "m2", "role": "assistant", "type": "subagent",
+         "content": "persisted body", "streaming": False,
+         "toolId": "toolu_live", "agentStatus": "completed"},
+    ]
+    task_registry.clear_session(session_id)
+    result = await _fresh_load_store_wins(session_id, session, store_messages, buffer)
+
+    card = {m["id"]: m for m in result["messages"]}["m2"]
+    assert card["agentStatus"] == "running"      # status still grafted
+    assert card["content"] == "persisted body"   # blank buffer did NOT overwrite

@@ -11,6 +11,7 @@ Fallback chain: live_session_store → DB → JSONL → SDK.
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.jsonl_parser import _apply_task_notification_status
 from app.core.system_message_filter import is_hidden_system_subtype
 from app.db import database
 
@@ -33,6 +34,10 @@ def load_messages_from_db(
     messages = []
     # Build a tool_id → tool_use index for merging tool_results
     tool_use_index: Dict[str, int] = {}
+    # Build a tool_id → subagent index so a persisted terminal
+    # <task-notification> user row can repair the matching card (status + usage +
+    # result) — mirrors the JSONL reload path in jsonl_parser.
+    subagent_index: Dict[str, int] = {}
 
     for row in rows:
         msg = _transform_row(row)
@@ -45,6 +50,12 @@ def load_messages_from_db(
             if tool_id:
                 tool_use_index[tool_id] = len(messages)
 
+        # Track subagent cards by their launch tool_id for task-notification repair
+        if msg.get("type") == "subagent":
+            tool_id = msg.get("toolId")
+            if tool_id:
+                subagent_index[tool_id] = len(messages)
+
         # Merge tool_result into preceding tool_use
         if row["role"] == "tool_result":
             tool_id = (row.get("metadata") or {}).get("tool_id")
@@ -54,6 +65,15 @@ def load_messages_from_db(
                 messages[idx]["toolStatus"] = "complete"
                 continue
             # No matching tool_use — emit as standalone (shouldn't happen often)
+
+        # A terminal <task-notification> persisted as a user row carries the
+        # backgrounded sub-agent's final status/usage/result. Flip + enrich the
+        # already-built card (the notification always follows its launch), then
+        # let the user row itself fall through to append (filtered by the UI).
+        if row["role"] == "user":
+            content = row.get("content")
+            if isinstance(content, str) and "<task-notification>" in content:
+                _apply_task_notification_status(content, messages, subagent_index)
 
         messages.append(msg)
 
@@ -190,6 +210,7 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "agentStatus": meta.get("agent_status", "completed"),
             "agentChildren": normalized_children,
             "agentId": meta.get("agent_id"),
+            "agentUsage": meta.get("agent_usage"),
         }
 
     if role == "team_member":

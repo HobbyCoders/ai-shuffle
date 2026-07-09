@@ -267,6 +267,9 @@ async def test_pump_redispatches_subagent_inner_activity_and_completes():
     assert "task_notification" in by_type
     assert by_type["task_notification"]["tool_use_id"] == "tu-1"
     assert by_type["task_notification"]["status"] == "completed"
+    # The summary rides the dispatched event so the parked card gets its short
+    # result text (result_text=summary in handle_task_notification).
+    assert by_type["task_notification"]["summary"] == "done"
     # Order: inner activity precedes completion.
     assert [e["type"] for e in captured].index("subagent_chunk") < [
         e["type"] for e in captured

@@ -746,6 +746,76 @@ def _describe_relay_error(err: Exception) -> str:
     return "device is unreachable"
 
 
+def _overlay_subagent_progress(
+    store_messages: list, buffer_messages: list
+) -> None:
+    """Graft fresher sub-agent CARD fields from the in-memory buffer onto the
+    store-loaded transcript, matched by ``toolId``.
+
+    Used on the ``/live`` fresh-load path where the STORE transcript wins the
+    completeness heal (the in-memory buffer is otherwise discarded). Sub-agent
+    progress mutates a card IN PLACE — ``agentStatus``/``agentChildren``/
+    ``agentUsage`` advance without changing the message count — so for those
+    cards the buffer is strictly fresher than the store snapshot. This mutates
+    ``store_messages`` fields ONLY; it never adds/removes messages, so the heal's
+    count/tie-break semantics are untouched. ``content`` is grafted only when the
+    buffer's is non-empty (never blank out a persisted body).
+    """
+    if not buffer_messages or not store_messages:
+        return
+    buffer_by_tool = {}
+    for bm in buffer_messages:
+        if not isinstance(bm, dict) or bm.get("type") != "subagent":
+            continue
+        tid = bm.get("toolId")
+        if tid:
+            buffer_by_tool[tid] = bm
+    if not buffer_by_tool:
+        return
+    for sm in store_messages:
+        if not isinstance(sm, dict) or sm.get("type") != "subagent":
+            continue
+        bm = buffer_by_tool.get(sm.get("toolId"))
+        if bm is None:
+            continue
+        # to_dict()/db loader emit these keys only when present; graft on
+        # presence so a store value is preserved when the buffer lacks one.
+        for field in ("agentStatus", "agentChildren", "agentUsage"):
+            if field in bm:
+                sm[field] = bm[field]
+        buf_content = bm.get("content")
+        if buf_content:
+            sm["content"] = buf_content
+
+
+def _reconcile_subagent_status(store_messages: list, active_tasks: list) -> None:
+    """Force ``agentStatus = "running"`` on store-loaded sub-agent cards whose
+    ``toolId`` matches a still-running registry task.
+
+    Covers the buffer-gone-but-tasks-alive case: on a fresh load the in-memory
+    buffer may already be gone (or never existed) while a background sub-agent is
+    still in flight, so a store/legacy transcript would default the card to
+    "completed" and freeze it. ``active_tasks`` is the ``get_visible`` wire view;
+    a task's ``toolUseId`` equals the launch tool_use id, which is the sub-agent
+    card's ``toolId``. Only matching cards are touched — a legacy transcript with
+    no live task stays "completed"/"pending" exactly as loaded.
+    """
+    running_tool_ids = {
+        t.get("toolUseId")
+        for t in (active_tasks or [])
+        if isinstance(t, dict) and t.get("status") == "running" and t.get("toolUseId")
+    }
+    if not running_tool_ids:
+        return
+    for m in store_messages:
+        if (
+            isinstance(m, dict)
+            and m.get("type") == "subagent"
+            and m.get("toolId") in running_tool_ids
+        ):
+            m["agentStatus"] = "running"
+
+
 @router.get("/{session_id}/live")
 async def get_live_session(
     request: Request,
@@ -1020,7 +1090,8 @@ async def get_live_session(
                     "subtype", "systemSubtype", "systemData",
                     "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
                     "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)
-                    "agentId", "agentType", "agentDescription", "agentStatus", "agentChildren",
+                    "agentId", "agentType", "agentDescription", "agentPrompt",
+                    "agentStatus", "agentChildren", "agentUsage",
                     "metadata",
                 )
 
@@ -1133,11 +1204,24 @@ async def get_live_session(
             if session_meta:
                 pending_live_full["session_meta"] = session_meta
             return pending_live_full
+        # STORE WINS: the buffer is discarded for completeness, but sub-agent
+        # cards mutate IN PLACE (progress advances agentChildren/agentStatus/
+        # agentUsage without changing counts), so the buffer is strictly fresher
+        # for THOSE cards. Graft them by toolId — fields only, never counts — so a
+        # parked session's live sub-agent progress isn't frozen to the store's
+        # snapshot on a fresh load.
+        _overlay_subagent_progress(messages, live_msgs)
         logger.debug(
             f"Live endpoint: store transcript for {session_id} is complete "
             f"({len(messages)} msgs >= snapshot {len(live_msgs)} msgs) — "
             f"healed any stale buffer"
         )
+
+    # Registry reconcile: even with the buffer gone (or never present), a
+    # sub-agent still running in the task registry must not render "completed".
+    # Force its card back to "running" by matching the launch tool_use id;
+    # non-matching cards (legacy transcripts) are left exactly as loaded.
+    _reconcile_subagent_status(messages, active_tasks)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     # This ensures the poller gets cost data on the first poll after streaming ends

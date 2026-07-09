@@ -977,6 +977,8 @@ function parseActiveTasks(raw: unknown): Task[] {
 			status,
 			kind,
 			summary: typeof t.summary === 'string' ? t.summary : null,
+			toolUseId: (typeof t.toolUseId === 'string' ? t.toolUseId
+				: typeof t.tool_use_id === 'string' ? t.tool_use_id : null),
 			startedAt: (typeof t.startedAt === 'string' ? t.startedAt
 				: typeof t.started_at === 'string' ? t.started_at : ''),
 			updatedAt: (typeof t.updatedAt === 'string' ? t.updatedAt

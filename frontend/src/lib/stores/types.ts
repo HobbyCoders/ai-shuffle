@@ -50,6 +50,12 @@ export interface Task {
 	status: TaskStatus;
 	kind: TaskKind;
 	summary: string | null;
+	/**
+	 * The Task/tool launch `tool_use` id this background task corresponds to
+	 * (registry truth), or null when unavailable. Used by the frontend to force
+	 * the spinner on a subagent card whose `toolId` matches a running task.
+	 */
+	toolUseId: string | null;
 	/** ISO-8601 timestamp when the task started. */
 	startedAt: string;
 	/** ISO-8601 timestamp of the last update. */

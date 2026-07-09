@@ -977,6 +977,7 @@ async def _drain_notifications_impl(
                                 "tool_use_id": _notif_tool_use_id,
                                 "status": status,
                                 "usage": frame.get("usage"),
+                                "summary": frame.get("summary"),
                             },
                             sub_ectx,
                             sub_state,

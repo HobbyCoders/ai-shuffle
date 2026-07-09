@@ -5,12 +5,15 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { extractToolResultMedia, mediaHtml } from '$lib/utils/media';
+	import { isSubagentRunning } from '$lib/utils/subagent-status';
 
 	interface Props {
 		message: ChatMessage;
+		/** Launch tool_use ids of background tasks the registry reports as currently running. */
+		runningToolIds?: Set<string>;
 	}
 
-	let { message }: Props = $props();
+	let { message, runningToolIds }: Props = $props();
 
 	// Filter valid children (ensure they have required id field)
 	const validChildren = $derived(
@@ -30,9 +33,12 @@
 		};
 	});
 
-	// Get status display
+	// Get status display. `isRunning` also honors the registry truth of running
+	// background tasks (activeTasks), so a subagent card whose launch tool id is
+	// still running is forced to the spinner even if the server-supplied status
+	// is stale (e.g. fresh loads of parked sessions).
 	const statusInfo = $derived({
-		isRunning: message.agentStatus === 'running',
+		isRunning: isSubagentRunning(message.agentStatus, message.toolId, runningToolIds),
 		isError: message.agentStatus === 'error'
 	});
 

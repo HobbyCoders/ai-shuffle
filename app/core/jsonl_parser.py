@@ -159,6 +159,44 @@ def _apply_task_notification_status(
     status = (_extract_task_notification_field(content, "status") or "").lower()
     msg["agentStatus"] = "error" if status in ("failed", "stopped", "error") else "completed"
 
+    # Recover usage stats from the persisted <usage> sub-fields so the reloaded
+    # card shows token/tool/duration stats instead of a bare checkmark. The unpark
+    # prompt writes subagent_tokens/tool_uses/duration_ms; map subagent_tokens →
+    # total_tokens to match the live card's agentUsage shape ({total_tokens,
+    # tool_uses, duration_ms}). Absent/blank fields are simply omitted.
+    def _usage_int(tag: str) -> Optional[int]:
+        raw = _extract_task_notification_field(content, tag)
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    usage: Dict[str, Any] = {}
+    total_tokens = _usage_int("subagent_tokens")
+    if total_tokens is not None:
+        usage["total_tokens"] = total_tokens
+    tool_uses = _usage_int("tool_uses")
+    if tool_uses is not None:
+        usage["tool_uses"] = tool_uses
+    duration_ms = _usage_int("duration_ms")
+    if duration_ms is not None:
+        usage["duration_ms"] = duration_ms
+    if usage:
+        msg["agentUsage"] = usage
+
+    # Recover the result text so the card body shows the outcome instead of the
+    # launch ACK. A card carrying a persisted terminal notification is always a
+    # backgrounded sub-agent whose content is only the launch ACK, so overwriting
+    # is safe. Truncate to 2000 chars to match the sync path (msg["content"] =
+    # output[:2000]). Prefer <result>; fall back to <summary>.
+    result_text = _extract_task_notification_field(content, "result")
+    if not result_text:
+        result_text = _extract_task_notification_field(content, "summary")
+    if result_text:
+        msg["content"] = result_text[:2000]
+
 
 def _truncate_for_display(content: str, max_size: int = MAX_DISPLAY_OUTPUT_SIZE) -> str:
     """

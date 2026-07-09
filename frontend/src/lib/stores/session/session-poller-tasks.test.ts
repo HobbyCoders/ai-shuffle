@@ -77,6 +77,23 @@ describe('session-poller · activeTasks threading', () => {
 		expect(result!.activeTasks[1]).toMatchObject({ id: 't2', kind: 'agent', summary: null });
 	});
 
+	it('carries toolUseId (camelCase, snake_case fallback, null default)', async () => {
+		fetchMock.mockResolvedValueOnce(
+			makeResponse({
+				activeTasks: [
+					{ id: 'c1', status: 'running', kind: 'agent', toolUseId: 'toolu_camel' },
+					{ id: 's1', status: 'running', kind: 'agent', tool_use_id: 'toolu_snake' },
+					{ id: 'n1', status: 'running', kind: 'agent' },
+				],
+			})
+		);
+		const result = await sessionPoller.loadSession(SESSION_ID);
+		expect(result!.activeTasks).toHaveLength(3);
+		expect(result!.activeTasks[0].toolUseId).toBe('toolu_camel');
+		expect(result!.activeTasks[1].toolUseId).toBe('toolu_snake');
+		expect(result!.activeTasks[2].toolUseId).toBeNull();
+	});
+
 	it('defaults to [] when activeTasks is absent', async () => {
 		fetchMock.mockResolvedValueOnce(makeResponse({}));
 		const result = await sessionPoller.loadSession(SESSION_ID);

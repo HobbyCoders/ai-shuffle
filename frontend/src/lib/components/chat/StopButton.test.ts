@@ -19,6 +19,7 @@ function makeTask(over: Partial<Task> = {}): Task {
 		status: 'running',
 		kind: 'agent',
 		summary: null,
+		toolUseId: null,
 		startedAt: new Date(Date.now() - 5000).toISOString(),
 		updatedAt: new Date().toISOString(),
 		...over
