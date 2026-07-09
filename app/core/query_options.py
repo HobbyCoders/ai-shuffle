@@ -49,6 +49,7 @@ from app.core.environment import (  # noqa: F401
     _get_hook_tool_names,
     _build_extra_args,
     _build_env_with_ai_tools,
+    apply_context_window_env,
     generate_environment_details,
 )
 
@@ -831,6 +832,11 @@ def build_options_from_profile(
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
+
+    # Force the standard 200k context window unless the profile opted into 1M
+    # via the model's `[1m]` suffix (natively-1M models like `fable` otherwise
+    # default to 1M in the CLI). See apply_context_window_env.
+    apply_context_window_env(full_env, model_to_use)
 
     ai_tool_env = full_env if full_env else None
 
