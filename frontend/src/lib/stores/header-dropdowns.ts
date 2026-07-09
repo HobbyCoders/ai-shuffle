@@ -11,7 +11,20 @@
  */
 import { writable } from 'svelte/store';
 
-type HeaderDropdownId = 'profile' | 'branch' | 'claude-status' | 'notifications';
+type HeaderDropdownId =
+	| 'profile'
+	| 'branch'
+	| 'claude-status'
+	| 'notifications'
+	// Git-action option popovers (split-button chevrons). Listing them here means
+	// opening any one closes every other header dropdown — including the branch
+	// selector and any sibling git-action popover — so only one is ever open.
+	| 'git-commit'
+	| 'git-push'
+	| 'git-pull'
+	| 'git-pr'
+	| 'git-finish'
+	| 'git-shipit';
 
 /** The currently-open header dropdown, or null when all are closed. */
 export const openHeaderDropdown = writable<HeaderDropdownId | null>(null);

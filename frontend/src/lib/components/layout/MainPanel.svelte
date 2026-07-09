@@ -20,9 +20,17 @@
 		generatePRDescription,
 		startFinishOperation,
 		startShipOperation,
-		type GitOperation,
-		type MergeMethod
+		type GitOperation
 	} from '$lib/api/git';
+	import type {
+		CommitNextStep,
+		CommitOptions,
+		PushOptions,
+		PullOptions,
+		CreatePROptions,
+		FinishOptions,
+		ShipItOptions
+	} from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
@@ -424,13 +432,8 @@
 		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
 	);
 
-	type CommitNextStep = 'commit' | 'push' | 'pr';
-	interface CommitOptions { message?: string; includeUnstaged?: boolean; nextStep?: CommitNextStep; }
-	interface PushOptions { force?: boolean; }
-	interface PullOptions { strategy?: 'merge' | 'rebase'; autoStash?: boolean; }
-	interface CreatePROptions { title?: string; body?: string; base?: string; draft?: boolean; }
-	interface FinishOptions { mergeMethod?: MergeMethod; cleanup?: boolean; }
-	interface ShipItOptions { mergeMethod?: MergeMethod; cleanup?: boolean; includeUnstaged?: boolean; base?: string; draft?: boolean; }
+	// Git-action option-bag types are shared with GitHeaderActions /
+	// GitActionOptionsDropdown via $lib/stores/derived/git-action-options.
 
 	/** Whether git action buttons may fire (guards double-taps + in-flight ops). */
 	function gitActionsBlocked(): boolean {
@@ -734,14 +737,14 @@
 								projectName={headerProjectName}
 								worktreeBranch={activeWorktreeBranch}
 								openPR={branchPR}
-								onClickCommit={() => handleCommit()}
-								onClickCreatePR={() => handleCreatePR()}
-								onClickFinish={() => handleFinish()}
+								onClickCommit={handleCommit}
+								onClickCreatePR={handleCreatePR}
+								onClickFinish={handleFinish}
 								onClickNewBranch={() => showCreateBranchModal = true}
-								onClickPush={() => handlePush()}
-								onClickPull={() => handlePull()}
+								onClickPush={handlePush}
+								onClickPull={handlePull}
 								onClickInitRepo={() => showInitRepoModal = true}
-								onClickShipIt={() => handleShipIt()}
+								onClickShipIt={handleShipIt}
 								onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 							/>
 							<GitProgressPopover />
