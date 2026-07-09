@@ -12,7 +12,14 @@ No SDK client, pool, or Postgres is required — these are pure helper functions
 
 from types import SimpleNamespace
 
-from app.core.query_engine import _read_task_output_file, _task_notification_frame
+import pytest
+
+from app.core.query_engine import (
+    _latch_cli_task_notifications,
+    _read_task_output_file,
+    _task_notification_frame,
+)
+from app.core.task_registry import task_registry
 
 
 # =============================================================================
@@ -94,3 +101,85 @@ class TestTaskNotificationFrame:
         status = SimpleNamespace(value="failed")
         frame = _task_notification_frame(_msg(status=status))
         assert frame["status"] == "failed"
+
+
+# =============================================================================
+# _latch_cli_task_notifications — in-process straddle latch
+#
+# When the CLI injects a <task-notification> user-lane steering message MID-turn
+# (which flows through stream_to_websocket as a plain-text UserMessage), we spend
+# mark_unparked at the source so the between-turns drain pump's existing per-task
+# dedup suppresses the straddle duplicate. RED against pre-latch code (the token
+# is never spent, so the pump re-delivers).
+# =============================================================================
+
+def _cli_task_notification_text(task_id="task-1", tool_use_id="tu-1"):
+    """The unindented CLI-format steering message the SDK injects in-stream."""
+    return (
+        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+        "<task-notification>\n"
+        f"<task-id>{task_id}</task-id>\n"
+        f"<tool-use-id>{tool_use_id}</tool-use-id>\n"
+        "<status>completed</status>\n"
+        "<summary>done</summary>\n"
+        "</task-notification>"
+    )
+
+
+class TestLatchCliTaskNotifications:
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    def test_spends_mark_unparked_for_task_id(self):
+        text = _cli_task_notification_text("task-1", "tu-1")
+        assert task_registry.was_unparked("sess-1", "task-1") is False
+        _latch_cli_task_notifications("sess-1", text)
+        # Token spent — a later pump mark_unparked returns False (dedup → suppress).
+        assert task_registry.was_unparked("sess-1", "task-1") is True
+        assert task_registry.mark_unparked("sess-1", "task-1") is False
+
+    def test_multiple_blocks_all_latched(self):
+        text = (
+            _cli_task_notification_text("task-1", "tu-1")
+            + "\n"
+            + _cli_task_notification_text("task-2", "tu-2")
+        )
+        _latch_cli_task_notifications("sess-1", text)
+        assert task_registry.was_unparked("sess-1", "task-1") is True
+        assert task_registry.was_unparked("sess-1", "task-2") is True
+
+    def test_idempotent_relatch_is_harmless(self):
+        text = _cli_task_notification_text("task-1", "tu-1")
+        _latch_cli_task_notifications("sess-1", text)
+        # The app's OWN synthetic unpark prompt flows back as a UserMessage on a
+        # follow-up turn; re-latching the same task must not error / re-arm.
+        _latch_cli_task_notifications("sess-1", text)
+        assert task_registry.was_unparked("sess-1", "task-1") is True
+
+    def test_resolves_task_via_tool_use_id_when_no_task_id(self):
+        # A block with only <tool-use-id> resolves the task via the registry's
+        # recorded launch tool_use_id.
+        task_registry.start_task(
+            "sess-1", "task-9", "agent", "bg work", tool_use_id="tu-9"
+        )
+        text = (
+            "<task-notification>\n"
+            "<tool-use-id>tu-9</tool-use-id>\n"
+            "<status>completed</status>\n"
+            "</task-notification>"
+        )
+        _latch_cli_task_notifications("sess-1", text)
+        assert task_registry.was_unparked("sess-1", "task-9") is True
+
+    def test_no_task_id_no_tool_use_id_is_skipped(self):
+        text = "<task-notification>\n<status>completed</status>\n</task-notification>"
+        # No crash; nothing latched.
+        _latch_cli_task_notifications("sess-1", text)
+        assert task_registry.was_unparked("sess-1", "task-1") is False
+
+    def test_non_notification_text_is_noop(self):
+        _latch_cli_task_notifications("sess-1", "just a normal user message")
+        assert task_registry._unparked.get("sess-1") in (None, set())

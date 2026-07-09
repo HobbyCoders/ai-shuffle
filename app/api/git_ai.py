@@ -2,8 +2,6 @@
 Git AI generation API endpoints.
 
 Provides AI-powered generation for:
-- Commit messages from diffs
-- PR titles and descriptions from branch commits
 - Branch names from user messages
 """
 
@@ -20,10 +18,6 @@ from app.api.common import check_project_access
 from app.api.git_helpers import run_git, get_working_dir
 
 from app.api.schemas.git import (
-    GenerateCommitMessageRequest,
-    GenerateCommitMessageResponse,
-    GeneratePRDescriptionRequest,
-    GeneratePRDescriptionResponse,
     GenerateBranchNameRequest,
     GenerateBranchNameResponse,
 )
@@ -93,158 +87,6 @@ def slugify_branch(msg: str, prefix: str) -> str:
 # AI Generation Endpoints
 # =============================================================================
 
-@router.post("/generate-commit-message", response_model=GenerateCommitMessageResponse)
-async def generate_commit_message(
-    request: Request,
-    project_id: str,
-    body: GenerateCommitMessageRequest,
-    worktree_id: Optional[str] = None,
-    token: str = Depends(require_auth)
-):
-    """
-    Generate a commit message using AI based on the current diff.
-
-    When worktree_id is provided, generates message based on worktree's diff.
-    """
-    from app.api.generation import generate_with_claude
-
-    t_start = time.perf_counter()
-    check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
-
-    if not await run_git(git_service.is_git_repo, working_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project is not a git repository"
-        )
-
-    t_diff_start = time.perf_counter()
-    diff_text = await run_git(
-        git_service.get_diff_text, working_dir, include_unstaged=body.include_unstaged
-    )
-    t_diff_ms = (time.perf_counter() - t_diff_start) * 1000
-    if not diff_text.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No changes to generate a commit message for"
-        )
-
-    prompt = f"""Based on the following git diff, write a concise commit message.
-Use conventional commit format (e.g., "feat:", "fix:", "refactor:", "docs:", "chore:", "perf:", "style:", "test:").
-The first line should be under 72 characters.
-If the change is complex, add a blank line followed by bullet points covering all significant changes.
-Return ONLY the commit message text, nothing else.
-
-<diff>
-{diff_text}
-</diff>"""
-
-    # Use the Default AI profile's model (no explicit override - respects user config)
-    t_ai_start = time.perf_counter()
-    response_text = await generate_with_claude(prompt)
-    t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
-
-    # Clean up: remove any markdown code blocks the model may have wrapped around the message
-    message = response_text.strip()
-    if message.startswith("```"):
-        lines = message.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        message = "\n".join(lines).strip()
-
-    t_total_ms = (time.perf_counter() - t_start) * 1000
-    logger.info(
-        f"[ship-it-timing] generate-commit-message project={project_id} "
-        f"total={t_total_ms:.0f}ms diff_fetch={t_diff_ms:.0f}ms "
-        f"ai_call={t_ai_ms:.0f}ms diff_bytes={len(diff_text)}"
-    )
-
-    return GenerateCommitMessageResponse(message=message)
-
-
-@router.post("/generate-pr-description", response_model=GeneratePRDescriptionResponse)
-async def generate_pr_description(
-    request: Request,
-    project_id: str,
-    body: GeneratePRDescriptionRequest,
-    worktree_id: Optional[str] = None,
-    token: str = Depends(require_auth)
-):
-    """
-    Generate a PR title and description using AI based on branch commits.
-
-    When worktree_id is provided, generates description from worktree's branch.
-    """
-    from app.api.generation import generate_with_claude, extract_json_from_response
-
-    t_start = time.perf_counter()
-    check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
-
-    if not await run_git(git_service.is_git_repo, working_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project is not a git repository"
-        )
-
-    t_log_start = time.perf_counter()
-    commit_log, diff_stat = await run_git(
-        git_service.get_branch_log, working_dir, base_branch=body.base_branch
-    )
-    t_log_ms = (time.perf_counter() - t_log_start) * 1000
-
-    if not commit_log.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No commits found ahead of the base branch"
-        )
-
-    prompt = f"""Based on the following git commits and change summary, generate a pull request title and description.
-Return a JSON object with "title" and "body" keys.
-
-The title should be concise (under 72 characters) and descriptive.
-The body should have a "## Summary" section with bullet points describing what changed and why. Include as many bullet points as needed to cover all significant changes.
-
-<commits>
-{commit_log}
-</commits>
-
-<changes>
-{diff_stat}
-</changes>
-
-Return ONLY the JSON object, no markdown code blocks or explanation."""
-
-    # Use the Default AI profile's model (no explicit override - respects user config)
-    t_ai_start = time.perf_counter()
-    response_text = await generate_with_claude(prompt)
-    t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
-
-    try:
-        parsed = extract_json_from_response(response_text)
-        title = parsed.get("title", "").strip()
-        pr_body = parsed.get("body", "").strip()
-    except (ValueError, KeyError) as e:
-        logger.warning(f"Failed to parse AI PR description, using fallback: {e}")
-        # Fallback: use first commit message as title
-        first_line = commit_log.split("\n")[0] if commit_log else "Update"
-        # Remove short SHA prefix if present
-        title = " ".join(first_line.split()[1:]) if " " in first_line else first_line
-        pr_body = ""
-
-    if not title:
-        first_line = commit_log.split("\n")[0] if commit_log else "Update"
-        title = " ".join(first_line.split()[1:]) if " " in first_line else first_line
-
-    t_total_ms = (time.perf_counter() - t_start) * 1000
-    logger.info(
-        f"[ship-it-timing] generate-pr-description project={project_id} "
-        f"total={t_total_ms:.0f}ms branch_log={t_log_ms:.0f}ms "
-        f"ai_call={t_ai_ms:.0f}ms log_bytes={len(commit_log)}"
-    )
-
-    return GeneratePRDescriptionResponse(title=title, body=pr_body)
-
-
 @router.post("/generate-branch-name")
 async def generate_branch_name(
     request: Request,
@@ -291,7 +133,7 @@ Message: "{body.message[:500]}"
 
 Return ONLY the branch name, nothing else."""
 
-        # Use Default AI profile's model (same as commit-msg / PR-desc endpoints).
+        # Use the Default AI profile's model (no explicit override).
         # Keeps the generation pool client reusable across all AI calls — any
         # explicit model override here would force a pool recycle if the default
         # model differs.

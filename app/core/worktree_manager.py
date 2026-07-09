@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 from app.core.config import settings
+from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
@@ -39,6 +40,65 @@ logger = logging.getLogger(__name__)
 class WorktreeError(Exception):
     """Exception raised for worktree creation/management errors with user-friendly messages."""
     pass
+
+
+# ---------------------------------------------------------------------------
+# Cross-device rebind fetch de-duplication (PR #493 follow-up #1)
+#
+# A rebind that must recover a branch surviving only on origin needs fresh
+# remote-tracking refs, which means a ``git fetch`` — a slow, network-bound
+# operation (historically up to ~60s). That fetch used to run synchronously
+# inside ``resolve_rebound_branch_plan`` on the SEND hot path, adding latency to
+# the first message of every cross-device resume. It is now primed at adopt time
+# (``_adopt_preflight_sync`` in app/api/sessions.py, off the hot path) and cached
+# here for a short window, so the first send reuses those refs instead of
+# blocking on another fetch. Keyed by the resolved local-clone directory.
+#
+# Backed by the shared ``git_cache`` TTL store (the same per-key cache
+# git_service / git_branch_ops / git_diff_ops use, instrumented by
+# resource_monitor) under ``fetch:{main_dir}`` keys, rather than a private dict —
+# so all git-side TTL state lives in one place.
+# ---------------------------------------------------------------------------
+_FETCH_TTL_SECONDS = 60.0
+_FETCH_CACHE_PREFIX = "fetch:"
+
+
+def _fetch_cache_key(main_dir: str) -> str:
+    return f"{_FETCH_CACHE_PREFIX}{main_dir}"
+
+
+def note_repo_fetched(main_dir: str) -> None:
+    """Record that origin refs for ``main_dir`` were just fetched."""
+    _git_cache.put(_fetch_cache_key(main_dir), True)
+
+
+def _repo_recently_fetched(main_dir: str) -> bool:
+    return _git_cache.get(_fetch_cache_key(main_dir), _FETCH_TTL_SECONDS) is not None
+
+
+def reset_fetch_cache() -> None:
+    """Drop all cached fetch timestamps (test hook).
+
+    Only the ``fetch:`` keys are invalidated so we never disturb the other git
+    result categories sharing ``_git_cache``.
+    """
+    _git_cache.invalidate_prefix(_FETCH_CACHE_PREFIX)
+
+
+def fetch_repo_cached(git_service_obj, main_dir: str, *, force: bool = False) -> bool:
+    """Fetch origin for ``main_dir`` unless a fetch was cached within the TTL.
+
+    ``force=True`` always fetches — used at adopt time, where freshness matters
+    for the "unpushed branch" advisory and the added latency is off the send hot
+    path. The send path passes ``force=False`` so a fetch primed at adopt time is
+    reused rather than repeated. A successful fetch (either way) refreshes the
+    cache timestamp. Returns ``True`` when a fetch was actually performed.
+    """
+    if not force and _repo_recently_fetched(main_dir):
+        return False
+    git_service_obj.fetch(main_dir)
+    note_repo_fetched(main_dir)
+    return True
 
 
 def resolve_rebound_branch_plan(
@@ -69,13 +129,30 @@ def resolve_rebound_branch_plan(
     if branch_name in local_branch_names:
         return False, None
 
-    git_service_obj.fetch(main_dir)
+    # Reuse a fetch primed at adopt time when it's still fresh, so this decision
+    # doesn't block the send path on another network fetch (PR #493 follow-up #1).
+    fetched = fetch_repo_cached(git_service_obj, main_dir)
     remote_names = [
         b["name"]
         for b in git_service_obj.list_branches(main_dir, include_remote=True)
     ]
     if f"origin/{branch_name}" in remote_names:
         return True, branch_name
+
+    # The branch is absent on the refs we just consulted. If those refs came from
+    # the CACHE (no fetch actually ran), they may be stale: the adopt flow primes
+    # the cache and warns the user to "push it from the other device", so the very
+    # next send — within the 60s TTL — would otherwise see stale refs and raise in
+    # the exact remediation flow we recommended. Force one fresh fetch and re-list
+    # before concluding the branch is unrecoverable (PR #493 follow-up #1).
+    if not fetched:
+        fetch_repo_cached(git_service_obj, main_dir, force=True)
+        remote_names = [
+            b["name"]
+            for b in git_service_obj.list_branches(main_dir, include_remote=True)
+        ]
+        if f"origin/{branch_name}" in remote_names:
+            return True, branch_name
 
     raise WorktreeError(
         f"Branch '{branch_name}' doesn't exist in the local clone or on "
@@ -1163,6 +1240,7 @@ class WorktreeManager:
         prior_status: Any,
         repository_id: Optional[str] = None,
         rebind_project_id: Optional[str] = None,
+        rebind_session_id: Optional[str] = None,
     ) -> Dict:
         """
         Adopt an on-disk git worktree (found via
@@ -1170,9 +1248,12 @@ class WorktreeManager:
         re-adding it. Flips the record to ACTIVE with the adopted path and
         returns the updated record (same shape ``recreate_worktree`` returns).
 
-        ``repository_id`` / ``rebind_project_id`` are set only on the cross-device
-        rebind path: the worktree row is re-pointed at this install's clone of the
-        repo and its sessions moved onto the local project row.
+        ``repository_id`` / ``rebind_project_id`` / ``rebind_session_id`` are set
+        only on the cross-device rebind path: the worktree row is re-pointed at
+        this install's clone of the repo, and ONLY the resumed session
+        (``rebind_session_id``) is moved onto the local project row — never its
+        sibling forks, which stay bound to their home device (PR #493 follow-up
+        #2).
         """
         adopt_path = Path(adopted["path"])
         stored_path = self._get_relative_worktree_path_from_full(
@@ -1185,8 +1266,7 @@ class WorktreeManager:
             branch_name=branch_name,
             repository_id=repository_id,
         )
-        if rebind_project_id:
-            self._repoint_worktree_sessions(worktree_id, rebind_project_id)
+        self._repoint_rebound_session(rebind_session_id, rebind_project_id)
         logger.info(
             f"Adopted existing on-disk worktree for branch '{branch_name}' "
             f"(worktree_id={worktree_id}, path={adopt_path}, "
@@ -1194,19 +1274,26 @@ class WorktreeManager:
         )
         return updated
 
-    def _repoint_worktree_sessions(self, worktree_id: str, project_id: str) -> None:
-        """Move every session that used this worktree onto ``project_id``.
+    def _repoint_rebound_session(
+        self, session_id: Optional[str], project_id: Optional[str]
+    ) -> None:
+        """Move ONLY the resumed session onto this install's local project row.
 
-        Used by the cross-device rebind so a session adopted here stops
-        resolving against the foreign project row that only exists on the
-        original device.
+        A cross-device rebind physically relocates the worktree onto this
+        install's clone, but the shared DB is authoritative for every install:
+        re-pointing *all* sessions on the worktree (as the original #493 code did)
+        would corrupt sibling forks the user isn't resuming here — flipping their
+        project id to a row that is foreign on THEIR home device. So we scope the
+        move to the single session being resumed. When no session id is known
+        (e.g. the manual ``reopen`` endpoint), we re-point nothing rather than
+        clobber siblings (PR #493 follow-up #2).
         """
-        for row in database.get_sessions_for_worktree(worktree_id):
-            session_id = row.get("id")
-            if session_id:
-                database.set_session_project(session_id, project_id)
+        if session_id and project_id:
+            database.set_session_project(session_id, project_id)
 
-    def recreate_worktree(self, worktree_id: str) -> Dict:
+    def recreate_worktree(
+        self, worktree_id: str, rebind_session_id: Optional[str] = None
+    ) -> Dict:
         """
         Recreate a worktree from its branch (last git state) so the user can
         resume the session — regardless of the record's prior status.
@@ -1222,6 +1309,9 @@ class WorktreeManager:
 
         Args:
             worktree_id: The worktree record to recreate
+            rebind_session_id: On the cross-device rebind path, the single session
+                being resumed. Only that session is moved onto this install's
+                local project row; sibling forks are left untouched (follow-up #2).
 
         Returns:
             Updated worktree dict
@@ -1356,6 +1446,7 @@ class WorktreeManager:
             return self._adopt_existing_worktree(
                 worktree_id, branch_name, adopted, project, prior_status=worktree["status"],
                 repository_id=rebound_repo_id, rebind_project_id=rebound_project_id,
+                rebind_session_id=rebind_session_id,
             )
 
         # Create git worktree
@@ -1378,6 +1469,7 @@ class WorktreeManager:
                         worktree_id, branch_name, adopted, project,
                         prior_status=worktree["status"],
                         repository_id=rebound_repo_id, rebind_project_id=rebound_project_id,
+                        rebind_session_id=rebind_session_id,
                     )
             raise WorktreeError(f"Git failed to recreate worktree: {error_msg or 'Unknown error'}")
 
@@ -1397,8 +1489,7 @@ class WorktreeManager:
             branch_name=branch_name,
             repository_id=rebound_repo_id,
         )
-        if rebound_project_id:
-            self._repoint_worktree_sessions(worktree_id, rebound_project_id)
+        self._repoint_rebound_session(rebind_session_id, rebound_project_id)
 
         # NOTE: sdk_session_id is intentionally preserved on reopen.
         # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),

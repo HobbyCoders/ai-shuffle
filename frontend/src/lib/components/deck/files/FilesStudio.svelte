@@ -18,6 +18,7 @@
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import FilesTreeNode from './FilesTreeNode.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	let uploadInput = $state<HTMLInputElement | null>(null);
 	let showNewFolder = $state(false);
@@ -27,6 +28,9 @@
 	let renameValue = $state('');
 	let pendingDelete = $state<FileItem | null>(null);
 	let isDragging = $state(false);
+	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenPath = $state<string | null>(null);
 
 	// Root-level directories for the tree sidebar.
 	let rootDirs = $state<{ name: string; path: string }[]>([]);
@@ -139,6 +143,21 @@
 		if (item.type === 'file') files.downloadFile(item.path, item.name);
 	}
 
+	// ── Collapsed ⋮ action tray (touch / narrow) ──
+	// RowActionMenu already stops propagation before calling this, so the row's
+	// own click (navigate) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, path: string) {
+		actionsOpenPath = actionsOpenPath === path ? null : path;
+	}
+	// The ⋮ toggle and every tray button stop propagation, so any click that
+	// reaches the window is outside an open tray — collapse it.
+	function onWindowClick() {
+		if (actionsOpenPath !== null) actionsOpenPath = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') actionsOpenPath = null;
+	}
+
 	// ── Presentation helpers ──
 	function fileIcon(item: FileItem) {
 		if (item.type === 'directory') return Folder;
@@ -169,6 +188,8 @@
 		return new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="fs">
 	<div class="fs-wrap">
@@ -303,13 +324,17 @@
 								</span>
 								<span class="fs-sz">{item.type === 'directory' ? '—' : (item.sizeFormatted ?? '—')}</span>
 								<span class="fs-md">{relTime(item.modifiedAt)}</span>
-								<span class="fs-actions">
+								<RowActionMenu
+									open={actionsOpenPath === item.path}
+									onToggle={(e) => toggleRowActions(e, item.path)}
+									label="File actions"
+								>
 									<button class="fs-icon-btn" title="Rename" onclick={(e) => startRename(item, e)}><Edit3 size={14} strokeWidth={1.8} /></button>
 									<button class="fs-icon-btn fs-icon-btn--danger" title="Delete" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} strokeWidth={1.8} /></button>
 									{#if item.type === 'file'}
 										<button class="fs-icon-btn" title="Download" onclick={(e) => download(item, e)}><Download size={14} strokeWidth={1.8} /></button>
 									{/if}
-								</span>
+								</RowActionMenu>
 							</div>
 						{/if}
 					{/each}
@@ -478,14 +503,11 @@
 	.fs-nm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.fs-sz, .fs-md { font-family: var(--font-mono, monospace); font-size: 0.7rem; color: var(--muted-foreground); }
 
-	.fs-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity 110ms ease; }
-	.fs-row:hover .fs-actions, .fs-row:focus-within .fs-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.fs-actions { opacity: 1; }
-	}
+	/* Hover reveal of the row's actions is signalled to RowActionMenu through the
+	   inherited --ram-reveal custom property (0 hidden / 1 shown); the component
+	   owns the button opacity + the touch/narrow ⋮ collapse + slide-out. */
+	.fs-row { --ram-reveal: 0; }
+	.fs-row:hover, .fs-row:focus-within { --ram-reveal: 1; }
 	.fs-icon-btn {
 		display: grid; place-items: center; width: 26px; height: 26px;
 		background: transparent; border: none; border-radius: 6px;
@@ -527,6 +549,5 @@
 		.fs-row--head { display: none; }
 		.fs-row { grid-template-columns: 1fr auto auto; gap: 10px; }
 		.fs-md { display: none; }
-		.fs-actions { opacity: 1; }
 	}
 </style>

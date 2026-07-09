@@ -523,6 +523,20 @@ async def reopen_worktree(
             detail=str(e)
         )
 
+    # A cross-device reopen rebinds the worktree onto THIS install's clone of the
+    # repo (updated["repository_id"] now points at the local repo). recreate_worktree
+    # only re-points the single resumed session when called from the send path with
+    # a rebind_session_id — a MANUAL reopen has none, and afterwards the send-path
+    # self-heal can NEVER fire (the cwd now exists locally, so every rebind gate is
+    # skipped). Left alone, the sessions' project_id stays foreign permanently and
+    # MCP servers resolve the wrong project forever. Broad repointing is correct
+    # here: reopen is an explicit manual relocation of the whole worktree, unlike
+    # the send path which stays scoped to one session (PR #493 follow-up #2).
+    local_pid: Optional[str] = None
+    local_repo = database.get_git_repository(updated["repository_id"])
+    if local_repo:
+        local_pid = local_repo.get("project_id")
+
     # Evict stale pooled subprocesses whose CWD pointed to the old (deleted) worktree.
     # Must be done here (async context) since recreate_worktree is sync.
     from app.core.session_pool import get_session_pool
@@ -530,6 +544,11 @@ async def reopen_worktree(
     sessions = database.get_sessions_for_worktree(worktree_id)
     for sess in sessions:
         sid = sess["id"]
+        if local_pid and sess.get("project_id") != local_pid:
+            database.set_session_project(sid, local_pid)
+            logger.info(
+                f"Repointed session {sid} to local project {local_pid} after worktree reopen"
+            )
         if pool.get(sid):
             await pool.remove(sid)
             logger.debug(f"Evicted pooled session {sid} after worktree reopen")

@@ -11,8 +11,10 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock, EllipsisVertical } from 'lucide-svelte';
+	import { onDestroy } from 'svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -66,6 +68,12 @@
 	let selectedKey = $state<string | null>(null);
 	let deletingSessionId = $state<string | null>(null);
 	let deleteLoading = $state(false);
+	// Safety auto-reset for the delete confirmation: if the user arms "Clear" but
+	// walks away, drop the confirm state after a while so a stale confirm can't
+	// fire later. The timer id is kept so we can cancel it whenever the confirm is
+	// resolved or replaced — a fire-and-forget timer used to blank the confirm out
+	// from under the user (it looked like the button vanished on its own).
+	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 	// Mobile only: which row has its action rail expanded out of the ⋮ menu.
 	// Single value = one open at a time; desktop keeps the always-inline rail.
 	let actionsOpenId = $state<string | null>(null);
@@ -324,7 +332,7 @@
 		// reaches the window is outside an open rail — collapse it.
 		if (actionsOpenId !== null) {
 			actionsOpenId = null;
-			deletingSessionId = null;
+			disarmDeleteConfirm();
 		}
 	}
 	function handleFilterWindowKeydown(e: KeyboardEvent) {
@@ -332,6 +340,7 @@
 			deviceMenuOpen = false;
 			linkMenuOpen = false;
 			actionsOpenId = null;
+			disarmDeleteConfirm();
 		}
 	}
 
@@ -354,7 +363,7 @@
 		e.stopPropagation();
 		if (actionsOpenId === id) {
 			actionsOpenId = null;
-			deletingSessionId = null;
+			disarmDeleteConfirm();
 		} else {
 			actionsOpenId = id;
 		}
@@ -426,9 +435,38 @@
 		}
 	}
 
+	// Arm the delete confirmation on a row and (re)start its safety auto-reset.
+	// Cancels any prior timer first so re-arming on another row can't leave a
+	// stale timer that later blanks the new confirm.
+	function armDeleteConfirm(id: string) {
+		disarmDeleteConfirm();
+		deletingSessionId = id;
+		deleteConfirmTimer = setTimeout(() => {
+			if (deletingSessionId === id) deletingSessionId = null;
+			deleteConfirmTimer = null;
+		}, 8000);
+	}
+	// Clear the confirm state and cancel its pending auto-reset timer. Use this
+	// anywhere `deletingSessionId` is dropped so no orphaned timer survives.
+	function disarmDeleteConfirm() {
+		if (deleteConfirmTimer !== null) {
+			clearTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = null;
+		}
+		deletingSessionId = null;
+	}
+	// The 8s auto-reset timer above outlives the component unless cancelled: if
+	// the board unmounts while a confirm is armed (e.g. the user navigates away),
+	// the timer would otherwise fire post-unmount and write to `deletingSessionId`.
+	onDestroy(() => {
+		disarmDeleteConfirm();
+	});
+
 	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
 		if (deletingSessionId === id) {
+			// Confirmed — the pending auto-reset is now moot; cancel it and delete.
+			disarmDeleteConfirm();
 			deleteLoading = true;
 			try {
 				if (activeId === id) onNewSession();
@@ -440,13 +478,12 @@
 				deletingSessionId = null;
 			}
 		} else {
-			deletingSessionId = id;
-			setTimeout(() => { if (deletingSessionId === id) deletingSessionId = null; }, 3000);
+			armDeleteConfirm(id);
 		}
 	}
 	function cancelDelete(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
-		deletingSessionId = null;
+		disarmDeleteConfirm();
 	}
 	// Open a session from its row — but never while that row is showing its
 	// delete confirmation (or the delete is in flight). The confirm button is
@@ -772,55 +809,46 @@
 			</div>
 		</div>
 		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
-		<span class="row-actions" class:open={actionsOpenId === session.id}>
-			<span class="row-actions-group">
-				<button
-					class="row-action"
-					title={resumeTitle(session)}
-					onclick={(e) => handleResume(e, session)}
-				>
-					<Play size={13} strokeWidth={1.6} />
-				</button>
-				<button
-					class="row-action"
-					title="Fork session"
-					onclick={(e) => handleFork(e, session)}
-				>
-					<GitFork size={13} strokeWidth={1.6} />
-				</button>
-				<button
-					class="row-action fav"
-					class:is-fav={session.is_favorite}
-					title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
-					onclick={(e) => handleToggleFavorite(e, session)}
-				>
-					<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
-				</button>
-				{#if deletingSessionId === session.id}
-					<button class="row-action danger" disabled={deleteLoading} title="Confirm clear" onclick={(e) => handleDelete(e, session.id)}>
-						<BrushCleaning size={13} strokeWidth={2} />
-					</button>
-					<button class="row-action" title="Cancel" onclick={cancelDelete}>
-						<X size={13} strokeWidth={2} />
-					</button>
-				{:else}
-					<button class="row-action clear" title="Clear session" onclick={(e) => handleDelete(e, session.id)}>
-						<BrushCleaning size={13} strokeWidth={1.6} />
-					</button>
-				{/if}
-			</span>
-			<!-- Mobile-only trigger: collapses the rail above into a single ⋮ so it
-			     stops eating the whole row. Hidden on desktop (hover reveals the rail). -->
+		<RowActionMenu
+			open={actionsOpenId === session.id}
+			onToggle={(e) => toggleRowActions(e, session.id)}
+			label="Session actions"
+		>
 			<button
-				class="row-action row-actions-toggle"
-				aria-label="Session actions"
-				aria-expanded={actionsOpenId === session.id}
-				title="Actions"
-				onclick={(e) => toggleRowActions(e, session.id)}
+				class="row-action"
+				title={resumeTitle(session)}
+				onclick={(e) => handleResume(e, session)}
 			>
-				<EllipsisVertical size={16} strokeWidth={1.6} />
+				<Play size={13} strokeWidth={1.6} />
 			</button>
-		</span>
+			<button
+				class="row-action"
+				title="Fork session"
+				onclick={(e) => handleFork(e, session)}
+			>
+				<GitFork size={13} strokeWidth={1.6} />
+			</button>
+			<button
+				class="row-action fav"
+				class:is-fav={session.is_favorite}
+				title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
+				onclick={(e) => handleToggleFavorite(e, session)}
+			>
+				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
+			</button>
+			{#if deletingSessionId === session.id}
+				<button class="row-action danger" disabled={deleteLoading} title="Confirm clear" onclick={(e) => handleDelete(e, session.id)}>
+					<BrushCleaning size={13} strokeWidth={2} />
+				</button>
+				<button class="row-action" title="Cancel" onclick={cancelDelete}>
+					<X size={13} strokeWidth={2} />
+				</button>
+			{:else}
+				<button class="row-action clear" title="Clear session" onclick={(e) => handleDelete(e, session.id)}>
+					<BrushCleaning size={13} strokeWidth={1.6} />
+				</button>
+			{/if}
+		</RowActionMenu>
 	</div>
 {/snippet}
 
@@ -1296,11 +1324,11 @@
 		box-shadow: 0 0 4px color-mix(in oklch, var(--primary) 50%, #22c55e);
 	}
 
-	.row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; position: relative; }
-	.row-actions-group { display: flex; align-items: center; gap: 2px; }
-	/* The ⋮ trigger exists only for touch / narrow layouts — desktop reveals the
-	   whole rail on row hover, so keep the trigger out of the flow entirely. */
-	.row-actions-toggle { display: none; }
+	/* Row-hover reveal of the action rail is signalled to RowActionMenu through
+	   the inherited --ram-reveal custom property (0 hidden / 1 shown); it owns the
+	   button opacity + the ⋮ collapse. Keep everything else (size, colour) here. */
+	.row { --ram-reveal: 0; }
+	.row:hover { --ram-reveal: 1; }
 	.row-action {
 		display: flex;
 		align-items: center;
@@ -1312,14 +1340,12 @@
 		border-radius: 6px;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		opacity: 0;
-		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
 	}
-	.row:hover .row-action { opacity: 1; }
 	.row-action:hover { color: var(--foreground); background: color-mix(in oklch, var(--muted) 60%, transparent); }
-	.row-action.fav.is-fav { opacity: 1; color: var(--warning); }
+	/* Active favourite + armed-delete stay visible at rest, even unhovered. */
+	.row-action.fav.is-fav { --ram-reveal: 1; color: var(--warning); }
 	.row-action.fav:hover { color: var(--warning); }
-	.row-action.danger { opacity: 1; color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+	.row-action.danger { --ram-reveal: 1; color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 	.row-action.danger:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
 	.row-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -1347,58 +1373,9 @@
 		.board-head-right { width: 100%; margin-left: 0; justify-content: center; }
 	}
 
-	/* Touch / mobile-width: row actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.row-action { opacity: 0.7; }
-
-		/* Collapse the four-button rail into a single ⋮ so it stops consuming the
-		   whole row. The rail floats out to the LEFT of the ⋮ as a small tray, so
-		   opening it never reflows the row's title/metadata. */
-		.row-actions-toggle { display: flex; }
-		.row-actions-group {
-			position: absolute;
-			right: calc(100% + 6px);
-			top: 50%;
-			transform: translateY(-50%);
-			padding: 3px;
-			border-radius: 10px;
-			background: var(--popover);
-			border: 1px solid var(--border);
-			box-shadow: var(--shadow-l);
-			z-index: 6;
-			opacity: 0;
-			pointer-events: none;
-			transition: opacity 160ms ease;
-		}
-		.row-actions.open .row-actions-group {
-			opacity: 1;
-			pointer-events: auto;
-		}
-
-		/* Each button slides out from behind the ⋮, staggered nearest-first. */
-		.row-actions-group .row-action {
-			opacity: 0;
-			transform: translateX(14px);
-			transition: opacity 160ms ease, transform 220ms cubic-bezier(0.34, 1.4, 0.5, 1);
-		}
-		.row-actions.open .row-actions-group .row-action {
-			opacity: 0.9;
-			transform: translateX(0);
-		}
-		.row-actions.open .row-actions-group .row-action:nth-last-child(1) { transition-delay: 20ms; }
-		.row-actions.open .row-actions-group .row-action:nth-last-child(2) { transition-delay: 60ms; }
-		.row-actions.open .row-actions-group .row-action:nth-last-child(3) { transition-delay: 100ms; }
-		.row-actions.open .row-actions-group .row-action:nth-last-child(4) { transition-delay: 140ms; }
-
-		/* Toggle reads as pressed while its rail is open. */
-		.row-actions.open .row-actions-toggle {
-			opacity: 1;
-			color: var(--foreground);
-			background: color-mix(in oklch, var(--muted) 60%, transparent);
-		}
-	}
+	/* Touch / mobile-width: the rail collapses behind a ⋮ owned by RowActionMenu,
+	   which drives its own open/closed button opacity + slide-out — so the desktop
+	   --ram-reveal hover signal is moot here and needs no override. */
 	@media (max-width: 639px) {
 		.board-header { padding: 12px 16px; }
 		.board-body { padding: 12px 16px 28px; }
@@ -1406,15 +1383,12 @@
 		.row { min-height: 64px; padding: 11px 14px; gap: 11px; }
 		.row-title { font-size: 0.9rem; }
 		.row-line2 { font-size: 0.72rem; gap: 7px; }
-		.row-action { width: 38px; height: 38px; opacity: 0.8; }
+		.row-action { width: 38px; height: 38px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.proj-card { transition: none; }
 		.section-toggle :global(.section-caret) { transition: none; }
 		.dot-streaming, .dot-attention { animation: none; }
-		/* Show/hide the action rail instantly — no slide. */
-		.row-actions-group, .row-actions-group .row-action { transition: none; }
-		.row-actions.open .row-actions-group .row-action { transform: none; transition-delay: 0s; }
 	}
 </style>

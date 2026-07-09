@@ -198,27 +198,6 @@ class CloneRepoResponse(BaseModel):
     repository_id: Optional[str] = None
 
 
-class GenerateCommitMessageRequest(BaseModel):
-    """Request to generate a commit message using AI"""
-    include_unstaged: bool = Field(default=True)
-
-
-class GenerateCommitMessageResponse(BaseModel):
-    """Response for AI-generated commit message"""
-    message: str
-
-
-class GeneratePRDescriptionRequest(BaseModel):
-    """Request to generate a PR title and description using AI"""
-    base_branch: str = Field(default="main")
-
-
-class GeneratePRDescriptionResponse(BaseModel):
-    """Response for AI-generated PR description"""
-    title: str
-    body: str
-
-
 # =============================================================================
 # Changed Files / Diff Models
 # =============================================================================

@@ -71,6 +71,45 @@ def test_nonexistent_project_rebinds_to_local_sibling(tmp_path):
     assert captured.get("project_id") == "p-local"
 
 
+def test_worktree_rebind_refreshes_in_memory_project(tmp_path):
+    """follow-up #3: a cross-device WORKTREE rebind moved the session onto this
+    install's local project row (persisted in the DB). build_options must adopt
+    that row in-memory too, so the builtin tools server sees the LOCAL project id
+    on THIS send — not the foreign one, which previously leaked for one send and
+    only self-healed on the next reload."""
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    foreign = {"id": "p-foreign", "name": "MyRepo", "path": str(tmp_path / "foreign")}
+    local_project = {"id": "p-local", "name": "MyRepo", "path": str(tmp_path / "local")}
+
+    captured = {}
+
+    def _fake_builtins(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    def _fake_resolve(session_id, project):
+        # Simulate _rebind_worktree_cwd_cross_device surfacing the local project as
+        # the explicit 4th return value (no longer smuggled through worktree_info).
+        return str(wt_dir), "worktree", {
+            "branch": "feat/x", "base_branch": "main",
+        }, local_project
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+        qo, "_resolve_session_worktree_cwd", side_effect=_fake_resolve
+    ), patch(
+        "app.mcp.builtin_tools.create_builtin_tools_server",
+        side_effect=_fake_builtins,
+    ):
+        opts, _ = qo.build_options_from_profile(
+            profile=_profile(), project=foreign, session_id="ses-1"
+        )
+
+    assert str(opts.cwd) == str(wt_dir)
+    # The rebound (local) project id — not the foreign one — reaches downstream.
+    assert captured.get("project_id") == "p-local"
+
+
 def test_nonexistent_profile_config_cwd_raises(tmp_path):
     missing = tmp_path / "gone-cwd"
     with patch.object(qo, "get_security_instructions", return_value=""):

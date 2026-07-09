@@ -1648,3 +1648,164 @@ async def test_pump_task_updated_chip_survives_missing_live_session():
         await handler._drain_notifications(session_id, "claude-code", None, None)
 
     handler._deliver_unpark.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 6. Straddle regression (in-process latch). The CLI injected the sub-agent's
+#    <task-notification> as a mid-turn user-lane steering message, which the
+#    query_engine branch latched via mark_unparked at the SOURCE
+#    (_latch_cli_task_notifications). When the typed TaskNotificationMessage then
+#    reaches the between-turns pump AFTER the parent ResultMessage, the pump's
+#    EXISTING per-task dedup must suppress it — no store scans, no table reads.
+# ---------------------------------------------------------------------------
+
+import json as _json
+from app.core.query_engine import _latch_cli_task_notifications
+
+
+def _cli_userlane_text(task_id="task-1", tool_use_id="tu-1"):
+    """The unindented CLI-format <task-notification> the SDK injects in-stream."""
+    return (
+        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+        "<task-notification>\n"
+        f"<task-id>{task_id}</task-id>\n"
+        f"<tool-use-id>{tool_use_id}</tool-use-id>\n"
+        "<status>completed</status>\n"
+        "<summary>done</summary>\n"
+        "</task-notification>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_after_in_stream_latch():
+    """Straddle: the query_engine branch spent mark_unparked in-stream, so when
+    the typed notification later reaches ONLY the pump it must NOT re-deliver."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    # In-stream: the CLI's user-lane steering message flowed through the
+    # query_engine UserMessage branch and latched the completion at the source.
+    _latch_cli_task_notifications("sess-1", _cli_userlane_text("task-1", "tu-1"))
+    assert task_registry.was_unparked("sess-1", "task-1") is True
+
+    # hang=False: the pump dedups (continue, no break), so the stream must END for
+    # the pump to terminate (mirrors test_pump_skips_already_notified_completion).
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # No duplicate unpark delivered — the pre-spent token dedups the straddle.
+    handler._deliver_unpark.assert_not_awaited()
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_delivers_when_no_in_stream_latch():
+    """Negative control: NO in-stream latch (at-rest completion) — the pump must
+    still deliver exactly once."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1 and pending[0]["task_id"] == "task-1"
+
+
+# ---------------------------------------------------------------------------
+# 7. Result-content fix — <result> carries the sub-agent's FINAL assistant
+#    message (all text blocks of the last assistant entry, joined), not the raw
+#    JSONL dump; falls back to the raw output file (restoring backgrounded-shell
+#    stdout) then the short summary.
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_result_is_final_assistant_text(tmp_path):
+    transcript = tmp_path / "agent-final.jsonl"
+    lines = [
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "STEP 1 working on it"}]},
+         "uuid": "a1", "timestamp": "t1"},
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "FINAL ANSWER HERE"}]},
+         "uuid": "a2", "timestamp": "t2"},
+    ]
+    transcript.write_text("\n".join(_json.dumps(x) for x in lines), encoding="utf-8")
+
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": str(transcript), "summary": "SHORT SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+
+    # <result> is the FINAL assistant message, not an earlier step nor raw JSONL.
+    assert "<result>FINAL ANSWER HERE</result>" in prompt
+    assert "STEP 1 working on it" not in prompt
+    # Raw transcript JSON must NOT be dumped into the prompt.
+    assert '"role": "assistant"' not in prompt
+    assert '{"type": "assistant"' not in prompt
+
+
+def test_build_prompt_joins_multiple_text_blocks_of_last_entry(tmp_path):
+    """The last assistant entry with TWO text blocks → both joined in <result>."""
+    transcript = tmp_path / "agent-multi.jsonl"
+    lines = [
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "EARLIER STEP"}]},
+         "uuid": "a1", "timestamp": "t1"},
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [
+             {"type": "text", "text": "PART ONE"},
+             {"type": "text", "text": "PART TWO"},
+         ]},
+         "uuid": "a2", "timestamp": "t2"},
+    ]
+    transcript.write_text("\n".join(_json.dumps(x) for x in lines), encoding="utf-8")
+
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": str(transcript), "summary": "SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+
+    assert "PART ONE" in prompt and "PART TWO" in prompt
+    assert "<result>PART ONE\nPART TWO</result>" in prompt
+    # Only the LAST entry's text — the earlier step is excluded.
+    assert "EARLIER STEP" not in prompt
+
+
+def test_build_prompt_restores_shell_stdout_via_raw_read(tmp_path):
+    """A backgrounded SHELL's output_file is plain text that parses to NO
+    assistant entries — the raw-read fallback must restore its stdout into
+    <result> (RED against the extract-only version, which lost it to summary)."""
+    out = tmp_path / "shell-out.txt"
+    out.write_text("SHELL STDOUT LINE 1\nSHELL STDOUT LINE 2\n", encoding="utf-8")
+
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": str(out), "summary": "SHORT SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+
+    assert "SHELL STDOUT LINE 1" in prompt
+    assert "SHELL STDOUT LINE 2" in prompt
+    # The raw stdout wins over the short summary.
+    assert "<result>SHORT SUMMARY</result>" not in prompt
+
+
+def test_build_prompt_falls_back_to_summary_when_unreadable():
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": "/nonexistent/path/does-not-exist.jsonl",
+        "summary": "SHORT SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+    assert "<result>SHORT SUMMARY</result>" in prompt

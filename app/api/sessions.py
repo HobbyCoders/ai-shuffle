@@ -182,14 +182,28 @@ def _adopt_preflight_sync(session: dict, project_id: str) -> tuple[Optional[str]
 
     warning: Optional[str] = None
     # Best-effort push check: only meaningful when we resolved onto a DIFFERENT
-    # local clone (a sibling) for a worktree-flagged session. No fetch here —
-    # this is a cheap, offline look at what the local clone already knows.
+    # local clone (a sibling) for a worktree-flagged session.
     try:
         resolved_via_sibling = local["id"] != project_id
         is_worktree_session = bool(session.get("worktree_branch") or session.get("worktree_id"))
         branch = session.get("worktree_branch")
         if resolved_via_sibling and is_worktree_session and branch:
             local_dir = get_project_working_dir(local)
+            # Freshen origin refs before deciding "unpushed". Without a fetch, a
+            # branch that WAS pushed from the other device but hasn't been fetched
+            # into this clone yet looks absent and yields a FALSE "hasn't been
+            # pushed" warning (PR #493 follow-up #4). This runs at adopt time (off
+            # the send hot path) and primes the rebind fetch cache so the first
+            # send doesn't fetch again (follow-up #1). A fetch failure here is
+            # non-fatal — fall through to the offline listing rather than block.
+            from app.core.worktree_manager import fetch_repo_cached
+            try:
+                fetch_repo_cached(git_service, local_dir, force=True)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Adopt preflight fetch failed for %s; using offline refs",
+                    local_dir, exc_info=True,
+                )
             # One listing covers both checks: include_remote=True returns local
             # branches by their bare name AND remote-tracking ones as "origin/<b>",
             # so local presence is `branch in all_names` and origin presence is

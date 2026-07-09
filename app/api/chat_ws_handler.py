@@ -231,17 +231,74 @@ _TASK_NOTIFICATION_NOTE = (
 )
 
 
+_MAX_TASK_RESULT_CHARS = 60_000
+
+
+def _extract_final_assistant_text(output_file: str) -> Optional[str]:
+    """Extract the sub-agent's FINAL assistant message from its JSONL transcript.
+
+    A terminal ``TaskNotificationMessage``'s ``output_file`` points at the
+    sub-agent's raw JSONL transcript (agent-*.jsonl shape). Dumping that whole
+    file verbatim as ``<result>`` (the old ``_read_task_output_file`` behaviour)
+    floods the parent's context with the entire transcript; the model only needs
+    the agent's final answer. Reuse the canonical agent-transcript parser
+    (``parse_agent_history``) and return the LAST assistant entry's text — JOINED
+    across all of that entry's text blocks, not just the trailing block. Returns
+    ``None`` on any failure / empty or unreadable transcript so the caller can
+    fall back to the raw output file / short summary.
+
+    ``transform_agent_entries`` emits ONE ``{"type": "text", ...}`` child per text
+    block, each id'd ``agent-text-<entry-uuid>`` — so every text block from the
+    same assistant entry shares one ``id``. Grouping the trailing text children by
+    that shared id reconstructs the last assistant message's full text.
+    """
+    if not output_file:
+        return None
+    from pathlib import Path
+    from app.core.jsonl_parser import parse_agent_history
+
+    try:
+        children = parse_agent_history(Path(output_file))
+    except Exception:
+        logger.debug(
+            "failed to parse task output_file %r for final assistant text",
+            output_file,
+            exc_info=True,
+        )
+        return None
+
+    text_children = [
+        c for c in children
+        if c.get("type") == "text" and (c.get("content") or "").strip()
+    ]
+    if not text_children:
+        return None
+    # The last assistant entry = the source entry of the final text child. All its
+    # text blocks share the same ``id`` (embeds the entry uuid); join them in order.
+    last_id = text_children[-1].get("id")
+    parts = [
+        c.get("content") or "" for c in text_children if c.get("id") == last_id
+    ]
+    joined = "\n".join(p for p in parts if p.strip())
+    return joined or None
+
+
 def _build_task_notification_prompt(pending: list) -> str:
     """Build ONE synthesized user prompt consolidating all pending notifications.
 
     Mirrors Claude Code's reference ``<task-notification>`` contract so the parent
-    wakes with each sub-agent's FULL result. The full result text is read off the
-    local disk via ``query_engine._read_task_output_file`` (the only way to obtain
-    it — the SDK message carries only a summary + path). The returned string always
-    contains the literal ``<task-notification>`` substring, so the existing user-
-    message filters keep it from rendering as a chat bubble.
+    wakes with each sub-agent's result. ``<result>`` carries the sub-agent's FINAL
+    assistant message, extracted from its transcript via
+    ``_extract_final_assistant_text`` (the raw transcript file is huge — the model
+    only needs the final answer). When the transcript yields no assistant text it
+    falls back to the RAW output-file read (``query_engine._read_task_output_file``
+    — this restores backgrounded SHELL stdout, whose plain-text output_file parses
+    to no assistant entries), then the short ``summary``. The returned string
+    always contains the literal ``<task-notification>`` substring, so the existing
+    user-message filters keep it from rendering as a chat bubble.
     """
     from app.core.query_engine import _read_task_output_file
+    from app.core.query_streaming import truncate_large_payload
 
     def _esc(value: Any) -> str:
         return "" if value is None else str(value)
@@ -249,7 +306,17 @@ def _build_task_notification_prompt(pending: list) -> str:
     blocks: List[str] = []
     for note in pending:
         output_file = note.get("output_file") or ""
-        result_text = _read_task_output_file(output_file)
+        # Fallback chain: parsed final assistant text → raw output-file read
+        # (backgrounded-shell stdout) → short summary → "".
+        result_text = _extract_final_assistant_text(output_file)
+        if not result_text:
+            result_text = _read_task_output_file(output_file) or None
+        if not result_text:
+            result_text = note.get("summary") or ""
+        if result_text and len(result_text) > _MAX_TASK_RESULT_CHARS:
+            # truncate via the shared helper (matches query_engine's own use)
+            # instead of a naive head-slice.
+            result_text = truncate_large_payload(result_text, _MAX_TASK_RESULT_CHARS)
         usage = note.get("usage") or {}
         usage_xml = (
             "  <usage>\n"
@@ -422,7 +489,9 @@ async def _deliver_unpark_impl(
         ctx.info(logger, "Unpark: a live turn already owns the session — yielding (no clobber)")
         return False
 
-    synth_prompt = _build_task_notification_prompt(pending)
+    # Runs the transcript parse + file reads off the event loop (matches the
+    # run_sync pattern used for the DB write just below).
+    synth_prompt = await run_sync(_build_task_notification_prompt, pending)
 
     ctx.debug(
         logger,
@@ -1029,6 +1098,14 @@ async def _drain_notifications_impl(
                 task_id = frame.get("task_id")
                 output_file = frame.get("output_file")
                 signature = frame.get("uuid") or f"{output_file}:{status}"
+                # Straddle dedup: a sub-agent that came to rest MID-turn had its
+                # <task-notification> injected in-stream by the CLI as a user-lane
+                # steering message; query_engine._latch_cli_task_notifications
+                # already spent mark_unparked at the source. So the typed
+                # notification reaching the pump AFTER the parent ResultMessage is
+                # suppressed here by the EXISTING per-task dedup below (no store
+                # scans, no table reads, no end_streaming timing hazard).
+                #
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
                 # for its whole life. The newer CLI re-emits a terminal notification
                 # with a FRESH uuid each time the agent comes to rest, which used to

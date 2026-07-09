@@ -484,6 +484,61 @@ def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
         return content[:max_chars] + "\n…[truncated]"
 
 
+def _latch_cli_task_notifications(session_id: str, text: str) -> None:
+    """Spend the one-unpark token for every ``<task-notification>`` the CLI just
+    injected in-stream (the duplicate-completion straddle fix).
+
+    When a background sub-agent comes to rest MID-turn the CLI enqueues its OWN
+    ``<task-notification>`` user-lane steering message into the model's context —
+    it flows through as a plain-text ``UserMessage`` (AI Shuffle deliberately does
+    not yield it as an event). The model therefore already acknowledged the
+    completion THIS turn. The typed ``TaskNotificationMessage`` can still reach the
+    between-turns drain pump AFTER the parent ``ResultMessage``, so the pump would
+    re-deliver the same completion as a follow-up turn. Spending ``mark_unparked``
+    the moment we observe the CLI's user-lane message makes the pump's existing
+    per-task dedup suppress that straddle duplicate — no store scans, no table
+    dependency, no ``end_streaming`` timing hazard.
+
+    ``text`` may contain MULTIPLE ``<task-notification>`` blocks; every one is
+    handled. ``mark_unparked`` is idempotent (set-add), so re-latching a task —
+    including when the app's OWN synthetic unpark prompt flows back through as a
+    ``UserMessage`` on a follow-up turn — is a harmless no-op.
+    """
+    if not session_id or not text or "<task-notification>" not in text:
+        return
+    from app.core.jsonl_parser import _extract_task_notification_field
+
+    # Split on the opening tag so each fragment holds at most one notification.
+    for fragment in text.split("<task-notification>")[1:]:
+        block = "<task-notification>" + fragment
+        task_id = _extract_task_notification_field(block, "task-id")
+        tool_use_id = _extract_task_notification_field(block, "tool-use-id")
+        resolved = task_id
+        if not resolved and tool_use_id:
+            # No <task-id> on this block — resolve via the parent launch
+            # tool_use_id the registry records on each task record.
+            for rec in task_registry.get_all(session_id):
+                if rec.get("toolUseId") == tool_use_id:
+                    resolved = rec.get("id")
+                    break
+        if not resolved:
+            logger.info(
+                "unpark-decision path=in-stream-text session=%s task_id=None "
+                "tool_use_id=%s decision=cli-delivered-userlane-skip-no-task-id",
+                session_id,
+                tool_use_id,
+            )
+            continue
+        task_registry.mark_unparked(session_id, resolved)
+        logger.info(
+            "unpark-decision path=in-stream-text session=%s task_id=%s "
+            "tool_use_id=%s decision=cli-delivered-userlane",
+            session_id,
+            resolved,
+            tool_use_id,
+        )
+
+
 def _task_notification_frame(message: Any) -> Dict[str, Any]:
     """Build the wire frame for a terminal ``TaskNotificationMessage``.
 
@@ -2861,6 +2916,11 @@ async def stream_to_websocket(
                 if isinstance(message.content, str):
                     content = message.content
                     logger.debug(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
+                    # Straddle latch: if the CLI injected a <task-notification>
+                    # user-lane steering message in-stream, spend mark_unparked now
+                    # so the between-turns drain pump won't re-deliver it.
+                    if content and "<task-notification>" in content:
+                        _latch_cli_task_notifications(session_id, content)
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -2885,6 +2945,13 @@ async def stream_to_websocket(
                     # Handle TextBlock - may contain local command output
                     if isinstance(block, TextBlock):
                         text = block.text
+                        # Straddle latch: the CLI injects a background sub-agent's
+                        # <task-notification> as a mid-turn user-lane steering
+                        # message. Spend mark_unparked the moment it is observed so
+                        # the drain pump's per-task dedup suppresses the straddle
+                        # duplicate (see _latch_cli_task_notifications).
+                        if text and "<task-notification>" in text:
+                            _latch_cli_task_notifications(session_id, text)
                         # Check for local command output (e.g., /context, /compact)
                         if "<local-command-stdout>" in text:
                             match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
