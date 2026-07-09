@@ -161,6 +161,41 @@ class TestSwitch:
             svc.switch_account("acct-b")
             inval.assert_called()
 
+    def test_switch_bumps_usage_generation(self, mock_db, oauth_tmp):
+        """A successful switch must invalidate any in-flight usage poll so the
+        indicator can re-poll the new account without an old poll overwriting it.
+        """
+        from app.core import claude_accounts as svc
+        from app.core.usage_limits import usage_limits_monitor
+        from app.db import database as db
+
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A"))
+        svc.seed_from_credentials_file()
+
+        b_oauth = _oauth_dict(access="B")
+        db.create_claude_account(
+            account_id="acct-b", name="B",
+            credentials=encryption.encrypt_value(json.dumps(b_oauth)),
+            credential_fingerprint=svc._fingerprint(b_oauth),
+            expires_at=b_oauth["expiresAt"], has_refresh_token=True,
+        )
+
+        before = usage_limits_monitor.current_generation()
+        assert svc.switch_account("acct-b")["success"]
+        # Strictly greater (bump may jump to the current epoch, not just +1).
+        assert usage_limits_monitor.current_generation() > before
+
+    def test_failed_switch_does_not_bump_generation(self, mock_db, oauth_tmp):
+        from app.core import claude_accounts as svc
+        from app.core.usage_limits import usage_limits_monitor
+        from app.db import database as db
+
+        _set_key(db)
+        before = usage_limits_monitor.current_generation()
+        assert "error" in svc.switch_account("missing")
+        assert usage_limits_monitor.current_generation() == before
+
     def test_switch_syncs_back_diverged_outgoing_file_first(self, mock_db, oauth_tmp):
         """Before overwriting, the outgoing account's rotated token is captured."""
         from app.core import claude_accounts as svc

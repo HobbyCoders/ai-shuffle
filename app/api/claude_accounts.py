@@ -5,6 +5,7 @@ Admin-gated CRUD + switching for Claude accounts. Mounted under
 display metadata plus a per-install ``is_active`` flag.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -22,6 +23,24 @@ router = APIRouter(
     prefix="/api/v1/auth/claude/accounts",
     tags=["Claude Accounts"],
 )
+
+
+def _schedule_usage_refresh() -> None:
+    """Fire-and-forget an immediate usage re-poll + broadcast after a switch.
+
+    The active account just changed, so the cached usage snapshot belongs to the
+    old account. Kick off a fresh poll (which broadcasts the new snapshot to all
+    connected clients) without blocking the switch response on the network fetch.
+    Best-effort: never let scheduling failures surface to the caller.
+    """
+    try:
+        from app.core.usage_limits import usage_limits_monitor
+        asyncio.create_task(usage_limits_monitor.refresh_and_broadcast())
+    except RuntimeError:
+        # No running event loop (e.g. sync test context) — skip silently.
+        pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Could not schedule usage refresh: {e}")
 
 
 def _epoch_ms(value) -> int | None:
@@ -127,10 +146,15 @@ async def complete_add_account(request: Request, token: str = Depends(require_ad
             detail=f"Could not add account: {err}",
         )
 
+    active_account_id = accounts.get_active_account_id()
+    # If this newly-added account became active, re-poll usage for it.
+    if make_active:
+        _schedule_usage_refresh()
+
     return {
         "success": True,
         "account": result.get("account"),
-        "active_account_id": accounts.get_active_account_id(),
+        "active_account_id": active_account_id,
     }
 
 
@@ -156,6 +180,8 @@ async def activate_account(account_id: str, token: str = Depends(require_admin))
             )
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=f"Could not switch account: {err}")
+    # Re-poll usage for the newly-active account and broadcast to all clients.
+    _schedule_usage_refresh()
     return {"success": True, "active_account_id": result["active_account_id"]}
 
 

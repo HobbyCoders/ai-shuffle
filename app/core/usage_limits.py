@@ -151,12 +151,40 @@ class UsageLimitsMonitor:
         self._available: bool = False
         # Log endpoint failures at WARNING only once per failure streak.
         self._warned: bool = False
+        # Monotonic tag on every snapshot. Bumped when the active account
+        # switches so an in-flight poll (started against the OLD account) can be
+        # detected and discarded instead of overwriting the new account's data,
+        # and so clients can drop out-of-order snapshots.
+        #
+        # Seeded from the epoch clock (NOT 0) so that after a backend restart
+        # the very first generation already exceeds anything the previous
+        # process broadcast. An open browser tab keeps its last-seen generation
+        # in memory; a near-0 restart seed would make it drop every
+        # post-restart snapshot and wedge stale until a manual reload.
+        self._generation: int = int(time.time())
+
+    def current_generation(self) -> int:
+        return self._generation
+
+    def bump_generation(self) -> int:
+        """Invalidate any in-flight fetch and tag future snapshots.
+
+        Called synchronously on a successful account switch. A poll that began
+        before this bump will see its captured generation differ from the
+        current one at commit time and discard its (now-stale) result.
+
+        Strictly increases AND keeps pace with the epoch clock, so generations
+        stay monotonic even across a rapid restart-then-switch sequence.
+        """
+        self._generation = max(self._generation + 1, int(time.time()))
+        return self._generation
 
     def _snapshot(self) -> Dict[str, Any]:
         return {
             "windows": list(self._windows),
             "fetched_at": self._fetched_at or None,
             "available": self._available,
+            "generation": self._generation,
         }
 
     async def fetch(self) -> Dict[str, Any]:
@@ -166,6 +194,11 @@ class UsageLimitsMonitor:
         snapshot without spamming logs. On endpoint failure keeps the last good
         snapshot and logs once at WARNING.
         """
+        # Tag this poll with the generation it started under. A concurrent
+        # account switch bumps the generation; if it changes before we commit,
+        # this poll's result is stale and must be discarded (see below).
+        gen = self._generation
+
         try:
             # Keep the on-disk token fresh (no-op in API-key mode / when valid).
             await direct_oauth.ensure_fresh_credentials()
@@ -195,6 +228,16 @@ class UsageLimitsMonitor:
                         resp.status_code,
                     )
                     self._warned = True
+                return self._snapshot()
+
+            if gen != self._generation:
+                # The active account switched while this poll was in flight.
+                # Discard the (old account's) result rather than overwriting the
+                # new account's data; the post-switch poll owns the snapshot.
+                logger.debug(
+                    "Usage-limits fetch discarded: generation changed %s -> %s",
+                    gen, self._generation,
+                )
                 return self._snapshot()
 
             data = resp.json()

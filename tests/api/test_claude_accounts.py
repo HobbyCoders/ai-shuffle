@@ -56,6 +56,47 @@ class TestRegisteredAndAuthed:
         resp = authenticated_client.post(f"{ROOT}/missing/activate")
         assert resp.status_code == 404
 
+    def test_activate_schedules_usage_refresh(self, authenticated_client, mock_db, oauth_tmp):
+        """A successful activate must schedule a fresh usage re-poll+broadcast
+        so the limits indicator reflects the newly-active account immediately.
+        """
+        from unittest.mock import patch
+        from app.db import database as db
+        import json
+
+        encryption.set_encryption_key("pw", db)
+        oauth_tmp.write_credentials_dict({
+            "accessToken": "atok", "refreshToken": "rtok",
+            "expiresAt": 9999999999000, "scopes": ["user:inference"],
+            "subscriptionType": None,
+        })
+        db.create_claude_account(
+            account_id="acct-x", name="X",
+            credentials=encryption.encrypt_value(json.dumps({
+                "accessToken": "atok", "refreshToken": "rtok",
+                "expiresAt": 9999999999000,
+            })),
+            credential_fingerprint="fp", expires_at=9999999999000,
+            has_refresh_token=True,
+        )
+
+        with patch("app.api.claude_accounts._schedule_usage_refresh") as sched:
+            resp = authenticated_client.post(f"{ROOT}/acct-x/activate")
+
+        assert resp.status_code == 200, resp.text
+        sched.assert_called_once()
+
+    def test_activate_missing_does_not_schedule(self, authenticated_client, mock_db):
+        from unittest.mock import patch
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        with patch("app.api.claude_accounts._schedule_usage_refresh") as sched:
+            resp = authenticated_client.post(f"{ROOT}/missing/activate")
+
+        assert resp.status_code == 404
+        sched.assert_not_called()
+
     def test_delete_missing_account(self, authenticated_client, mock_db):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)

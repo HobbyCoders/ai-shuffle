@@ -38,6 +38,12 @@ interface RateLimitState {
 	windows: Record<string, UsageWindow>;
 	/** Whether the backend currently has a usable Claude credential. */
 	available: boolean;
+	/**
+	 * True between an account switch and the arrival of the fresh snapshot for
+	 * the new account. The indicator dims itself so we never present the OLD
+	 * account's numbers as if they were current. Runtime-only (not persisted).
+	 */
+	stale: boolean;
 }
 
 /** Live SDK `rate_limit` event payload (utilization is a 0–1 fraction). */
@@ -60,6 +66,12 @@ export interface UsageSnapshot {
 	windows: SnapshotWindow[];
 	fetched_at?: number | null;
 	available: boolean;
+	/**
+	 * Monotonic generation tag from the backend. Bumped on every account switch.
+	 * Lets us drop a snapshot from an older generation that arrives out of order
+	 * after a newer one (e.g. a slow in-flight poll completing post-switch).
+	 */
+	generation?: number | null;
 }
 
 const STORAGE_KEY = 'usage-limit-windows';
@@ -174,7 +186,16 @@ function _saveWindows(windows: Record<string, UsageWindow>) {
 const _store = createStore<RateLimitState>({
 	windows: _loadWindows(),
 	available: false,
+	stale: false,
 });
+
+/**
+ * Highest snapshot generation seen this session. In-memory (NOT persisted) so a
+ * page reload — or a backend restart, which resets its counter to 0 — starts
+ * fresh and never permanently rejects post-restart snapshots. A snapshot with a
+ * strictly-lower generation is a stale straggler and is discarded.
+ */
+let _lastGeneration = -1;
 
 export const rateLimit = {
 	get current(): RateLimitState {
@@ -201,17 +222,37 @@ export const rateLimit = {
 		_store.update((s) => {
 			const windows = { ...s.windows, [rate_limit_type]: win };
 			_saveWindows(windows);
-			return { windows, available: true };
+			return { ...s, windows, available: true };
 		});
+	},
+
+	/**
+	 * Mark the indicator stale — call at the start of an account switch so it
+	 * dims until the fresh snapshot for the new account arrives.
+	 */
+	markStale(): void {
+		_store.update((s) => ({ ...s, stale: true }));
 	},
 
 	/** Apply a polled snapshot (WS `usage_snapshot` or REST `/usage/limits`). */
 	applySnapshot(snapshot: UsageSnapshot): void {
+		const gen = snapshot.generation;
+		if (gen == null) {
+			// No generation tag (legacy backend / tests). Treat as authoritative
+			// and reset the guard so it can't wedge on a stale high-water mark.
+			_lastGeneration = -1;
+		} else {
+			// Discard a straggler from an older generation (out-of-order arrival).
+			if (gen < _lastGeneration) return;
+			_lastGeneration = gen;
+		}
+
 		// When the backend has no usable credential it reports available=false
 		// with no windows — keep the last-known windows rather than flashing the
-		// pill away, but reflect availability.
+		// pill away, but reflect availability. A fresh snapshot resolves any
+		// pending switch, so clear the stale flag either way.
 		if (!snapshot.available) {
-			_store.update((s) => ({ ...s, available: false }));
+			_store.update((s) => ({ ...s, available: false, stale: false }));
 			return;
 		}
 		const now = Date.now();
@@ -227,6 +268,6 @@ export const rateLimit = {
 			};
 		}
 		_saveWindows(windows);
-		_store.update(() => ({ windows, available: true }));
+		_store.update(() => ({ windows, available: true, stale: false }));
 	},
 };

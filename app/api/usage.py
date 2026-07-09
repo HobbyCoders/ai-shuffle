@@ -32,6 +32,8 @@ class UsageSnapshot(BaseModel):
     windows: List[UsageWindow] = []
     fetched_at: Optional[float] = None
     available: bool = False
+    # Monotonic tag; lets clients drop out-of-order snapshots after a switch.
+    generation: Optional[int] = None
 
 
 @router.get("/limits", response_model=UsageSnapshot)

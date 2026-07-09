@@ -26,6 +26,7 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { rateLimit } from '$lib/stores/rate-limit';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -490,6 +491,9 @@
 	async function activateAccount(id: string) {
 		switchingAccountId = id;
 		accountsError = '';
+		// Dim the usage indicator immediately — the shown numbers belong to the
+		// outgoing account until the backend broadcasts the new one's snapshot.
+		rateLimit.markStale();
 		try {
 			await activateClaudeAccount(id);
 			await loadClaudeAccounts();
