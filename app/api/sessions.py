@@ -924,6 +924,12 @@ async def get_live_session(
                     "metadata",
                 )
 
+                # Per-message profile resolution — same ordered-queue merge as
+                # GET /{id}: JSONL entries carry no DB row id, so each user
+                # message consumes its content's queue built from the DB rows.
+                from app.core.cost_utils import build_profile_queues
+                profile_queues = build_profile_queues(session_id)
+
                 # Transform to live format
                 for m in jsonl_messages:
                     msg = {
@@ -937,6 +943,11 @@ async def get_live_session(
                         value = m.get(field)
                         if value is not None:
                             msg[field] = value
+
+                    if msg["role"] == "user":
+                        queue = profile_queues.get(msg["content"])
+                        if queue:
+                            msg["profile_id"] = queue.popleft()
 
                     messages.append(msg)
 

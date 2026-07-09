@@ -983,6 +983,12 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
 	if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;
 
+	// Per-message profile (user messages): lets MessageArea label each bubble
+	// with the profile that produced it instead of the session's current one.
+	// Server emits camelCase `profileId`; snake_case kept as a fallback.
+	if (m.profileId) msg.profileId = m.profileId as string;
+	else if (m.profile_id) msg.profileId = m.profile_id as string;
+
 	if (m.thinkingTokens !== undefined) msg.thinkingTokens = m.thinkingTokens as number;
 
 	if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
