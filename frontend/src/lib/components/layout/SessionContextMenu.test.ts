@@ -105,6 +105,36 @@ describe('SessionContextMenu', () => {
 		expect(menu.style.top).toBe('8px');
 	});
 
+	// --- Regression: panel hugs its content, never stretches to the viewport ---
+	// The menu renders as a flow sibling of its host panel, so an ancestor layout
+	// rule such as MainPanel's `.feature-panel > * { height: 100% }` used to resolve
+	// against the viewport (the fixed menu's containing block) and stretch the panel
+	// to full screen height — items at the top, a huge empty area below. jsdom does
+	// no layout, so we assert the structural guard: the menu pins its own height to
+	// `auto` inline (inline declarations win the cascade over any non-!important
+	// ancestor rule) and never carries a viewport-relative height.
+	it('does not adopt a full-viewport height from an ancestor `> *` layout rule', () => {
+		// Reproduce the exact offending ancestor rule.
+		const style = document.createElement('style');
+		style.textContent = '.feature-panel-stretch > * { flex: 1; height: 100%; }';
+		document.head.appendChild(style);
+
+		const { container } = open({ x: 100, y: 100 });
+		// The menu is now a direct `> *` child of a matching ancestor.
+		container.classList.add('feature-panel-stretch');
+
+		const menu = container.querySelector('.ctx-menu') as HTMLElement;
+
+		// The inline defense is present and pins the height to content.
+		expect(menu.style.height).toBe('auto');
+		// No viewport-relative sizing leaks into the panel's inline style.
+		expect(menu.getAttribute('style')).not.toMatch(/100vh|100%/);
+		// And the cascade resolves height to the inline `auto`, not the ancestor 100%.
+		expect(getComputedStyle(menu).height).not.toBe('100%');
+
+		style.remove();
+	});
+
 	// --- Dismissal ---
 	it('closes on Escape', async () => {
 		const onClose = vi.fn();

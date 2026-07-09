@@ -133,12 +133,18 @@
 		oncontextmenu={(e) => { e.preventDefault(); onClose(); }}
 	></div>
 
+	<!-- height:auto is a defensive inline override: this fixed overlay renders as a
+	     flow sibling of its host panel, so an ancestor layout rule such as
+	     `.feature-panel > * { height: 100% }` (MainPanel) would otherwise resolve
+	     against the viewport and stretch the menu to full screen height. Inline
+	     declarations win the cascade over non-!important stylesheet rules, so this
+	     keeps the panel hugging its items regardless of where it's mounted. -->
 	<div
 		bind:this={menuEl}
 		bind:clientWidth={menuW}
 		bind:clientHeight={menuH}
 		class="ctx-menu"
-		style="left: {left}px; top: {top}px;"
+		style="left: {left}px; top: {top}px; height: auto;"
 		role="menu"
 		aria-label={ariaLabel}
 		tabindex="-1"
