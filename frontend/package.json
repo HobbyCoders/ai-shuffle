@@ -9,8 +9,8 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "prebuild": "node scripts/stamp-sw-version.mjs",
     "build": "svelte-kit sync && vite build",
+    "postbuild": "node scripts/stamp-sw-version.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",

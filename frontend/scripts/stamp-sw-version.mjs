@@ -2,29 +2,32 @@
 /**
  * Stamp the service worker CACHE_VERSION so every build busts the SW cache.
  *
- * Runs as the npm "prebuild" step (before `vite build`). Rewrites the
- * `const CACHE_VERSION = ...;` line in static/sw.js with a value derived from
+ * Runs as the npm "postbuild" step (after `vite build`). Rewrites the
+ * `const CACHE_VERSION = ...;` line in build/sw.js (the build OUTPUT copy,
+ * not the tracked static/sw.js source) with a value derived from
  * package.json version + git short SHA, e.g. "1.2.1-a2850458". If any single
  * build changes app code, the SHA changes → CACHE_VERSION changes → clients
  * drop the old cache on activate.
  *
  * Pure Node (no bash) so it works identically on Windows, Linux, and in the
- * Docker frontend-builder stage. Never fails the build: if git is unavailable
- * (e.g. a source tarball with no .git), it falls back to the package version
- * plus a short timestamp so the value is still unique per build.
+ * Docker frontend-builder stage. Falls back to the package version plus a
+ * short timestamp if git is unavailable (e.g. a source tarball with no .git),
+ * so the stamp is still unique per build.
  *
- * NOTE: the committed static/sw.js keeps its pinned integer default; this
- * script overwrites it only in the working tree during a build. Do not commit
- * the stamped value — it is build output.
+ * Stamping happens post-build, in build/sw.js only. This keeps the tracked
+ * frontend/static/sw.js source file untouched (it stays at its committed
+ * 'dev' placeholder) so `git status` is clean after every build. Deploy
+ * scripts that copy frontend/build/* to app/static still ship the real
+ * stamped value to production unchanged.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(__dirname, '..');
-const swPath = join(frontendRoot, 'static', 'sw.js');
+const swPath = join(frontendRoot, 'build', 'sw.js');
 const pkgPath = join(frontendRoot, 'package.json');
 
 function shortSha() {
@@ -43,6 +46,14 @@ function shortSha() {
 }
 
 function main() {
+  if (!existsSync(swPath)) {
+    console.error(
+      `[stamp-sw] ${swPath} not found — expected the build output copy of sw.js. ` +
+        'Did `vite build` run (and copy static/ into build/) before this postbuild step?'
+    );
+    process.exit(1);
+  }
+
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
   const version = pkg.version || '0.0.0';
   const sha = shortSha();
@@ -51,12 +62,12 @@ function main() {
   let sw = readFileSync(swPath, 'utf8');
   const re = /const CACHE_VERSION = .*;/;
   if (!re.test(sw)) {
-    console.error('[stamp-sw] CACHE_VERSION line not found in sw.js — skipping stamp');
-    process.exit(0); // never fail the build over a missing stamp
+    console.error(`[stamp-sw] CACHE_VERSION line not found in ${swPath}`);
+    process.exit(1);
   }
   sw = sw.replace(re, `const CACHE_VERSION = '${stamp}';`);
   writeFileSync(swPath, sw);
-  console.log(`[stamp-sw] CACHE_VERSION stamped to ${stamp}`);
+  console.log(`[stamp-sw] CACHE_VERSION stamped to ${stamp} in build/sw.js`);
 }
 
 main();

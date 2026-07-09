@@ -2,7 +2,8 @@
 // Version: 2.0.0
 // Auto-update enabled - clients reload automatically on new version
 
-const CACHE_VERSION = 9;
+// Real value is stamped into build/sw.js by scripts/stamp-sw-version.mjs (postbuild); this placeholder is never used in production.
+const CACHE_VERSION = 'dev';
 const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
