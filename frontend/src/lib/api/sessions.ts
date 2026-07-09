@@ -109,6 +109,14 @@ export interface ForkSessionResponse {
 	status: string;
 }
 
+export interface AdoptSessionResponse {
+	session_id: string;
+	instance_id: string;
+	/** True when ownership was re-pointed here; false when already local (no-op). */
+	adopted: boolean;
+	status: string;
+}
+
 // ============================================================================
 // Session API Functions
 // ============================================================================
@@ -181,8 +189,21 @@ export async function exportSession(
  * @param sessionId The session to fork from
  * @param messageIndex The 0-based message index to fork after
  */
-export async function forkSession(sessionId: string, messageIndex: number): Promise<ForkSessionResponse> {
-	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, { message_index: messageIndex });
+export async function forkSession(sessionId: string, messageIndex?: number): Promise<ForkSessionResponse> {
+	// Omitting messageIndex forks the ENTIRE session (the sessions-board "Fork"
+	// action). Passing an index forks up to and including that display message.
+	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, {
+		message_index: messageIndex ?? null
+	});
+}
+
+/**
+ * Adopt a session created by another install so it can resume on this device
+ * ("Resume here"). No-ops server-side when the session is already local. Rejects
+ * with 409 while the owning device is still online (it may be streaming there).
+ */
+export async function adoptSession(sessionId: string): Promise<AdoptSessionResponse> {
+	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, {});
 }
 
 /** Result of stopping one in-flight background task. */

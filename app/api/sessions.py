@@ -87,6 +87,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     ImportJSONLResponse,
     ForkSessionRequest,
     ForkSessionResponse,
+    AdoptSessionResponse,
     CreateWorktreeSessionRequest,
     WorktreeSessionResponse,
 )
@@ -121,6 +122,82 @@ router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
 router.include_router(cloud_router)
+
+
+# ============================================================================
+# Cross-device adopt ("Resume here")
+# ============================================================================
+
+@router.post("/{session_id}/adopt", response_model=AdoptSessionResponse)
+async def adopt_session_endpoint(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Take over a session created by another install so it can resume locally.
+
+    On a shared database every install's sessions are visible, but a session is
+    "owned" by the install whose ``instance_id`` is on the row — the send /
+    interrupt path resolves the working dir and worktree against the local
+    machine, so a foreign session can't actually be driven from here until it is
+    adopted. This re-points ``instance_id`` to this install.
+
+    Semantics:
+      * Already local (this install, or a legacy NULL owner) → no-op, returns
+        ``adopted=False`` so the caller just opens it.
+      * Owned elsewhere but that device is still **online** (heartbeat within the
+        last ~90s) → refuse with 409: it may be actively streaming there, and two
+        installs driving one SDK session at once corrupts the transcript. The
+        user should stop it on that device (or wait for it to go offline) first.
+      * Owned elsewhere and that device is offline / unregistered → adopt it.
+
+    Worktree sessions keep working after adoption: only the owner column changes,
+    so the existing ``recreate_worktree`` adopt-on-disk path rebinds the worktree
+    on the next resume (``sdk_session_id`` is preserved, so history survives).
+    """
+    from app.core.config import settings
+
+    session = await require_session(request, session_id)
+
+    me = settings.effective_instance_id
+    owner = session.get("instance_id")
+
+    # Already ours (or legacy NULL) — nothing to adopt.
+    if not owner or owner == me:
+        return AdoptSessionResponse(
+            session_id=session_id,
+            instance_id=me,
+            adopted=False,
+            status="already_local",
+        )
+
+    # Owned by another install: refuse while that device is live so we never
+    # wrestle an actively-streaming session away mid-turn.
+    install = await run_sync(database.get_install, owner)
+    if install and install.get("online"):
+        device = install.get("device_name") or "another device"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This session is active on {device}. Stop it there, or wait "
+                "until that device goes offline, before resuming it here."
+            ),
+        )
+
+    updated = await run_sync(database.adopt_session, session_id, me)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    logger.info("Adopted session %s from install %s -> %s", session_id, owner, me)
+    return AdoptSessionResponse(
+        session_id=session_id,
+        instance_id=me,
+        adopted=True,
+        status="adopted",
+    )
 
 
 # ============================================================================

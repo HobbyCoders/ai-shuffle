@@ -578,6 +578,31 @@ def set_session_cloud_branch(session_id: str, cloud_branch: Optional[str]) -> bo
         return cursor.rowcount > 0
 
 
+def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
+    """Re-point a session's owning install to ``instance_id`` (cross-device adopt).
+
+    Backs the sessions-board "Resume here" action: on a shared database a
+    session created by another install can be taken over locally by rewriting
+    its ``instance_id`` to this install's id. Only the owning-install column is
+    touched — ``sdk_session_id`` / ``worktree_id`` / ``worktree_branch`` stay
+    put so history resumes and the existing ``recreate_worktree`` adopt-on-disk
+    path (worktree_manager) rebinds any worktree. ``updated_at`` IS bumped so the
+    adopted session surfaces at the top of the board on the new device. Returns
+    the updated row, or ``None`` if no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET instance_id = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
+            (instance_id, now, session_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 
