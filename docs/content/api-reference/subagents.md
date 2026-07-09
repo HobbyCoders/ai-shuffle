@@ -30,7 +30,7 @@ curl http://localhost:8000/api/v1/subagents \
     "description": "Reads and summarizes .jsonl chat history files",
     "prompt": "You are a chat history summarizer...",
     "tools": ["Read", "Grep", "Glob"],
-    "model": "claude-haiku-4-5",
+    "model": "haiku",
     "is_builtin": true,
     "is_modified": false,
     "created_at": "2025-01-01T00:00:00Z"
@@ -57,7 +57,7 @@ curl -X POST http://localhost:8000/api/v1/subagents \
     "description": "Reviews code changes for bugs, security issues, and best practices",
     "prompt": "You are an expert code reviewer. Analyze the code carefully and provide feedback on:\n1. Bugs and logic errors\n2. Security vulnerabilities\n3. Performance issues\n4. Code style and best practices\n\nBe specific and provide line numbers.",
     "tools": ["Read", "Grep", "Glob"],
-    "model": "claude-sonnet-4-6"
+    "model": "sonnet"
   }'
 ```
 
@@ -69,7 +69,7 @@ curl -X POST http://localhost:8000/api/v1/subagents \
 | `description` | string | Yes | When to use this agent (shown to Claude) |
 | `prompt` | string | Yes | System prompt for the subagent |
 | `tools` | string[] | No | Allowed tools (null = inherit all from parent) |
-| `model` | string | No | Model override: a canonical model id (e.g. `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-8`), or null to inherit. Legacy slugs (`haiku`, `sonnet`, `opus`) are still accepted and normalized to the canonical id. |
+| `model` | string | No | Model override: a preset shorthand (`haiku`, `sonnet`, `opus`, `fable`), any custom model id (passed through unchanged), or null to inherit. Legacy full model ids (`claude-sonnet-4-6`, `claude-opus-4-8`, etc.) are still recognized: the app displays them as the matching shorthand and rewrites them to it the next time the subagent is saved from the UI. |
 
 ### PUT /api/v1/subagents/{subagent_id}
 
@@ -109,12 +109,13 @@ curl -X POST http://localhost:8000/api/v1/subagents/chat-history-summarizer/reve
 
 | Model | Best For | Cost |
 |-------|----------|------|
-| `claude-haiku-4-5` | Fast, simple tasks | Lowest |
-| `claude-sonnet-4-6` | Balanced capability | Medium |
-| `claude-opus-4-8` | Complex reasoning | Highest |
+| `haiku` | Fast, simple tasks | Lowest |
+| `sonnet` | Balanced capability | Medium |
+| `opus` | Complex reasoning | High |
+| `fable` | Hardest reasoning, long-running tasks | Highest |
 | `null` | Inherit from parent session | Varies |
 
-Legacy short slugs (`haiku`, `sonnet`, `opus`) are still accepted on input and normalized to the corresponding canonical id.
+Any other string is treated as a custom model ID and passed through unchanged. Legacy full model IDs (`claude-sonnet-4-6`, `claude-opus-4-8`, etc.) are still recognized: the app displays them as the matching shorthand and rewrites them to it the next time the subagent is saved from the UI.
 
 ### Tool Restrictions
 
@@ -130,6 +131,6 @@ Common tool subsets:
 
 | ID | Purpose | Default Model |
 |----|---------|---------------|
-| `chat-history-summarizer` | Summarize .jsonl chat histories | claude-haiku-4-5 |
+| `chat-history-summarizer` | Summarize .jsonl chat histories | haiku |
 
 Built-in subagents can be customized (PUT) and reverted (revert endpoint).

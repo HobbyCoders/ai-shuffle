@@ -58,7 +58,7 @@ AI Shuffle ships with five built-in subagents:
 - **ID:** `Explore`
 - **Purpose:** Fast, read-only agent specialized for exploring codebases -- finding files by pattern, searching code, and answering questions about the codebase
 - **Tools:** `Read`, `Grep`, `Glob`, `Bash`, `Skill`
-- **Model:** `claude-haiku-4-5`
+- **Model:** `haiku`
 - **When used:** When Claude needs a quick, thorough search across the codebase
 
 ### Plan
@@ -81,7 +81,7 @@ AI Shuffle ships with five built-in subagents:
 - **ID:** `chat-history-summarizer`
 - **Purpose:** Reads `.jsonl` session history files and produces concise summaries
 - **Tools:** `Read`, `Grep`, `Glob`
-- **Model:** `claude-haiku-4-5` for fast, cost-effective summarization
+- **Model:** `haiku` for fast, cost-effective summarization
 - **When used:** When Claude needs to understand the context of a previous conversation
 
 Built-in subagents can be customized (name, description, prompt, tools, model) through the UI or API. If you modify a built-in subagent, you can revert it to its original defaults at any time.
