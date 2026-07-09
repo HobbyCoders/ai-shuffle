@@ -211,13 +211,12 @@
 	.active-tasks-inner {
 		max-width: 56rem;
 		margin: 0 auto;
-		padding: 0.375rem 0.625rem;
 		background: color-mix(in oklch, var(--card) 80%, transparent);
 		border: 1px solid var(--border-subtle);
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		overflow: hidden;
 		display: flex;
 		flex-direction: column;
-		gap: 0.375rem;
 	}
 
 	/* The whole header is the collapse toggle — click anywhere on it. */
@@ -226,15 +225,13 @@
 		align-items: center;
 		gap: 0.375rem;
 		width: 100%;
-		padding: 0.1875rem 0.25rem;
-		margin: -0.1875rem -0.25rem;
+		padding: 0.375rem 0.625rem;
 		border: none;
 		background: transparent;
 		font: inherit;
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 		text-align: left;
-		border-radius: 0.375rem;
 		cursor: pointer;
 		transition: color 0.12s ease, background 0.12s ease;
 	}
@@ -242,6 +239,11 @@
 	.active-tasks-header:hover {
 		color: var(--foreground);
 		background: var(--hover-overlay);
+	}
+
+	.active-tasks-header:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	.tasks-icon {
@@ -271,6 +273,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
+		padding: 0 0.625rem 0.375rem;
 	}
 
 	.task-row {
