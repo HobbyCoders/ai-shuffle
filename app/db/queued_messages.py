@@ -80,6 +80,30 @@ def get_queued_messages(session_id: str) -> List[QueuedMessageRow]:
         return [_normalize_row(r) for r in cursor.fetchall()]
 
 
+def count_queued_messages(session_id: str) -> int:
+    """Cheap count of undrained queued messages for a session.
+
+    Used by ``/live`` to keep the client's poll-alive signal up while a
+    follow-up turn is imminent (queue rows await the drain pump) even though
+    nothing is streaming this instant. Sibling reader of
+    ``pop_next_queued_message`` — a COUNT(*) rather than a full row fetch.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM queued_messages WHERE session_id = %s",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return 0
+        # Tolerate dict-row (RealDictCursor / pg_shim) or tuple-row cursors.
+        try:
+            return int(row["n"])
+        except (TypeError, KeyError, IndexError):
+            return int(row[0])
+
+
 def pop_next_queued_message(session_id: str) -> Optional[QueuedMessageRow]:
     """Atomically get and delete the first queued message for a session.
 

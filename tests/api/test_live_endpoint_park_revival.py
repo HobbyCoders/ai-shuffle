@@ -105,7 +105,76 @@ async def test_idle_session_delta_poll_returns_304():
     try:
         with patch.object(live_session_store, "has_session", return_value=True), \
              patch.object(live_session_store, "is_streaming", return_value=False), \
-             patch.object(live_session_store, "get_session_since", return_value=None):
+             patch.object(live_session_store, "get_session_since", return_value=None), \
+             patch("app.api.sessions.database.count_queued_messages", return_value=0):
+            result = await get_live_session(
+                request=MagicMock(), session_id=session_id,
+                since_update_id=7, token="tok",
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert isinstance(result, Response)
+    assert result.status_code == 304
+
+
+# =============================================================================
+# Switch-back into a queue-driven follow-up gap (incident 2026-07-09,
+# ses-6ed0038f173f froze 19:13-19:17 EDT while streaming continuously).
+#
+# A queue/unpark-driven session between follow-up turns has NOTHING streaming
+# this instant (no tasks, no unpark latch) but has UNDRAINED queued messages: a
+# follow-up turn is imminent. Without a keep-polling signal a switch-back's poll
+# reads a truthful idle and the client stops polling forever. get_live_session
+# reuses unpark_pending as the keep-alive channel whenever a queue row exists.
+# =============================================================================
+
+
+async def test_queued_messages_keep_poll_alive_signal_true():
+    """Undrained queued messages -> body (not 304) with unpark_pending=true."""
+    session_id = "u1-queued-sess"
+    session = {"id": session_id, "title": "Queued"}
+    task_registry.clear_session(session_id)  # no tasks, no unpark latch
+
+    patches = _owner_path_patches(session)
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(live_session_store, "has_session", return_value=True), \
+             patch.object(live_session_store, "is_streaming", return_value=False), \
+             patch.object(live_session_store, "get_session_since", return_value=None), \
+             patch("app.api.sessions.database.count_queued_messages", return_value=2):
+            result = await get_live_session(
+                request=MagicMock(), session_id=session_id,
+                since_update_id=7, token="tok",
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    # NOT a 304: the queue keep-alive surfaces as unpark_pending so the poller
+    # holds its park poll until the follow-up turn drains and starts streaming.
+    assert not isinstance(result, Response)
+    assert isinstance(result, dict)
+    assert result["unpark_pending"] is True
+    assert result["is_streaming"] is False
+
+
+async def test_no_queued_messages_no_keep_poll_signal():
+    """Negative: empty queue + no work -> genuine 304 (signal stays down)."""
+    session_id = "u1-noqueue-sess"
+    session = {"id": session_id, "title": "Idle"}
+    task_registry.clear_session(session_id)
+
+    patches = _owner_path_patches(session)
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(live_session_store, "has_session", return_value=True), \
+             patch.object(live_session_store, "is_streaming", return_value=False), \
+             patch.object(live_session_store, "get_session_since", return_value=None), \
+             patch("app.api.sessions.database.count_queued_messages", return_value=0):
             result = await get_live_session(
                 request=MagicMock(), session_id=session_id,
                 since_update_id=7, token="tok",
