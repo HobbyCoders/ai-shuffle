@@ -319,7 +319,7 @@
 						{/if}
 					</div>
 					{#if customModelMode}
-						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-opus-4-7" />
+						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-sonnet-4-5" />
 					{/if}
 				</div>
 			</div>

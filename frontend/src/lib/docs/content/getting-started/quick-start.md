@@ -24,7 +24,7 @@ Profiles control how Claude behaves. To create one:
 3. Configure:
    - **Name** — A descriptive name
    - **System Prompt** — Instructions for Claude
-   - **Model** — claude-sonnet-4-6, claude-opus-4-8, etc.
+   - **Model** — sonnet, opus, fable, etc.
    - **Allowed Tools** — Which tools Claude can use
    - **Thinking Mode** — How deeply Claude reasons
 4. Save the profile

@@ -1113,7 +1113,7 @@ _CHS_DEF = {
     "description": "Summarizes chat history",
     "prompt": "Summarizer prompt",
     "tools": ["Read", "Grep", "Glob"],
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
 }
 
 

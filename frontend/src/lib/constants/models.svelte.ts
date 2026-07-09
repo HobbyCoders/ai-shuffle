@@ -18,10 +18,10 @@
 
 import { api } from '$lib/api/client';
 
-export type ModelFamily = 'haiku' | 'sonnet' | 'opus';
+export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable';
 
 export interface ModelOption {
-	/** Canonical model ID persisted to storage and sent to the backend/SDK. */
+	/** Model identifier (an Agent SDK shorthand alias) persisted to storage and sent to the backend/SDK. */
 	value: string;
 	/** Human-facing label for dropdowns and badges. */
 	label: string;
@@ -45,21 +45,24 @@ export const CONTEXT_1M_SUFFIX = '[1m]';
 // ---------------------------------------------------------------------------
 
 const STATIC_MODELS: readonly ModelOption[] = [
-	{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku', supports1m: false },
-	{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', family: 'sonnet', supports1m: true },
-	{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', supports1m: true },
-	{ value: 'claude-opus-4-7', label: 'Opus 4.7', family: 'opus', supports1m: true },
-	{ value: 'claude-opus-4-8', label: 'Opus 4.8', family: 'opus', supports1m: true }
+	{ value: 'haiku', label: 'Haiku', family: 'haiku', supports1m: false },
+	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports1m: true },
+	{ value: 'opus', label: 'Opus', family: 'opus', supports1m: true },
+	{ value: 'fable', label: 'Fable', family: 'fable', supports1m: true }
 ] as const;
 
-const STATIC_DEFAULT = 'claude-sonnet-4-6';
+const STATIC_DEFAULT = 'sonnet';
 
 const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
-	haiku: 'claude-haiku-4-5',
-	sonnet: 'claude-sonnet-4-6',
-	'sonnet[1m]': 'claude-sonnet-4-6[1m]',
-	opus: 'claude-opus-4-8',
-	'opus[1m]': 'claude-opus-4-8[1m]'
+	'claude-haiku-4-5': 'haiku',
+	'claude-sonnet-4-6': 'sonnet',
+	'claude-sonnet-4-6[1m]': 'sonnet[1m]',
+	'claude-opus-4-6': 'opus',
+	'claude-opus-4-6[1m]': 'opus[1m]',
+	'claude-opus-4-7': 'opus',
+	'claude-opus-4-7[1m]': 'opus[1m]',
+	'claude-opus-4-8': 'opus',
+	'claude-opus-4-8[1m]': 'opus[1m]'
 };
 
 /** Sentinel value meaning "inherit from parent" (used by subagents). */
@@ -113,7 +116,7 @@ export function isRegistryHydrated(): boolean {
  * Resolve a stored model string to its canonical form.
  *
  * - `null | undefined | ''` → `''` (inherit / unset)
- * - Legacy short slug → canonical full ID
+ * - Legacy full model ID → shorthand alias
  * - Any other string → returned as-is (custom models pass through)
  */
 export function normalizeModel(value: string | null | undefined): string {
@@ -177,7 +180,7 @@ export function getModelFamily(value: string | null | undefined): ModelFamily | 
 
 /**
  * CSS badge class for a stored model value. Pairs with the
- * `card-badge--{haiku,sonnet,opus,inherit,muted}` classes in
+ * `card-badge--{haiku,sonnet,opus,fable,inherit,muted}` classes in
  * `card-design-system.css`.
  */
 export function getModelBadgeClass(value: string | null | undefined): string {

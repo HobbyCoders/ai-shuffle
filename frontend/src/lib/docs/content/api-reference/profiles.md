@@ -28,7 +28,7 @@ curl http://localhost:8000/api/v1/profiles \
     "id": "default",
     "name": "Default",
     "description": "Default profile",
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
     "system_prompt": "You are a helpful assistant.",
     "permission_mode": "default",
     "thinking_mode": "default",
@@ -57,7 +57,7 @@ curl -X POST http://localhost:8000/api/v1/profiles \
   -d '{
     "name": "Code Reviewer",
     "description": "Reviews code for quality and bugs",
-    "model": "claude-opus-4-6",
+    "model": "opus",
     "system_prompt": "You are an expert code reviewer. Focus on bugs, security issues, and code quality.",
     "permission_mode": "plan",
     "thinking_mode": "think_harder",
@@ -93,7 +93,7 @@ Delete a profile.
 |-------|------|-------------|
 | `name` | string | Display name |
 | `description` | string | Description of the profile's purpose |
-| `model` | string | Claude model ID (e.g., claude-sonnet-4-6) |
+| `model` | string | Model preset shorthand (e.g., sonnet) or a custom model id |
 | `system_prompt` | string | Instructions for Claude |
 | `permission_mode` | string | default, acceptEdits, plan, bypassPermissions |
 | `thinking_mode` | string | default, think, think_harder, ultra_think |

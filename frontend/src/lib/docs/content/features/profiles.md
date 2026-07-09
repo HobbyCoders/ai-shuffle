@@ -36,16 +36,18 @@ A profile contains a `config` object with the following settings:
 
 #### Models
 
-| Value               | Description                   |
-|---------------------|-------------------------------|
-| `claude-sonnet-4-6` | Claude Sonnet 4.6             |
-| `claude-haiku-4-5`  | Claude Haiku 4.5              |
-| `claude-opus-4-6`   | Claude Opus 4.6               |
-| `claude-opus-4-7`   | Claude Opus 4.7               |
-| `claude-opus-4-8`   | Claude Opus 4.8               |
-| `sonnet`            | Alias for `claude-sonnet-4-6` |
-| `opus`              | Alias for `claude-opus-4-8`   |
-| `haiku`             | Alias for `claude-haiku-4-5`  |
+| Value    | Description                                    |
+|----------|------------------------------------------------|
+| `haiku`  | Claude Haiku (fast, cheap)                     |
+| `sonnet` | Claude Sonnet (balanced, default)              |
+| `opus`   | Claude Opus (powerful)                         |
+| `fable`  | Claude Fable (most capable)                    |
+
+Any other string is treated as a custom model ID and passed through unchanged
+(e.g. `claude-sonnet-4-5`). Older stored full model IDs (`claude-sonnet-4-6`,
+`claude-opus-4-8`, etc.) are still recognized: the app displays them as the
+matching shorthand and rewrites them to it the next time the profile is saved
+from the UI.
 
 #### Permission Modes
 

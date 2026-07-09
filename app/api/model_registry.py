@@ -26,15 +26,15 @@ async def list_models(token: str = Depends(require_auth)) -> dict:
 
         {
           "models": [
-            {"value": "claude-sonnet-4-6",
-             "label": "Sonnet 4.6",
+            {"value": "sonnet",
+             "label": "Sonnet",
              "family": "sonnet",
              "context_window": 200000},
             ...
           ],
-          "default": "claude-sonnet-4-6",
+          "default": "sonnet",
           "inherit_value": "",
-          "legacy_map": {"sonnet": "claude-sonnet-4-6", ...}
+          "legacy_map": {"claude-sonnet-4-6": "sonnet", ...}
         }
     """
     return registry_payload()

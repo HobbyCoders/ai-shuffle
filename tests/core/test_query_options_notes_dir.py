@@ -22,7 +22,7 @@ from app.core.note_files import get_notes_dir
 
 
 def _profile(config=None):
-    cfg = {"model": "claude-opus-4-8", "tools_preset": "claude_code"}
+    cfg = {"model": "opus", "tools_preset": "claude_code"}
     if config:
         cfg.update(config)
     return {"id": "t", "config": cfg}

@@ -208,7 +208,7 @@ class TestCreateSubagent:
             skills=["x"],
             memory="project",
             mcp_servers=[{"name": "foo"}],
-            model="claude-haiku-4-5",
+            model="haiku",
         )
         tool = _get_tool(admin_tools, "createSubagent")
         with patch("app.db.database.get_subagent", return_value=None), \
@@ -221,7 +221,7 @@ class TestCreateSubagent:
                 "skills": ["x"],
                 "memory": "project",
                 "mcp_servers": [{"name": "foo"}],
-                "model": "claude-haiku-4-5",
+                "model": "haiku",
             })
         data = _parse_result(result)
         assert data["success"] is True
@@ -230,7 +230,7 @@ class TestCreateSubagent:
         assert kwargs.get("skills") == ["x"]
         assert kwargs.get("memory") == "project"
         assert kwargs.get("mcp_servers") == [{"name": "foo"}]
-        assert kwargs.get("model") == "claude-haiku-4-5"
+        assert kwargs.get("model") == "haiku"
 
     @pytest.mark.asyncio
     async def test_create_subagent_tools_none_is_inherit_all(self, admin_tools):
