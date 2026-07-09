@@ -38,6 +38,25 @@
 		onCancel
 	}: Props = $props();
 
+	/**
+	 * Portal the overlay to document.body so its `position: fixed` box resolves
+	 * against the viewport — NOT against an ancestor. A `backdrop-filter` (or
+	 * `transform`/`filter`/`perspective`) on any ancestor makes that ancestor the
+	 * containing block for fixed descendants, which would squeeze/clip this dialog
+	 * inside that box (e.g. the chat input dock's `backdrop-filter: blur(20px)`).
+	 * Reparenting to <body> escapes every such ancestor. Component-scoped style
+	 * classes live on the elements themselves, so they travel intact.
+	 * (Same idiom as MediaLightbox.)
+	 */
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
+	}
+
 	function onWindowKeydown(e: KeyboardEvent) {
 		if (!open) return;
 		if (e.key === 'Escape') {
@@ -54,6 +73,7 @@
 
 {#if open}
 	<div
+		use:portal
 		class="fixed inset-0 z-[200] flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"

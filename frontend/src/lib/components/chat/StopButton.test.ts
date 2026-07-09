@@ -108,6 +108,19 @@ describe('StopButton · informed-choice Stop', () => {
 		expect(screen.getByText(/1 background agent is still running/i)).toBeTruthy();
 	});
 
+	it('portals the confirm to document.body so it escapes the input dock backdrop-filter', async () => {
+		// The confirm renders inside ChatInput's `.input-wrapper`, whose
+		// `backdrop-filter: blur(20px)` makes it the containing block for
+		// `position: fixed` descendants — trapping/clipping the dialog inside the
+		// input dock. Portaling the dialog root onto <body> escapes that ancestor.
+		render(StopButton, { props: { activeTasks: [makeTask()], onStop: vi.fn() } });
+
+		await fireEvent.click(stopButton());
+
+		const dialog = screen.getByRole('dialog');
+		expect(dialog.parentElement).toBe(document.body);
+	});
+
 	it('Escape cancels the confirm without stopping', async () => {
 		const onStop = vi.fn();
 		render(StopButton, { props: { activeTasks: [makeTask()], onStop } });
