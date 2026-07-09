@@ -15,6 +15,7 @@
 	} from 'lucide-svelte';
 	import { git, changedFiles, changedFilesLoading } from '$lib/stores/git.svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
+	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import DiffViewer from './DiffViewer.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { toast } from '$lib/stores/toast';
@@ -323,17 +324,25 @@
 		}
 	}
 
+	// ── Mobile detection ────────────────────────────────────────────────
+	// Fullscreen below the app-wide mobile cutoff (1080px), which is wider than
+	// the 640px `sm` breakpoint so unfolded foldables (Galaxy Z Fold inner
+	// screen ≈ 884px) get a fullscreen panel rather than a partial drawer.
+	function computeIsMobile(): boolean {
+		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
+	}
+
 	// ── Resize logic ────────────────────────────────────────────────────
 	let panelWidth = $state(
-		typeof window !== 'undefined' && window.innerWidth < 640
+		computeIsMobile()
 			? window.innerWidth
-			: Math.min(window?.innerWidth * 0.6 || 800, 1100)
+			: Math.min((typeof window !== 'undefined' ? window.innerWidth : 0) * 0.6 || 800, 1100)
 	);
 	let isResizing = $state(false);
 	let panelElement: HTMLElement | undefined = $state(undefined);
 
 	function startResize(e: PointerEvent) {
-		if (typeof window !== 'undefined' && window.innerWidth < 640) return; // no resize on mobile
+		if (computeIsMobile()) return; // no resize on mobile (panel is fullscreen)
 		e.preventDefault();
 		isResizing = true;
 		const startX = e.clientX;
@@ -355,11 +364,10 @@
 		window.addEventListener('pointerup', onUp);
 	}
 
-	// ── Mobile detection ────────────────────────────────────────────────
-	let isMobile = $state(typeof window !== 'undefined' && window.innerWidth < 640);
+	let isMobile = $state(computeIsMobile());
 
 	function handleResize() {
-		isMobile = window.innerWidth < 640;
+		isMobile = computeIsMobile();
 		if (isMobile) panelWidth = window.innerWidth;
 	}
 
@@ -889,7 +897,11 @@
 		height: 64px;
 	}
 
-	@media (max-width: 639px) {
+	/* Fullscreen at the app-wide mobile cutoff (1080px) rather than the 640px
+	   `sm` breakpoint, so unfolded foldables (Galaxy Z Fold inner screen
+	   ≈ 884px) open fullscreen instead of as a partial-width drawer. Backstops
+	   the JS-driven .panel-mobile class before hydration. */
+	@media (max-width: 1080px) {
 		.panel {
 			width: 100% !important;
 			border-left: none;
