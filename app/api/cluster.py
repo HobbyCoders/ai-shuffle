@@ -552,6 +552,12 @@ async def delete_install(install_id: str, token: str = Depends(require_auth)) ->
     ok = await run_sync(database.delete_install, install_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Install not found")
+    # Prune the departed install's usage-snapshot row too — otherwise it lingers
+    # in the shared table forever (read-time filtered only). Best-effort.
+    try:
+        await run_sync(database.delete_usage_snapshot, install_id)
+    except Exception as e:  # noqa: BLE001 — cleanup must not fail the delete
+        logger.debug("Usage-snapshot prune skipped for %s: %s", install_id, e)
     return {"ok": True, "deleted": install_id}
 
 

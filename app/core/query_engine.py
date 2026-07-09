@@ -156,6 +156,51 @@ _STREAM_DEBUG = bool(
 )
 
 
+def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
+    """Build the ``rate_limit`` WS frame from an SDK ``RateLimitInfo``.
+
+    Shared by the interactive (``stream_query``) and offloaded
+    (``stream_to_websocket``) streaming paths so both stamp the identical fields,
+    including this install's ``instance_id`` (the frontend attributes the reading
+    to the right per-account window). Cross-install propagation does NOT ride
+    this frame — it happens via the shared ``usage_snapshots`` row and the
+    cluster ``usage_snapshot`` broadcast (see the paired
+    ``apply_live_event_and_broadcast`` call at each site).
+    """
+    return {
+        "type": "rate_limit",
+        "status": rli.status,
+        "rate_limit_type": rli.rate_limit_type,
+        "resets_at": rli.resets_at,
+        "utilization": rli.utilization,
+        # SDK 0.1.81+ overage fields (None when absent)
+        "overage_status": getattr(rli, "overage_status", None),
+        "overage_resets_at": getattr(rli, "overage_resets_at", None),
+        "overage_disabled_reason": getattr(rli, "overage_disabled_reason", None),
+        "session_id": session_id,
+        "instance_id": settings.effective_instance_id,
+    }
+
+
+async def _apply_rate_limit_live_event(rli: Any) -> None:
+    """Persist a live ``rate_limit`` refinement into the shared usage snapshot.
+
+    A yielded ``rate_limit`` frame reaches only clients connected directly to
+    THIS install's WS; peers (and offloaded/cloud-relayed views, which read the
+    owning install's ``/live`` via ``live_session_store`` — where ``rate_limit``
+    is never written) see the change only through the shared ``usage_snapshots``
+    row persisted here plus the cluster ``usage_snapshot`` broadcast. Best-effort
+    — never break streaming.
+    """
+    try:
+        from app.core.usage_limits import usage_limits_monitor
+        await usage_limits_monitor.apply_live_event_and_broadcast(
+            rli.rate_limit_type, rli.utilization, rli.resets_at,
+        )
+    except Exception as _usage_err:  # noqa: BLE001 — never break the turn
+        logger.debug(f"usage monitor live-event update skipped: {_usage_err}")
+
+
 # Map the SDK's terminal TaskNotificationStatus ("completed"/"failed"/"stopped")
 # onto the registry's terminal statuses. TaskNotificationMessage is ALWAYS
 # terminal (the Literal has no in-progress value), so any notification completes
@@ -780,14 +825,7 @@ async def execute_query(
                 # this onto (unlike the streaming paths), so feed the live reading
                 # into the usage monitor and broadcast a usage_snapshot so open
                 # clients still reflect the change.
-                _rli = message.rate_limit_info
-                try:
-                    from app.core.usage_limits import usage_limits_monitor
-                    await usage_limits_monitor.apply_live_event_and_broadcast(
-                        _rli.rate_limit_type, _rli.utilization, _rli.resets_at,
-                    )
-                except Exception as _usage_err:  # noqa: BLE001 — never break the turn
-                    logger.debug(f"usage monitor live-event update skipped: {_usage_err}")
+                await _apply_rate_limit_live_event(message.rate_limit_info)
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -1425,18 +1463,13 @@ async def stream_query(
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
                 _rli = message.rate_limit_info
-                yield {
-                    "type": "rate_limit",
-                    "status": _rli.status,
-                    "rate_limit_type": _rli.rate_limit_type,
-                    "resets_at": _rli.resets_at,
-                    "utilization": _rli.utilization,
-                    # SDK 0.1.81+ overage fields (None when absent)
-                    "overage_status": getattr(_rli, "overage_status", None),
-                    "overage_resets_at": getattr(_rli, "overage_resets_at", None),
-                    "overage_disabled_reason": getattr(_rli, "overage_disabled_reason", None),
-                    "session_id": session_id,
-                }
+                # Yield the frame to clients on THIS install's WS. Cross-install
+                # views (peers, offloaded/cloud-relayed sessions) do NOT receive
+                # this frame — the relay serves live_session_store, which never
+                # carries rate_limit. They see the change only via the shared
+                # usage_snapshots row + cluster broadcast we persist below.
+                yield _rate_limit_event_dict(_rli, session_id)
+                await _apply_rate_limit_live_event(_rli)
 
             elif isinstance(message, HookEventMessage):
                 logger.debug(f"Hook event: {getattr(message, 'hook_event_name', None)}")
@@ -3089,18 +3122,13 @@ async def stream_to_websocket(
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"[WS] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
                 _rli = message.rate_limit_info
-                yield {
-                    "type": "rate_limit",
-                    "status": _rli.status,
-                    "rate_limit_type": _rli.rate_limit_type,
-                    "resets_at": _rli.resets_at,
-                    "utilization": _rli.utilization,
-                    # SDK 0.1.81+ overage fields (None when absent)
-                    "overage_status": getattr(_rli, "overage_status", None),
-                    "overage_resets_at": getattr(_rli, "overage_resets_at", None),
-                    "overage_disabled_reason": getattr(_rli, "overage_disabled_reason", None),
-                    "session_id": session_id,
-                }
+                # Yield the frame to clients on THIS install's WS. Cross-install
+                # views (peers, offloaded/cloud-relayed sessions) do NOT receive
+                # this frame — the relay serves live_session_store, which never
+                # carries rate_limit. They see the change only via the shared
+                # usage_snapshots row + cluster broadcast we persist below.
+                yield _rate_limit_event_dict(_rli, session_id)
+                await _apply_rate_limit_live_event(_rli)
 
             elif isinstance(message, HookEventMessage):
                 logger.debug(f"[WS] Hook event: {getattr(message, 'hook_event_name', None)}")

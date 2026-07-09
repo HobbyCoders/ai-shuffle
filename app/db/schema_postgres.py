@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 53
 
 
 def create_postgres_schema(cursor) -> None:
@@ -736,6 +736,30 @@ def create_postgres_schema(cursor) -> None:
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_used_at TIMESTAMP WITH TIME ZONE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36c. Usage snapshots (v53). Per-install Claude usage-limits snapshot,
+    #      keyed by instance_id. The 5-hour Claude usage window is PER-ACCOUNT,
+    #      and on a shared database two installs may run different Claude
+    #      accounts — so each install persists its own snapshot here and the
+    #      usage endpoint serves every install's snapshot (joined to the
+    #      installs registry for device_name/online). ``windows`` is the
+    #      normalized window list; ``account_*`` records which Claude account
+    #      produced the reading (Nones in legacy single-account mode).
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_snapshots (
+            instance_id TEXT PRIMARY KEY,
+            windows JSONB NOT NULL DEFAULT '[]',
+            available BOOLEAN DEFAULT FALSE,
+            generation BIGINT,
+            fetched_at BIGINT,
+            account_id TEXT,
+            account_email TEXT,
+            account_name TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
 

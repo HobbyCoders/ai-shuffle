@@ -6,6 +6,15 @@
  * re-exported here for backward compatibility.
  */
 
+// The usage-snapshot wire shapes live in the rate-limit store (their canonical
+// consumer). Re-export them here under the API-layer names other modules use so
+// there's a single source of truth. Types-only import — no runtime cycle.
+import type {
+	SnapshotWindow,
+	SnapshotInstance,
+	UsageSnapshot,
+} from '$lib/stores/rate-limit';
+
 const API_BASE = '/api/v1';
 
 export interface ApiError {
@@ -507,14 +516,12 @@ export async function importAgent(data: AgentImportRequest): Promise<Profile> {
 	return api.post<Profile>('/profiles/import', data);
 }
 
-/** Latest Claude usage snapshot (all rate-limit windows). */
-export interface UsageLimitsSnapshot {
-	windows: { type: string; utilization: number; resets_at?: string | null }[];
-	fetched_at?: number | null;
-	available: boolean;
-	/** Monotonic generation tag; bumped on account switch. Drops stale snapshots. */
-	generation?: number | null;
-}
+/** One rate-limit window in a usage snapshot. */
+export type UsageLimitsWindow = SnapshotWindow;
+/** One install's usage bucket within a snapshot (clustered deployment). */
+export type UsageLimitsInstanceSnapshot = SnapshotInstance;
+/** Latest Claude usage snapshot (top-level = LOCAL install; `snapshots` = per-install). */
+export type UsageLimitsSnapshot = UsageSnapshot;
 
 /**
  * Fetch the latest Claude usage-limits snapshot. Used on chat load to populate

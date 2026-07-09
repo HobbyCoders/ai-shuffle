@@ -16,8 +16,10 @@ const future = () => new Date(Date.now() + 3_600_000).toISOString();
 const past = () => new Date(Date.now() - 1_000).toISOString();
 
 beforeEach(() => {
-	// Reset to an empty-but-available snapshot (clears any prior windows).
-	rateLimit.applySnapshot({ windows: [], available: true });
+	// Full reset: clears every bucket AND the per-install generation guard (a
+	// legacy snapshot no longer wipes other installs' buckets — the fold is
+	// non-destructive — so tests must reset via the dedicated hook).
+	rateLimit.__resetForTests();
 });
 afterEach(() => cleanup());
 
@@ -143,9 +145,101 @@ describe('UsageLimitIndicator', () => {
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(3);
+		// A lone unlabeled install keeps the original flat popover (no headers).
+		expect(container.querySelector('.popover-section')).toBeNull();
 		// Labels are humanised per the known-type map.
 		expect(container.textContent).toContain('5-hour limit');
 		expect(container.textContent).toContain('Weekly (all models)');
 		expect(container.textContent).toContain('Fable 5 limit');
+	});
+
+	it('dedupes popover sections that share a Claude account', async () => {
+		// Two installs, ONE shared account → a single section, not two.
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					account_email: 'shared@example.com',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+				{
+					instance_id: 'worker',
+					device_name: 'Worker',
+					account_email: 'shared@example.com',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(UsageLimitIndicator);
+		// Pill tracks the self install (primary), 12% — not the worker's 88%.
+		expect(container.querySelector('.usage-text')?.textContent).toBe('12%');
+
+		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
+		expect(container.querySelectorAll('.popover-section').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.textContent).toContain('Studio');
+		expect(container.textContent).not.toContain('Worker');
+	});
+
+	it('shows one section per install when the accounts differ', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					account_email: 'a@example.com',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+				{
+					instance_id: 'worker',
+					device_name: 'Worker',
+					account_email: 'b@example.com',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(UsageLimitIndicator);
+		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
+		expect(container.querySelectorAll('.popover-section').length).toBe(2);
+		expect(container.querySelectorAll('.popover-row').length).toBe(2);
+		expect(container.textContent).toContain('Studio');
+		expect(container.textContent).toContain('Worker');
+	});
+
+	it('labels an unlabeled non-self section "Other device", not "This device"', async () => {
+		// Self install has no device/account label; a live event for a REMOTE
+		// install (no metadata) creates a bare second bucket. Only the true self
+		// may default to "This device" — the remote bucket must not claim it too.
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{ instance_id: 'primary', available: true, windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }] },
+			],
+		});
+		rateLimit.applyLiveEvent({
+			rate_limit_type: 'five_hour',
+			utilization: 0.5,
+			resets_at: future(),
+			instance_id: 'worker',
+		});
+		const { container } = render(UsageLimitIndicator);
+		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
+		const devices = Array.from(container.querySelectorAll('.section-device')).map((el) => el.textContent);
+		expect(devices).toContain('This device');
+		expect(devices).toContain('Other device');
+		expect(devices.filter((d) => d === 'This device').length).toBe(1);
 	});
 });

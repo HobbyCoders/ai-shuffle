@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.oauth import direct_oauth
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,12 @@ _TOP_LEVEL_TYPES = (
 
 # How long a cached snapshot is considered fresh for on-demand REST reads.
 _SNAPSHOT_TTL_SECONDS = 300
+
+# Short TTL for the assembled cluster view (peer snapshot rows + installs map).
+# Hot GETs/broadcasts within this window reuse the cached DB reads; the cache is
+# invalidated whenever THIS process persists its own row so a local change
+# surfaces at once. Bounds the per-event and per-GET DB cost.
+_CLUSTER_CACHE_TTL_SECONDS = 4.0
 
 
 def _limit_entry_to_type(entry: Dict[str, Any]) -> Optional[str]:
@@ -162,6 +169,9 @@ class UsageLimitsMonitor:
         # in memory; a near-0 restart seed would make it drop every
         # post-restart snapshot and wedge stale until a manual reload.
         self._generation: int = int(time.time())
+        # Short-TTL cache of the assembled cluster view: (expires_at, snapshots).
+        # Invalidated on our own persist so local changes are never masked.
+        self._cluster_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
 
     def current_generation(self) -> int:
         return self._generation
@@ -187,6 +197,58 @@ class UsageLimitsMonitor:
             "generation": self._generation,
         }
 
+    def _resolve_account_meta(self) -> Dict[str, Optional[str]]:
+        """Best-effort {account_id, account_email, account_name} for this install.
+
+        Legacy single-account / API-key installs have no active pointer, so all
+        three come back None. Never raises — callers persist Nones on any error.
+        """
+        meta: Dict[str, Optional[str]] = {
+            "account_id": None, "account_email": None, "account_name": None,
+        }
+        try:
+            from app.core import claude_accounts
+            from app.db import database as db
+            account_id = claude_accounts.get_active_account_id()
+            if account_id:
+                meta["account_id"] = account_id
+                row = db.get_claude_account(account_id)
+                if row:
+                    meta["account_email"] = row.get("email")
+                    meta["account_name"] = row.get("name")
+        except Exception:  # noqa: BLE001 — metadata is best-effort
+            pass
+        return meta
+
+    def _persist_snapshot(self) -> None:
+        """Persist this install's snapshot row to the shared DB (best-effort).
+
+        Keyed by ``effective_instance_id`` so peers can serve every install's
+        per-account usage. Wrapped so a DB hiccup never breaks the poll or a
+        live-event application. Synchronous psycopg2 — async callers MUST run
+        this through ``run_sync`` so it never blocks the event loop.
+        """
+        try:
+            from app.core.config import settings
+            from app.db import database as db
+            meta = self._resolve_account_meta()
+            fetched_ms = int(self._fetched_at * 1000) if self._fetched_at else None
+            db.upsert_usage_snapshot(
+                settings.effective_instance_id,
+                self._windows,
+                self._available,
+                self._generation,
+                fetched_ms,
+                account_id=meta["account_id"],
+                account_email=meta["account_email"],
+                account_name=meta["account_name"],
+            )
+            # Our own row changed — drop the cluster cache so the next assembly
+            # re-reads and reflects it immediately.
+            self._cluster_cache = None
+        except Exception as e:  # noqa: BLE001 — persistence must never break the poll
+            logger.debug("Usage-snapshot persist skipped: %s", e)
+
     async def fetch(self) -> Dict[str, Any]:
         """Fetch and cache the latest snapshot. Never raises.
 
@@ -211,6 +273,9 @@ class UsageLimitsMonitor:
             # empty gracefully; this is an expected steady state, so no logging.
             self._available = False
             self._windows = []
+            # Still persist so API-key-mode installs are represented in the
+            # cluster snapshot (empty windows, available=False).
+            await run_sync(self._persist_snapshot)
             return self._snapshot()
 
         headers = {
@@ -245,6 +310,10 @@ class UsageLimitsMonitor:
             self._fetched_at = time.time()
             self._available = True
             self._warned = False
+            # Persist this install's snapshot (stamped with the active account)
+            # so peers can serve the correct per-account reset time for offloaded
+            # sessions. Best-effort — never break the poll on a DB error.
+            await run_sync(self._persist_snapshot)
             logger.debug("Usage-limits snapshot updated: %d window(s)", len(self._windows))
             return self._snapshot()
 
@@ -260,17 +329,113 @@ class UsageLimitsMonitor:
             return await self.fetch()
         return self._snapshot()
 
+    async def get_cluster_snapshot(
+        self, max_age: float = _SNAPSHOT_TTL_SECONDS
+    ) -> Dict[str, Any]:
+        """Return the LOCAL snapshot plus every install's persisted snapshot.
+
+        Refreshes this install's own reading first when stale (persisting it),
+        then reads all persisted snapshots and joins the installs registry for
+        ``device_name``/``online``. Keeps the legacy top-level fields
+        (``windows``/``fetched_at``/``available``/``generation``) intact for old
+        clients, and adds:
+
+          * ``snapshots`` — one entry per install (self always included), each
+            ``{instance_id, device_name, online, account_id, account_email,
+            account_name, windows, fetched_at, available, generation}``.
+          * ``self_instance_id`` — this install's ``effective_instance_id``.
+
+        Rows whose ``instance_id`` is not in the installs registry are skipped
+        UNLESS the row is self (so a brand-new install with no registry row yet
+        still reports its own numbers).
+        """
+        # Refresh + persist our own reading if it is stale or never fetched.
+        await self.get_snapshot(max_age)
+        # Assembly reads the DB — offload it so it never blocks the event loop.
+        return await run_sync(self._cluster_snapshot)
+
+    def _read_cluster_rows(self, self_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Read + assemble the per-install snapshot list from the DB (cached).
+
+        Returns the list on success (self always included when it has a row), or
+        ``None`` when the DB read FAILED so the caller can omit the cluster keys
+        entirely rather than emit an empty list. Cached for
+        ``_CLUSTER_CACHE_TTL_SECONDS`` and invalidated on our own persist.
+        Synchronous — call via ``run_sync`` from async paths.
+        """
+        now = time.time()
+        cached = self._cluster_cache
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        try:
+            from app.db import database as db
+            installs_map = db.get_installs_map()
+            rows = db.get_all_usage_snapshots()
+        except Exception as e:  # noqa: BLE001 — cluster read is best-effort
+            logger.debug("Usage cluster snapshot read skipped: %s", e)
+            return None
+
+        snapshots: List[Dict[str, Any]] = []
+        for row in rows:
+            iid = row.get("instance_id")
+            install = installs_map.get(iid)
+            if install is None and iid != self_id:
+                # An install that has left the registry — drop its stale row.
+                continue
+            snapshots.append({
+                "instance_id": iid,
+                "device_name": install.get("device_name") if install else None,
+                "online": bool(install.get("online")) if install else False,
+                "account_id": row.get("account_id"),
+                "account_email": row.get("account_email"),
+                "account_name": row.get("account_name"),
+                "windows": row.get("windows") or [],
+                "fetched_at": row.get("fetched_at"),
+                "available": bool(row.get("available")),
+                "generation": row.get("generation"),
+            })
+        self._cluster_cache = (now + _CLUSTER_CACHE_TTL_SECONDS, snapshots)
+        return snapshots
+
+    def _cluster_snapshot(self) -> Dict[str, Any]:
+        """Assemble the enriched cluster snapshot from the CURRENT local state.
+
+        Does no network I/O — callers refresh first if they need fresh data.
+        Reads all persisted per-install snapshots and joins the installs
+        registry. On a DB READ FAILURE the cluster keys (``snapshots`` /
+        ``self_instance_id``) are OMITTED so the frontend falls back to the
+        legacy single-install fold instead of wiping its buckets on an empty
+        list. Synchronous — call via ``run_sync`` from async paths.
+        """
+        base = self._snapshot()
+
+        from app.core.config import settings
+        self_id = settings.effective_instance_id
+
+        snapshots = self._read_cluster_rows(self_id)
+        if snapshots is None:
+            # DB read failed — return the plain legacy snapshot only.
+            return base
+
+        base["snapshots"] = snapshots
+        base["self_instance_id"] = self_id
+        return base
+
     def apply_live_event(
         self,
         rate_limit_type: Optional[str],
         utilization: Optional[float],
         resets_at: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Refine a single window from a live SDK ``rate_limit`` event.
+        """Refine a single window from a live SDK ``rate_limit`` event (in-memory).
 
-        Returns the updated snapshot when a window changed, else None. Does not
-        broadcast — callers decide (see ``refresh_and_broadcast`` / the headless
-        query path).
+        Returns the updated snapshot when the reading MATERIALLY changed (i.e.
+        needs persist + broadcast), else None — an identical repeat (same type,
+        utilization and resets_at) is a no-op so a tool-use loop's per-round-trip
+        events don't each cost a DB upsert + cluster fanout. Does NOT persist or
+        broadcast — async callers do that via ``run_sync`` (see
+        ``apply_live_event_and_broadcast`` / ``refresh_and_broadcast``).
         """
         if not rate_limit_type or utilization is None:
             return None
@@ -288,14 +453,20 @@ class UsageLimitsMonitor:
 
         updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at}
         replaced = False
+        changed = True
         for i, w in enumerate(self._windows):
             if w.get("type") == rate_limit_type:
+                # Compare against the last-applied (= last-persisted) reading.
+                if w.get("utilization") == util and w.get("resets_at") == resets_at:
+                    changed = False
                 self._windows[i] = updated
                 replaced = True
                 break
         if not replaced:
             self._windows.append(updated)
         self._available = True
+        if not changed:
+            return None
         return self._snapshot()
 
     async def _broadcast(self, snapshot: Dict[str, Any]) -> None:
@@ -307,8 +478,14 @@ class UsageLimitsMonitor:
             logger.debug("Usage-snapshot broadcast skipped: %s", e)
 
     async def refresh_and_broadcast(self) -> Dict[str, Any]:
-        """Poller entry point: fetch the latest snapshot and broadcast it."""
-        snapshot = await self.fetch()
+        """Poller entry point: fetch the latest snapshot and broadcast it.
+
+        Broadcasts the enriched CLUSTER snapshot (every install's per-account
+        data), not just this install's, so all clients render the correct reset
+        time for offloaded sessions.
+        """
+        await self.fetch()
+        snapshot = await run_sync(self._cluster_snapshot)
         await self._broadcast(snapshot)
         return snapshot
 
@@ -320,12 +497,18 @@ class UsageLimitsMonitor:
     ) -> None:
         """Apply a live event and, if it changed anything, broadcast the update.
 
-        Used by the headless/automation query path, which has no per-session WS
-        stream to yield the ``rate_limit`` event onto.
+        Used by every streaming path (headless/automation, interactive, and
+        offloaded WS) to persist the live refinement into the shared
+        ``usage_snapshots`` row — the only cross-install propagation channel, as
+        the yielded WS ``rate_limit`` event reaches only clients connected
+        directly to this install.
         """
         snapshot = self.apply_live_event(rate_limit_type, utilization, resets_at)
         if snapshot is not None:
-            await self._broadcast(snapshot)
+            # Persist (so peers see the live change) then broadcast the enriched
+            # cluster shape. Both touch the DB — offload off the event loop.
+            await run_sync(self._persist_snapshot)
+            await self._broadcast(await run_sync(self._cluster_snapshot))
 
 
 # Global singleton.

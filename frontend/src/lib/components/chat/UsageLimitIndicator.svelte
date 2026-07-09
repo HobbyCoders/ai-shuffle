@@ -5,9 +5,16 @@
 	 * plus a click/tap popover listing ALL current limit windows with a progress
 	 * bar, %, and reset countdown.
 	 *
+	 * The 5-hour window is per Claude ACCOUNT, and each install runs a different
+	 * account. The pill therefore tracks the window of the install that OWNS the
+	 * viewed/composed session (resolved by `usage-target.ts`), not always the
+	 * local install — an offloaded session shows the worker's usage. The popover
+	 * lists every install's windows, one section per account/device.
+	 *
 	 * The pill headline is pinned to the 5-hour window and never falls back to
-	 * another window: if `five_hour` isn't known yet the pill stays hidden. The
-	 * weekly (`seven_day`) and Fable/Opus windows only appear inside the popover.
+	 * another window: if `five_hour` isn't known for the resolved install the pill
+	 * stays hidden. The weekly (`seven_day`) and Fable/Opus windows only appear
+	 * inside the popover.
 	 *
 	 * Data source: the `rateLimit` store, fed by the backend usage poller
 	 * (`usage_snapshot` WS event + the `/usage/limits` REST fetch on load) and by
@@ -29,12 +36,23 @@
 		windowLabel,
 		effectivePct,
 		formatCountdown,
+		formatAsOf,
+		resolveBucket,
+		resolveBucketKey,
+		selfBucketKey,
+		isBucketStale,
+		type UsageBucket,
 	} from '$lib/stores/rate-limit';
+	import { usageTargetInstance } from '$lib/stores/usage-target';
 
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
+	// The interval only runs while the popover is `open` (where live countdowns
+	// matter); when closed we refresh `now` once so the pill is current but avoid
+	// re-running the per-second `sections` recompute for a hidden popover.
 	let now: number = $state(Date.now());
 	$effect(() => {
 		now = Date.now();
+		if (!open) return;
 		const interval = setInterval(() => {
 			now = Date.now();
 		}, 1000);
@@ -49,18 +67,29 @@
 		hasReset: boolean;
 	}
 
-	const items = $derived.by<WindowItem[]>(() =>
-		orderedWindows($rateLimit.windows).map((w) => ({
+	function itemsFor(bucket: UsageBucket): WindowItem[] {
+		return orderedWindows(bucket.windows).map((w) => ({
 			type: w.type,
 			label: windowLabel(w.type),
 			pct: effectivePct(w, now),
 			countdown: formatCountdown(w.resets_at, now),
 			hasReset: w.resets_at != null,
-		}))
+		}));
+	}
+
+	// The install whose usage the pill tracks (null = local/self).
+	const target = $derived($usageTargetInstance);
+	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
+	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
+
+	const items = $derived.by<WindowItem[]>(() =>
+		resolvedBucket ? itemsFor(resolvedBucket) : []
 	);
 
 	// Headline: pinned to the 5-hour window only — never falls back to another
-	// window. Stays null (pill hidden) until the 5-hour window is known.
+	// window. Stays null (pill hidden) until the 5-hour window is known for the
+	// resolved install (a remote target with no snapshot yet stays hidden — we
+	// never borrow the local account's number).
 	const headline = $derived.by<WindowItem | null>(
 		() => items.find((it) => it.type === 'five_hour') ?? null
 	);
@@ -68,9 +97,70 @@
 	const hasValue = $derived(headline != null);
 	const displayPct = $derived(headline?.pct ?? 0);
 
-	// Dim the pill between an account switch and the new account's fresh snapshot
-	// so we never present the previous account's numbers as current.
-	const stale = $derived($rateLimit.stale ?? false);
+	// Dim the pill between an account switch and the resolved install's fresh
+	// snapshot so we never present the previous account's numbers as current.
+	const stale = $derived(resolvedKey != null && ($rateLimit.staleByInstance[resolvedKey] ?? false));
+
+	// ── Popover sections: one per install, deduped by shared account identity ──
+	interface PopoverSection {
+		key: string;
+		isSelf: boolean;
+		deviceLabel: string | null;
+		accountLabel: string | null;
+		staleLine: string | null;
+		items: WindowItem[];
+	}
+
+	function staleLineFor(bucket: UsageBucket): string | null {
+		const offline = bucket.online === false;
+		const old = isBucketStale(bucket, now);
+		if (!offline && !old) return null;
+		const age = formatAsOf(bucket.fetchedAt, now);
+		const asOf = age ? `as of ${age}` : 'as of unknown';
+		return offline ? `offline · ${asOf}` : asOf;
+	}
+
+	const sections = $derived.by<PopoverSection[]>(() => {
+		const state = $rateLimit;
+		const selfKey = selfBucketKey(state);
+		// Self bucket first, then the rest by device label / key for stability.
+		const keys = Object.keys(state.buckets).sort((a, b) => {
+			if (a === selfKey) return -1;
+			if (b === selfKey) return 1;
+			const da = state.buckets[a].deviceName ?? a;
+			const db = state.buckets[b].deviceName ?? b;
+			return da.localeCompare(db);
+		});
+		const seenIdentity = new Set<string>();
+		const out: PopoverSection[] = [];
+		for (const key of keys) {
+			const bucket = state.buckets[key];
+			const rows = itemsFor(bucket);
+			if (rows.length === 0) continue;
+			// Dedupe installs that share one Claude account (id or email).
+			const identity = bucket.accountId ?? bucket.accountEmail ?? null;
+			if (identity != null) {
+				if (seenIdentity.has(identity)) continue;
+				seenIdentity.add(identity);
+			}
+			out.push({
+				key,
+				isSelf: key === selfKey,
+				deviceLabel: bucket.deviceName ?? null,
+				accountLabel: bucket.accountName ?? bucket.accountEmail ?? null,
+				staleLine: staleLineFor(bucket),
+				items: rows,
+			});
+		}
+		return out;
+	});
+
+	// Show per-section headers only when there's more than one install to
+	// distinguish or we actually know who a section belongs to — a lone unlabeled
+	// bucket keeps the original flat popover.
+	const showSectionHeaders = $derived(
+		sections.length > 1 || sections.some((s) => s.deviceLabel || s.accountLabel)
+	);
 
 	function severityFor(pct: number): 'neutral' | 'warning' | 'danger' {
 		if (pct > 90) return 'danger';
@@ -137,26 +227,46 @@
 		{#if open}
 			<div class="usage-popover" role="dialog" aria-label="Usage limits">
 				<div class="popover-title">Usage limits</div>
-				{#each items as item (item.type)}
-					{@const rowSeverity = severityFor(item.pct)}
-					<div class="popover-row">
-						<div class="row-head">
-							<span class="row-label">{item.label}</span>
-							<span class="row-pct {rowSeverity}">{item.pct}%</span>
-						</div>
-						<div class="row-bar">
-							<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
-						</div>
-						<div class="row-reset">
-							{#if item.countdown}
-								resets in {item.countdown}
-							{:else if item.hasReset}
-								resets soon
-							{:else}
-								no reset window
+				{#each sections as section (section.key)}
+					{#if showSectionHeaders}
+						<div class="popover-section">
+							<div class="section-head">
+								{#if section.deviceLabel}
+									<span class="section-device">{section.deviceLabel}</span>
+								{/if}
+								{#if section.accountLabel}
+									<span class="section-account">{section.accountLabel}</span>
+								{/if}
+								{#if !section.deviceLabel && !section.accountLabel}
+									<span class="section-device">{section.isSelf ? 'This device' : 'Other device'}</span>
+								{/if}
+							</div>
+							{#if section.staleLine}
+								<div class="section-stale">{section.staleLine}</div>
 							{/if}
 						</div>
-					</div>
+					{/if}
+					{#each section.items as item (item.type)}
+						{@const rowSeverity = severityFor(item.pct)}
+						<div class="popover-row">
+							<div class="row-head">
+								<span class="row-label">{item.label}</span>
+								<span class="row-pct {rowSeverity}">{item.pct}%</span>
+							</div>
+							<div class="row-bar">
+								<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
+							</div>
+							<div class="row-reset">
+								{#if item.countdown}
+									resets in {item.countdown}
+								{:else if item.hasReset}
+									resets soon
+								{:else}
+									no reset window
+								{/if}
+							</div>
+						</div>
+					{/each}
 				{/each}
 			</div>
 		{/if}
@@ -287,6 +397,36 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		color: var(--muted-foreground);
+	}
+
+	/* Per-install section header (only shown when >1 install / when named). */
+	.popover-section {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		margin-top: 2px;
+	}
+	.popover-section:first-of-type {
+		margin-top: 0;
+	}
+	.section-head {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+	.section-device {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--foreground);
+	}
+	.section-account {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	.section-stale {
+		font-size: 10px;
+		color: var(--warning);
 	}
 
 	.popover-row {

@@ -87,7 +87,10 @@ def _safe_json(value):
 # v50: Add automation_fires table (atomic cross-install claim per scheduled fire)
 # v51: Add sessions.parked_task_kind (durable parked marker, cleared by boot reconcile)
 # v52: Add claude_accounts table (multiple Anthropic OAuth accounts + in-app switching)
-SCHEMA_VERSION = 52
+# v53: Add usage_snapshots table (per-install Claude usage-limits snapshot on a
+#      shared DB — the 5-hour window is per-account, so each install persists
+#      its own snapshot and the usage endpoint serves them all)
+SCHEMA_VERSION = 53
 
 
 def _run_column_migrations(cursor):
@@ -597,6 +600,29 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("automation_fires")
 
+    # usage_snapshots (v53). Per-install Claude usage-limits snapshot keyed by
+    # instance_id. The 5-hour Claude usage window is per-account and two installs
+    # on a shared DB may run different accounts, so each install persists its own
+    # snapshot and the usage endpoint serves them all. Idempotent so upgrades
+    # from any older version land the table without needing the SCHEMA_VERSION
+    # bump to fire the bootstrap path (same defensive pattern as the
+    # automation_fires block above).
+    if not table_exists(cursor, "usage_snapshots"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usage_snapshots (
+                instance_id TEXT PRIMARY KEY,
+                windows JSONB NOT NULL DEFAULT '[]',
+                available BOOLEAN DEFAULT FALSE,
+                generation BIGINT,
+                fetched_at BIGINT,
+                account_id TEXT,
+                account_email TEXT,
+                account_name TEXT,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("usage_snapshots")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -962,6 +988,12 @@ from app.db.claude_accounts import (  # noqa: F401
     mark_claude_account_sync_pending,
     touch_claude_account_last_used,
     count_claude_accounts,
+)
+
+from app.db.usage_snapshots import (  # noqa: F401
+    upsert_usage_snapshot,
+    get_all_usage_snapshots,
+    delete_usage_snapshot,
 )
 
 from app.db.rate_limits import (  # noqa: F401

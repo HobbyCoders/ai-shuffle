@@ -912,10 +912,14 @@ class SyncEngine:
     ):
         """Fan a Claude usage-limits snapshot out to EVERY connected device.
 
-        Account-level (not session- or user-scoped): the usage windows belong to
-        the shared Claude credential, so every open client should see the same
-        numbers. Sent as a ``usage_snapshot`` WS event carrying the snapshot's
-        ``windows``/``fetched_at``/``available`` fields.
+        Cluster-level (not session- or user-scoped): the 5-hour Claude window is
+        PER-ACCOUNT, and on a shared database two installs may run different
+        Claude accounts, so the numbers are NOT identical everywhere. The
+        broadcast carries the enriched cluster shape — the local install's legacy
+        top-level ``windows``/``fetched_at``/``available``/``generation`` plus a
+        ``snapshots`` list of every install's per-account snapshot and
+        ``self_instance_id`` — as a ``usage_snapshot`` WS event, so each client
+        can render the correct reset time for offloaded sessions.
         """
         message = {"type": "usage_snapshot", **snapshot}
 

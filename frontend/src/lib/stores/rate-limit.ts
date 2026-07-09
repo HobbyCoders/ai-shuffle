@@ -1,23 +1,37 @@
 /**
- * Usage-limits store — a per-window map of the user's Claude subscription usage,
- * fed by BOTH:
- *   1. A polled snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
- *      endpoint on page load) — the authoritative full set of windows, from the
- *      backend usage poller. Utilization is already 0–100 percent.
- *   2. Live SDK `rate_limit` events (WS `case 'rate_limit'`) — refine a SINGLE
- *      window as its status changes. SDK utilization is a 0.0–1.0 fraction, so
- *      it is normalised to 0–100 on ingest.
+ * Usage-limits store — per-INSTALL buckets of Claude subscription usage.
  *
- * Both key on the window-type string (`five_hour`, `seven_day`,
+ * The 5-hour usage window is scoped to a Claude ACCOUNT, and in a clustered
+ * deployment (primary + worker sharing one Postgres) each install is logged into
+ * a DIFFERENT account. A session can be offloaded to the worker, so the usage a
+ * viewer cares about is the usage of the install that actually RUNS the viewed
+ * session — not necessarily the local install's account. This store therefore
+ * keeps one `UsageBucket` PER install (keyed by `instance_id`) rather than a
+ * single global window set. The widget resolves which bucket to show from the
+ * currently viewed/composed session (see `usage-target.ts`).
+ *
+ * Fed by BOTH:
+ *   1. A polled snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
+ *      endpoint) — authoritative full sets of windows per install, from the
+ *      backend usage poller. Utilization is already 0–100 percent. The modern
+ *      payload carries a `snapshots` array (one entry per install) plus
+ *      `self_instance_id`; a legacy payload carries only top-level windows for
+ *      the LOCAL install, which we fold into a self bucket.
+ *   2. Live SDK `rate_limit` events (WS `case 'rate_limit'`) — refine a SINGLE
+ *      window of the emitting install's bucket, routed by the event's
+ *      `instance_id`. SDK utilization is a 0.0–1.0 fraction, normalised to
+ *      0–100 on ingest.
+ *
+ * Windows key on the window-type string (`five_hour`, `seven_day`,
  * `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
- * `overage`) so they update the same slot. The map is persisted to localStorage
- * so the header pill/popover stay populated across reloads.
+ * `overage`). Buckets are persisted to localStorage so the header pill/popover
+ * stay populated across reloads.
  *
  * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
  *
- * Consumers: `UsageLimitIndicator.svelte` (header pill + popover) reads
- * `$rateLimit.windows`; `ws-message-handlers.ts` calls `applyLiveEvent` /
- * `applySnapshot`.
+ * Consumers: `UsageLimitIndicator.svelte` (header pill + popover) resolves a
+ * bucket via `resolveBucket`; `ws-message-handlers.ts` calls `applyLiveEvent` /
+ * `applySnapshot`; `usage-target.ts` derives which install to show.
  */
 
 import { createStore } from './store-utils';
@@ -33,18 +47,45 @@ export interface UsageWindow {
 	source: 'poll' | 'live';
 }
 
-interface RateLimitState {
+/**
+ * One install's usage snapshot: its window set plus who/where it belongs to.
+ * `accountId`/`accountEmail` identify the Claude account so the popover can
+ * dedupe two installs that happen to share one account.
+ */
+export interface UsageBucket {
 	/** Keyed by window type. */
 	windows: Record<string, UsageWindow>;
-	/** Whether the backend currently has a usable Claude credential. */
+	/** Epoch ms the backend last fetched this install's usage (staleness). */
+	fetchedAt: number | null;
+	/** Whether this install currently has a usable Claude credential. */
 	available: boolean;
-	/**
-	 * True between an account switch and the arrival of the fresh snapshot for
-	 * the new account. The indicator dims itself so we never present the OLD
-	 * account's numbers as if they were current. Runtime-only (not persisted).
-	 */
-	stale: boolean;
+	accountId?: string | null;
+	accountEmail?: string | null;
+	accountName?: string | null;
+	deviceName?: string | null;
+	/** Owning install seen recently (heartbeat). null = unknown. */
+	online?: boolean | null;
+	/** Monotonic generation tag from the backend for THIS install (see below). */
+	generation?: number | null;
 }
+
+interface RateLimitState {
+	/** Keyed by install `instance_id` (or `'__self__'` for a legacy/local-only
+	 *  payload that carries no instance id). */
+	buckets: Record<string, UsageBucket>;
+	/** The local install's instance id, when the backend reports it. null in the
+	 *  legacy path — the self bucket is then keyed `'__self__'`. */
+	selfInstanceId: string | null;
+	/**
+	 * Per-install "stale between an account switch and the fresh snapshot" flag.
+	 * The indicator dims the pill for the shown install so we never present the
+	 * OLD account's numbers as current. Runtime-only (not persisted).
+	 */
+	staleByInstance: Record<string, boolean>;
+}
+
+/** Fallback bucket key when a payload carries no instance id (legacy backend). */
+export const SELF_BUCKET_KEY = '__self__';
 
 /** Live SDK `rate_limit` event payload (utilization is a 0–1 fraction). */
 export interface LiveRateLimitEvent {
@@ -53,6 +94,9 @@ export interface LiveRateLimitEvent {
 	resets_at?: string | null;
 	utilization?: number | null;
 	session_id?: string;
+	/** The install that emitted the event (relayed remote events are tagged with
+	 *  the worker's id). Absent on legacy backends → routed to the self bucket. */
+	instance_id?: string | null;
 }
 
 /** One window from a polled snapshot (utilization already 0–100). */
@@ -62,7 +106,25 @@ export interface SnapshotWindow {
 	resets_at?: string | null;
 }
 
+/** One install's entry in the modern `snapshots` array. */
+export interface SnapshotInstance {
+	instance_id: string;
+	device_name?: string | null;
+	online?: boolean | null;
+	account_id?: string | null;
+	account_email?: string | null;
+	account_name?: string | null;
+	windows: SnapshotWindow[];
+	/** Epoch MILLISECONDS (the legacy top-level `fetched_at` is seconds). */
+	fetched_at?: number | null;
+	available: boolean;
+	generation?: number | null;
+}
+
 export interface UsageSnapshot {
+	/** Legacy top-level fields — the LOCAL install's data. Always present for
+	 *  backwards compatibility; folded into the self bucket when `snapshots` is
+	 *  absent. */
 	windows: SnapshotWindow[];
 	fetched_at?: number | null;
 	available: boolean;
@@ -72,9 +134,17 @@ export interface UsageSnapshot {
 	 * after a newer one (e.g. a slow in-flight poll completing post-switch).
 	 */
 	generation?: number | null;
+	/** Modern per-install snapshots (each `fetched_at` in MILLISECONDS). When
+	 *  present AND non-empty, merges into the buckets map (absent installs are
+	 *  carried forward and marked stale). Absent or empty (e.g. a backend DB
+	 *  blip) → the top-level fields fold into the current self bucket. */
+	snapshots?: SnapshotInstance[];
+	/** The local install's instance id (which entry in `snapshots` is "us"). */
+	self_instance_id?: string | null;
 }
 
-const STORAGE_KEY = 'usage-limit-windows';
+const STORAGE_KEY_V2 = 'usage-limit-buckets-v2';
+const LEGACY_STORAGE_KEY = 'usage-limit-windows';
 
 // Human labels per known window type. Unknown types get a humanized fallback.
 export const WINDOW_LABELS: Record<string, string> = {
@@ -151,6 +221,23 @@ export function formatCountdown(resetsAt: string | null | undefined, nowMs: numb
 	return `${s}s`;
 }
 
+/** Format an "as of" age from a fetched timestamp: "just now" / "4m ago". */
+export function formatAsOf(fetchedAt: number | null | undefined, nowMs: number): string {
+	if (fetchedAt == null) return '';
+	const diffMs = nowMs - fetchedAt;
+	if (diffMs < 60_000) return 'just now';
+	const totalMin = Math.floor(diffMs / 60_000);
+	const d = Math.floor(totalMin / 1440);
+	const h = Math.floor((totalMin % 1440) / 60);
+	const m = totalMin % 60;
+	if (d > 0) return `${d}d ago`;
+	if (h > 0) return `${h}h ago`;
+	return `${m}m ago`;
+}
+
+/** How old a bucket's data may get before we surface an "as of" staleness line. */
+export const BUCKET_STALE_MS = 5 * 60_000;
+
 /** Windows as an array, ordered by WINDOW_ORDER then any extras alphabetically. */
 export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
 	const known = WINDOW_ORDER.filter((t) => t in windows).map((t) => windows[t]);
@@ -161,41 +248,137 @@ export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindo
 	return [...known, ...extra];
 }
 
-function _loadWindows(): Record<string, UsageWindow> {
-	try {
-		const raw = localStorage.getItem(STORAGE_KEY);
-		if (!raw) return {};
-		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed === 'object') {
-			return parsed as Record<string, UsageWindow>;
+/** The key of the self (local install's) bucket for the given state. */
+export function selfBucketKey(state: RateLimitState): string {
+	return state.selfInstanceId ?? SELF_BUCKET_KEY;
+}
+
+/**
+ * Resolve which bucket to display for a target install:
+ *   - exact match on a non-null `instanceId` → that install's bucket;
+ *   - `instanceId == null` (a local/self session) → the self bucket;
+ *   - a non-null `instanceId` with no bucket, on a LEGACY store (no cluster info:
+ *     `selfInstanceId == null` and a '__self__' bucket exists) → the self bucket.
+ *     A legacy backend only knows the single local install, so any target maps to
+ *     it. On a MODERN store (`selfInstanceId` known) we deliberately do NOT fall
+ *     back — an unknown remote target must resolve to null rather than showing the
+ *     LOCAL account's numbers, which would be a lie.
+ */
+export function resolveBucket(state: RateLimitState, instanceId: string | null): UsageBucket | null {
+	if (instanceId != null) {
+		const exact = state.buckets[instanceId];
+		if (exact) return exact;
+		if (state.selfInstanceId == null && state.buckets[SELF_BUCKET_KEY]) {
+			return state.buckets[SELF_BUCKET_KEY];
 		}
-		return {};
+		return null;
+	}
+	return state.buckets[selfBucketKey(state)] ?? null;
+}
+
+/** The bucket key `resolveBucket` would return (for staleness lookup), or null. */
+export function resolveBucketKey(state: RateLimitState, instanceId: string | null): string | null {
+	if (instanceId != null) {
+		if (state.buckets[instanceId]) return instanceId;
+		if (state.selfInstanceId == null && state.buckets[SELF_BUCKET_KEY]) return SELF_BUCKET_KEY;
+		return null;
+	}
+	const key = selfBucketKey(state);
+	return state.buckets[key] ? key : null;
+}
+
+/** Whether a bucket's polled data has aged past `BUCKET_STALE_MS` (needs a refresh). */
+export function isBucketStale(bucket: UsageBucket, now: number): boolean {
+	return bucket.fetchedAt != null && now - bucket.fetchedAt > BUCKET_STALE_MS;
+}
+
+// ─── Persistence ─────────────────────────────────────────────────────────────
+
+interface PersistedShape {
+	buckets: Record<string, UsageBucket>;
+	selfInstanceId: string | null;
+}
+
+function _load(): { buckets: Record<string, UsageBucket>; selfInstanceId: string | null } {
+	try {
+		const raw = localStorage.getItem(STORAGE_KEY_V2);
+		if (raw) {
+			const parsed = JSON.parse(raw) as PersistedShape;
+			if (parsed && typeof parsed === 'object' && parsed.buckets && typeof parsed.buckets === 'object') {
+				return { buckets: parsed.buckets, selfInstanceId: parsed.selfInstanceId ?? null };
+			}
+			return { buckets: {}, selfInstanceId: null };
+		}
+		// v2 absent — migrate the legacy single-window map into a self bucket.
+		const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+		if (legacy) {
+			const windows = JSON.parse(legacy) as Record<string, UsageWindow>;
+			localStorage.removeItem(LEGACY_STORAGE_KEY);
+			if (windows && typeof windows === 'object' && Object.keys(windows).length > 0) {
+				const bucket: UsageBucket = {
+					windows,
+					fetchedAt: null,
+					available: true,
+				};
+				return { buckets: { [SELF_BUCKET_KEY]: bucket }, selfInstanceId: null };
+			}
+		}
+		return { buckets: {}, selfInstanceId: null };
 	} catch {
-		return {}; // localStorage unavailable (SSR/prerender) or malformed JSON.
+		return { buckets: {}, selfInstanceId: null }; // localStorage unavailable / malformed.
 	}
 }
 
-function _saveWindows(windows: Record<string, UsageWindow>) {
+function _save(state: RateLimitState) {
 	try {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(windows));
+		const payload: PersistedShape = { buckets: state.buckets, selfInstanceId: state.selfInstanceId };
+		localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload));
 	} catch {
 		// best-effort persistence
 	}
 }
 
+const _loaded = _load();
 const _store = createStore<RateLimitState>({
-	windows: _loadWindows(),
-	available: false,
-	stale: false,
+	buckets: _loaded.buckets,
+	selfInstanceId: _loaded.selfInstanceId,
+	staleByInstance: {},
 });
 
 /**
- * Highest snapshot generation seen this session. In-memory (NOT persisted) so a
- * page reload — or a backend restart, which resets its counter to 0 — starts
- * fresh and never permanently rejects post-restart snapshots. A snapshot with a
- * strictly-lower generation is a stale straggler and is discarded.
+ * Highest snapshot generation seen this session, PER install. In-memory (NOT
+ * persisted) so a page reload — or a backend restart, which resets its counter
+ * to 0 — starts fresh and never permanently rejects post-restart snapshots. A
+ * snapshot entry with a strictly-lower generation than its install's high-water
+ * mark is a stale straggler and is discarded.
  */
-let _lastGeneration = -1;
+const _lastGenByInstance: Record<string, number> = {};
+
+/**
+ * Normalise a legacy top-level `fetched_at` (epoch SECONDS, float) into the
+ * store's canonical epoch MILLISECONDS. Per-install `snapshots[].fetched_at`
+ * already arrives in ms and is stored as-is.
+ */
+function _legacyFetchedMs(sec: number | null | undefined): number | null {
+	if (sec == null || typeof sec !== 'number' || !Number.isFinite(sec)) return null;
+	return Math.round(sec * 1000);
+}
+
+/** Build a window map from raw snapshot windows. */
+function _windowsFromSnapshot(raw: SnapshotWindow[] | undefined, now: number): Record<string, UsageWindow> {
+	const windows: Record<string, UsageWindow> = {};
+	for (const w of raw ?? []) {
+		if (!w?.type || typeof w.utilization !== 'number') continue;
+		windows[w.type] = {
+			type: w.type,
+			utilization: _clampPct(w.utilization),
+			resets_at: w.resets_at ?? null,
+			received_at: now,
+			source: 'poll',
+		};
+	}
+	return windows;
+}
 
 export const rateLimit = {
 	get current(): RateLimitState {
@@ -206,7 +389,9 @@ export const rateLimit = {
 
 	createDerived: _store.createDerived,
 
-	/** Apply a live SDK `rate_limit` event — refines a single window. */
+	/** Apply a live SDK `rate_limit` event — refines a single window of the
+	 *  emitting install's bucket. Routed by `instance_id`, falling back to the
+	 *  self install when the event carries none (legacy backend). */
 	applyLiveEvent(event: LiveRateLimitEvent): void {
 		const { rate_limit_type, utilization } = event;
 		// A data-less event (utilization null) must NOT create/wipe a window —
@@ -220,54 +405,185 @@ export const rateLimit = {
 			source: 'live',
 		};
 		_store.update((s) => {
-			const windows = { ...s.windows, [rate_limit_type]: win };
-			_saveWindows(windows);
-			return { ...s, windows, available: true };
+			const key = event.instance_id ?? s.selfInstanceId ?? SELF_BUCKET_KEY;
+			const prev = s.buckets[key];
+			const bucket: UsageBucket = {
+				...(prev ?? { windows: {}, fetchedAt: null, available: true }),
+				windows: { ...(prev?.windows ?? {}), [rate_limit_type]: win },
+				available: true,
+			};
+			const buckets = { ...s.buckets, [key]: bucket };
+			const next = { ...s, buckets };
+			_save(next);
+			return next;
 		});
 	},
 
 	/**
-	 * Mark the indicator stale — call at the start of an account switch so it
-	 * dims until the fresh snapshot for the new account arrives.
+	 * Mark the local (self) install's bucket stale — call at the start of an
+	 * account switch so its pill dims until the fresh snapshot arrives. Scoped to
+	 * the self bucket: an offloaded session on another install is unaffected.
 	 */
 	markStale(): void {
-		_store.update((s) => ({ ...s, stale: true }));
+		_store.update((s) => ({
+			...s,
+			staleByInstance: { ...s.staleByInstance, [selfBucketKey(s)]: true },
+		}));
 	},
 
 	/** Apply a polled snapshot (WS `usage_snapshot` or REST `/usage/limits`). */
 	applySnapshot(snapshot: UsageSnapshot): void {
-		const gen = snapshot.generation;
-		if (gen == null) {
-			// No generation tag (legacy backend / tests). Treat as authoritative
-			// and reset the guard so it can't wedge on a stale high-water mark.
-			_lastGeneration = -1;
-		} else {
-			// Discard a straggler from an older generation (out-of-order arrival).
-			if (gen < _lastGeneration) return;
-			_lastGeneration = gen;
-		}
+		const now = Date.now();
 
-		// When the backend has no usable credential it reports available=false
-		// with no windows — keep the last-known windows rather than flashing the
-		// pill away, but reflect availability. A fresh snapshot resolves any
-		// pending switch, so clear the stale flag either way.
-		if (!snapshot.available) {
-			_store.update((s) => ({ ...s, available: false, stale: false }));
+		// ── Modern path: per-install snapshots MERGE into the buckets map ───────
+		// Require a non-empty array: an empty `snapshots: []` is not authoritative
+		// (e.g. a transient backend DB read failure), so we fall through to the
+		// legacy fold below rather than wiping every bucket.
+		if (Array.isArray(snapshot.snapshots) && snapshot.snapshots.length > 0) {
+			_store.update((s) => {
+				const buckets: Record<string, UsageBucket> = {};
+				const staleByInstance = { ...s.staleByInstance };
+				const incomingKeys = new Set<string>();
+				for (const entry of snapshot.snapshots!) {
+					if (!entry?.instance_id) continue;
+					const key = entry.instance_id;
+					incomingKeys.add(key);
+					const prev = s.buckets[key];
+
+					// Per-install generation guard: a straggler from an older
+					// generation is dropped — carry the previous bucket forward. A
+					// null generation is accepted but must NOT lower the high-water
+					// mark (that would re-admit older out-of-order snapshots).
+					const gen = entry.generation;
+					if (gen != null) {
+						if (gen < (_lastGenByInstance[key] ?? -1)) {
+							if (prev) buckets[key] = prev;
+							continue;
+						}
+						_lastGenByInstance[key] = gen;
+					}
+
+					// A fresh snapshot for this install resolves any pending switch.
+					staleByInstance[key] = false;
+
+					const meta = {
+						accountId: entry.account_id ?? null,
+						accountEmail: entry.account_email ?? null,
+						accountName: entry.account_name ?? null,
+						deviceName: entry.device_name ?? null,
+						online: entry.online ?? null,
+						generation: gen ?? null,
+						fetchedAt: entry.fetched_at ?? null,
+					};
+
+					if (!entry.available) {
+						// No usable credential: keep last-known windows rather than
+						// flashing the pill away, but reflect availability.
+						buckets[key] = {
+							...meta,
+							windows: prev?.windows ?? {},
+							available: false,
+						};
+					} else {
+						buckets[key] = {
+							...meta,
+							windows: _windowsFromSnapshot(entry.windows, now),
+							available: true,
+						};
+					}
+				}
+
+				// Preserve existing buckets whose install is ABSENT from this
+				// snapshot (e.g. a transient registry dropout, or a self bucket
+				// restored via live events before the next full poll). Carry them
+				// forward unchanged and mark them stale so the UI signals the data
+				// is no longer confirmed by a fresh snapshot.
+				for (const key of Object.keys(s.buckets)) {
+					if (incomingKeys.has(key) || buckets[key]) continue;
+					buckets[key] = s.buckets[key];
+					staleByInstance[key] = true;
+				}
+				// Prune stale flags for keys that ended up with no bucket at all.
+				for (const key of Object.keys(staleByInstance)) {
+					if (!buckets[key]) delete staleByInstance[key];
+				}
+
+				const next: RateLimitState = {
+					buckets,
+					selfInstanceId: snapshot.self_instance_id ?? null,
+					staleByInstance,
+				};
+				_save(next);
+				return next;
+			});
 			return;
 		}
-		const now = Date.now();
-		const windows: Record<string, UsageWindow> = {};
-		for (const w of snapshot.windows ?? []) {
-			if (!w?.type || typeof w.utilization !== 'number') continue;
-			windows[w.type] = {
-				type: w.type,
-				utilization: _clampPct(w.utilization),
-				resets_at: w.resets_at ?? null,
-				received_at: now,
-				source: 'poll',
+
+		// ── Legacy / degraded fold: top-level windows → the CURRENT self bucket ──
+		// Reached for a genuinely-legacy backend (no `snapshots` support) AND for a
+		// degraded modern payload (`snapshots` omitted or empty, e.g. a transient
+		// backend DB failure). Either way the payload describes only the LOCAL
+		// install, so it folds NON-destructively into the store's current self
+		// bucket: every other install's bucket, `selfInstanceId`, and the self
+		// bucket's account/device metadata are all preserved. (Wiping them would
+		// null selfInstanceId and arm resolveBucket's legacy self-fallback, serving
+		// the LOCAL account's numbers for an offloaded session — the original
+		// mislabel bug.) On a genuinely-legacy store selfInstanceId was never set,
+		// so the fold key stays '__self__' and behavior is unchanged.
+		_store.update((s) => {
+			const key = selfBucketKey(s);
+			const gen = snapshot.generation;
+			if (gen == null) {
+				// No generation tag (legacy backend / tests). Treat as authoritative
+				// and reset the guard so it can't wedge on a stale high-water mark.
+				_lastGenByInstance[key] = -1;
+			} else {
+				if (gen < (_lastGenByInstance[key] ?? -1)) return s; // straggler — drop
+				_lastGenByInstance[key] = gen;
+			}
+
+			const staleByInstance = { ...s.staleByInstance, [key]: false };
+			const prev = s.buckets[key];
+			let bucket: UsageBucket;
+			if (!snapshot.available) {
+				// Keep last-known windows; reflect availability; clear the switch flag.
+				bucket = {
+					...(prev ?? { windows: {}, fetchedAt: null }),
+					available: false,
+					fetchedAt: _legacyFetchedMs(snapshot.fetched_at) ?? prev?.fetchedAt ?? null,
+				};
+			} else {
+				// Spread `prev` so a modern self bucket keeps its account/device
+				// metadata (labels) through a degraded payload; override only the
+				// data fields the legacy payload actually carries.
+				bucket = {
+					...(prev ?? {}),
+					windows: _windowsFromSnapshot(snapshot.windows, now),
+					fetchedAt: _legacyFetchedMs(snapshot.fetched_at),
+					available: true,
+					generation: gen ?? null,
+				};
+			}
+			const next: RateLimitState = {
+				buckets: { ...s.buckets, [key]: bucket },
+				selfInstanceId: s.selfInstanceId,
+				staleByInstance,
 			};
-		}
-		_saveWindows(windows);
-		_store.update(() => ({ windows, available: true, stale: false }));
+			_save(next);
+			return next;
+		});
+	},
+
+	/**
+	 * Test-only: reset the store to a pristine empty state AND clear the
+	 * per-install generation high-water marks. The module-level
+	 * `_lastGenByInstance` otherwise leaks install keys between tests (the legacy
+	 * reset path only clears the self key), letting an earlier test's generation
+	 * wedge a later one.
+	 */
+	__resetForTests(): void {
+		for (const k of Object.keys(_lastGenByInstance)) delete _lastGenByInstance[k];
+		_store.set({ buckets: {}, selfInstanceId: null, staleByInstance: {} });
+		_save(_store.current);
 	},
 };

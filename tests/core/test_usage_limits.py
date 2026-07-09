@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.config import settings
 from app.core.usage_limits import (
     UsageLimitsMonitor,
     parse_usage_response,
@@ -375,3 +376,180 @@ class TestLiveEvents:
             snap = await monitor.get_snapshot(max_age=300)
             oauth.get_access_token.assert_not_called()
         assert snap["windows"][0]["utilization"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Per-install persistence (usage_snapshots table)
+# ---------------------------------------------------------------------------
+
+class TestPersistence:
+    @pytest.mark.asyncio
+    async def test_fetch_persists_row_with_instance_and_account_meta(self, monitor, mock_db):
+        from app.db import database as db
+        iid = settings.effective_instance_id
+
+        # Seed an active Claude account for this install so metadata resolves.
+        db.create_claude_account(
+            account_id="acct-1", name="Primary", credentials="enc:x",
+            credential_fingerprint=None, expires_at=None, has_refresh_token=True,
+            email="primary@example.com",
+        )
+        db.set_system_setting(f"claude_active_account:{iid}", "acct-1")
+
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tok"
+            await monitor.fetch()
+
+        rows = db.get_all_usage_snapshots()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["instance_id"] == iid
+        assert row["available"] is True
+        assert row["account_id"] == "acct-1"
+        assert row["account_email"] == "primary@example.com"
+        assert row["account_name"] == "Primary"
+        assert row["windows"]  # normalized windows persisted
+
+    @pytest.mark.asyncio
+    async def test_no_credential_persists_unavailable_row(self, monitor, mock_db):
+        from app.db import database as db
+        with patch("app.core.usage_limits.direct_oauth") as oauth:
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = None
+            await monitor.fetch()
+
+        rows = db.get_all_usage_snapshots()
+        assert len(rows) == 1
+        assert rows[0]["instance_id"] == settings.effective_instance_id
+        assert rows[0]["available"] is False
+        assert rows[0]["windows"] == []
+        # Legacy single-account/API-key mode → no account metadata.
+        assert rows[0]["account_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_apply_live_event_and_broadcast_persists(self, monitor, mock_db):
+        # apply_live_event is now pure in-memory; the async broadcast wrapper is
+        # what persists (through run_sync) and fans out.
+        from app.db import database as db
+        monitor._broadcast = AsyncMock()
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+
+        rows = db.get_all_usage_snapshots()
+        assert len(rows) == 1
+        assert rows[0]["instance_id"] == settings.effective_instance_id
+        assert rows[0]["available"] is True
+        # SDK fraction normalized to percent, then persisted.
+        assert rows[0]["windows"][0]["utilization"] == 42.0
+        monitor._broadcast.assert_awaited_once()
+
+    def test_apply_live_event_is_in_memory_only(self, monitor, mock_db):
+        # The sync refiner must NOT touch the DB — persistence is the async
+        # wrapper's job now (Fix 3: no sync DB on the event loop).
+        from app.db import database as db
+        snap = monitor.apply_live_event("five_hour", 0.42, "a")
+        assert snap is not None  # changed → caller should persist/broadcast
+        assert db.get_all_usage_snapshots() == []
+
+    @pytest.mark.asyncio
+    async def test_unchanged_reading_skips_persist_and_broadcast(self, monitor, mock_db):
+        # A tool-use loop emits one rate_limit event per API round-trip; identical
+        # repeats must not each cost a DB upsert + cluster fanout (Fix 4).
+        monitor._persist_snapshot = MagicMock()
+        monitor._broadcast = AsyncMock()
+
+        # First reading: a new window → changed → persist + broadcast.
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        assert monitor._persist_snapshot.call_count == 1
+        assert monitor._broadcast.await_count == 1
+
+        # Identical repeat → no-op.
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
+        assert monitor._persist_snapshot.call_count == 1
+        assert monitor._broadcast.await_count == 1
+
+        # A materially changed reading → persists + broadcasts immediately.
+        await monitor.apply_live_event_and_broadcast("five_hour", 0.55, "a")
+        assert monitor._persist_snapshot.call_count == 2
+        assert monitor._broadcast.await_count == 2
+
+    def test_cluster_cache_invalidated_on_own_persist(self, monitor, mock_db):
+        from app.db import database as db
+        self_id = settings.effective_instance_id
+
+        # Seed + assemble once to populate the short-TTL cluster cache.
+        monitor._windows = [{"type": "five_hour", "utilization": 10.0, "resets_at": None}]
+        db.upsert_usage_snapshot(
+            self_id, windows=monitor._windows, available=True, generation=1, fetched_at=1,
+        )
+        first = monitor._cluster_snapshot()
+        assert monitor._cluster_cache is not None
+        assert any(s["instance_id"] == self_id for s in first["snapshots"])
+
+        # A peer row written directly to the DB is masked while the cache is warm.
+        db.register_install("peer-x", "Peer", "http://p:1", "docker", "1", {})
+        db.upsert_usage_snapshot("peer-x", windows=[], available=True, generation=1, fetched_at=1)
+        cached = monitor._cluster_snapshot()
+        assert not any(s["instance_id"] == "peer-x" for s in cached["snapshots"])
+
+        # Persisting our OWN row invalidates the cache → peer becomes visible.
+        monitor._persist_snapshot()
+        after = monitor._cluster_snapshot()
+        assert any(s["instance_id"] == "peer-x" for s in after["snapshots"])
+
+    def test_cluster_snapshot_omits_keys_on_db_read_failure(self, monitor):
+        # Fix 1: a DB read failure must NOT emit `snapshots: []` alongside valid
+        # top-level windows (the frontend's modern branch would wipe all buckets).
+        monitor._windows = [{"type": "five_hour", "utilization": 10.0, "resets_at": None}]
+        monitor._available = True
+        monitor._fetched_at = time.time()
+
+        with patch("app.db.database.get_installs_map", side_effect=RuntimeError("db down")):
+            snap = monitor._cluster_snapshot()
+
+        # Legacy fields remain valid for the legacy fold.
+        assert snap["available"] is True
+        assert snap["windows"][0]["type"] == "five_hour"
+        assert snap["generation"] == monitor.current_generation()
+        # Cluster keys omitted entirely.
+        assert "snapshots" not in snap
+        assert "self_instance_id" not in snap
+
+    @pytest.mark.asyncio
+    async def test_midflight_generation_bump_does_not_persist_stale(self, monitor, mock_db):
+        from app.db import database as db
+
+        # Prime the persisted row with account A's windows.
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tokA"
+            await monitor.fetch()
+        primed = db.get_all_usage_snapshots()[0]["windows"]
+        assert primed
+
+        async def _get_then_switch(*args, **kwargs):
+            monitor.bump_generation()  # a switch lands mid-flight
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
+            return resp
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=_get_then_switch)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        factory = MagicMock(return_value=ctx)
+
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch("app.core.usage_limits.httpx.AsyncClient", factory):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tokA"
+            await monitor.fetch()
+
+        # The discarded straggler never overwrote the persisted row.
+        row = db.get_all_usage_snapshots()[0]
+        assert row["windows"] == primed
+        assert all(w["utilization"] != 99.0 for w in row["windows"])

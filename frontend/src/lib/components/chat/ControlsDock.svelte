@@ -10,11 +10,11 @@
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
-	import { onMount } from 'svelte';
 	import { Monitor } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import { getUsageLimits } from '$lib/api/client';
-	import { rateLimit } from '$lib/stores/rate-limit';
+	import { rateLimit, resolveBucketKey, isBucketStale } from '$lib/stores/rate-limit';
+	import { usageTargetInstance } from '$lib/stores/usage-target';
 
 	interface Props {
 		isUploading: boolean;
@@ -53,14 +53,48 @@
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
 	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
 
-	// Populate the usage-limits pill on load, before the first `usage_snapshot`
-	// WS event arrives. The backend poller keeps it fresh thereafter.
-	onMount(() => {
-		getUsageLimits()
+	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
+	// concurrent triggers (e.g. mount + a rapid target change) into ONE GET.
+	let usageFetchInFlight: Promise<void> | null = null;
+	function refreshUsageLimits(): Promise<void> {
+		if (usageFetchInFlight) return usageFetchInFlight;
+		usageFetchInFlight = getUsageLimits()
 			.then((snap) => rateLimit.applySnapshot(snap))
 			.catch(() => {
-				// Non-fatal — the WS `usage_snapshot` event will populate it later.
+				// Non-fatal — reset so a later target change / WS event retries.
+				handledTarget = undefined;
+			})
+			.finally(() => {
+				usageFetchInFlight = null;
 			});
+		return usageFetchInFlight;
+	}
+
+	// Populate the pill on load AND keep it right when the viewed/composed session
+	// moves to a DIFFERENT install (e.g. opening an offloaded session), whose usage
+	// bucket may be missing or stale — the snapshot broadcast can lag switching by
+	// up to the poll interval. The FIRST run always fetches (initial populate,
+	// before the first `usage_snapshot` WS event); later target changes only
+	// refetch when that install's bucket is missing/unavailable/stale, so a plain
+	// session switch on a fresh bucket does not refetch. Reading `rateLimit.current`
+	// (a plain getter, not $state) deliberately does NOT make this effect depend on
+	// the store, so it fires only on target changes. `undefined` = not yet handled
+	// (distinct from a real `null`/self target).
+	let handledTarget: string | null | undefined = undefined;
+	$effect(() => {
+		const target = $usageTargetInstance;
+		if (target === handledTarget) return;
+		const firstRun = handledTarget === undefined;
+		handledTarget = target;
+		const state = rateLimit.current;
+		const key = resolveBucketKey(state, target);
+		const bucket = key ? state.buckets[key] : null;
+		const isStale =
+			(key != null && (state.staleByInstance[key] ?? false)) ||
+			(bucket != null && isBucketStale(bucket, Date.now()));
+		if (firstRun || !bucket || !bucket.available || isStale) {
+			refreshUsageLimits();
+		}
 	});
 
 	// Poll computer-use status (shared store) only while the active profile

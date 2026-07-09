@@ -413,15 +413,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		if (msgType === 'tabs_sync') return;
 
-		// Account-level Claude usage snapshot from the backend poller (not tied to
-		// the active session). Feeds the usage-limits store that drives the header
-		// pill + popover.
+		// Per-install Claude usage snapshot from the backend poller (not tied to
+		// the active session). Each install runs a different account, so the
+		// payload carries a `snapshots` array (one bucket per install) plus
+		// `self_instance_id`; the legacy top-level fields describe the LOCAL
+		// install and are folded into a self bucket when `snapshots` is absent.
+		// Feeds the usage-limits store that drives the header pill + popover.
 		if (msgType === 'usage_snapshot') {
 			rateLimit.applySnapshot({
 				windows: (data.windows as { type: string; utilization: number; resets_at?: string | null }[]) ?? [],
 				fetched_at: (data.fetched_at as number | null) ?? null,
 				available: (data.available as boolean) ?? false,
 				generation: (data.generation as number | null) ?? undefined,
+				snapshots: (data.snapshots as import('$lib/stores/rate-limit').SnapshotInstance[] | undefined) ?? undefined,
+				self_instance_id: (data.self_instance_id as string | null | undefined) ?? undefined,
 			});
 			return;
 		}
@@ -1080,14 +1085,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'rate_limit': {
-				// Live SDK rate-limit event — refines a single usage window. The
-				// UsageLimitIndicator pill/popover read the store reactively.
+				// Live SDK rate-limit event — refines a single usage window of the
+				// EMITTING install's bucket. `instance_id` tags which install it came
+				// from (relayed remote-session events carry the worker's id); the
+				// store routes by it so an offloaded session's usage lands in the
+				// right bucket. The UsageLimitIndicator reads the store reactively.
 				rateLimit.applyLiveEvent({
 					status: (data.status as string) ?? 'unknown',
 					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',
 					resets_at: data.resets_at as string | undefined,
 					utilization: data.utilization as number | undefined,
 					session_id: data.session_id as string | undefined,
+					instance_id: (data.instance_id as string | null | undefined) ?? undefined,
 				});
 				break;
 			}
