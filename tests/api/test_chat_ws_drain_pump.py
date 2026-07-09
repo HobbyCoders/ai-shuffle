@@ -1648,3 +1648,126 @@ async def test_pump_task_updated_chip_survives_missing_live_session():
         await handler._drain_notifications(session_id, "claude-code", None, None)
 
     handler._deliver_unpark.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 6. Straddle regression — the typed TaskNotificationMessage reaches ONLY the
+#    drain pump (never latched in-stream), but the CLI already injected its own
+#    <task-notification> user-lane steering message into the model's context
+#    during the turn. The pump must SUPPRESS (no re-delivery), spend the
+#    one-unpark token, and log decision="cli-delivered-userlane".
+# ---------------------------------------------------------------------------
+
+import json as _json
+import logging as _logging
+from types import SimpleNamespace as _NS
+
+
+def _cli_userlane_row(task_id="task-1", tool_use_id="tu-1"):
+    """A retained live-store USER message mirroring the CLI's injected
+    <task-notification> steering row (keyed by <task-id>/<tool-use-id>)."""
+    body = (
+        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+        "<task-notification>\n"
+        f"  <task-id>{task_id}</task-id>\n"
+        f"  <tool-use-id>{tool_use_id}</tool-use-id>\n"
+        "  <status>completed</status>\n"
+        "  <summary>done</summary>\n"
+        "</task-notification>"
+    )
+    return _NS(role="user", content=body, type="text")
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_when_cli_delivered_userlane(caplog):
+    """Straddle: notification only reaches the pump, but the CLI already delivered
+    it in-stream (user-lane row retained). The pump must NOT re-deliver."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
+
+    # Live store retains the CLI-injected <task-notification> user row.
+    fake_session = _NS(messages=[_cli_userlane_row("task-1", "tu-1")])
+
+    # hang=False: suppression continue's (no break), so the stream must END for
+    # the pump to terminate (mirrors test_pump_skips_already_notified_completion).
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch.object(
+        cwh.live_session_store, "get_session", return_value=fake_session
+    ), patch.object(cwh.database, "get_session_messages", return_value=[]):
+        with caplog.at_level(_logging.INFO, logger="app.api.chat_ws_handler"):
+            await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # No duplicate unpark delivered.
+    handler._deliver_unpark.assert_not_awaited()
+    # One-unpark token spent (so any later drain also dedups).
+    assert task_registry.was_unparked("sess-1", "task-1") is True
+    # Trace logged with the new suppression reason.
+    assert "cli-delivered-userlane" in caplog.text
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_delivers_when_no_cli_userlane_row():
+    """Negative control: SAME setup but NO CLI-injected user row anywhere (live
+    store + DB empty) — a genuine at-rest completion must still deliver exactly
+    once (the new gate must not break legitimate between-turns delivery)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch.object(
+        cwh.live_session_store, "get_session", return_value=None
+    ), patch.object(cwh.database, "get_session_messages", return_value=[]):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1 and pending[0]["task_id"] == "task-1"
+
+
+# ---------------------------------------------------------------------------
+# 7. Result-content fix — <result> carries the sub-agent's FINAL assistant
+#    message (extracted from the transcript), not the raw JSONL dump; unreadable
+#    transcript falls back to the short summary.
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_result_is_final_assistant_text(tmp_path):
+    transcript = tmp_path / "agent-final.jsonl"
+    lines = [
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "STEP 1 working on it"}]},
+         "uuid": "a1", "timestamp": "t1"},
+        {"type": "assistant", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "FINAL ANSWER HERE"}]},
+         "uuid": "a2", "timestamp": "t2"},
+    ]
+    transcript.write_text("\n".join(_json.dumps(x) for x in lines), encoding="utf-8")
+
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": str(transcript), "summary": "SHORT SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+
+    # <result> is the FINAL assistant message, not an earlier step nor raw JSONL.
+    assert "<result>FINAL ANSWER HERE</result>" in prompt
+    assert "STEP 1 working on it" not in prompt
+    # Raw transcript JSON must NOT be dumped into the prompt.
+    assert '"role": "assistant"' not in prompt
+    assert '{"type": "assistant"' not in prompt
+
+
+def test_build_prompt_falls_back_to_summary_when_unreadable():
+    pending = [{
+        "task_id": "t", "tool_use_id": "tu", "status": "completed",
+        "output_file": "/nonexistent/path/does-not-exist.jsonl",
+        "summary": "SHORT SUMMARY", "usage": {},
+    }]
+    prompt = cwh._build_task_notification_prompt(pending)
+    assert "<result>SHORT SUMMARY</result>" in prompt

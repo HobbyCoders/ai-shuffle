@@ -370,8 +370,19 @@ async def test_slow_path_drain_impl_unparks_via_ws_collaborators(tmp_path):
 
     task_registry.reset_all()
     ws_cleanup._drain_pumps.clear()
-    out = tmp_path / "out.txt"
-    out.write_text("SLOW RESULT", encoding="utf-8")
+    # The sub-agent's output_file is its JSONL transcript; the unpark prompt now
+    # extracts the FINAL assistant message from it (not a raw dump), so write a
+    # transcript whose final assistant text is the result under assertion.
+    import json as _json
+    out = tmp_path / "agent-slow.jsonl"
+    out.write_text(
+        _json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "SLOW RESULT"}]},
+            "uuid": "a1", "timestamp": "t1",
+        }),
+        encoding="utf-8",
+    )
 
     # The agent task is "running" from the parent turn, launched in the background
     # (its launch tool_use_id is the notification's tool_use_id "tu-1").
