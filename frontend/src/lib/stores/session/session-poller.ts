@@ -120,6 +120,90 @@ export interface PollAppliedData {
 /** Number of consecutive failures before notifying the error callback */
 const CONSECUTIVE_ERROR_THRESHOLD = 3;
 
+/**
+ * Anchored-insertion union merge — shared by the poll-apply FULL-replace and
+ * DELTA branches so a short poll can only ADD rendered cards, never DROP them.
+ *
+ * `base` already contains the messages the incoming poll represents (the
+ * snapshot for the full branch; the kept-history slice + the delta's streaming
+ * messages for the delta branch). Every message in `existingMessages` that the
+ * base is MISSING is spliced back immediately AFTER its nearest preceding
+ * neighbor that IS present in the base (preserving relative order). A run with
+ * no preceding present anchor (empty/truncated seed) goes to the head.
+ *
+ * PRESENCE is matched by id OR transcript uuid (jsonlUuid): id families can
+ * switch between live-store ids (text-{12hex}) and parser ids (text-{uuid}-{n})
+ * across polls, so a uuid match absorbs the same logical message as an UPDATE
+ * instead of duplicating it. A present existing message anchors subsequent
+ * missing cards to the id it carries IN THE BASE (id-match wins; else the base
+ * msg sharing its uuid).
+ *
+ * `shouldPreserve` gates which MISSING messages are actually rescued (the full
+ * branch keeps everything; the delta branch excludes in-flight streaming
+ * bubbles and optimistic user-* placeholders). A skipped message does NOT
+ * advance the anchor, so a later preserved card still anchors to the last
+ * genuinely-present neighbor.
+ *
+ * Why chain anchors + a LIVE index lookup instead of a precomputed index + a
+ * single global offset: the offset shortcut is only correct when anchors are
+ * monotonic in the base's order. At a compaction/turn boundary the base
+ * re-seeds from the durable transcript, so present messages arrive uuid-matched
+ * under a different id family AND can be RE-ORDERED relative to the client
+ * array; a later missing card then anchors to a present message sitting EARLIER
+ * in the base than an earlier card's anchor, and the global offset shoves it
+ * past its anchor → the cards "jump around" (settling only on refresh, which
+ * takes the base verbatim into an empty client). Chaining + a live index lookup
+ * keeps every card behind its own anchor regardless of order.
+ *
+ * `isStreaming`: belt-and-suspenders — once the turn has ended a spliced-back
+ * message must not keep rendering the streaming dots, so clear the flag.
+ */
+function unionMergeMissingIntoBase(
+	base: ChatMessage[],
+	existingMessages: ChatMessage[],
+	isStreaming: boolean,
+	shouldPreserve: (m: ChatMessage) => boolean = () => true,
+): ChatMessage[] {
+	const baseIds = new Set(base.map(m => m.id).filter((id): id is string => !!id));
+	const baseUuids = new Set(
+		base.map(m => m.jsonlUuid).filter((u): u is string => !!u)
+	);
+	const inBase = (m: ChatMessage): boolean =>
+		(!!m.id && baseIds.has(m.id)) || (!!m.jsonlUuid && baseUuids.has(m.jsonlUuid));
+
+	const missingEntries: Array<{ msg: ChatMessage; anchorId: string | null }> = [];
+	let lastPlacedId: string | null = null;
+	for (const m of existingMessages) {
+		if (inBase(m)) {
+			// Present: subsequent missing cards anchor to this neighbor's base id
+			// (id-match wins; else the base msg sharing its uuid).
+			lastPlacedId = (m.id && baseIds.has(m.id))
+				? m.id
+				: (m.jsonlUuid
+					? base.find(s => s.jsonlUuid === m.jsonlUuid)?.id ?? m.id
+					: m.id);
+			continue;
+		}
+		if (!shouldPreserve(m)) continue; // skip WITHOUT advancing the anchor
+		const placed = !isStreaming && m.streaming ? { ...m, streaming: false } : m;
+		missingEntries.push({ msg: placed, anchorId: lastPlacedId });
+		// Chain the next missing card AFTER this one so a contiguous missing run
+		// keeps its relative order (and never reverses when several share one anchor).
+		lastPlacedId = placed.id;
+	}
+
+	const out = [...base];
+	for (const { msg, anchorId } of missingEntries) {
+		let insertIdx = 0;
+		if (anchorId) {
+			const idx = out.findIndex(x => x.id === anchorId);
+			insertIdx = idx >= 0 ? idx + 1 : 0;
+		}
+		out.splice(insertIdx, 0, msg);
+	}
+	return out;
+}
+
 // ─── Poller Class ────────────────────────────────────────────────────────────
 
 class SessionPoller {
@@ -633,7 +717,31 @@ class SessionPoller {
 			const historyMessages = existingMessages
 				.slice(0, initialMessageCount)
 				.filter(m => !streamingIds.has(m.id));
-			messages = [...historyMessages, ...streamingMessages];
+			// A short DELTA poll after a RE-SEEDED turn must not DROP tail cards the
+			// prior FULL poll's union-merge rescued at index >= initialMessageCount.
+			// Scenario: a stopped/idle session gets a new prompt; the backend rebuilds
+			// its buffer from the durable transcript (different id family, missing
+			// client-only cards) and sets initial_message_count=K. The first FULL poll
+			// (imc=0) union-merges the client's prior-turn tail (final assistant text +
+			// system card) back in past index K; a blind `slice(0, K)` on the next
+			// DELTA would discard exactly those, so the prior turn's tail vanishes until
+			// refresh. Harden symmetrically with the full branch: preserve existing tail
+			// messages the delta is MISSING, anchored after their nearest present
+			// neighbor. Exclusions: in-flight streaming bubbles (replaced wholesale by
+			// the fresh streamingMessages — preserving one would duplicate the live
+			// bubble if its id churned) and optimistic user-* placeholders (Phase-1 in
+			// session-init.ts reconciles those against the real server user msg;
+			// preserving one here would double the user bubble). Destructive refreshes
+			// (rewind/discard) can NEVER arrive as deltas — the backend always serves
+			// them as full initial_message_count=0 snapshots (see
+			// live_session_store.get_session_since) — so no destructive gate is needed.
+			const base = [...historyMessages, ...streamingMessages];
+			messages = unionMergeMissingIntoBase(
+				base,
+				existingMessages,
+				isStreaming,
+				(m) => !m.streaming && !(m.role === 'user' && !!m.id && m.id.startsWith('user-')),
+			);
 		} else if (initialMessageCount > 0 && existingMessages && existingMessages.length > 0) {
 			// existingMessages may already contain streaming messages from a
 			// previous poll. Concatenating blindly would duplicate them.
@@ -676,77 +784,16 @@ class SessionPoller {
 			// (full_refresh_reason "rewind" / "discard"); when present we fall
 			// through to the plain full-replace below so deletions propagate.
 			//
-			// ANCHORED INSERTION (not prepend-all): a message is "present in the
-			// snapshot" if its id OR its transcript uuid (jsonlUuid) matches — id
-			// families can switch between live-store ids (text-{12hex}) and parser
-			// ids (text-{uuid}-{n}) across polls, so a uuid match absorbs the same
-			// logical message as an UPDATE instead of duplicating it. Each
-			// contiguous run of existing messages the snapshot is missing is spliced
-			// immediately AFTER its nearest PRECEDING existing neighbor that IS
-			// present in the snapshot (preserving relative order). A run with no
+			// ANCHORED INSERTION (not prepend-all): the shared helper splices each
+			// existing message the snapshot is MISSING immediately AFTER its nearest
+			// preceding present neighbor (present = id OR transcript-uuid match, so an
+			// id-family switch absorbs as an UPDATE, not a duplicate). A run with no
 			// preceding anchor (empty/truncated seed) goes to the head. This mirrors
 			// session-init.ts's Phase-1 reconciliation and fixes the order scramble
 			// where a tail-truncated seed jumped the kept tail to the top of the chat.
-			const snapshotIds = new Set(streamingMessages.map(m => m.id));
-			const snapshotUuids = new Set(
-				streamingMessages.map(m => m.jsonlUuid).filter((u): u is string => !!u)
-			);
-			const inSnapshot = (m: ChatMessage): boolean =>
-				(!!m.id && snapshotIds.has(m.id)) || (!!m.jsonlUuid && snapshotUuids.has(m.jsonlUuid));
-
-			messages = [...streamingMessages];
-			// Batch each contiguous missing run and splice after its preceding
-			// present anchor (or head). We collect entries first (anchorId = id of
-			// the nearest preceding present existing msg, or null for head), then
-			// splice in a second pass keyed off the snapshot's current positions —
-			// matching the two-phase splice in session-init.ts so overlapping runs
-			// keep their relative order.
-			// Anchor each missing card to the id of its IMMEDIATE predecessor in the
-			// existing array — a present neighbor's snapshot id, OR (when the
-			// predecessor was itself missing) that just-placed card's own id. Then
-			// splice by looking the anchor up in the LIVE (mutating) array.
-			//
-			// Why not a precomputed index + single global offset: that shortcut is
-			// only correct when the anchors are monotonic in SNAPSHOT order. At a
-			// compaction/turn boundary the snapshot re-seeds from the durable
-			// transcript, so present messages arrive uuid-matched under a different id
-			// family AND can be RE-ORDERED relative to the client array. A later
-			// missing card then anchors to a present message that sits EARLIER in the
-			// snapshot than an earlier card's anchor; the global offset shoves it past
-			// its anchor and the cards "jump around" (settling only on refresh, which
-			// takes the snapshot verbatim into an empty client). Chaining + a live
-			// index lookup keeps every card behind its own anchor regardless of order.
-			const missingEntries: Array<{ msg: ChatMessage; anchorId: string | null }> = [];
-			let lastPlacedId: string | null = null;
-			for (const m of existingMessages) {
-				if (inSnapshot(m)) {
-					// Present: subsequent missing cards anchor to this neighbor's
-					// snapshot id (id-match wins; else the snapshot msg sharing its uuid).
-					lastPlacedId = snapshotIds.has(m.id)
-						? m.id
-						: (m.jsonlUuid
-							? streamingMessages.find(s => s.jsonlUuid === m.jsonlUuid)?.id ?? m.id
-							: m.id);
-					continue;
-				}
-				// Same belt-and-suspenders as the snapshot map above: once the turn
-				// has ended, a spliced-back message must not keep rendering the
-				// streaming dots.
-				const placed = !isStreaming && m.streaming ? { ...m, streaming: false } : m;
-				missingEntries.push({ msg: placed, anchorId: lastPlacedId });
-				// Chain the next missing card AFTER this one so a contiguous missing
-				// run keeps its relative order (and never reverses when several share
-				// one anchor).
-				lastPlacedId = placed.id;
-			}
-			for (const { msg, anchorId } of missingEntries) {
-				let insertIdx = 0;
-				if (anchorId) {
-					const idx = messages.findIndex(x => x.id === anchorId);
-					insertIdx = idx >= 0 ? idx + 1 : 0;
-				}
-				messages.splice(insertIdx, 0, msg);
-			}
+			// The full branch preserves EVERYTHING the snapshot is missing (default
+			// shouldPreserve); the delta branch above passes a narrower predicate.
+			messages = unionMergeMissingIntoBase([...streamingMessages], existingMessages, isStreaming);
 		} else {
 			messages = streamingMessages;
 		}
