@@ -941,6 +941,27 @@ class TestResponseModels:
         )
         assert response.installed is False
 
+    def test_available_plugin_response_skills_only(self):
+        """Should serialize a skills-only implicit plugin (has_skills, no hooks/mcp)."""
+        from app.api.plugins import AvailablePluginResponse
+        response = AvailablePluginResponse(
+            id="remotion@remotion",
+            name="remotion",
+            marketplace="remotion",
+            marketplace_path="/path/to/remotion",
+            description="Skills discovered in this repository",
+            has_commands=False,
+            has_agents=False,
+            has_skills=True,
+            has_hooks=False,
+            has_mcp=False,
+            installed=False,
+            enabled=False
+        )
+        assert response.has_skills is True
+        assert response.has_hooks is False
+        assert response.has_mcp is False
+
     def test_file_agent_response(self):
         """Should create file agent response."""
         from app.api.plugins import FileAgentResponse

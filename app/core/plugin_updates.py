@@ -119,6 +119,12 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
             if not install:
                 continue
 
+        # Implicit plugins (marketplace-less repos installed as a single plugin)
+        # have no manifest entry to diff against -- skip update checks entirely,
+        # else they would report a spurious update every cycle.
+        if isinstance(install, dict) and install.get("implicit"):
+            continue
+
         parts = plugin_id.rsplit("@", 1)
         if len(parts) != 2:
             continue
