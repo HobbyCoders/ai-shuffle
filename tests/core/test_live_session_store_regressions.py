@@ -446,6 +446,202 @@ class TestUpdateIdConsistency:
 
 
 # =============================================================================
+# Bug: Parked sessions do not unpark in the UI (cross-turn update-id starvation)
+#
+# start_streaming used to build a fresh LiveSession with last_update_id=1 every
+# turn. A park-poller holds a since_update_id cursor from the PREVIOUS turn
+# (e.g. 50). get_session_since gates on last_update_id <= since_update_id -> None,
+# so the unpark follow-up turn's counter (1..~20) never exceeds the stale cursor:
+# the poller is permanently starved — it never sees is_streaming=true and never
+# receives the follow-up's messages; only a page refresh (cursor 0) recovers.
+# Fix: carry the counter forward across turns (start_streaming) and serve a full
+# NON-DESTRUCTIVE snapshot to any poller whose cursor predates the turn or came
+# from a lost incarnation (get_session_since).
+# =============================================================================
+
+class TestCrossTurnUpdateIdMonotonicity:
+
+    async def test_parked_poller_not_starved_across_unpark_followup(self, store):
+        """PRIMARY REGRESSION: a park-poller holding a PRIOR turn's cursor must
+        still receive the unpark follow-up turn's snapshot, not None."""
+        # Turn 1: a few messages that advance the counter, then end.
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+        ])
+        await store.append_text("s1", "answer one")
+        await store.append_text("s1", "answer two")
+        await store.end_streaming("s1")
+
+        # The parked poller holds turn 1's final counter as its since_update_id.
+        parked_cursor = store.get_session("s1").last_update_id
+        assert parked_cursor > 1
+
+        # Turn 2: the unpark follow-up starts with seeded history.
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+            {"id": "h2", "role": "assistant", "type": "text", "content": "answer two"},
+            {"id": "h3", "role": "user", "content": "<task-notification>done"},
+        ])
+
+        result = store.get_session_since("s1", parked_cursor)
+        assert result is not None, "parked poller starved: get_session_since returned None"
+        assert result["initial_message_count"] == 0
+        # NON-destructive: no reason (a short seed must union-merge, not truncate).
+        assert result.get("full_refresh_reason") is None
+        assert result["is_streaming"] is True
+
+    async def test_counter_carries_forward_across_turns(self, store):
+        """After turn 2 starts, last_update_id exceeds turn 1's final counter;
+        subsequent appends keep it strictly increasing."""
+        await store.start_streaming("s1", initial_messages=[])
+        await store.append_text("s1", "one")
+        await store.append_text("s1", "two")
+        await store.end_streaming("s1")
+        turn1_final = store.get_session("s1").last_update_id
+
+        await store.start_streaming("s1", initial_messages=[])
+        turn2_start = store.get_session("s1").last_update_id
+        assert turn2_start > turn1_final
+        # turn_start_update_id marks the counter value at this turn's start.
+        assert store.get_session("s1").turn_start_update_id == turn2_start
+
+        await store.append_text("s1", "three")
+        assert store.get_session("s1").last_update_id > turn2_start
+
+    async def test_cursor_ahead_of_counter_serves_full_snapshot(self, store):
+        """A cursor far larger than the counter (lost incarnation, e.g. server
+        restart recreated the store) gets a full NON-DESTRUCTIVE snapshot, not
+        None."""
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q"},
+        ])
+        await store.append_text("s1", "a")
+        far_ahead = store.get_session("s1").last_update_id + 10_000
+
+        result = store.get_session_since("s1", far_ahead)
+        assert result is not None
+        assert result["initial_message_count"] == 0
+        assert result.get("full_refresh_reason") is None
+
+    async def test_equal_cursor_no_op_preserved(self, store):
+        """A cursor equal to the counter still yields None (the 304 no-op poll)."""
+        await store.start_streaming("s1", initial_messages=[])
+        await store.append_text("s1", "a")
+        current = store.get_session("s1").last_update_id
+        assert store.get_session_since("s1", current) is None
+
+    async def test_same_turn_cursor_returns_delta(self, store):
+        """A cursor from WITHIN this turn (>= turn_start_update_id) still gets a
+        delta (only the turn's newly streamed messages), not a full snapshot."""
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+        ])
+        await store.append_text("s1", "a1")
+        await store.end_streaming("s1")
+        # Turn 2 so turn_start_update_id is a carried-forward (non-1) value.
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+            {"id": "h2", "role": "assistant", "type": "text", "content": "a1"},
+        ])
+        session = store.get_session("s1")
+        mid_cursor = session.last_update_id
+        assert mid_cursor >= session.turn_start_update_id
+
+        await store.append_text("s1", "new stuff")
+        result = store.get_session_since("s1", mid_cursor)
+        assert result is not None
+        # Delta: history is skipped, so initial_message_count > 0 and only the
+        # turn's streamed messages are sliced.
+        assert result["initial_message_count"] > 0
+        assert result.get("full_refresh_reason") is None
+        assert all(m["content"] != "Q1" for m in result["messages"])
+
+    async def test_rewind_snapshot_wins_over_cross_turn_branch(self, store):
+        """A destructive rewind must keep its 'rewind' tag even for a parked
+        cursor that ALSO predates the turn — the trim branch precedes the new
+        cross-turn branch, so the destructive tag survives."""
+        # Turn 1 advances the counter; the parked cursor predates turn 2.
+        await store.start_streaming("session-1", initial_messages=[
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+        ])
+        await store.append_text("session-1", "reply")
+        await store.end_streaming("session-1")
+        parked_cursor = store.get_session("session-1").last_update_id
+
+        # Turn 2 seeds history, then a rewind trims it mid-turn.
+        await store.start_streaming("session-1", initial_messages=[
+            {"id": "m1", "role": "user", "type": "text", "content": "first", "uuid": "u1"},
+            {"id": "m2", "role": "assistant", "type": "text", "content": "reply1", "uuid": "a1"},
+            {"id": "m3", "role": "user", "type": "text", "content": "second", "uuid": "u2"},
+        ])
+        removed = await store.truncate_after_uuid(
+            "session-1", target_uuid="a1", include_response=False, target_role="assistant"
+        )
+        assert removed is True
+
+        # parked_cursor predates BOTH the trim and turn 2's start; the destructive
+        # rewind branch must win (it precedes the cross-turn branch), keeping tag.
+        result = store.get_session_since("session-1", parked_cursor)
+        assert result is not None
+        assert result["initial_message_count"] == 0
+        assert result["full_refresh_reason"] == "rewind"
+
+    async def test_stale_cursor_full_snapshot_advances_poller_once(self, store):
+        """After a stale-cursor poll receives the full snapshot, adopting the
+        payload's last_update_id as the new cursor must make the NEXT poll
+        return None — no repeated full serialization on the hot poll path."""
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+        ])
+        await store.append_text("s1", "a1")
+        await store.end_streaming("s1")
+        parked_cursor = store.get_session("s1").last_update_id
+
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+            {"id": "h2", "role": "assistant", "type": "text", "content": "a1"},
+        ])
+        first = store.get_session_since("s1", parked_cursor)
+        assert first is not None
+
+        # Poller adopts the served counter; the follow-up poll is a no-op.
+        new_cursor = first["last_update_id"]
+        assert store.get_session_since("s1", new_cursor) is None
+
+    async def test_cursor_ahead_poll_does_not_steal_pending_full_refresh(self, store):
+        """A stale lost-incarnation poller (cursor > counter) must NOT consume
+        the one-shot needs_full_refresh flag — it belongs to in-range pollers.
+        If it were cleared here, a pending compaction/rewind refresh would be
+        stolen from a legitimate in-range poller (multi-device)."""
+        await store.start_streaming("s1", initial_messages=[
+            {"id": "h1", "role": "user", "content": "Q1"},
+        ])
+        await store.append_text("s1", "a1")
+        in_range_cursor = store.get_session("s1").last_update_id
+
+        # Flag via the public compaction path (get_session returns a COPY, so
+        # mutating its return value would never reach the store's session).
+        await store.add_system_message(
+            "s1", content="Context compacted", subtype="compact_boundary"
+        )
+        assert store.get_session("s1").needs_full_refresh is True
+
+        # Stale poller polls with a cursor ahead of the counter: gets a plain
+        # non-destructive snapshot, and the one-shot flag survives.
+        ahead = store.get_session("s1").last_update_id + 10_000
+        stale = store.get_session_since("s1", ahead)
+        assert stale is not None
+        assert stale.get("full_refresh_reason") is None
+        assert store.get_session("s1").needs_full_refresh is True
+
+        # The in-range poller still receives the compaction refresh with reason.
+        legit = store.get_session_since("s1", in_range_cursor)
+        assert legit is not None
+        assert legit["full_refresh_reason"] == "compaction"
+        assert legit["initial_message_count"] == 0
+
+
+# =============================================================================
 # Bug: Initial message count tracking for delta polls
 #
 # When start_streaming is called with history, initial_message_count must
