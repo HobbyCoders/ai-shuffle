@@ -906,6 +906,44 @@ class SyncEngine:
             source_device_id=source_device_id,
         )
 
+    async def broadcast_usage_snapshot(
+        self,
+        snapshot: Dict[str, Any],
+    ):
+        """Fan a Claude usage-limits snapshot out to EVERY connected device.
+
+        Account-level (not session- or user-scoped): the usage windows belong to
+        the shared Claude credential, so every open client should see the same
+        numbers. Sent as a ``usage_snapshot`` WS event carrying the snapshot's
+        ``windows``/``fetched_at``/``available`` fields.
+        """
+        message = {"type": "usage_snapshot", **snapshot}
+
+        # Snapshot every user's device list under the lock, then release before I/O.
+        async with self._user_lock:
+            targets = [
+                (user_id, did, conn)
+                for user_id, devices in self._user_connections.items()
+                for did, conn in devices.items()
+            ]
+
+        if not targets:
+            return
+
+        failed: List[tuple] = []
+        for user_id, device_id, conn in targets:
+            success = await conn.send_json(message)
+            if not success:
+                failed.append((user_id, device_id))
+
+        if failed:
+            async with self._user_lock:
+                for user_id, device_id in failed:
+                    if device_id in self._user_connections.get(user_id, {}):
+                        del self._user_connections[user_id][device_id]
+                    if user_id in self._user_connections and not self._user_connections[user_id]:
+                        del self._user_connections[user_id]
+
     async def broadcast_branch_changed(
         self,
         user_id: str,

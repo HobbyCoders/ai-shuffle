@@ -507,6 +507,21 @@ export async function importAgent(data: AgentImportRequest): Promise<Profile> {
 	return api.post<Profile>('/profiles/import', data);
 }
 
+/** Latest Claude usage snapshot (all rate-limit windows). */
+export interface UsageLimitsSnapshot {
+	windows: { type: string; utilization: number; resets_at?: string | null }[];
+	fetched_at?: number | null;
+	available: boolean;
+}
+
+/**
+ * Fetch the latest Claude usage-limits snapshot. Used on chat load to populate
+ * the usage pill before the first `usage_snapshot` WS event arrives.
+ */
+export async function getUsageLimits(): Promise<UsageLimitsSnapshot> {
+	return api.get<UsageLimitsSnapshot>('/usage/limits');
+}
+
 /**
  * Parse and validate agent export file
  */

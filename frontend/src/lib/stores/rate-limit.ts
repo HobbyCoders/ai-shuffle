@@ -1,53 +1,106 @@
 /**
- * Rate-limit store — holds the most recent `rate_limit` WebSocket event plus a
- * persisted "last-known five-hour reading" so `UsageLimitIndicator.svelte` can
- * render a 5-hour usage pill (hidden until the first reading arrives).
+ * Usage-limits store — a per-window map of the user's Claude subscription usage,
+ * fed by BOTH:
+ *   1. A polled snapshot (`usage_snapshot` WS event + the REST `/usage/limits`
+ *      endpoint on page load) — the authoritative full set of windows, from the
+ *      backend usage poller. Utilization is already 0–100 percent.
+ *   2. Live SDK `rate_limit` events (WS `case 'rate_limit'`) — refine a SINGLE
+ *      window as its status changes. SDK utilization is a 0.0–1.0 fraction, so
+ *      it is normalised to 0–100 on ingest.
  *
- * Slice C (SDK 0.1.65→0.1.81 upgrade). Plain `.ts` (no $state runes) — see
- * KNOWN_ISSUES.md Root Cause 10.
+ * Both key on the window-type string (`five_hour`, `seven_day`,
+ * `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
+ * `overage`) so they update the same slot. The map is persisted to localStorage
+ * so the header pill/popover stay populated across reloads.
  *
- * Data-source reality: the CLI emits `rate_limit` events only when the
- * rate-limit *status transitions* (e.g. toward `allowed_warning`) — there is no
- * proactive/queryable "current 5h usage" feed (no SDK control request for it,
- * and the 5h window belongs to the CLI's OAuth subscription, not the backend's
- * API key). So we keep the MOST RECENT reported five-hour reading
- * ({@link RateLimitState.lastFiveHour}) and persist it to localStorage. The pill
- * stays hidden until the first reading ever arrives, then shows that last-known
- * value at all times, resetting to 0% once the window rolls over (`resets_at`
- * passes).
+ * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
  *
- * Lifecycle:
- *   1. WS handler `case 'rate_limit'` calls {@link rateLimit.set}.
- *   2. A five-hour event updates `lastFiveHour` and is persisted.
- *   3. UsageLimitIndicator subscribes via `$rateLimit` and renders `lastFiveHour`.
+ * Consumers: `UsageLimitIndicator.svelte` (header pill + popover) reads
+ * `$rateLimit.windows`; `ws-message-handlers.ts` calls `applyLiveEvent` /
+ * `applySnapshot`.
  */
 
 import { createStore } from './store-utils';
 
-interface RateLimitEvent {
-	status: string;
-	rate_limit_type: string;
-	resets_at?: string;
-	utilization?: number;
-	session_id?: string;
-	/** Wall-clock when we received the event (ms since epoch). */
+/** A single rate-limit window, utilization normalised to 0–100 percent. */
+export interface UsageWindow {
+	type: string;
+	/** 0–100 percent. */
+	utilization: number;
+	resets_at: string | null;
+	/** Wall-clock (ms since epoch) when we last updated this window. */
 	received_at: number;
+	source: 'poll' | 'live';
 }
 
 interface RateLimitState {
-	event: RateLimitEvent | null;
-	dismissedEventKey: string | null;
-	/** Most recent five-hour-window reading, persisted across reloads so the
-	 *  usage pill can stay visible between (sparse) rate-limit events. */
-	lastFiveHour: RateLimitEvent | null;
+	/** Keyed by window type. */
+	windows: Record<string, UsageWindow>;
+	/** Whether the backend currently has a usable Claude credential. */
+	available: boolean;
 }
 
-/** Canonical SDK value for the 5-hour ("session") rate-limit window. */
-const FIVE_HOUR_TYPE = 'five_hour';
-const FIVE_HOUR_STORAGE_KEY = 'rate-limit-five-hour';
+/** Live SDK `rate_limit` event payload (utilization is a 0–1 fraction). */
+export interface LiveRateLimitEvent {
+	status?: string;
+	rate_limit_type: string;
+	resets_at?: string | null;
+	utilization?: number | null;
+	session_id?: string;
+}
+
+/** One window from a polled snapshot (utilization already 0–100). */
+export interface SnapshotWindow {
+	type: string;
+	utilization: number;
+	resets_at?: string | null;
+}
+
+export interface UsageSnapshot {
+	windows: SnapshotWindow[];
+	fetched_at?: number | null;
+	available: boolean;
+}
+
+const STORAGE_KEY = 'usage-limit-windows';
+
+// Human labels per known window type. Unknown types get a humanized fallback.
+export const WINDOW_LABELS: Record<string, string> = {
+	five_hour: '5-hour limit',
+	seven_day: 'Weekly (all models)',
+	seven_day_opus: 'Weekly Opus',
+	seven_day_sonnet: 'Weekly Sonnet',
+	seven_day_overage_included: 'Fable 5 limit',
+	overage: 'Overage',
+};
+
+// Display order for the popover / headline selection tie-breaks.
+export const WINDOW_ORDER = [
+	'five_hour',
+	'seven_day',
+	'seven_day_opus',
+	'seven_day_sonnet',
+	'seven_day_overage_included',
+	'overage',
+];
+
+export function windowLabel(type: string): string {
+	return WINDOW_LABELS[type] ?? type.replace(/_/g, ' ');
+}
+
+/** Clamp an already-percent (0–100) value into range. */
+function _clampPct(u: number): number {
+	if (typeof u !== 'number' || Number.isNaN(u) || !Number.isFinite(u)) return 0;
+	return Math.min(100, Math.max(0, u));
+}
+
+/** Normalise an SDK fraction (0–1, defensively 0–100) to a 0–100 percent. */
+function _fractionToPct(u: number): number {
+	return _clampPct(u <= 1 ? u * 100 : u);
+}
 
 /** Parse `resets_at` (ISO string, epoch seconds, or epoch ms) into epoch ms. */
-function _parseResetMs(resetsAt: string | number | undefined): number | null {
+export function parseResetMs(resetsAt: string | number | null | undefined): number | null {
 	if (resetsAt == null) return null;
 	if (typeof resetsAt === 'number') {
 		return resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
@@ -62,40 +115,66 @@ function _parseResetMs(resetsAt: string | number | undefined): number | null {
 	return Number.isNaN(parsed) ? null : parsed;
 }
 
-function _loadLastFiveHour(): RateLimitEvent | null {
+/** Effective utilization for a window, accounting for a rolled-over window. */
+export function effectivePct(w: UsageWindow, nowMs: number): number {
+	const resetMs = parseResetMs(w.resets_at);
+	if (resetMs != null && resetMs <= nowMs) return 0; // window rolled over
+	return Math.round(w.utilization);
+}
+
+/** Format a countdown like "3h 12m" / "12m 4s" / "now". */
+export function formatCountdown(resetsAt: string | null | undefined, nowMs: number): string {
+	const target = parseResetMs(resetsAt);
+	if (target == null) return '';
+	const diffMs = target - nowMs;
+	if (diffMs <= 0) return 'now';
+	const totalSec = Math.ceil(diffMs / 1000);
+	const d = Math.floor(totalSec / 86400);
+	const h = Math.floor((totalSec % 86400) / 3600);
+	const m = Math.floor((totalSec % 3600) / 60);
+	const s = totalSec % 60;
+	if (d > 0) return `${d}d ${h}h`;
+	if (h > 0) return `${h}h ${m}m`;
+	if (m > 0) return `${m}m ${s}s`;
+	return `${s}s`;
+}
+
+/** Windows as an array, ordered by WINDOW_ORDER then any extras alphabetically. */
+export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
+	const known = WINDOW_ORDER.filter((t) => t in windows).map((t) => windows[t]);
+	const extra = Object.keys(windows)
+		.filter((t) => !WINDOW_ORDER.includes(t))
+		.sort()
+		.map((t) => windows[t]);
+	return [...known, ...extra];
+}
+
+function _loadWindows(): Record<string, UsageWindow> {
 	try {
-		const raw = localStorage.getItem(FIVE_HOUR_STORAGE_KEY);
-		if (!raw) return null;
+		const raw = localStorage.getItem(STORAGE_KEY);
+		if (!raw) return {};
 		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed === 'object' && parsed.rate_limit_type === FIVE_HOUR_TYPE) {
-			return parsed as RateLimitEvent;
+		if (parsed && typeof parsed === 'object') {
+			return parsed as Record<string, UsageWindow>;
 		}
-		return null;
+		return {};
 	} catch {
-		// localStorage unavailable (SSR/prerender) or malformed JSON.
-		return null;
+		return {}; // localStorage unavailable (SSR/prerender) or malformed JSON.
 	}
 }
 
-function _saveLastFiveHour(e: RateLimitEvent | null) {
+function _saveWindows(windows: Record<string, UsageWindow>) {
 	try {
-		if (e) localStorage.setItem(FIVE_HOUR_STORAGE_KEY, JSON.stringify(e));
-		else localStorage.removeItem(FIVE_HOUR_STORAGE_KEY);
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(windows));
 	} catch {
-		// localStorage unavailable — persistence is best-effort.
+		// best-effort persistence
 	}
 }
 
 const _store = createStore<RateLimitState>({
-	event: null,
-	dismissedEventKey: null,
-	lastFiveHour: _loadLastFiveHour(),
+	windows: _loadWindows(),
+	available: false,
 });
-
-/** Build a stable key per distinct event so dismiss survives countdown ticks. */
-function eventKey(e: RateLimitEvent): string {
-	return `${e.rate_limit_type}|${e.resets_at ?? ''}|${e.received_at}`;
-}
 
 export const rateLimit = {
 	get current(): RateLimitState {
@@ -106,43 +185,48 @@ export const rateLimit = {
 
 	createDerived: _store.createDerived,
 
-	set(event: Omit<RateLimitEvent, 'received_at'>): void {
-		const next: RateLimitEvent = { ...event, received_at: Date.now() };
-		const isFiveHour = next.rate_limit_type === FIVE_HOUR_TYPE;
-		// Persist the latest five-hour reading so the pill survives reloads and
-		// stays populated between events.
-		if (isFiveHour) _saveLastFiveHour(next);
-		_store.update(s => ({
-			...s,
-			event: next,
-			// Re-arm: a new event always re-shows even if a previous one was dismissed.
-			dismissedEventKey: null,
-			lastFiveHour: isFiveHour ? next : s.lastFiveHour,
-		}));
+	/** Apply a live SDK `rate_limit` event — refines a single window. */
+	applyLiveEvent(event: LiveRateLimitEvent): void {
+		const { rate_limit_type, utilization } = event;
+		// A data-less event (utilization null) must NOT create/wipe a window —
+		// the CLI emits these before any usage is recorded.
+		if (!rate_limit_type || utilization == null || typeof utilization !== 'number') return;
+		const win: UsageWindow = {
+			type: rate_limit_type,
+			utilization: _fractionToPct(utilization),
+			resets_at: event.resets_at ?? null,
+			received_at: Date.now(),
+			source: 'live',
+		};
+		_store.update((s) => {
+			const windows = { ...s.windows, [rate_limit_type]: win };
+			_saveWindows(windows);
+			return { windows, available: true };
+		});
 	},
 
-	clear(): void {
-		// Clears only the transient event; the persisted five-hour reading stays.
-		_store.update(s => ({ ...s, event: null, dismissedEventKey: null }));
-	},
-
-	dismiss(): void {
-		const cur = _store.current.event;
-		if (!cur) return;
-		_store.update(s => ({ ...s, dismissedEventKey: eventKey(cur) }));
-	},
-
-	/** Tick helper — clears the transient `event` once its window resets.
-	 *  Does NOT touch `lastFiveHour` (which intentionally persists). */
-	gcExpired(now: number = Date.now()): boolean {
-		const cur = _store.current.event;
-		if (!cur?.resets_at) return false;
-		const resetMs = _parseResetMs(cur.resets_at);
-		if (resetMs == null) return false;
-		if (resetMs <= now) {
-			_store.update(s => ({ ...s, event: null, dismissedEventKey: null }));
-			return true;
+	/** Apply a polled snapshot (WS `usage_snapshot` or REST `/usage/limits`). */
+	applySnapshot(snapshot: UsageSnapshot): void {
+		// When the backend has no usable credential it reports available=false
+		// with no windows — keep the last-known windows rather than flashing the
+		// pill away, but reflect availability.
+		if (!snapshot.available) {
+			_store.update((s) => ({ ...s, available: false }));
+			return;
 		}
-		return false;
+		const now = Date.now();
+		const windows: Record<string, UsageWindow> = {};
+		for (const w of snapshot.windows ?? []) {
+			if (!w?.type || typeof w.utilization !== 'number') continue;
+			windows[w.type] = {
+				type: w.type,
+				utilization: _clampPct(w.utilization),
+				resets_at: w.resets_at ?? null,
+				received_at: now,
+				source: 'poll',
+			};
+		}
+		_saveWindows(windows);
+		_store.update(() => ({ windows, available: true }));
 	},
 };

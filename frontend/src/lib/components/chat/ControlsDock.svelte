@@ -13,6 +13,8 @@
 	import { onMount } from 'svelte';
 	import { Monitor } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
+	import { getUsageLimits } from '$lib/api/client';
+	import { rateLimit } from '$lib/stores/rate-limit';
 
 	interface Props {
 		isUploading: boolean;
@@ -50,6 +52,16 @@
 	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
 	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
+
+	// Populate the usage-limits pill on load, before the first `usage_snapshot`
+	// WS event arrives. The backend poller keeps it fresh thereafter.
+	onMount(() => {
+		getUsageLimits()
+			.then((snap) => rateLimit.applySnapshot(snap))
+			.catch(() => {
+				// Non-fatal — the WS `usage_snapshot` event will populate it later.
+			});
+	});
 
 	// Poll computer-use status (shared store) only while the active profile
 	// enables the capability; stop when it doesn't, to avoid idle polling.
