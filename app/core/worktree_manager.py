@@ -20,13 +20,12 @@ Path pattern:
 import hashlib
 import logging
 import os
-import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 from app.core.config import settings
+from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
@@ -54,28 +53,36 @@ class WorktreeError(Exception):
 # (``_adopt_preflight_sync`` in app/api/sessions.py, off the hot path) and cached
 # here for a short window, so the first send reuses those refs instead of
 # blocking on another fetch. Keyed by the resolved local-clone directory.
+#
+# Backed by the shared ``git_cache`` TTL store (the same per-key cache
+# git_service / git_branch_ops / git_diff_ops use, instrumented by
+# resource_monitor) under ``fetch:{main_dir}`` keys, rather than a private dict —
+# so all git-side TTL state lives in one place.
 # ---------------------------------------------------------------------------
 _FETCH_TTL_SECONDS = 60.0
-_recent_fetches: Dict[str, float] = {}
-_recent_fetches_lock = threading.Lock()
+_FETCH_CACHE_PREFIX = "fetch:"
+
+
+def _fetch_cache_key(main_dir: str) -> str:
+    return f"{_FETCH_CACHE_PREFIX}{main_dir}"
 
 
 def note_repo_fetched(main_dir: str) -> None:
     """Record that origin refs for ``main_dir`` were just fetched."""
-    with _recent_fetches_lock:
-        _recent_fetches[str(main_dir)] = time.monotonic()
+    _git_cache.put(_fetch_cache_key(main_dir), True)
 
 
 def _repo_recently_fetched(main_dir: str) -> bool:
-    with _recent_fetches_lock:
-        ts = _recent_fetches.get(str(main_dir))
-        return ts is not None and (time.monotonic() - ts) < _FETCH_TTL_SECONDS
+    return _git_cache.get(_fetch_cache_key(main_dir), _FETCH_TTL_SECONDS) is not None
 
 
 def reset_fetch_cache() -> None:
-    """Drop all cached fetch timestamps (test hook)."""
-    with _recent_fetches_lock:
-        _recent_fetches.clear()
+    """Drop all cached fetch timestamps (test hook).
+
+    Only the ``fetch:`` keys are invalidated so we never disturb the other git
+    result categories sharing ``_git_cache``.
+    """
+    _git_cache.invalidate_prefix(_FETCH_CACHE_PREFIX)
 
 
 def fetch_repo_cached(git_service_obj, main_dir: str, *, force: bool = False) -> bool:
@@ -124,13 +131,28 @@ def resolve_rebound_branch_plan(
 
     # Reuse a fetch primed at adopt time when it's still fresh, so this decision
     # doesn't block the send path on another network fetch (PR #493 follow-up #1).
-    fetch_repo_cached(git_service_obj, main_dir)
+    fetched = fetch_repo_cached(git_service_obj, main_dir)
     remote_names = [
         b["name"]
         for b in git_service_obj.list_branches(main_dir, include_remote=True)
     ]
     if f"origin/{branch_name}" in remote_names:
         return True, branch_name
+
+    # The branch is absent on the refs we just consulted. If those refs came from
+    # the CACHE (no fetch actually ran), they may be stale: the adopt flow primes
+    # the cache and warns the user to "push it from the other device", so the very
+    # next send — within the 60s TTL — would otherwise see stale refs and raise in
+    # the exact remediation flow we recommended. Force one fresh fetch and re-list
+    # before concluding the branch is unrecoverable (PR #493 follow-up #1).
+    if not fetched:
+        fetch_repo_cached(git_service_obj, main_dir, force=True)
+        remote_names = [
+            b["name"]
+            for b in git_service_obj.list_branches(main_dir, include_remote=True)
+        ]
+        if f"origin/{branch_name}" in remote_names:
+            return True, branch_name
 
     raise WorktreeError(
         f"Branch '{branch_name}' doesn't exist in the local clone or on "

@@ -194,7 +194,7 @@ def _rebind_worktree_cwd_cross_device(
 
 def _resolve_session_worktree_cwd(
     session_id: str, project: Optional[Dict[str, Any]]
-) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Resolve the working directory for a session that may be a worktree session.
 
     A worktree session resumes exactly like a local session: it only cares that
@@ -220,9 +220,14 @@ def _resolve_session_worktree_cwd(
     blocks the resume.
 
     Returns:
-        (working_dir, execution_mode, worktree_info) when the session resolves to
-        a worktree, OR ``(None, None, None)`` when the session is NOT a worktree
-        session and the caller should use normal project/local resolution.
+        (working_dir, execution_mode, worktree_info, rebound_project) when the
+        session resolves to a worktree, OR ``(None, None, None, None)`` when the
+        session is NOT a worktree session and the caller should use normal
+        project/local resolution. ``rebound_project`` is the local project row the
+        session was moved onto by a cross-device rebind (else ``None``) — returned
+        explicitly rather than smuggled through ``worktree_info`` so the single
+        caller can refresh its in-memory project without a pop-or-leak dance
+        (PR #493 follow-up #3).
 
     Raises:
         WorktreeUnavailableError: the session IS a worktree session but its working
@@ -265,7 +270,7 @@ def _resolve_session_worktree_cwd(
             return working_dir, "worktree", {
                 "branch": worktree.get("branch_name", "unknown"),
                 "base_branch": worktree.get("base_branch", "main"),
-            }
+            }, None
 
         # Row exists but no candidate directory is on disk. Name the row's
         # location up front so the error message never lacks a path when the row
@@ -286,8 +291,7 @@ def _resolve_session_worktree_cwd(
             return rebound_cwd, "worktree", {
                 "branch": branch_name or "unknown",
                 "base_branch": worktree.get("base_branch", "main"),
-                "rebound_project": rebound_project,
-            }
+            }, rebound_project
         raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # No worktree row found via the session join. This is either a normal local
@@ -312,7 +316,7 @@ def _resolve_session_worktree_cwd(
             return working_dir, "worktree", {
                 "branch": branch_name or "unknown",
                 "base_branch": "main",
-            }
+            }, None
         backup_path = session.get("worktree_path")
         missing_path = None
         if backup_path:
@@ -333,12 +337,11 @@ def _resolve_session_worktree_cwd(
             return rebound_cwd, "worktree", {
                 "branch": branch_name or "unknown",
                 "base_branch": "main",
-                "rebound_project": rebound_project,
-            }
+            }, rebound_project
         raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # Genuinely not a worktree session — caller uses project/local resolution.
-    return None, None, None
+    return None, None, None, None
 
 
 # Operating guidance appended to the system prompt when computer-use is active.
@@ -532,7 +535,9 @@ def build_options_from_profile(
         # Resolve a worktree cwd if this session is a worktree session. This
         # raises WorktreeUnavailableError (rather than silently using main) when
         # the session is worktree-flagged but its worktree can't be recovered.
-        wt_dir, wt_mode, wt_info = _resolve_session_worktree_cwd(session_id, project)
+        wt_dir, wt_mode, wt_info, rebound_project = _resolve_session_worktree_cwd(
+            session_id, project
+        )
         if wt_dir is not None:
             working_dir = wt_dir
             working_dir_source = "worktree"
@@ -543,12 +548,10 @@ def build_options_from_profile(
             # in-memory too, so the app-config / builtin-tools MCP servers below
             # resolve the LOCAL project id on THIS send instead of the foreign one
             # — which would otherwise only self-heal on the next reload (PR #493
-            # follow-up #3). The private key is popped so it never leaks into the
-            # environment-details prompt.
-            if worktree_info:
-                rebound_project = worktree_info.pop("rebound_project", None)
-                if rebound_project:
-                    project = rebound_project
+            # follow-up #3). Returned explicitly (not smuggled through
+            # worktree_info) so nothing can leak into the environment-details prompt.
+            if rebound_project:
+                project = rebound_project
         elif project:
             working_dir = get_project_working_dir(project)
             working_dir_source = "project"

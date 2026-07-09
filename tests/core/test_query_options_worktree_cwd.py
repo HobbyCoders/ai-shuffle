@@ -93,11 +93,12 @@ def test_active_row_dir_exists_returns_cwd_no_recreate(mocks):
     mocks.get_worktree_by_session.return_value = _wt(status="active")
     FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
-    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, info, rebound = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
     assert info == {"branch": "feat/foo", "base_branch": "main"}
+    assert rebound is None
     mocks.wm.recreate_worktree.assert_not_called()
     # An already-active row needs no self-heal.
     mocks.update_worktree.assert_not_called()
@@ -113,7 +114,7 @@ def test_stale_status_with_dir_self_heals_and_never_recreates(mocks, stale_statu
     mocks.get_worktree_by_session.return_value = _wt(status=stale_status, wt_id="wt-7")
     FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
-    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, info, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
@@ -155,7 +156,7 @@ def test_dir_exists_but_no_git_still_returns_cwd(mocks):
     # Force any accidental validity check to report invalid — must be irrelevant.
     mocks.wm.is_worktree_valid.return_value = False
 
-    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, _, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
@@ -178,7 +179,7 @@ def test_no_row_backup_dir_exists_returns_backup_cwd(mocks):
     }
     FakePath.existing = {"/abs/.worktrees/feat/orphaned"}
 
-    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
+    working_dir, mode, info, _ = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
     assert working_dir == "/abs/.worktrees/feat/orphaned"
     assert mode == "worktree"
@@ -227,7 +228,7 @@ def test_local_session_returns_none(mocks):
 
     result = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
-    assert result == (None, None, None)
+    assert result == (None, None, None, None)
     mocks.wm.create_worktree.assert_not_called()
     mocks.wm.recreate_worktree.assert_not_called()
 
@@ -241,7 +242,7 @@ def test_self_heal_failure_does_not_block_resume(mocks):
     FakePath.existing = {"/abs/.worktrees/feat/foo"}
     mocks.update_worktree.side_effect = RuntimeError("db write boom")
 
-    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, _, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     # The heal was attempted and failed, but the resume still returns the cwd.
     mocks.update_worktree.assert_called_once_with("wt-9", status="active")
@@ -268,7 +269,7 @@ def test_row_path_stale_but_session_backup_valid_resumes_on_backup(mocks):
     }
     FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
-    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, info, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
@@ -301,7 +302,7 @@ def test_row_dir_missing_rebinds_via_recreate(mocks):
         "app.core.project_links.resolve_runnable_local_project",
         return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
     ):
-        working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+        working_dir, mode, info, rebound = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert mode == "worktree"
     assert working_dir == "/abs/.worktrees/feat/foo-local"
@@ -309,9 +310,11 @@ def test_row_dir_missing_rebinds_via_recreate(mocks):
     # session to re-point — never all sessions on the worktree (follow-up #2).
     mocks.wm.recreate_worktree.assert_called_once_with("wt-x", rebind_session_id=SESSION_ID)
     assert info["branch"] == "feat/foo"
-    # follow-up #3: the local project the session was rebound onto is surfaced so
-    # build_options can refresh its in-memory project for THIS send (MCP servers).
-    assert info["rebound_project"] == {"id": "proj-local", "path": "/local/clone"}
+    # follow-up #3: the local project the session was rebound onto is surfaced (as
+    # the explicit 4th return value, NOT inside worktree_info) so build_options can
+    # refresh its in-memory project for THIS send (MCP servers).
+    assert rebound == {"id": "proj-local", "path": "/local/clone"}
+    assert "rebound_project" not in info
 
 
 def test_row_dir_missing_no_sibling_raises(mocks):
@@ -397,7 +400,7 @@ def test_no_row_foreign_rebinds_creates_in_sibling(mocks, monkeypatch):
         "app.core.project_links.resolve_runnable_local_project",
         return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
     ):
-        working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+        working_dir, mode, _, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert mode == "worktree"
     assert working_dir == "/abs/.worktrees/feat/recreate"
@@ -471,7 +474,7 @@ def test_no_row_rebound_branch_recovered_from_origin(mocks, monkeypatch):
         "app.core.project_links.resolve_runnable_local_project",
         return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
     ):
-        working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+        working_dir, mode, _, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert mode == "worktree"
     # We must fetch before concluding origin has the branch.

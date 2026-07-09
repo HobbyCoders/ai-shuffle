@@ -89,10 +89,11 @@ def test_worktree_rebind_refreshes_in_memory_project(tmp_path):
         return None
 
     def _fake_resolve(session_id, project):
-        # Simulate _rebind_worktree_cwd_cross_device surfacing the local project.
+        # Simulate _rebind_worktree_cwd_cross_device surfacing the local project as
+        # the explicit 4th return value (no longer smuggled through worktree_info).
         return str(wt_dir), "worktree", {
-            "branch": "feat/x", "base_branch": "main", "rebound_project": local_project,
-        }
+            "branch": "feat/x", "base_branch": "main",
+        }, local_project
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo, "_resolve_session_worktree_cwd", side_effect=_fake_resolve

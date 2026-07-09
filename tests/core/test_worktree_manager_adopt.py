@@ -656,3 +656,87 @@ def test_fetch_repo_cached_force_always_fetches_and_primes(tmp_path):
     # A subsequent non-forced call within the TTL is a cache hit (no fetch).
     assert fetch_repo_cached(git, main_dir) is False
     git.fetch.assert_called_once_with(main_dir)
+
+
+# ---------------------------------------------------------------------------
+# follow-up #1 (stale-cache spurious failure): when the plan decides on CACHED
+# refs (a fetch was primed at adopt time) and the branch is absent, it forces one
+# fresh fetch and re-checks before raising. This closes the verified failure —
+# adopt primes the cache + warns "push it from the other device"; the user pushes
+# and re-sends within the 60s TTL; without the retry the plan raises in the exact
+# remediation flow it recommended.
+# ---------------------------------------------------------------------------
+
+def test_resolve_rebound_branch_plan_force_fetches_on_stale_cache_miss(tmp_path):
+    """RED before the fix: with the cache primed and origin/<branch> not yet in the
+    (stale) refs, the plan raised immediately. It must instead force one fetch and
+    recover the freshly pushed branch."""
+    from app.core.worktree_manager import (
+        resolve_rebound_branch_plan,
+        note_repo_fetched,
+        reset_fetch_cache,
+    )
+
+    reset_fetch_cache()
+    main_dir = str(tmp_path / "clone-stale")
+    git = MagicMock(name="git_service")
+
+    state = {"fetched": False}
+
+    def _fetch(_dir):
+        state["fetched"] = True
+
+    git.fetch.side_effect = _fetch
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            names = [{"name": "main", "is_remote": False}]
+            # The pushed branch only becomes visible AFTER a real fetch — modelling
+            # the stale-cache window where the ref hasn't been fetched in yet.
+            if state["fetched"]:
+                names.append({"name": "origin/feat/z", "is_remote": True})
+            return names
+        return [{"name": "main", "is_remote": False}]
+
+    git.list_branches.side_effect = _branches
+
+    # Adopt-time primed the cache → the first (non-forced) fetch is skipped, so the
+    # decision runs on stale refs and misses the branch.
+    note_repo_fetched(main_dir)
+
+    create_new, base = resolve_rebound_branch_plan(git, main_dir, "feat/z")
+
+    assert (create_new, base) == (True, "feat/z")
+    # Exactly one fetch: the forced retry after the cached-refs miss.
+    git.fetch.assert_called_once_with(main_dir)
+
+
+def test_resolve_rebound_branch_plan_force_fetch_still_absent_raises(tmp_path):
+    """The forced retry doesn't paper over a genuinely missing branch: when it is
+    absent locally AND on origin even after a fresh fetch, the loud WorktreeError
+    remains."""
+    from app.core.worktree_manager import (
+        resolve_rebound_branch_plan,
+        note_repo_fetched,
+        reset_fetch_cache,
+    )
+
+    reset_fetch_cache()
+    main_dir = str(tmp_path / "clone-stale-2")
+    git = MagicMock(name="git_service")
+
+    def _branches(_dir, include_remote=False):
+        # Neither local nor origin carries the branch, before OR after a fetch.
+        if include_remote:
+            return [{"name": "main", "is_remote": False}]
+        return [{"name": "main", "is_remote": False}]
+
+    git.list_branches.side_effect = _branches
+
+    note_repo_fetched(main_dir)  # primes cache → first check runs on cached refs
+
+    with pytest.raises(WorktreeError):
+        resolve_rebound_branch_plan(git, main_dir, "feat/w")
+
+    # The forced retry was still attempted before giving up.
+    git.fetch.assert_called_once_with(main_dir)
