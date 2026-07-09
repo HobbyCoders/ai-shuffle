@@ -802,6 +802,52 @@ class TestSessionMessageProfileId:
         assert msgs[2]["profileId"] == "profile-b"
         assert msgs[2]["profile_id"] == "profile-b"
 
+    def test_legacy_db_path_carries_per_message_timestamp(
+        self, client, mock_database, sample_session
+    ):
+        """Legacy ``session_messages`` rows surface each row's own created_at.
+
+        Regression guard for the "every message shows the same wall-clock time
+        after a reload" bug: the legacy fallback (Fallback 3, used in
+        mirror/disabled when JSONL yields nothing, and in postgres_only for
+        pre-cutover sessions) must expose each row's ``created_at`` as
+        ``metadata.timestamp`` so the frontend renders the original send time
+        instead of falling back to ``now``. Datetime columns must be normalized
+        to ISO strings (mirroring db_message_loader) so the value survives JSON
+        serialization identically to the /live path.
+        """
+        from datetime import datetime
+        from app.core.config import settings
+
+        ts1 = datetime(2024, 1, 15, 19, 50, 0)
+        ts2 = datetime(2024, 1, 15, 20, 30, 0)
+        ts3 = datetime(2024, 1, 15, 20, 57, 0)
+
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 1, "role": "user", "content": "First", "tool_name": None,
+             "profile_id": None, "created_at": ts1},
+            {"id": 2, "role": "assistant", "content": "ok", "tool_name": None,
+             "profile_id": None, "created_at": ts2},
+            {"id": 3, "role": "user", "content": "Second", "tool_name": None,
+             "profile_id": None, "created_at": ts3},
+        ]
+
+        with patch.object(settings, "session_store_mode", "disabled"), \
+                patch("app.core.cost_utils.attach_cost_metadata"):
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        # Each message must carry its OWN original timestamp (not a shared "now").
+        assert msgs[0]["metadata"]["timestamp"] == ts1.isoformat()
+        assert msgs[1]["metadata"]["timestamp"] == ts2.isoformat()
+        assert msgs[2]["metadata"]["timestamp"] == ts3.isoformat()
+        # And they must all be distinct — the exact symptom was uniform stamps.
+        stamps = {m["metadata"]["timestamp"] for m in msgs}
+        assert len(stamps) == 3
+
 
 # =============================================================================
 # Test session_store_mode read-cutover isolation (PR C.1)

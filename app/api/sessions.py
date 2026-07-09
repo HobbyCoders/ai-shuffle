@@ -699,6 +699,20 @@ async def _legacy_db_messages(session_id: str) -> list:
         # surface the camelCase alias the frontend reads (the snake_case key
         # alone was silently dropped before the model exposed profile_id).
         msg["profileId"] = msg.get("profile_id")
+        # Surface each row's own created_at as metadata.timestamp so the UI
+        # renders each message's ORIGINAL send time on reload instead of
+        # falling back to "now" (which made every message show the same
+        # wall-clock time). Mirror db_message_loader: normalize datetime →
+        # ISO string so the value stays JSON-serializable and matches the
+        # /live path, and merge into any existing metadata rather than clobber.
+        created_at = msg.get("created_at")
+        if hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+        if created_at:
+            existing_meta = msg.get("metadata")
+            existing_meta = dict(existing_meta) if isinstance(existing_meta, dict) else {}
+            existing_meta.setdefault("timestamp", created_at)
+            msg["metadata"] = existing_meta
         messages.append(msg)
     return messages
 
