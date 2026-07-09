@@ -423,13 +423,27 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             else:
                 jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
-                # Get profile_id map (cached to avoid loading all DB messages every time)
-                from app.core.cost_utils import get_cached_profile_map
-                db_profile_map = get_cached_profile_map(session_id)
+                # Per-message profile resolution. JSONL entries carry no DB row id,
+                # so each user message's profile is read from the DB user rows by
+                # matching content and consuming the match in order (cached to avoid
+                # re-loading all DB messages). Popping left-to-right assigns the
+                # correct profile even when the profile changed mid-session and the
+                # same prompt text repeats. (This must reach the response: the
+                # SessionMessage model now carries profile_id/profileId, which the
+                # frontend reads to label each bubble.)
+                from app.core.cost_utils import build_profile_queues
+                profile_queues = build_profile_queues(session_id)
 
                 # Transform to expected format for SessionWithMessages
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
                 for i, m in enumerate(jsonl_messages):
+                    # Resolve this message's profile (user rows only) by consuming
+                    # the ordered per-content queue built from the DB user rows.
+                    msg_profile_id = None
+                    if m.get("role") == "user":
+                        queue = profile_queues.get(m.get("content", ""))
+                        if queue:
+                            msg_profile_id = queue.popleft()
                     # Timestamps live in metadata (not Pydantic datetime fields);
                     # the frontend reads them directly from metadata for display.
                     msg_data = {
@@ -449,7 +463,8 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
-                        "profile_id": db_profile_map.get(m.get("content", "")) if m.get("role") == "user" else None,
+                        "profile_id": msg_profile_id,
+                        "profileId": msg_profile_id,
                         "created_at": None  # Let Pydantic use default; timestamp is in metadata
                     }
                     # Include subagent-specific fields if present
@@ -603,6 +618,10 @@ async def _legacy_db_messages(session_id: str) -> list:
             msg["toolInput"] = msg.get("tool_input")
         elif msg.get("role") == "assistant":
             msg["type"] = "text"
+        # Each session_messages row already carries its own profile_id column;
+        # surface the camelCase alias the frontend reads (the snake_case key
+        # alone was silently dropped before the model exposed profile_id).
+        msg["profileId"] = msg.get("profile_id")
         messages.append(msg)
     return messages
 
@@ -905,6 +924,12 @@ async def get_live_session(
                     "metadata",
                 )
 
+                # Per-message profile resolution — same ordered-queue merge as
+                # GET /{id}: JSONL entries carry no DB row id, so each user
+                # message consumes its content's queue built from the DB rows.
+                from app.core.cost_utils import build_profile_queues
+                profile_queues = build_profile_queues(session_id)
+
                 # Transform to live format
                 for m in jsonl_messages:
                     msg = {
@@ -918,6 +943,11 @@ async def get_live_session(
                         value = m.get(field)
                         if value is not None:
                             msg[field] = value
+
+                    if msg["role"] == "user":
+                        queue = profile_queues.get(msg["content"])
+                        if queue:
+                            msg["profile_id"] = queue.popleft()
 
                     messages.append(msg)
 

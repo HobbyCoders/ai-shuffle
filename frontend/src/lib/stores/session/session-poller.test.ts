@@ -197,6 +197,31 @@ describe('session-poller · loadSession reconciliation', () => {
 		expect(toolMsg!.toolScreenshot).toBeUndefined();
 	});
 
+	it('maps per-message profileId (camelCase, with snake_case fallback) onto ChatMessage', async () => {
+		// Regression: the server persists which profile produced each user
+		// message; without this mapping every bubble fell back to the session's
+		// CURRENT profile. GET/live JSONL paths emit `profileId`; the /live DB
+		// fast path emits snake_case `profile_id`.
+		fetchMock.mockResolvedValueOnce(
+			makeLiveResponse({
+				lastUpdateId: 4,
+				isStreaming: false,
+				messages: [
+					{ id: 'msg-camel', role: 'user', type: 'text', content: 'q1', streaming: false, profileId: 'profile-a' },
+					{ id: 'msg-snake', role: 'user', type: 'text', content: 'q2', streaming: false, profile_id: 'profile-b' },
+					{ id: 'msg-none', role: 'assistant', type: 'text', content: 'a', streaming: false },
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SESSION_ID);
+		const session = sessionStateManager.getSession(SESSION_ID);
+		const byId = new Map(session!.messages.map(m => [m.id, m]));
+		expect(byId.get('msg-camel')!.profileId).toBe('profile-a');
+		expect(byId.get('msg-snake')!.profileId).toBe('profile-b');
+		expect(byId.get('msg-none')!.profileId).toBeUndefined();
+	});
+
 	it('applies server state on first load when no prior entry exists', async () => {
 		fetchMock.mockResolvedValueOnce(
 			makeLiveResponse({
