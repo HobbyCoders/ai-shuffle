@@ -812,3 +812,147 @@ export async function cloneRepository(
 ): Promise<CloneRepoResponse> {
     return api.post<CloneRepoResponse>(`${BASE}/${projectId}/git/clone`, request);
 }
+
+// ============================================================================
+// AI Generation API
+// ============================================================================
+
+export interface GenerateCommitMessageRequest {
+    include_unstaged?: boolean;
+}
+
+export interface GenerateCommitMessageResponse {
+    message: string;
+}
+
+export interface GeneratePRDescriptionRequest {
+    base_branch?: string;
+}
+
+export interface GeneratePRDescriptionResponse {
+    title: string;
+    body: string;
+}
+
+/**
+ * Generate a commit message using AI based on the current diff
+ */
+export async function generateCommitMessage(
+    projectId: string,
+    request: GenerateCommitMessageRequest = {},
+    worktreeId?: string
+): Promise<GenerateCommitMessageResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<GenerateCommitMessageResponse>(
+        `${BASE}/${projectId}/git/generate-commit-message${params}`, request
+    );
+}
+
+/**
+ * Generate a PR title and description using AI based on branch commits
+ */
+export async function generatePRDescription(
+    projectId: string,
+    request: GeneratePRDescriptionRequest = {},
+    worktreeId?: string
+): Promise<GeneratePRDescriptionResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<GeneratePRDescriptionResponse>(
+        `${BASE}/${projectId}/git/generate-pr-description${params}`, request
+    );
+}
+
+// ============================================================================
+// Multi-step Git Operations API (Finish / Ship It)
+// ============================================================================
+//
+// Finish and Ship It run as server-side operations composed of ordered steps.
+// The POST endpoint kicks off the operation and returns its initial snapshot;
+// the client then polls the GET endpoint until the operation reaches a terminal
+// status (`done` or `error`), rendering per-step progress in GitProgressPopover.
+
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
+
+export type GitOperationStatus = 'running' | 'done' | 'error';
+
+export type GitOperationStepStatus =
+    | 'pending'
+    | 'running'
+    | 'done'
+    | 'error'
+    | 'warning'
+    | 'skipped';
+
+export interface GitOperationStep {
+    id: string;
+    label: string;
+    status: GitOperationStepStatus;
+    error?: string;
+    detail?: string;
+}
+
+export interface GitOperationResult {
+    pr_url?: string;
+    pr_number?: number;
+    worktree_deleted?: boolean;
+}
+
+export interface GitOperation {
+    operation_id: string;
+    status: GitOperationStatus;
+    steps: GitOperationStep[];
+    result?: GitOperationResult;
+}
+
+export interface FinishOperationRequest {
+    worktree_id?: string;
+    session_id?: string;
+    merge_method: MergeMethod;
+    cleanup: boolean;
+}
+
+export interface ShipOperationRequest {
+    worktree_id?: string;
+    session_id?: string;
+    merge_method: MergeMethod;
+    cleanup: boolean;
+    include_unstaged: boolean;
+    base?: string;
+    draft?: boolean;
+}
+
+/**
+ * Start a "Finish" operation — merge the branch's open PR into the default
+ * branch (and optionally clean up). Returns the operation's initial snapshot.
+ */
+export async function startFinishOperation(
+    projectId: string,
+    request: FinishOperationRequest
+): Promise<GitOperation> {
+    return api.post<GitOperation>(`${BASE}/${projectId}/git/finish`, request);
+}
+
+/**
+ * Start a "Ship It" operation — commit → push → open/merge PR → clean up, end
+ * to end. Returns the operation's initial snapshot.
+ */
+export async function startShipOperation(
+    projectId: string,
+    request: ShipOperationRequest
+): Promise<GitOperation> {
+    return api.post<GitOperation>(`${BASE}/${projectId}/git/ship`, request);
+}
+
+/**
+ * Poll the current state of a running git operation.
+ */
+export async function getGitOperation(
+    projectId: string,
+    operationId: string,
+    options?: RequestOptions
+): Promise<GitOperation> {
+    return api.get<GitOperation>(
+        `${BASE}/${projectId}/git/operations/${encodeURIComponent(operationId)}`,
+        options
+    );
+}
