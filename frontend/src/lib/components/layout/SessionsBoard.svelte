@@ -18,7 +18,6 @@
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite, forkSession, adoptSession, api } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
-	import SessionContextMenu from './SessionContextMenu.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { toast } from '$lib/stores/toast';
 
@@ -339,98 +338,36 @@
 		await toggleFavorite(s);
 	}
 
-	// --- Right-click / long-press context menu -----------------------------
-	// Desktop: right-click a row. Touch: press-and-hold ~500ms (movement or
-	// scroll cancels). Both open the same themed menu at the pointer.
-	let ctxOpen = $state(false);
-	let ctxX = $state(0);
-	let ctxY = $state(0);
-	let ctxSession = $state<Session | null>(null);
-
-	function openMenuAt(x: number, y: number, s: Session) {
-		ctxSession = s;
-		ctxX = x;
-		ctxY = y;
-		ctxOpen = true;
-	}
-	function closeMenu() {
-		ctxOpen = false;
-		suppressClick = false;
-	}
-	function openContextMenu(e: MouseEvent, s: Session) {
-		// Right-click (mouse). Touch long-press is handled by the press timer, so
-		// ignore a synthesized contextmenu while a touch menu is already open.
-		e.preventDefault();
-		if (ctxOpen) return;
-		openMenuAt(e.clientX, e.clientY, s);
-	}
-
-	// Touch long-press machinery.
-	const LONG_PRESS_MS = 500;
-	const MOVE_CANCEL_PX = 10;
-	let pressTimer: ReturnType<typeof setTimeout> | null = null;
-	let pressStart: { x: number; y: number } | null = null;
-	// True from a long-press open until the ensuing synthetic click is swallowed,
-	// so press-and-hold opens the menu instead of the session.
-	let suppressClick = $state(false);
-
-	function cancelPress() {
-		if (pressTimer) {
-			clearTimeout(pressTimer);
-			pressTimer = null;
-		}
-	}
-	function onRowPointerDown(e: PointerEvent, s: Session) {
-		if (e.pointerType !== 'touch') return; // mouse → contextmenu handles it
-		cancelPress();
-		pressStart = { x: e.clientX, y: e.clientY };
-		pressTimer = setTimeout(() => {
-			pressTimer = null;
-			suppressClick = true;
-			if (pressStart) openMenuAt(pressStart.x, pressStart.y, s);
-		}, LONG_PRESS_MS);
-	}
-	function onRowPointerMove(e: PointerEvent) {
-		if (!pressTimer || !pressStart) return;
-		if (Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > MOVE_CANCEL_PX) cancelPress();
-	}
-	function onRowPointerUp() {
-		cancelPress();
-	}
-
+	// Row activation — a plain click / Enter / Space opens the session. (The
+	// former right-click + long-press context menu was replaced by the inline
+	// action-rail buttons on each row; see the Fork / Resume buttons below.)
 	function onRowClick(s: Session) {
-		if (suppressClick) {
-			suppressClick = false;
-			return;
-		}
 		openSession(s.id);
 	}
-	// Keyboard: the ContextMenu / Shift+F10 keys open the menu near the row.
 	function onRowKeydown(e: KeyboardEvent, s: Session) {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
 			openSession(s.id);
-		} else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
-			e.preventDefault();
-			const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-			openMenuAt(r.left + 24, r.bottom - 8, s);
 		}
 	}
 
-	// --- Menu labels + action dispatch -------------------------------------
-	const ctxIsRemote = $derived(!!ctxSession?.is_remote);
-	const resumeLabel = $derived(ctxIsRemote ? 'Resume here' : 'Open');
-	const resumeHint = $derived(ctxIsRemote ? ctxSession?.device_name || undefined : undefined);
-	const favLabel = $derived(ctxSession?.is_favorite ? 'Unfavorite' : 'Favorite');
-
-	async function runContextAction(id: string) {
-		const s = ctxSession;
-		closeMenu();
-		if (!s) return;
-		if (id === 'resume') await resumeHere(s);
-		else if (id === 'fork') await forkFromMenu(s);
-		else if (id === 'favorite') await toggleFavorite(s);
-		else if (id === 'clear') requestClear(s);
+	// --- Row action-rail handlers ------------------------------------------
+	// Each stops propagation so the row's own click (open the session) never
+	// also fires when a rail button is pressed.
+	async function handleResume(e: MouseEvent | KeyboardEvent, s: Session) {
+		e.stopPropagation();
+		await resumeHere(s);
+	}
+	async function handleFork(e: MouseEvent | KeyboardEvent, s: Session) {
+		e.stopPropagation();
+		await forkAndOpen(s);
+	}
+	// "Resume here" adopts a foreign-instance session to this install and opens
+	// it; for a local session there is nothing to adopt, so it is a plain open
+	// and the tooltip reads "Open" instead.
+	function resumeTitle(s: Session): string {
+		if (!s.is_remote) return 'Open';
+		return s.device_name ? `Resume here (${s.device_name})` : 'Resume here';
 	}
 
 	// "Resume here": adopt a foreign-instance session to this install (a no-op
@@ -450,7 +387,7 @@
 	}
 
 	// "Fork": duplicate the whole conversation into a new session, then open it.
-	async function forkFromMenu(s: Session) {
+	async function forkAndOpen(s: Session) {
 		try {
 			const res = await forkSession(s.id);
 			await appData.loadSessions();
@@ -461,12 +398,6 @@
 		}
 	}
 
-	// "Clear": route into the existing two-step inline confirmation (the row's
-	// Confirm/Cancel buttons) rather than deleting outright.
-	function requestClear(s: Session) {
-		deletingSessionId = s.id;
-		setTimeout(() => { if (deletingSessionId === s.id) deletingSessionId = null; }, 3000);
-	}
 	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
 		if (deletingSessionId === id) {
@@ -749,11 +680,6 @@
 		tabindex="0"
 		onclick={() => onRowClick(session)}
 		onkeydown={(e) => onRowKeydown(e, session)}
-		oncontextmenu={(e) => openContextMenu(e, session)}
-		onpointerdown={(e) => onRowPointerDown(e, session)}
-		onpointermove={onRowPointerMove}
-		onpointerup={onRowPointerUp}
-		onpointercancel={onRowPointerUp}
 	>
 		<span class="row-status">
 			{#if needsAttention(session.id)}
@@ -820,6 +746,20 @@
 		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
 		<span class="row-actions">
 			<button
+				class="row-action"
+				title={resumeTitle(session)}
+				onclick={(e) => handleResume(e, session)}
+			>
+				<Play size={13} strokeWidth={1.6} />
+			</button>
+			<button
+				class="row-action"
+				title="Fork session"
+				onclick={(e) => handleFork(e, session)}
+			>
+				<GitFork size={13} strokeWidth={1.6} />
+			</button>
+			<button
 				class="row-action fav"
 				class:is-fav={session.is_favorite}
 				title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
@@ -842,27 +782,6 @@
 		</span>
 	</div>
 {/snippet}
-
-<!-- Context-menu icons (snippets so the generic menu stays theme-agnostic) -->
-{#snippet iconResume()}<Play size={15} strokeWidth={1.7} />{/snippet}
-{#snippet iconFork()}<GitFork size={15} strokeWidth={1.7} />{/snippet}
-{#snippet iconFav()}<Star size={15} strokeWidth={1.7} fill={ctxSession?.is_favorite ? 'currentColor' : 'none'} />{/snippet}
-{#snippet iconClear()}<BrushCleaning size={15} strokeWidth={1.7} />{/snippet}
-
-<SessionContextMenu
-	open={ctxOpen}
-	x={ctxX}
-	y={ctxY}
-	heading={ctxSession?.title || 'Untitled'}
-	items={[
-		{ id: 'resume', label: resumeLabel, icon: iconResume, hint: resumeHint },
-		{ id: 'fork', label: 'Fork', icon: iconFork },
-		{ id: 'favorite', label: favLabel, icon: iconFav, active: !!ctxSession?.is_favorite },
-		{ id: 'clear', label: 'Clear', icon: iconClear, danger: true }
-	]}
-	onSelect={runContextAction}
-	onClose={closeMenu}
-/>
 
 <style>
 	.board {
