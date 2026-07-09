@@ -1039,9 +1039,12 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
 	if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;
 
-	// Per-message profile (user messages): lets MessageArea label each bubble
-	// with the profile that produced it instead of the session's current one.
-	// Server emits camelCase `profileId`; snake_case kept as a fallback.
+	// Per-message profile (any role — user, assistant, thinking): lets
+	// MessageArea label each bubble with the profile that produced it instead
+	// of the session's CURRENT selection, so switching profiles no longer
+	// re-labels historical assistant messages. Server emits snake_case
+	// `profile_id` from the live store / DB and camelCase `profileId` from the
+	// JSONL read paths; accept either.
 	if (m.profileId) msg.profileId = m.profileId as string;
 	else if (m.profile_id) msg.profileId = m.profile_id as string;
 

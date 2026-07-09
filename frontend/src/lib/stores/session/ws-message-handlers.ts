@@ -635,6 +635,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 								type: 'text' as const,
 								content: '',
 								streaming: true,
+								// Stamp the in-flight turn's profile so the bubble is
+								// labelled by the profile that produced it, not the
+								// session's live selection. Left unset for adopted
+								// streams (no local query profile) — the poller then
+								// backfills it from the server's per-message profile.
+								profileId: s.currentQueryProfileId ?? undefined,
 								timestamp: new Date().toISOString(),
 							}],
 						};

@@ -709,7 +709,14 @@ class TestSessionMessageProfileId:
     def test_jsonl_path_carries_per_message_profile_id(
         self, client, mock_database, sample_session
     ):
-        """A user message's own profile id survives serialization (both keys)."""
+        """Both the user row AND its turn's assistant row carry the profile.
+
+        The JSONL transcript stores no profile on assistant rows, so the turn's
+        assistant/thinking bubbles inherit the profile resolved for the turn's
+        user message. Without this the assistant bubble reaches the frontend with
+        no profileId and falls back to the session's CURRENT selection — the
+        "assistant messages re-label when you switch profile" bug.
+        """
         jsonl_messages = [
             {"id": 1, "role": "user", "content": "Hello", "type": "text", "metadata": {}},
             {"id": 2, "role": "assistant", "content": "Hi!", "type": "text", "metadata": {}},
@@ -723,13 +730,19 @@ class TestSessionMessageProfileId:
         msgs = resp.json()["messages"]
         assert msgs[0]["profileId"] == "profile-x"
         assert msgs[0]["profile_id"] == "profile-x"
-        # Assistant rows have no per-message profile.
-        assert msgs[1]["profileId"] is None
+        # The assistant reply belongs to the same turn → same profile.
+        assert msgs[1]["profileId"] == "profile-x"
+        assert msgs[1]["profile_id"] == "profile-x"
 
     def test_jsonl_path_mid_session_profile_change(
         self, client, mock_database, sample_session
     ):
-        """Distinct prompts sent under different profiles each keep their own."""
+        """Each turn's user AND assistant rows keep that turn's own profile.
+
+        This is the screenshot bug: after a mid-session switch to profile-b, the
+        first turn's assistant reply ("a") must stay attributed to profile-a, not
+        re-label to the now-current profile-b.
+        """
         jsonl_messages = [
             {"id": 1, "role": "user", "content": "First", "type": "text", "metadata": {}},
             {"id": 2, "role": "assistant", "content": "a", "type": "text", "metadata": {}},
@@ -744,8 +757,35 @@ class TestSessionMessageProfileId:
 
         assert resp.status_code == 200
         msgs = resp.json()["messages"]
-        assert msgs[0]["profileId"] == "profile-a"
-        assert msgs[2]["profileId"] == "profile-b"
+        assert msgs[0]["profileId"] == "profile-a"  # user, turn 1
+        assert msgs[1]["profileId"] == "profile-a"  # assistant, turn 1 (stays a)
+        assert msgs[2]["profileId"] == "profile-b"  # user, turn 2
+        assert msgs[3]["profileId"] == "profile-b"  # assistant, turn 2
+
+    def test_jsonl_path_thinking_and_tools_inherit_turn_profile(
+        self, client, mock_database, sample_session
+    ):
+        """Thinking blocks and interleaved tool rows inherit the turn's profile.
+
+        Assistant output for a turn is not just the final text — thinking blocks
+        and tool cards render between the user prompt and the reply. All belong to
+        the turn's profile so none fall back to the current selection.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "Do it", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "hmm", "type": "thinking", "metadata": {}},
+            {"id": 3, "role": "assistant", "content": "", "type": "tool_use",
+             "toolName": "Read", "metadata": {}},
+            {"id": 4, "role": "assistant", "content": "done", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages, {"Do it": ["profile-z"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert [m["profileId"] for m in msgs] == ["profile-z"] * 4
 
     def test_jsonl_path_repeated_prompt_resolves_in_order(
         self, client, mock_database, sample_session

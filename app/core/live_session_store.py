@@ -123,6 +123,12 @@ class LiveMessage:
     # Metadata (added at completion)
     metadata: Optional[Dict[str, Any]] = None
 
+    # The profile that produced this message. Seeded from history on reload and
+    # stamped with the turn's profile for messages produced during streaming, so
+    # every bubble is labelled by the profile that generated it — not the
+    # session's CURRENT selector (which used to re-label all bubbles on switch).
+    profile_id: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result = {
@@ -193,6 +199,11 @@ class LiveMessage:
         if self.metadata:
             result["metadata"] = self.metadata
 
+        # Per-message profile attribution (snake_case; the frontend's
+        # convertServerMessage maps profile_id/profileId to profileId).
+        if self.profile_id:
+            result["profile_id"] = self.profile_id
+
         return result
 
 
@@ -204,6 +215,12 @@ class LiveSession:
     is_streaming: bool = True
     last_update_id: int = 0  # Monotonically increasing for efficient polling
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # The profile driving THIS streaming turn. Messages produced during the turn
+    # (assistant text, thinking, …) are stamped with it at creation so each
+    # bubble is attributed to the profile that generated it rather than the
+    # session's live selector. History messages keep their own seeded profile.
+    profile_id: Optional[str] = None
 
     # Number of initial (history) messages loaded at stream start.
     # These messages never change during streaming, so delta polls can skip them.
@@ -497,7 +514,8 @@ class LiveSessionStore:
     async def start_streaming(
         self,
         session_id: str,
-        initial_messages: Optional[List[Dict[str, Any]]] = None
+        initial_messages: Optional[List[Dict[str, Any]]] = None,
+        profile_id: Optional[str] = None,
     ) -> LiveSession:
         """
         Initialize a streaming session.
@@ -505,6 +523,9 @@ class LiveSessionStore:
         Args:
             session_id: The session ID
             initial_messages: Existing messages to include (from JSONL history)
+            profile_id: The profile driving this turn. Stamped onto messages
+                produced during the turn so each bubble is attributed to the
+                profile that generated it (not the session's live selector).
 
         Returns:
             The created LiveSession
@@ -568,6 +589,9 @@ class LiveSessionStore:
                         system_subtype=m.get("systemSubtype") or m.get("subtype"),
                         system_data=m.get("systemData") or m.get("data"),
                         metadata=m.get("metadata"),
+                        # Carry each history row's own profile so seeded bubbles
+                        # keep their original attribution during the new turn.
+                        profile_id=m.get("profile_id") or m.get("profileId"),
                     )
                     messages.append(msg)
 
@@ -583,6 +607,7 @@ class LiveSessionStore:
                 is_streaming=True,
                 last_update_id=1,
                 initial_message_count=len(messages),
+                profile_id=profile_id,
             )
 
             if prev_session:
@@ -665,6 +690,7 @@ class LiveSessionStore:
                 type="text",
                 content="",
                 streaming=True,
+                profile_id=session.profile_id,
             )
             session.messages.append(msg)
             self._increment_update_id(session)
@@ -694,6 +720,7 @@ class LiveSessionStore:
                 type="text",
                 content=content,
                 streaming=True,
+                profile_id=session.profile_id,
             )
             session.messages.append(msg)
             self._increment_update_id(session)
@@ -734,6 +761,7 @@ class LiveSessionStore:
                 type="thinking",
                 content=content,
                 streaming=True,
+                profile_id=session.profile_id,
             )
             session.messages.insert(insert_idx, msg)
             self._increment_update_id(session)

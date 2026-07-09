@@ -60,3 +60,65 @@ def test_update_profile_map_appends_preserving_order():
 
     assert cost_utils.get_cached_profile_map("sess-3") == {"same": ["a", "b"]}
     _clear_cache()
+
+
+def test_attach_turn_profile_ids_carries_turn_profile_to_all_rows():
+    """The turn's profile (from its user row) flows onto that turn's
+    assistant/thinking/tool rows; a mid-session switch re-attributes only the
+    later turn. Both snake_case and camelCase keys are written."""
+    _clear_cache()
+    db_rows = [
+        {"role": "user", "content": "q1", "profile_id": "p-a"},
+        {"role": "user", "content": "q2", "profile_id": "p-b"},
+    ]
+    # The transcript carries a profile only on user rows; the rest inherit.
+    transcript = [
+        {"role": "user", "content": "q1", "type": "text"},
+        {"role": "assistant", "content": "a1", "type": "text"},
+        {"role": "assistant", "content": "t1", "type": "thinking"},
+        {"role": "user", "content": "q2", "type": "text"},
+        {"role": "assistant", "content": "a2", "type": "text"},
+    ]
+    with patch("app.db.database.get_session_messages", return_value=db_rows):
+        result = cost_utils.attach_turn_profile_ids("sess-4", transcript)
+
+    assert result is transcript  # mutated in place, returned for chaining
+    assert [m["profile_id"] for m in transcript] == [
+        "p-a", "p-a", "p-a", "p-b", "p-b",
+    ]
+    assert transcript[0]["profileId"] == "p-a"
+    _clear_cache()
+
+
+def test_attach_turn_profile_ids_leaves_unresolved_turn_untouched():
+    """A user row with no DB profile match (unresolved) leaves its turn's rows
+    unstamped rather than mislabelling them with a neighbouring turn."""
+    _clear_cache()
+    db_rows = [{"role": "user", "content": "known", "profile_id": "p-a"}]
+    transcript = [
+        {"role": "user", "content": "unknown", "type": "text"},
+        {"role": "assistant", "content": "a0", "type": "text"},
+        {"role": "user", "content": "known", "type": "text"},
+        {"role": "assistant", "content": "a1", "type": "text"},
+    ]
+    with patch("app.db.database.get_session_messages", return_value=db_rows):
+        cost_utils.attach_turn_profile_ids("sess-5", transcript)
+
+    assert "profile_id" not in transcript[0]
+    assert "profile_id" not in transcript[1]
+    assert transcript[2]["profile_id"] == "p-a"
+    assert transcript[3]["profile_id"] == "p-a"
+    _clear_cache()
+
+
+def test_attach_turn_profile_ids_both_keys_false_writes_snake_only():
+    """When both_keys=False only the snake_case profile_id is written."""
+    _clear_cache()
+    db_rows = [{"role": "user", "content": "q", "profile_id": "p-a"}]
+    transcript = [{"role": "user", "content": "q", "type": "text"}]
+    with patch("app.db.database.get_session_messages", return_value=db_rows):
+        cost_utils.attach_turn_profile_ids("sess-6", transcript, both_keys=False)
+
+    assert transcript[0]["profile_id"] == "p-a"
+    assert "profileId" not in transcript[0]
+    _clear_cache()

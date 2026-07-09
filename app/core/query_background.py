@@ -718,7 +718,9 @@ async def start_background_query(
     except Exception:
         initial_messages = []
 
-    await live_session_store.start_streaming(session_id, initial_messages)
+    await live_session_store.start_streaming(
+        session_id, initial_messages, profile_id=profile_id
+    )
 
     # Add user message to live store
     user_msg_id = f"user-{int(datetime.now(timezone.utc).timestamp() * 1000)}"

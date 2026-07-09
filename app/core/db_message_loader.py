@@ -135,6 +135,10 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "role": "assistant",
             "content": row["content"],
             "type": "text",
+            # Each row carries the profile that produced it. Surface it so the UI
+            # labels every bubble with its OWN profile instead of falling back to
+            # the session's CURRENT selection (which re-labels on profile switch).
+            "profile_id": row.get("profile_id"),
             "metadata": {
                 **base["metadata"],
                 "model": meta.get("model"),
@@ -147,6 +151,7 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "role": "assistant",
             "content": row["content"],
             "type": "thinking",
+            "profile_id": row.get("profile_id"),
             "metadata": {
                 **base["metadata"],
                 "model": meta.get("model"),
