@@ -188,7 +188,10 @@ class TestFetch:
             with caplog.at_level(logging.WARNING):
                 snap = await monitor.fetch()
 
-        assert snap == {"windows": [], "fetched_at": None, "available": False}
+        assert snap == {
+            "windows": [], "fetched_at": None, "available": False,
+            "generation": monitor.current_generation(),
+        }
         # Missing credential is an expected steady state — no warning spam.
         assert caplog.text == ""
 
@@ -229,6 +232,76 @@ class TestFetch:
 
         assert snap["available"] is True
         assert snap["windows"]  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# generation guard (stale in-flight poll ordering)
+# ---------------------------------------------------------------------------
+
+class TestGenerationGuard:
+    def test_snapshot_includes_generation(self, monitor):
+        assert monitor._snapshot()["generation"] == monitor.current_generation()
+
+    def test_bump_generation_increments(self, monitor):
+        g0 = monitor.current_generation()
+        assert monitor.bump_generation() == g0 + 1
+        assert monitor.current_generation() == g0 + 1
+        assert monitor._snapshot()["generation"] == g0 + 1
+
+    @pytest.mark.asyncio
+    async def test_stale_fetch_discarded_when_generation_bumped_midflight(self, monitor):
+        """A poll that STARTED before an account switch must not overwrite the
+        new account's data if it completes afterwards.
+
+        Simulated by bumping the generation from inside the network read (as a
+        concurrent ``switch_account`` would) and returning DIFFERENT data. The
+        stale result is discarded and the primed windows survive.
+        """
+        # Prime the monitor with account A's windows.
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch("app.core.usage_limits.httpx.AsyncClient", _fake_httpx(200, REAL_RESPONSE)):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tokA"
+            await monitor.fetch()
+        primed = monitor._snapshot()["windows"]
+        assert primed  # sanity: account A produced windows
+
+        async def _get_then_switch(*args, **kwargs):
+            # A switch lands while this fetch is awaiting the network.
+            monitor.bump_generation()
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"five_hour": {"utilization": 99.0, "resets_at": None}}
+            return resp
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=_get_then_switch)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        factory = MagicMock(return_value=ctx)
+
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch("app.core.usage_limits.httpx.AsyncClient", factory):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tokA"
+            snap = await monitor.fetch()
+
+        # Discarded: primed windows unchanged, the 99% straggler never applied.
+        assert snap["windows"] == primed
+        assert all(w["utilization"] != 99.0 for w in snap["windows"])
+
+    @pytest.mark.asyncio
+    async def test_fresh_fetch_applies_when_generation_stable(self, monitor):
+        with patch("app.core.usage_limits.direct_oauth") as oauth, \
+             patch(
+                 "app.core.usage_limits.httpx.AsyncClient",
+                 _fake_httpx(200, {"five_hour": {"utilization": 55.0, "resets_at": None}}),
+             ):
+            oauth.ensure_fresh_credentials = AsyncMock(return_value=False)
+            oauth.get_access_token.return_value = "tok"
+            snap = await monitor.fetch()
+        assert any(w["utilization"] == 55.0 for w in snap["windows"])
 
 
 # ---------------------------------------------------------------------------

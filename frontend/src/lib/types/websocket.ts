@@ -534,6 +534,8 @@ export interface WsServerUsageSnapshot {
 	windows: Array<{ type: string; utilization: number; resets_at?: string | null }>;
 	fetched_at?: number | null;
 	available: boolean;
+	/** Monotonic generation tag; bumped on account switch. Drops stale snapshots. */
+	generation?: number | null;
 }
 
 /** User question from the SDK (interactive questions for the user). */

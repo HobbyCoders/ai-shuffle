@@ -64,6 +64,10 @@
 	const hasValue = $derived(headline != null);
 	const displayPct = $derived(headline?.pct ?? 0);
 
+	// Dim the pill between an account switch and the new account's fresh snapshot
+	// so we never present the previous account's numbers as current.
+	const stale = $derived($rateLimit.stale ?? false);
+
 	function severityFor(pct: number): 'neutral' | 'warning' | 'danger' {
 		if (pct > 90) return 'danger';
 		if (pct >= 70) return 'warning';
@@ -110,7 +114,9 @@
 		<button
 			type="button"
 			class="usage-indicator usage-limit {severity}"
-			title={tooltip}
+			class:stale
+			title={stale ? 'Refreshing usage for the new account…' : tooltip}
+			aria-busy={stale}
 			aria-haspopup="dialog"
 			aria-expanded={open}
 			onclick={toggle}
@@ -177,6 +183,26 @@
 	}
 	.usage-indicator:hover {
 		background: color-mix(in oklch, var(--glass-bg) 80%, var(--foreground) 6%);
+	}
+
+	/* Stale: dimmed + gently pulsing while the new account's usage is fetched. */
+	.usage-indicator.stale {
+		opacity: 0.5;
+		animation: usage-stale-pulse 1.4s ease-in-out infinite;
+	}
+	@keyframes usage-stale-pulse {
+		0%,
+		100% {
+			opacity: 0.4;
+		}
+		50% {
+			opacity: 0.65;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.usage-indicator.stale {
+			animation: none;
+		}
 	}
 
 	.limit-icon {

@@ -320,6 +320,15 @@ def switch_account(account_id: str) -> Dict[str, Any]:
     finally:
         _suppress_sync_back = False
 
+    # 6. Invalidate any in-flight usage poll (started against the previous
+    #    account) so the limits indicator re-polls the new account cleanly.
+    #    Best-effort + lazy import: never let this break the switch.
+    try:
+        from app.core.usage_limits import usage_limits_monitor
+        usage_limits_monitor.bump_generation()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Could not bump usage generation on switch: {e}")
+
     return {"success": True, "active_account_id": account_id}
 
 

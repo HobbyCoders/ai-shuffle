@@ -421,6 +421,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				windows: (data.windows as { type: string; utilization: number; resets_at?: string | null }[]) ?? [],
 				fetched_at: (data.fetched_at as number | null) ?? null,
 				available: (data.available as boolean) ?? false,
+				generation: (data.generation as number | null) ?? undefined,
 			});
 			return;
 		}

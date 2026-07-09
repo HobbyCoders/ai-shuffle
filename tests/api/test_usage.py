@@ -53,7 +53,9 @@ class TestUsageLimitsEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"windows": [], "fetched_at": None, "available": False}
+        assert body == {
+            "windows": [], "fetched_at": None, "available": False, "generation": None,
+        }
 
     def test_requires_auth(self):
         # No dependency override → real require_auth runs and rejects.

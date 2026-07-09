@@ -72,6 +72,34 @@ describe('UsageLimitIndicator', () => {
 		expect(container.querySelector('.usage-indicator.warning')).not.toBeNull();
 	});
 
+	it('dims the pill (stale) while an account switch is pending', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
+		});
+		rateLimit.markStale();
+		const { container } = render(UsageLimitIndicator);
+		// Still shows the last-known number, but visibly dimmed.
+		expect(container.querySelector('.usage-text')?.textContent).toBe('42%');
+		expect(container.querySelector('.usage-indicator.stale')).not.toBeNull();
+	});
+
+	it('clears the stale dimming when the fresh snapshot arrives', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
+		});
+		rateLimit.markStale();
+		// New account's snapshot lands.
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 8, resets_at: future() }],
+		});
+		const { container } = render(UsageLimitIndicator);
+		expect(container.querySelector('.usage-indicator.stale')).toBeNull();
+		expect(container.querySelector('.usage-text')?.textContent).toBe('8%');
+	});
+
 	it('opens a popover listing all windows on click', async () => {
 		rateLimit.applySnapshot({
 			available: true,
