@@ -22,7 +22,9 @@
  * createSubscribers subscribe shim for `$gitOperations` auto-subscription.
  */
 
+import { browser } from '$app/environment';
 import * as gitApi from '$lib/api/git';
+import { isApiError } from '$lib/api/client';
 import { git } from './git.svelte';
 import { createSubscribers } from './store-utils';
 
@@ -71,6 +73,14 @@ const EMPTY_STATE: GitOperationsState = {
 const SUCCESS_CLEAR_MS = 2_500;
 // Poll cadence for server-side operations.
 const POLL_INTERVAL_MS = 1_000;
+// How many consecutive poll failures we tolerate before giving up. A single
+// transient blip (WS hiccup, momentary 5xx) shouldn't abort an in-flight op.
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+// Terminal cap: the backend keeps an operation for a 10-minute TTL, so anything
+// still 'running' past that is effectively lost — stop polling and surface it.
+const OPERATION_TIMEOUT_MS = 10 * 60 * 1_000;
+// sessionStorage key used to re-attach to a server op across a page refresh.
+const PERSIST_KEY = 'ai-shuffle-git-operation';
 
 // ============================================================================
 // Reactive State
@@ -112,6 +122,114 @@ function _errText(e: unknown): string {
 		if (typeof obj.message === 'string' && obj.message) return obj.message;
 	}
 	return 'Operation failed';
+}
+
+// ── sessionStorage re-attach ────────────────────────────────────────────────
+// A server op lives on the backend; if the page refreshes mid-op we'd otherwise
+// orphan it (popover/toast lost). We persist the minimal handle while a server
+// op is active and clear it on any terminal, then resume polling on store init.
+
+/** The minimal handle needed to re-attach to a server op after a refresh. */
+export interface PersistedGitOperation {
+	operation_id: string;
+	project_id: string;
+	session_id: string | null;
+	kind: string;
+}
+
+function _persistOp(entry: PersistedGitOperation): void {
+	if (typeof sessionStorage === 'undefined') return;
+	try {
+		sessionStorage.setItem(PERSIST_KEY, JSON.stringify(entry));
+	} catch {
+		/* private-mode / quota — best effort */
+	}
+}
+
+function _clearPersistedOp(): void {
+	if (typeof sessionStorage === 'undefined') return;
+	try {
+		sessionStorage.removeItem(PERSIST_KEY);
+	} catch {
+		/* ignore */
+	}
+}
+
+function _readPersistedOp(): PersistedGitOperation | null {
+	if (typeof sessionStorage === 'undefined') return null;
+	try {
+		const raw = sessionStorage.getItem(PERSIST_KEY);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw) as Partial<PersistedGitOperation>;
+		if (!parsed || !parsed.operation_id || !parsed.project_id) return null;
+		return {
+			operation_id: parsed.operation_id,
+			project_id: parsed.project_id,
+			session_id: parsed.session_id ?? null,
+			kind: parsed.kind ?? 'Operation'
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Poll a server operation until it reaches a terminal status, mirroring its
+ * steps into the store and settling on succeed/fail. Tolerates transient poll
+ * errors (only fails after MAX_CONSECUTIVE_POLL_FAILURES in a row, or on a
+ * definitive 404), and hard-stops with a timeout error past OPERATION_TIMEOUT_MS.
+ * Returns the last-seen snapshot; the caller treats a non-`done` result as a
+ * no-op (the failure is already pinned in the popover).
+ */
+async function _pollToTerminal(
+	projectId: string,
+	token: number,
+	op: gitApi.GitOperation,
+	startedAt: number
+): Promise<gitApi.GitOperation> {
+	let consecutiveFailures = 0;
+
+	while (op.status === 'running') {
+		await _delay(POLL_INTERVAL_MS);
+		if (_opToken !== token) return op;
+
+		// Terminal cap — the backend TTL has almost certainly reaped the op.
+		if (Date.now() - startedAt >= OPERATION_TIMEOUT_MS) {
+			gitOperations.fail('Operation timed out — check the repo state');
+			return op;
+		}
+
+		try {
+			op = await gitApi.getGitOperation(projectId, op.operation_id);
+			if (_opToken !== token) return op;
+			consecutiveFailures = 0; // any success resets the tolerance window
+			gitOperations.replaceSteps(op.steps);
+		} catch (e) {
+			if (_opToken !== token) return op;
+			// A definitive 404 means the op is gone (expired / never existed) —
+			// no point retrying, fail immediately.
+			if (isApiError(e) && e.status === 404) {
+				gitOperations.fail(_errText(e));
+				return op;
+			}
+			// Otherwise treat as transient; only give up after N in a row.
+			if (++consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+				gitOperations.fail(_errText(e));
+				return op;
+			}
+		}
+	}
+
+	if (op.status === 'done') {
+		gitOperations.succeed(op.result ?? null);
+	} else {
+		const failing = op.steps.find((s) => s.status === 'error');
+		gitOperations.fail(failing?.error ?? 'Operation failed', {
+			stepId: failing?.id,
+			detail: failing?.detail
+		});
+	}
+	return op;
 }
 
 // ============================================================================
@@ -175,6 +293,7 @@ export const gitOperations = {
 	 */
 	succeed(result?: gitApi.GitOperationResult | null): void {
 		git.setOperationInProgress(false);
+		_clearPersistedOp();
 		const token = _opToken;
 		_update((s) => ({
 			...s,
@@ -198,6 +317,7 @@ export const gitOperations = {
 	 */
 	fail(error: string, opts?: { stepId?: string; detail?: string }): void {
 		git.setOperationInProgress(false);
+		_clearPersistedOp();
 		_cancelClearTimer();
 		_update((s) => ({
 			...s,
@@ -228,6 +348,7 @@ export const gitOperations = {
 	/** Clear the operation immediately (success collapse or error dismiss). */
 	clear(): void {
 		_cancelClearTimer();
+		_clearPersistedOp();
 		_opToken++;
 		git.setOperationInProgress(false);
 		_set({ ...EMPTY_STATE });
@@ -246,38 +367,63 @@ export const gitOperations = {
 	async runServer(
 		projectId: string,
 		title: string,
-		starter: () => Promise<gitApi.GitOperation>
+		starter: () => Promise<gitApi.GitOperation>,
+		meta?: { sessionId?: string | null; kind?: string }
 	): Promise<gitApi.GitOperation> {
 		const token = gitOperations.begin(title, []);
+		const startedAt = Date.now();
 		try {
-			let op = await starter();
+			const op = await starter();
 			if (_opToken !== token) return op;
 			gitOperations.replaceSteps(op.steps);
-
-			while (op.status === 'running') {
-				await _delay(POLL_INTERVAL_MS);
-				if (_opToken !== token) return op;
-				op = await gitApi.getGitOperation(projectId, op.operation_id);
-				if (_opToken !== token) return op;
-				gitOperations.replaceSteps(op.steps);
-			}
-
-			if (op.status === 'done') {
-				gitOperations.succeed(op.result ?? null);
-			} else {
-				const failing = op.steps.find((s) => s.status === 'error');
-				gitOperations.fail(failing?.error ?? 'Operation failed', {
-					stepId: failing?.id,
-					detail: failing?.detail
-				});
-			}
-			return op;
+			// Persist the handle so a mid-op page refresh can re-attach (item 4).
+			_persistOp({
+				operation_id: op.operation_id,
+				project_id: projectId,
+				session_id: meta?.sessionId ?? null,
+				kind: meta?.kind ?? title
+			});
+			return await _pollToTerminal(projectId, token, op, startedAt);
 		} catch (e) {
 			if (_opToken === token) gitOperations.fail(_errText(e));
 			throw e;
 		}
+	},
+
+	/**
+	 * Re-attach to a server operation persisted before a page refresh. Reads the
+	 * sessionStorage handle, re-opens the popover, and resumes polling so the
+	 * op recovers instead of orphaning. No-op when nothing is persisted or an
+	 * operation is already active. Fire-and-forget (errors are pinned in the UI).
+	 */
+	resumePersisted(): void {
+		if (_state.active) return; // don't clobber a live operation
+		const persisted = _readPersistedOp();
+		if (!persisted) return;
+
+		const token = gitOperations.begin(persisted.kind || 'Operation', []);
+		const startedAt = Date.now();
+		void (async () => {
+			try {
+				const op = await gitApi.getGitOperation(
+					persisted.project_id,
+					persisted.operation_id
+				);
+				if (_opToken !== token) return;
+				gitOperations.replaceSteps(op.steps);
+				await _pollToTerminal(persisted.project_id, token, op, startedAt);
+			} catch (e) {
+				if (_opToken === token) gitOperations.fail(_errText(e));
+			}
+		})();
 	}
 };
+
+// On store init (app load), re-attach to any operation left mid-flight by a
+// page refresh so its popover/toast recovers rather than orphaning the op.
+if (browser) {
+	gitOperations.resumePersisted();
+}
 
 // ============================================================================
 // Derived stores

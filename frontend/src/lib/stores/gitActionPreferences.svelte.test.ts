@@ -1,11 +1,12 @@
 /**
- * Tests for gitActionPreferences — specifically the "strip unknown keys" merge
- * behavior added when the canned-prompt system was removed.
+ * Tests for gitActionPreferences — the merge behavior for the shared
+ * `git_action_settings` server blob.
  *
- * The old system persisted a `customMessages` blob inside the shared
- * `git_action_settings` preference. After its removal `mergePreferences` must
- * rebuild state from ONLY the known structured keys, so stale `customMessages`
- * (and any other unknown fields) can't ride along into state or get re-saved.
+ * The removed canned-prompt system persisted a `customMessages` blob inside this
+ * preference; `mergePreferences` must still strip that known-dead key. But it
+ * must PRESERVE any other unknown/future keys: the blob is shared cross-version,
+ * so an older app must not wipe a newer app's keys on every save (a whitelist
+ * rebuild would silently downgrade the shared blob).
  *
  * The store caches its state at module scope and reads localStorage once at
  * import, so we seed storage then re-import fresh (vi.resetModules).
@@ -29,16 +30,17 @@ async function freshStore() {
 	return (await import('./gitActionPreferences.svelte')).gitActionPreferences;
 }
 
-describe('gitActionPreferences — merge strips unknown keys', () => {
-	it('drops stale customMessages and unknown fields from persisted prefs', async () => {
+describe('gitActionPreferences — merge strips customMessages, preserves unknown keys', () => {
+	it('drops stale customMessages but preserves unknown/future keys', async () => {
 		localStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
 				includeUnstaged: false,
 				nextStep: 'pr',
-				// Stale blob from the removed canned-prompt system + junk key.
+				// Stale blob from the removed canned-prompt system — must be dropped.
 				customMessages: { commit: 'do the thing', shipIt: 'YOLO' },
-				bogusKey: 42,
+				// A key a NEWER app version added — must survive an older app's save.
+				futureFeatureKey: 42,
 			})
 		);
 
@@ -51,9 +53,11 @@ describe('gitActionPreferences — merge strips unknown keys', () => {
 		// Untouched keys fall back to defaults.
 		expect(cur.mergeMethod).toBe('squash');
 		expect(cur.pullStrategy).toBe('rebase');
-		// Stale / unknown keys are stripped entirely.
+		// The known-dead customMessages key is stripped.
 		expect('customMessages' in cur).toBe(false);
-		expect('bogusKey' in cur).toBe(false);
+		// Unknown/future keys are preserved (forward-compat with the shared blob).
+		expect('futureFeatureKey' in cur).toBe(true);
+		expect(cur.futureFeatureKey).toBe(42);
 	});
 
 	it('produces a clean default set when nothing is persisted', async () => {

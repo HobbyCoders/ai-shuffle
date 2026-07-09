@@ -141,6 +141,120 @@ describe('gitOperations — server-polled operations', () => {
 		expect(git.operationInProgress).toBe(false);
 	});
 
+	it('tolerates a transient poll blip mid-op and still completes', async () => {
+		// First poll rejects (transient), second poll resolves done — the op must
+		// recover rather than aborting on the single failure.
+		mocks.getGitOperation
+			.mockRejectedValueOnce(new Error('network blip'))
+			.mockResolvedValueOnce(
+				op({
+					status: 'done',
+					steps: [{ id: 'merge', label: 'Merge PR', status: 'done' }],
+					result: { pr_number: 9 }
+				})
+			);
+
+		const starter = vi.fn().mockResolvedValue(
+			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'pending' }] })
+		);
+
+		const p = gitOperations.runServer('proj-1', 'Ship It', starter);
+		await vi.advanceTimersByTimeAsync(0); // kickoff
+		await vi.advanceTimersByTimeAsync(1_000); // poll 1 → blip (tolerated)
+		expect(gitOperations.current.status).toBe('running');
+		await vi.advanceTimersByTimeAsync(1_000); // poll 2 → done
+		await p;
+
+		expect(gitOperations.current.status).toBe('done');
+		expect(gitOperations.current.result?.pr_number).toBe(9);
+	});
+
+	it('fails after 5 consecutive poll failures', async () => {
+		mocks.getGitOperation.mockRejectedValue(new Error('flaky'));
+
+		const starter = vi.fn().mockResolvedValue(
+			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'running' }] })
+		);
+
+		const p = gitOperations.runServer('proj-1', 'Ship It', starter);
+		await vi.advanceTimersByTimeAsync(0);
+		// Five consecutive failed polls trip the tolerance threshold.
+		for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(1_000);
+		await p;
+
+		expect(gitOperations.current.status).toBe('error');
+		expect(mocks.getGitOperation).toHaveBeenCalledTimes(5);
+	});
+
+	it('fails immediately on a definitive 404 for the operation', async () => {
+		mocks.getGitOperation.mockRejectedValue({ detail: 'Operation not found', status: 404 });
+
+		const starter = vi.fn().mockResolvedValue(
+			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'running' }] })
+		);
+
+		const p = gitOperations.runServer('proj-1', 'Ship It', starter);
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(1_000); // single poll → 404
+		await p;
+
+		expect(gitOperations.current.status).toBe('error');
+		expect(gitOperations.current.error).toBe('Operation not found');
+		// No retries on a definitive 404.
+		expect(mocks.getGitOperation).toHaveBeenCalledTimes(1);
+	});
+
+	it('caps a stuck operation with a timeout error past the TTL', async () => {
+		// Server never leaves 'running' — the client must stop polling at the cap.
+		mocks.getGitOperation.mockResolvedValue(
+			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'running' }] })
+		);
+
+		const starter = vi.fn().mockResolvedValue(
+			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'pending' }] })
+		);
+
+		const p = gitOperations.runServer('proj-1', 'Ship It', starter);
+		await vi.advanceTimersByTimeAsync(0);
+		// Advance past the 10-minute cap.
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1_000 + 1_000);
+		await p;
+
+		expect(gitOperations.current.status).toBe('error');
+		expect(gitOperations.current.error).toMatch(/timed out/i);
+	});
+
+	it('re-attaches to a persisted operation on resumePersisted()', async () => {
+		// Simulate a mid-op page refresh: a handle was persisted to sessionStorage.
+		sessionStorage.setItem(
+			'ai-shuffle-git-operation',
+			JSON.stringify({
+				operation_id: 'op-resumed',
+				project_id: 'proj-9',
+				session_id: 'sess-9',
+				kind: 'ship'
+			})
+		);
+
+		mocks.getGitOperation
+			.mockResolvedValueOnce(
+				op({ operation_id: 'op-resumed', status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'running' }] })
+			)
+			.mockResolvedValueOnce(
+				op({ operation_id: 'op-resumed', status: 'done', steps: [{ id: 'merge', label: 'Merge PR', status: 'done' }] })
+			);
+
+		gitOperations.resumePersisted();
+		await vi.advanceTimersByTimeAsync(0); // first getGitOperation (re-attach)
+
+		expect(mocks.getGitOperation).toHaveBeenCalledWith('proj-9', 'op-resumed');
+		expect(gitOperations.current.status).toBe('running');
+		expect(git.operationInProgress).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(1_000); // poll → done
+		expect(gitOperations.current.status).toBe('done');
+	});
+
 	it('fails and pins the failing step when the server operation errors', async () => {
 		mocks.getGitOperation.mockResolvedValueOnce(
 			op({

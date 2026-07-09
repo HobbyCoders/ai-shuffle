@@ -77,3 +77,64 @@ export function computeShipItSteps(input: ShipItStepInput): ShipItStep[] {
 	if (input.cleanup) steps.push({ id: 'cleanup', label: 'Clean up branch' });
 	return steps;
 }
+
+// ── Operation completion side-effects ───────────────────────────────────────
+
+/** The origin an operation was started against (captured at START). */
+export interface OperationOrigin {
+	sessionId: string | null;
+	projectId: string | null;
+}
+
+/** Terminal snapshot fields a completed operation reports. */
+export interface OperationOutcome {
+	status: 'running' | 'done' | 'error';
+	worktreeDeleted?: boolean;
+	prUrl?: string;
+	prNumber?: number;
+}
+
+/** The side-effects the caller should apply after an operation finishes. */
+export interface OperationSideEffects {
+	/** Flag the ORIGINATING session's worktree deleted (never a switched-to one). */
+	markWorktreeDeleted: boolean;
+	/** Refresh git/PR state (only while still viewing the originating project). */
+	refreshGit: boolean;
+	/** Success toast to show (always safe — it just confirms the user's action). */
+	toast: { label: string; prUrl?: string; prNumber?: number };
+}
+
+/**
+ * Decide which completion side-effects a finished git operation should apply,
+ * given the origin it was started against and the currently-active session /
+ * project. Session-scoped effects (markWorktreeDeleted, git refresh) are
+ * suppressed when the user has switched away, so a Finish/Ship It that resolves
+ * after the user moved on never mutates the wrong session's state.
+ *
+ * Returns null for a non-terminal / non-`done` operation (nothing to do — a
+ * failure is already pinned in the progress popover).
+ */
+export function computeOperationSideEffects(
+	op: OperationOutcome,
+	origin: OperationOrigin,
+	current: OperationOrigin
+): OperationSideEffects | null {
+	if (op.status !== 'done') return null;
+
+	const stillOnOrigin = current.sessionId === origin.sessionId;
+	const sameProject = current.projectId === origin.projectId;
+
+	const toast = op.prUrl
+		? {
+				label: op.prNumber ? `Merged pull request #${op.prNumber}` : 'Operation complete',
+				prUrl: op.prUrl,
+				prNumber: op.prNumber
+			}
+		: { label: 'Operation complete' };
+
+	return {
+		markWorktreeDeleted: !!op.worktreeDeleted && stillOnOrigin,
+		refreshGit: stillOnOrigin && sameProject,
+		toast
+	};
+}

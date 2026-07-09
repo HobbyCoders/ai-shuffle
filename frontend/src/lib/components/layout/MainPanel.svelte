@@ -29,8 +29,10 @@
 		PullOptions,
 		CreatePROptions,
 		FinishOptions,
-		ShipItOptions
+		ShipItOptions,
+		OperationOrigin
 	} from '$lib/stores/derived/git-action-options';
+	import { computeOperationSideEffects } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
@@ -615,19 +617,26 @@
 	async function handleFinish(opts: FinishOptions = {}) {
 		if (gitActionsBlocked()) return;
 		const projectId = activeProject!;
+		// Capture the origin at START so completion side-effects apply to the
+		// session/project the operation was launched from — never a switched-to one.
+		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
 		const prefs = gitActionPreferences.current;
 		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
 		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
 		try {
-			const op = await gitOperations.runServer(projectId, 'Finish', () =>
-				startFinishOperation(projectId, {
-					worktree_id: activeWorktreeId ?? undefined,
-					session_id: activeSessionId ?? undefined,
-					merge_method: mergeMethod,
-					cleanup
-				})
+			const op = await gitOperations.runServer(
+				projectId,
+				'Finish',
+				() =>
+					startFinishOperation(projectId, {
+						worktree_id: activeWorktreeId ?? undefined,
+						session_id: activeSessionId ?? undefined,
+						merge_method: mergeMethod,
+						cleanup
+					}),
+				{ sessionId: origin.sessionId, kind: 'finish' }
 			);
-			onOperationDone(op);
+			onOperationDone(op, origin);
 		} catch {
 			// runServer already pinned the failure in the progress popover.
 		}
@@ -636,24 +645,29 @@
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
 		const projectId = activeProject!;
+		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
 		const prefs = gitActionPreferences.current;
 		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
 		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
 		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
 		const base = opts.base ?? $githubRepoInfo?.default_branch ?? undefined;
 		try {
-			const op = await gitOperations.runServer(projectId, 'Ship It', () =>
-				startShipOperation(projectId, {
-					worktree_id: activeWorktreeId ?? undefined,
-					session_id: activeSessionId ?? undefined,
-					merge_method: mergeMethod,
-					cleanup,
-					include_unstaged: includeUnstaged,
-					base,
-					draft: opts.draft ?? false
-				})
+			const op = await gitOperations.runServer(
+				projectId,
+				'Ship It',
+				() =>
+					startShipOperation(projectId, {
+						worktree_id: activeWorktreeId ?? undefined,
+						session_id: activeSessionId ?? undefined,
+						merge_method: mergeMethod,
+						cleanup,
+						include_unstaged: includeUnstaged,
+						base_branch: base,
+						draft: opts.draft ?? false
+					}),
+				{ sessionId: origin.sessionId, kind: 'ship' }
 			);
-			onOperationDone(op);
+			onOperationDone(op, origin);
 		} catch {
 			// runServer already pinned the failure in the progress popover.
 		}
@@ -664,23 +678,37 @@
 	 * A terminal error is left pinned in the popover (no toast). On success:
 	 * surface the PR link, refresh git/PR state, and — when the backend cleaned
 	 * up the worktree — flag it deleted so git polling stops for the gone folder.
+	 *
+	 * Session-scoped effects (markWorktreeDeleted, git refresh) are gated on the
+	 * user STILL viewing the originating session/project (`origin`, captured at
+	 * start), so an op that resolves after a session switch can't mutate the
+	 * wrong session's state. The success toast is always safe to show.
 	 */
-	function onOperationDone(op: GitOperation) {
-		if (op.status !== 'done') return;
-		const result = op.result;
-		if (result?.worktree_deleted) {
+	function onOperationDone(op: GitOperation, origin: OperationOrigin) {
+		const effects = computeOperationSideEffects(
+			{
+				status: op.status,
+				worktreeDeleted: op.result?.worktree_deleted,
+				prUrl: op.result?.pr_url,
+				prNumber: op.result?.pr_number
+			},
+			origin,
+			{ sessionId: activeSessionId, projectId: activeProject }
+		);
+		if (!effects) return;
+
+		if (effects.markWorktreeDeleted) {
 			// Flips activeWorktreeId → null so the header reloads project-mode git
 			// state and the git store stops polling the removed worktree folder.
 			activeSession.markWorktreeDeleted();
 		}
-		if (activeProject) {
+		if (effects.refreshGit) {
 			git.forceRefresh();
-			checkPullRequests(activeProject, $gitStatus?.current_branch ?? null);
+			checkPullRequests(origin.projectId!, $gitStatus?.current_branch ?? null);
 		}
-		if (result?.pr_url) {
-			const url = result.pr_url;
-			const label = result.pr_number ? `Merged pull request #${result.pr_number}` : 'Operation complete';
-			toast.push(label, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+		if (effects.toast.prUrl) {
+			const url = effects.toast.prUrl;
+			toast.push(effects.toast.label, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
 		} else {
 			toast.push('Operation complete', { tone: 'success' });
 		}

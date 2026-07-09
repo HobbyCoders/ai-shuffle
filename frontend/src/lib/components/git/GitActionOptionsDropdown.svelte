@@ -156,6 +156,37 @@
 	);
 </script>
 
+<!-- Shared between the Finish and Ship It branches (identical merge controls). -->
+{#snippet mergeMethodFieldset()}
+	<fieldset class="opt-radio-group">
+		<legend class="opt-label">Merge method</legend>
+		{#each [{ v: 'squash', l: 'Squash' }, { v: 'merge', l: 'Merge commit' }, { v: 'rebase', l: 'Rebase' }] as opt (opt.v)}
+			<button
+				type="button"
+				class="opt-radio"
+				class:selected={prefs.mergeMethod === opt.v}
+				aria-pressed={prefs.mergeMethod === opt.v}
+				onclick={() => gitActionPreferences.setMergeMethod(opt.v as 'squash' | 'merge' | 'rebase')}
+			>
+				<span class="opt-radio-dot"></span>{opt.l}
+			</button>
+		{/each}
+	</fieldset>
+{/snippet}
+
+{#snippet cleanupToggle()}
+	<button
+		type="button"
+		class="opt-toggle"
+		role="switch"
+		aria-checked={prefs.cleanupAfterMerge}
+		onclick={() => gitActionPreferences.setCleanupAfterMerge(!prefs.cleanupAfterMerge)}
+	>
+		<span class="opt-toggle-label">{isWorktreeMode ? 'Delete worktree after merge' : 'Delete branch after merge'}</span>
+		<span class="opt-switch" class:on={prefs.cleanupAfterMerge}></span>
+	</button>
+{/snippet}
+
 <div class="options-dropdown" bind:this={panelRef} role="dialog" aria-label="{action} options">
 	{#if action === 'commit'}
 		<div class="opt-title">Commit options</div>
@@ -283,31 +314,8 @@
 
 	{:else if action === 'finish'}
 		<div class="opt-title">Merge options</div>
-		<fieldset class="opt-radio-group">
-			<legend class="opt-label">Merge method</legend>
-			{#each [{ v: 'squash', l: 'Squash' }, { v: 'merge', l: 'Merge commit' }, { v: 'rebase', l: 'Rebase' }] as opt (opt.v)}
-				<button
-					type="button"
-					class="opt-radio"
-					class:selected={prefs.mergeMethod === opt.v}
-					aria-pressed={prefs.mergeMethod === opt.v}
-					onclick={() => gitActionPreferences.setMergeMethod(opt.v as 'squash' | 'merge' | 'rebase')}
-				>
-					<span class="opt-radio-dot"></span>{opt.l}
-				</button>
-			{/each}
-		</fieldset>
-
-		<button
-			type="button"
-			class="opt-toggle"
-			role="switch"
-			aria-checked={prefs.cleanupAfterMerge}
-			onclick={() => gitActionPreferences.setCleanupAfterMerge(!prefs.cleanupAfterMerge)}
-		>
-			<span class="opt-toggle-label">{isWorktreeMode ? 'Delete worktree after merge' : 'Delete branch after merge'}</span>
-			<span class="opt-switch" class:on={prefs.cleanupAfterMerge}></span>
-		</button>
+		{@render mergeMethodFieldset()}
+		{@render cleanupToggle()}
 
 		<button type="button" class="opt-submit" disabled={busy} onclick={submitFinish}>
 			{openPR ? `Merge PR #${openPR.number}` : 'Merge PR'}
@@ -321,31 +329,8 @@
 			{/each}
 		</ol>
 
-		<fieldset class="opt-radio-group">
-			<legend class="opt-label">Merge method</legend>
-			{#each [{ v: 'squash', l: 'Squash' }, { v: 'merge', l: 'Merge commit' }, { v: 'rebase', l: 'Rebase' }] as opt (opt.v)}
-				<button
-					type="button"
-					class="opt-radio"
-					class:selected={prefs.mergeMethod === opt.v}
-					aria-pressed={prefs.mergeMethod === opt.v}
-					onclick={() => gitActionPreferences.setMergeMethod(opt.v as 'squash' | 'merge' | 'rebase')}
-				>
-					<span class="opt-radio-dot"></span>{opt.l}
-				</button>
-			{/each}
-		</fieldset>
-
-		<button
-			type="button"
-			class="opt-toggle"
-			role="switch"
-			aria-checked={prefs.cleanupAfterMerge}
-			onclick={() => gitActionPreferences.setCleanupAfterMerge(!prefs.cleanupAfterMerge)}
-		>
-			<span class="opt-toggle-label">{isWorktreeMode ? 'Delete worktree after merge' : 'Delete branch after merge'}</span>
-			<span class="opt-switch" class:on={prefs.cleanupAfterMerge}></span>
-		</button>
+		{@render mergeMethodFieldset()}
+		{@render cleanupToggle()}
 
 		<button type="button" class="opt-submit" disabled={busy} onclick={submitShipIt}>Ship It</button>
 	{/if}

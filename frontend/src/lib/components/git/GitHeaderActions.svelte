@@ -146,8 +146,10 @@
 	// Local branch names offered as PR base targets in the Create PR popover.
 	const baseBranchNames = $derived(localBranches.map(b => b.name));
 
-	// Remote branches that don't have a local counterpart
-	const remoteBranches = $derived(() => {
+	// Remote branches that don't have a local counterpart. `$derived.by` memoizes
+	// the computed array (recomputed only when its deps change) rather than a
+	// `$derived(() => ...)` whose value is a closure re-run on every call site.
+	const remoteBranches = $derived.by(() => {
 		const localNames = new Set(localBranches.map(b => b.name));
 		return $branchStore
 			.filter(b => b.remote)
@@ -170,10 +172,10 @@
 	);
 	const filteredRemoteBranches = $derived(
 		branchSearch
-			? remoteBranches().filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
-			: remoteBranches()
+			? remoteBranches.filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
+			: remoteBranches
 	);
-	const showSearch = $derived(localBranches.length + remoteBranches().length > 5);
+	const showSearch = $derived(localBranches.length + remoteBranches.length > 5);
 
 	// Can the user interact with the branch selector?
 	// In worktree mode, branch is always locked (read-only display). Also locked

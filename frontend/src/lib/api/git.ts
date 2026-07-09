@@ -917,7 +917,9 @@ export interface ShipOperationRequest {
     merge_method: MergeMethod;
     cleanup: boolean;
     include_unstaged: boolean;
-    base?: string;
+    /** Canonical wire field the backend expects (`base_branch`). The nicer `base`
+     *  name lives on ShipItOptions and is mapped to this at the client boundary. */
+    base_branch?: string;
     draft?: boolean;
 }
 

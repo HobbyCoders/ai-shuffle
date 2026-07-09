@@ -45,14 +45,18 @@ const DEFAULT_PREFERENCES: GitActionPreferences = {
 };
 
 /**
- * Merge a partial (localStorage or server) onto the defaults, keeping ONLY the
- * known preference keys. Rebuilding key-by-key strips any stale/unknown blobs
- * (e.g. the removed `customMessages` from the canned-prompt system) so they
- * never ride along into state or get re-persisted.
+ * Merge a partial (localStorage or server) onto the defaults.
+ *
+ * Fills missing KNOWN keys from defaults, but PRESERVES any unknown keys the
+ * blob carries. The `git_action_settings` preference is a single shared server
+ * blob: an older app version must not wipe a newer version's keys just because
+ * it doesn't recognize them (a whitelist rebuild would drop them on every save
+ * and silently downgrade the shared blob). The only key we explicitly strip is
+ * the known-dead `customMessages` from the removed canned-prompt system.
  */
 function mergePreferences(parsed: Partial<GitActionPreferences> | null | undefined): GitActionPreferences {
-	const p = (parsed ?? {}) as Partial<GitActionPreferences>;
-	return {
+	const p = (parsed ?? {}) as Partial<GitActionPreferences> & Record<string, unknown>;
+	const merged: Record<string, unknown> = {
 		includeUnstaged: p.includeUnstaged ?? DEFAULT_PREFERENCES.includeUnstaged,
 		nextStep: p.nextStep ?? DEFAULT_PREFERENCES.nextStep,
 		pullStrategy: p.pullStrategy ?? DEFAULT_PREFERENCES.pullStrategy,
@@ -60,6 +64,14 @@ function mergePreferences(parsed: Partial<GitActionPreferences> | null | undefin
 		mergeMethod: p.mergeMethod ?? DEFAULT_PREFERENCES.mergeMethod,
 		cleanupAfterMerge: p.cleanupAfterMerge ?? DEFAULT_PREFERENCES.cleanupAfterMerge,
 	};
+	// Preserve unknown / future keys (forward-compat with newer app versions
+	// sharing the same server blob); drop only the known-dead customMessages.
+	for (const [k, v] of Object.entries(p)) {
+		if (k in merged) continue;
+		if (k === 'customMessages') continue;
+		merged[k] = v;
+	}
+	return merged as unknown as GitActionPreferences;
 }
 
 // ============================================
