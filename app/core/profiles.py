@@ -2,7 +2,7 @@
 Profile and subagent utilities
 
 Seeds a built-in "Default AI" profile on first run. This profile is used
-for all internal AI generation tasks (commit messages, PR descriptions,
+for all internal AI generation tasks (branch-name generation,
 profile/subagent generation, etc.) when no user profile is selected.
 Built-in profiles can be edited but not deleted.
 """
@@ -45,8 +45,8 @@ DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
 # Built-in Default AI Profile
 # ============================================================================
 # This profile controls the model and settings used for all internal AI
-# generation tasks: commit messages, PR descriptions, profile/subagent
-# generation, and any other AI-powered feature that doesn't use a user profile.
+# generation tasks: branch-name generation, profile/subagent generation,
+# and any other AI-powered feature that doesn't use a user profile.
 # Users can edit these settings but cannot delete the profile.
 
 DEFAULT_AI_PROFILE_ID = "default-ai"
@@ -54,8 +54,8 @@ DEFAULT_AI_PROFILE_ID = "default-ai"
 DEFAULT_AI_PROFILE: Dict[str, Any] = {
     "id": DEFAULT_AI_PROFILE_ID,
     "name": "Default AI",
-    "description": "Built-in profile used for AI-powered features like commit message generation, "
-                   "PR descriptions, profile/subagent generation, and other internal AI tasks. "
+    "description": "Built-in profile used for AI-powered features like branch-name generation, "
+                   "profile/subagent generation, and other internal AI tasks. "
                    "Edit this profile to change the model and settings used by these features.",
     "config": {
         "model": DEFAULT_MODEL,
@@ -100,18 +100,6 @@ def get_default_ai_profile() -> Optional[Dict[str, Any]]:
     Returns the profile dict or None if it hasn't been seeded yet.
     """
     return database.get_profile(DEFAULT_AI_PROFILE_ID)
-
-
-def get_default_ai_model() -> str:
-    """Get the model configured in the default AI profile.
-
-    Falls back to the registry's ``DEFAULT_MODEL`` if the profile doesn't
-    exist or has no model set.
-    """
-    profile = get_default_ai_profile()
-    if profile:
-        return profile.get("config", {}).get("model", DEFAULT_MODEL) or DEFAULT_MODEL
-    return DEFAULT_MODEL
 
 
 def run_migrations():
