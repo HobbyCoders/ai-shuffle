@@ -241,7 +241,7 @@
 
 	.active-tasks-header:hover {
 		color: var(--foreground);
-		background: var(--muted);
+		background: var(--hover-overlay);
 	}
 
 	.tasks-icon {
