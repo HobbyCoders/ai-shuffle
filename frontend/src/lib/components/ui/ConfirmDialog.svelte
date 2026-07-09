@@ -109,6 +109,12 @@
 		animation: confirm-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
+	@media (prefers-reduced-motion: reduce) {
+		.animate-confirm-in {
+			animation: none;
+		}
+	}
+
 	.confirm-secondary-btn:hover {
 		background: var(--hover-overlay);
 		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));

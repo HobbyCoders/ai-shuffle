@@ -20,6 +20,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import VoiceRecorder from './VoiceRecorder.svelte';
+	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
@@ -676,16 +677,13 @@
 										</svg>
 									</button>
 								{:else}
-									<button
-										type="button"
-										onclick={() => activeSession.stopGeneration()}
-										class="stop-btn"
-										title="Stop generating"
-									>
-										<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-											<rect x="6" y="6" width="12" height="12" rx="2" />
-										</svg>
-									</button>
+									<!-- Stop is an informed choice when background agents are live:
+									     the SDK interrupt cancels them too, so StopButton confirms
+									     first (and stays one-click when there's no background work). -->
+									<StopButton
+										activeTasks={$activeSession.activeTasks}
+										onStop={() => activeSession.stopGeneration()}
+									/>
 								{/if}
 							{:else}
 								<button
@@ -917,22 +915,6 @@
 
 	.send-btn.send-later-btn:hover:not(:disabled) svg {
 		color: var(--foreground);
-	}
-
-	.stop-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		background: var(--status-error-bg);
-		color: var(--destructive);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		transition: background-color 0.15s;
-	}
-
-	.stop-btn:hover {
-		background: color-mix(in oklch, var(--destructive) 25%, transparent);
 	}
 
 	@keyframes fadeIn {
