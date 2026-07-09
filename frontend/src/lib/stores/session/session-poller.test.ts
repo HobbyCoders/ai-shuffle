@@ -987,3 +987,261 @@ describe('session-poller · anchored union-merge insertion order', () => {
 		expect(order).toEqual(['p2', 'mb', 'p1', 'ma']);
 	});
 });
+
+describe('session-poller · DELTA preserves union-merge-rescued tail cards', () => {
+	// Bug: "messages disappear after sending into a stopped/idle session, until
+	// refresh". User sends into a stopped session → the backend re-seeds its
+	// buffer from the durable transcript (different id family, missing client-only
+	// cards) and sets initial_message_count=K. The FIRST poll is FULL (imc=0): the
+	// union-merge rescues the client's prior-turn tail (final assistant text +
+	// system/"Task Updated" card) and splices them at index >= K. The SECOND poll
+	// is DELTA (imc=K): the old `existingMessages.slice(0, K)` DROPPED everything
+	// past K → the rescued tail cards vanished. Fix: the DELTA branch preserves
+	// existing tail messages the delta is MISSING with the same anchored-insertion
+	// the full branch uses (add-only, never drop completed rendered cards).
+	const SID = 'session-delta-preserve';
+
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		sessionPoller.stopAll();
+		sessionStateManager.removeSession(SID);
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	/** A DELTA /live response: initial_message_count=K, only the current turn. */
+	function makeDeltaResponse(opts: {
+		lastUpdateId: number;
+		initialMessageCount: number;
+		isStreaming: boolean;
+		messages: Array<Record<string, unknown>>;
+	}) {
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({
+				last_update_id: opts.lastUpdateId,
+				is_streaming: opts.isStreaming,
+				initial_message_count: opts.initialMessageCount,
+				usage: {},
+				messages: opts.messages,
+			}),
+		} as unknown as Response;
+	}
+
+	it('keeps rescued prior-turn tail cards on a delta after a re-seeded turn (THE BUG)', async () => {
+		// State after the first FULL poll union-merged the prior turn's tail back
+		// in: [re-seeded history (K=2)] + [rescued final assistant text + system
+		// card] (client-only ids, no uuid the delta will carry).
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'seed-u1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'seed-a1', role: 'assistant', type: 'text', content: 'seed reply', streaming: false },
+				// Rescued tail cards (prior turn's final output, client-only):
+				{ id: 'rescued-text', role: 'assistant', type: 'text', content: 'final answer', streaming: false },
+				{ id: 'rescued-sys', role: 'system', type: 'system', content: 'Task Updated', systemSubtype: 'hook_event', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		// DELTA poll: initial_message_count=2, carrying only the NEW turn.
+		fetchMock.mockResolvedValue(
+			makeDeltaResponse({
+				lastUpdateId: 9,
+				initialMessageCount: 2,
+				isStreaming: true,
+				messages: [
+					{ id: 'new-user', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'new-partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const ids = sessionStateManager.getSession(SID)!.messages.map(m => m.id);
+		// Pre-fix: ids would be [seed-u1, seed-a1, new-user, new-partial] — the
+		// rescued tail cards dropped. Post-fix: they survive, in order, positioned
+		// right after the history and BEFORE the new user prompt.
+		expect(ids).toEqual([
+			'seed-u1', 'seed-a1', 'rescued-text', 'rescued-sys', 'new-user', 'new-partial',
+		]);
+		expect(ids.indexOf('rescued-text')).toBeLessThan(ids.indexOf('new-user'));
+		expect(ids.indexOf('rescued-sys')).toBeLessThan(ids.indexOf('new-user'));
+	});
+
+	it('does NOT preserve a tail message still flagged streaming (in-flight bubble)', async () => {
+		// A prior poll's live streaming bubble in the tail must be replaced wholesale
+		// by the fresh streamingMessages — never preserved, or it would duplicate the
+		// live bubble if its id churned.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'seed-u1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'seed-a1', role: 'assistant', type: 'text', content: 'seed reply', streaming: false },
+				{ id: 'stale-stream', role: 'assistant', type: 'text', content: 'in flight', streaming: true },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeDeltaResponse({
+				lastUpdateId: 9,
+				initialMessageCount: 2,
+				isStreaming: true,
+				messages: [
+					{ id: 'new-user', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'new-partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const ids = sessionStateManager.getSession(SID)!.messages.map(m => m.id);
+		expect(ids).not.toContain('stale-stream');
+		expect(ids).toEqual(['seed-u1', 'seed-a1', 'new-user', 'new-partial']);
+	});
+
+	it('does NOT preserve an optimistic user-* tail when the real user msg arrives in the delta', async () => {
+		// message-sender appends an optimistic `user-${Date.now()}` before the server
+		// persists it under a different id. Preserving it here while the real user
+		// message arrives in the delta would double the user bubble — Phase-1 in
+		// session-init.ts reconciles optimistic user-* separately.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'seed-a1', role: 'assistant', type: 'text', content: 'seed reply', streaming: false },
+				{ id: 'user-1720000000000', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeDeltaResponse({
+				lastUpdateId: 9,
+				initialMessageCount: 1,
+				isStreaming: true,
+				messages: [
+					{ id: 'msg-9', role: 'user', type: 'text', content: 'second prompt', streaming: false },
+					{ id: 'new-partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const msgs = sessionStateManager.getSession(SID)!.messages;
+		// Exactly ONE user bubble — the optimistic user-* tail was NOT preserved as
+		// a second card alongside the real user msg arriving in the delta. (The lone
+		// bubble's id may be the optimistic one: applyServerState's preserveMessageIds
+		// re-adopts it for DOM stability — that's outside this fix's scope; what
+		// matters is there is no DUPLICATE.)
+		const users = msgs.filter(m => m.role === 'user');
+		expect(users.length).toBe(1);
+		expect(users[0].content).toBe('second prompt');
+		expect(msgs.length).toBe(3);
+		expect(msgs.map(m => m.content)).toEqual(['seed reply', 'second prompt', 'partial']);
+	});
+
+	it('does NOT duplicate a tail card whose jsonlUuid matches a delta message', async () => {
+		// The same logical message can carry a different id family across polls while
+		// sharing the transcript uuid. A uuid match must count as present-in-delta so
+		// the existing copy is absorbed as an update, not resurrected as a duplicate.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'seed-u1', role: 'user', type: 'text', content: 'first prompt', streaming: false },
+				{ id: 'text-oldid', role: 'assistant', type: 'text', content: 'shared reply', streaming: false, jsonlUuid: 'uuid-shared' },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeDeltaResponse({
+				lastUpdateId: 9,
+				initialMessageCount: 1,
+				isStreaming: true,
+				messages: [
+					// Same uuid, DIFFERENT id family — this is the SAME message as text-oldid.
+					{ id: 'text-newid-0', role: 'assistant', type: 'text', content: 'shared reply', streaming: false, uuid: 'uuid-shared' },
+					{ id: 'partial', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const msgs = sessionStateManager.getSession(SID)!.messages;
+		// Shared-uuid message appears exactly once (absorbed as an update).
+		expect(msgs.filter(m => m.jsonlUuid === 'uuid-shared').length).toBe(1);
+		expect(msgs.map(m => m.content)).toEqual(['first prompt', 'shared reply', 'partial']);
+	});
+
+	it('leaves a normal steady-state streaming delta unchanged (no dup of finalized tail)', async () => {
+		// Belt: the fix must not alter ordinary streaming. The tail holds the prior
+		// poll's finalized text + still-streaming text; both reappear in the fresh
+		// delta under stable ids, so nothing is preserved (no duplicates).
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'u1', role: 'user', type: 'text', content: 'prompt', streaming: false },
+				{ id: 't1', role: 'assistant', type: 'text', content: 'first block', streaming: false },
+				{ id: 't2', role: 'assistant', type: 'text', content: 'streaming so', streaming: true },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeDeltaResponse({
+				lastUpdateId: 9,
+				initialMessageCount: 1,
+				isStreaming: true,
+				messages: [
+					{ id: 't1', role: 'assistant', type: 'text', content: 'first block', streaming: false },
+					{ id: 't2', role: 'assistant', type: 'text', content: 'streaming so far', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const msgs = sessionStateManager.getSession(SID)!.messages;
+		expect(msgs.map(m => m.id)).toEqual(['u1', 't1', 't2']);
+		// The streaming block updated in place; no duplicate finalized 'first block'.
+		expect(msgs.filter(m => m.id === 't1').length).toBe(1);
+		expect(msgs.find(m => m.id === 't2')!.content).toBe('streaming so far');
+	});
+});
