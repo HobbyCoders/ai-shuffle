@@ -506,20 +506,41 @@ def resolve_working_dir(session: Dict[str, Any]) -> str:
     """Resolve the working directory for a session, checking worktree first, then project.
 
     Priority:
-    1. Worktree path (if session is linked to an active worktree)
-    2. Project path
-    3. Default workspace
+    1. Worktree path — used whenever the resolved directory EXISTS on disk,
+       regardless of the worktree row's ``status`` (same rule as
+       ``_resolve_session_worktree_cwd``: a per-device sync sweep can flip a
+       healthy row to 'deleted' in shared Postgres without the directory
+       moving, and this auxiliary reader must keep reading history/JSONL from
+       where the session actually runs). The session's backup ``worktree_path``
+       column is tried when the row (or its path) is missing on disk. No status
+       self-heal here — that lives in query_options only.
+    2. Project path — only when no worktree directory exists on disk. This is
+       an auxiliary reader (history/JSONL parsing, LiveSessionStore seeding,
+       checkpoint flows), so a missing worktree dir degrades to the project
+       dir instead of raising; it must never break history reads.
+    3. Default workspace.
     """
     from app.db import database
-    from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+    from app.core.project_utils import get_project_working_dir, resolve_existing_worktree_cwd
 
     # Check for worktree first — worktree sessions should resolve to the worktree path,
-    # not the main project directory.
+    # not the main project directory. Disk existence is the only gate:
+    # resolve_existing_worktree_cwd tries the row's path, then the session's
+    # backup worktree_path, per-candidate, and never raises.
     worktree_id = session.get("worktree_id")
     if worktree_id:
-        worktree = database.get_worktree(worktree_id)
-        if worktree and worktree.get("status") == "active":
-            return get_worktree_working_dir(worktree)
+        worktree = None
+        try:
+            worktree = database.get_worktree(worktree_id)
+        except Exception:  # noqa: BLE001 — a row lookup failure must not skip the backup path
+            logger.debug(
+                "resolve_working_dir: worktree row lookup failed; trying the "
+                "session's backup worktree_path",
+                exc_info=True,
+            )
+        resolved = resolve_existing_worktree_cwd(worktree, session)
+        if resolved:
+            return resolved
 
     project_id = session.get("project_id")
     if project_id:

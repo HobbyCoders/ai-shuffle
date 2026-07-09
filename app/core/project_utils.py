@@ -11,7 +11,7 @@ Convention:
 
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Callable, Optional, Union
 
 from app.core.config import settings
 
@@ -106,6 +106,62 @@ def get_worktree_working_dir(worktree: dict) -> str:
 def get_worktree_working_dir_as_path(worktree: dict) -> Path:
     """Resolve worktree working directory as a Path object."""
     return Path(get_worktree_working_dir(worktree))
+
+
+def resolve_existing_worktree_cwd(
+    worktree: Optional[dict],
+    session: Optional[dict],
+    is_dir: Optional[Callable[[str], bool]] = None,
+) -> Optional[str]:
+    """Resolve the first worktree cwd candidate whose directory EXISTS on disk.
+
+    The shared rule for every worktree-session path consumer (resume cwd
+    resolution, history/JSONL readers, session-poll metadata): a worktree session
+    only needs its working directory to exist — the worktree row's ``status`` is
+    never consulted.
+
+    Candidates, in order:
+      1. the worktree row's ``worktree_path``;
+      2. the session's backup ``worktree_path`` column. This is a write-once
+         snapshot while adopt/recreate rewrite the ROW path, so the two can
+         genuinely diverge — both must be tried.
+
+    Each candidate resolves independently (per-candidate try/except), so a
+    corrupt/unresolvable first candidate never masks a valid second one. This
+    function never raises.
+
+    Args:
+        worktree: The worktree row, or None.
+        session: The session row (carries the backup columns), or None.
+        is_dir: Optional existence predicate override taking the resolved
+            absolute path (used by pollers to inject a TTL-cached stat).
+            Defaults to ``Path(resolved).is_dir()``.
+
+    Returns:
+        The resolved absolute path of the first candidate whose directory
+        exists, or None when no candidate resolves to an existing directory.
+    """
+    check = is_dir if is_dir is not None else (lambda p: Path(p).is_dir())
+    candidates = []
+    if worktree and worktree.get("worktree_path"):
+        candidates.append(worktree)
+    if session and session.get("worktree_path"):
+        candidates.append({
+            "worktree_path": session["worktree_path"],
+            "id": session.get("worktree_id") or (worktree or {}).get("id") or "unknown",
+        })
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = get_worktree_working_dir(candidate)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if check(resolved):
+                return resolved
+        except Exception:  # noqa: BLE001 — a bad candidate must not mask the next one
+            continue
+    return None
 
 
 def get_project_parent_dir(project: Union[dict, str]) -> Path:

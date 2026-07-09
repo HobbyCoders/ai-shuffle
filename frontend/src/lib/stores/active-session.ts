@@ -151,7 +151,6 @@ export interface ActiveSessionState {
 	isCreatingWorktree: boolean;
 	worktreeError: string | null;
 	worktreeDeleted: boolean;
-	isReopeningWorktree: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
 	/** Accumulated text from WebSocket stream_delta events for instant rendering.
@@ -257,7 +256,6 @@ function defaultState(): ActiveSessionState {
 		isCreatingWorktree: false,
 		worktreeError: null,
 		worktreeDeleted: false,
-		isReopeningWorktree: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
