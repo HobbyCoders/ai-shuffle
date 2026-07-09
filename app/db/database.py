@@ -815,6 +815,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_cloud_branch,
     set_session_parked_task_kind,
     adopt_session,
+    set_session_project,
     session_has_forks,
     get_session_forks,
     get_session_messages,

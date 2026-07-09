@@ -39,6 +39,38 @@ def test_nonexistent_project_path_raises_with_path_and_name(tmp_path):
     assert "other-install" in msg
 
 
+def test_nonexistent_project_rebinds_to_local_sibling(tmp_path):
+    """Cross-device rebind: a plain (non-worktree) session whose project path is
+    foreign runs transparently in this install's clone of the same repo, and the
+    rebound (local) project id — not the stale foreign one — flows into the
+    builtin tools server (guarding the `project = local_project` reassignment)."""
+    missing = tmp_path / "foreign-gone"
+    local_clone = tmp_path / "local-clone"
+    local_clone.mkdir()
+    project = {"id": "p-foreign", "name": "MyRepo", "path": str(missing)}
+    local_project = {"id": "p-local", "name": "MyRepo", "path": str(local_clone)}
+
+    captured = {}
+
+    def _fake_builtins(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=(project, local_project),
+    ), patch(
+        "app.mcp.builtin_tools.create_builtin_tools_server",
+        side_effect=_fake_builtins,
+    ):
+        opts, _ = qo.build_options_from_profile(profile=_profile(), project=project)
+
+    # cwd rebound onto the local clone; the foreign path never reaches the SDK.
+    assert str(opts.cwd) == str(local_clone)
+    # The rebound project id (not the foreign one) is what downstream tools see.
+    assert captured.get("project_id") == "p-local"
+
+
 def test_nonexistent_profile_config_cwd_raises(tmp_path):
     missing = tmp_path / "gone-cwd"
     with patch.object(qo, "get_security_instructions", return_value=""):

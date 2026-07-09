@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.config import settings
+from app.core.project_utils import get_project_working_dir
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -97,3 +100,87 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
         logger.debug("maybe_auto_link_project: set failed for %s", project_id, exc_info=True)
         return project.get("link_group_id")
     return group_id
+
+
+# ---------------------------------------------------------------------------
+# Cross-install project resolution
+#
+# On a shared database a project's ``path`` is machine-specific, so mapping a
+# stored project row onto whatever clone THIS install actually has is a shared
+# concern: automations resolve the row to run against, and cross-device session
+# adopt / worktree recreate rebind onto the local clone of the same repo. Both
+# reuse the ``link_group_id`` grouping (one row per install for one logical
+# repo, derived from the normalized git remote).
+# ---------------------------------------------------------------------------
+
+def _link_group_siblings(project: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All rows sharing the project's link group (one per install), or []."""
+    link_group_id = project.get("link_group_id")
+    return database.get_projects_in_link_group(link_group_id) if link_group_id else []
+
+
+def _local_candidate(
+    project: Dict[str, Any], siblings: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """The row THIS install can actually run, given a project and its siblings.
+
+    Own row first, then this install's link-group sibling. As a last resort,
+    the stored row itself when its path exists on this machine — covering
+    legacy rows without an ``instance_id``, regenerated instance ids, and
+    shared filesystems, all of which ran fine before instance tracking.
+    """
+    me = settings.effective_instance_id
+    if project.get("instance_id") == me:
+        return project
+    for sibling in siblings:
+        if sibling.get("instance_id") == me:
+            return sibling
+    try:
+        if Path(get_project_working_dir(project)).is_dir():
+            return project
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def resolve_local_project(project_id: str) -> Optional[Dict[str, Any]]:
+    """Map a project id onto the row runnable on THIS install, if any.
+
+    Returns the project row itself when this install owns it, else this
+    install's clone of the same repo (same ``link_group_id``), else the
+    stored row when its path exists here anyway. None means the project only
+    exists on other installs and a run here would fail on a nonexistent
+    working directory.
+    """
+    project = database.get_project(project_id)
+    if not project:
+        return None
+    return _local_candidate(project, _link_group_siblings(project))
+
+
+def resolve_runnable_local_project(
+    project_id: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(stored_project, local_project_or_None)`` for a project id.
+
+    Like :func:`resolve_local_project` but the returned ``local`` is only
+    non-None when its working directory is an existing directory ON THIS
+    MACHINE. ``resolve_local_project``'s own-row and sibling branches trust the
+    ``instance_id`` match without touching the filesystem, which is right for
+    election but wrong for a rebind that is about to run git against the path —
+    so this variant adds a final ``is_dir()`` guard.
+
+    ``stored`` is the raw project row (or None if the id is unknown), useful for
+    building an actionable "not on this device" message.
+    """
+    stored = database.get_project(project_id)
+    if not stored:
+        return None, None
+    local = _local_candidate(stored, _link_group_siblings(stored))
+    if local is not None:
+        try:
+            if not Path(get_project_working_dir(local)).is_dir():
+                local = None
+        except (OSError, ValueError):
+            local = None
+    return stored, local

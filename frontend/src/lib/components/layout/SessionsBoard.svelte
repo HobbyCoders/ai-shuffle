@@ -398,8 +398,14 @@
 	async function resumeHere(s: Session) {
 		try {
 			if (s.is_remote) {
-				await adoptSession(s.id);
+				const res = await adoptSession(s.id);
 				await appData.loadSessions();
+				// Non-blocking cross-device advisory (e.g. an unpushed worktree
+				// branch): surface it before opening so the user knows the send
+				// may fail until they push, but still let them in.
+				if (res?.warning) {
+					toast.push(res.warning, { tone: 'warning' });
+				}
 			}
 			onOpenSession(s.id);
 		} catch (e) {

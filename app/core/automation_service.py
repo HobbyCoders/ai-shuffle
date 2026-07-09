@@ -6,13 +6,17 @@ import hashlib
 import logging
 import re
 import secrets
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core import encryption
 from app.core.config import settings
 from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
-from app.core.project_utils import get_project_working_dir
+from app.core.project_links import (  # noqa: F401 — re-exported for existing callers/tests
+    _link_group_siblings,
+    _local_candidate,
+    resolve_local_project,
+    resolve_runnable_local_project,
+)
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -94,59 +98,15 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Cross-install project resolution and scheduled-runner election
+# Scheduled-runner election
 #
 # Automations live in the shared database while their project's ``path`` is
 # machine-specific, so a run must map the stored project row onto whatever
-# clone THIS install has. The sessions board already folds same-repo rows
-# from every install into one logical project via ``link_group_id``
-# (app/core/project_links.py) — automations reuse that grouping here.
+# clone THIS install has. The cross-install resolution helpers
+# (``resolve_local_project`` / ``_local_candidate`` / ``_link_group_siblings``)
+# live in ``app/core/project_links.py`` and are re-imported above so this
+# module — and its tests — keep referencing them unchanged.
 # ---------------------------------------------------------------------------
-
-def _link_group_siblings(project: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """All rows sharing the project's link group (one per install), or []."""
-    link_group_id = project.get("link_group_id")
-    return database.get_projects_in_link_group(link_group_id) if link_group_id else []
-
-
-def _local_candidate(
-    project: Dict[str, Any], siblings: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    """The row THIS install can actually run, given a project and its siblings.
-
-    Own row first, then this install's link-group sibling. As a last resort,
-    the stored row itself when its path exists on this machine — covering
-    legacy rows without an ``instance_id``, regenerated instance ids, and
-    shared filesystems, all of which ran fine before instance tracking.
-    """
-    me = settings.effective_instance_id
-    if project.get("instance_id") == me:
-        return project
-    for sibling in siblings:
-        if sibling.get("instance_id") == me:
-            return sibling
-    try:
-        if Path(get_project_working_dir(project)).is_dir():
-            return project
-    except (OSError, ValueError):
-        pass
-    return None
-
-
-def resolve_local_project(project_id: str) -> Optional[Dict[str, Any]]:
-    """Map a project id onto the row runnable on THIS install, if any.
-
-    Returns the project row itself when this install owns it, else this
-    install's clone of the same repo (same ``link_group_id``), else the
-    stored row when its path exists here anyway. None means the project only
-    exists on other installs and a run here would fail on a nonexistent
-    working directory.
-    """
-    project = database.get_project(project_id)
-    if not project:
-        return None
-    return _local_candidate(project, _link_group_siblings(project))
-
 
 def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
     """Decide whether THIS install executes a scheduled (cron/interval) fire.

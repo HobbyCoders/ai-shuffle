@@ -20,7 +20,7 @@ query_options.py so no real Postgres, git, or disk is needed.
 from dataclasses import dataclass
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import app.core.project_utils as pu
 import app.core.query_options as qo
@@ -273,4 +273,245 @@ def test_row_path_stale_but_session_backup_valid_resumes_on_backup(mocks):
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
     assert info == {"branch": "feat/foo", "base_branch": "main"}
+
+
+# ---------------------------------------------------------------------------
+# (j) cross-device rebind — a WORKTREE ROW exists but its cwd is gone because the
+#     row points at another (offline) machine's checkout. When THIS install has a
+#     clone of the same repo (link group), recreate the worktree there and resume.
+#     This is the ONE place a worktree is (re)created on the resume path, gated on
+#     the cwd being GENUINELY missing AND a local sibling clone existing.
+# ---------------------------------------------------------------------------
+
+def test_row_dir_missing_rebinds_via_recreate(mocks):
+    """Row cwd gone + local clone of the repo present → recreate_worktree runs in
+    that clone and its cwd is used (the user's actual cross-device bug)."""
+    mocks.get_worktree_by_session.return_value = _wt(
+        status="active", wt_id="wt-x", branch="feat/foo"
+    )
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-foreign"}
+    FakePath.existing = set()  # row + backup dirs both gone here
+
+    new_wt = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    new_wt["worktree_path"] = ".worktrees/feat/foo-local"
+    mocks.wm.recreate_worktree.return_value = new_wt
+    mocks.wm.is_worktree_valid.return_value = True
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ):
+        working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    assert working_dir == "/abs/.worktrees/feat/foo-local"
+    # recreate_worktree owns the rebind (sibling, repo id, re-pointed sessions).
+    mocks.wm.recreate_worktree.assert_called_once_with("wt-x")
+    assert info["branch"] == "feat/foo"
+
+
+def test_row_dir_missing_no_sibling_raises(mocks):
+    """Row cwd gone + NO local clone → honest WorktreeUnavailableError naming the
+    path; recreate is never attempted."""
+    mocks.get_worktree_by_session.return_value = _wt(
+        status="active", wt_id="wt-x", branch="fix/bar"
+    )
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-foreign"}
+    FakePath.existing = set()
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, None),
+    ):
+        with pytest.raises(WorktreeUnavailableError) as ei:
+            _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
+
+    assert ei.value.branch_name == "fix/bar"
+    assert "/abs/.worktrees/fix/bar" in str(ei.value)
+    mocks.wm.recreate_worktree.assert_not_called()
+
+
+def test_row_dir_missing_same_device_raises_no_recreate(mocks):
+    """Row cwd gone but the runnable local project is the session's OWN project
+    (same id → same device): this is NOT a cross-device relocation, so we must
+    raise the honest error and NEVER recreate — else a worktree the user simply
+    removed gets silently resurrected (and a branch surviving only on origin
+    could be fabricated empty off the default). Regression guard for the gate
+    that requires a DIFFERENT clone."""
+    mocks.get_worktree_by_session.return_value = _wt(
+        status="active", wt_id="wt-x", branch="feat/foo"
+    )
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-owned"}
+    FakePath.existing = set()  # worktree folder was removed on this device
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        # local id == the session's project_id → own project, same device.
+        return_value=({"id": "proj-owned"}, {"id": "proj-owned", "path": "/repo"}),
+    ):
+        with pytest.raises(WorktreeUnavailableError) as ei:
+            _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert ei.value.branch_name == "feat/foo"
+    assert "/abs/.worktrees/feat/foo" in str(ei.value)
+    mocks.wm.recreate_worktree.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# (k) cross-device rebind — NO worktree row (row hard-deleted; only the session's
+#     worktree_* columns remain). Create a fresh worktree in the local sibling
+#     clone from the branch, reusing/recovering it rather than fabricating one.
+# ---------------------------------------------------------------------------
+
+def test_no_row_foreign_rebinds_creates_in_sibling(mocks, monkeypatch):
+    """No row + project checkout missing here → rebind onto this install's clone,
+    create the worktree from the local branch, and re-point the session."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-foreign",
+    }
+    FakePath.existing = set()  # backup dir gone → falls through to rebind
+
+    set_project = MagicMock(name="set_session_project")
+    update_session = MagicMock(name="update_session")
+    monkeypatch.setattr(qo.database, "set_session_project", set_project)
+    monkeypatch.setattr(qo.database, "update_session", update_session)
+    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: p["path"])
+
+    new_wt = _wt(status="active", wt_id="wt-new", branch="feat/recreate")
+    mocks.wm.git_service.list_branches.return_value = [
+        {"name": "feat/recreate", "is_remote": False}
+    ]
+    mocks.wm.create_worktree.return_value = new_wt
+    mocks.wm.is_worktree_valid.return_value = True
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ):
+        working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    assert working_dir == "/abs/.worktrees/feat/recreate"
+    # Reuse the local branch: no new branch, no base — created under the clone.
+    mocks.wm.create_worktree.assert_called_once_with(
+        "proj-local", "feat/recreate", create_new_branch=False, base_branch=None
+    )
+    set_project.assert_called_once_with(SESSION_ID, "proj-local")
+    update_session.assert_called_once_with(SESSION_ID, worktree_id="wt-new")
+
+
+def test_no_row_foreign_no_sibling_raises(mocks, monkeypatch):
+    """No row + project missing here + no local clone → WorktreeUnavailableError,
+    no create."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-foreign",
+    }
+    FakePath.existing = set()
+    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: p["path"])
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, None),
+    ):
+        with pytest.raises(WorktreeUnavailableError) as ei:
+            _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert ei.value.branch_name == "feat/recreate"
+    assert "/abs/.worktrees/feat/recreate" in str(ei.value)
+    mocks.wm.create_worktree.assert_not_called()
+
+
+def test_no_row_rebound_branch_recovered_from_origin(mocks, monkeypatch):
+    """No row + rebind + branch missing locally but pushed to origin → create from
+    origin/<branch>, NOT a fresh branch off the default (which would silently
+    present an empty branch as the user's work)."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-foreign",
+    }
+    FakePath.existing = set()
+    monkeypatch.setattr(qo.database, "set_session_project", MagicMock())
+    monkeypatch.setattr(qo.database, "update_session", MagicMock())
+    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: p["path"])
+
+    new_wt = _wt(status="active", wt_id="wt-new", branch="feat/recreate")
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": "origin/main", "is_remote": True},
+                {"name": "origin/feat/recreate", "is_remote": True},
+            ]
+        return [{"name": "main", "is_remote": False}]
+
+    mocks.wm.git_service.list_branches.side_effect = _branches
+    mocks.wm.create_worktree.return_value = new_wt
+    mocks.wm.is_worktree_valid.return_value = True
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ):
+        working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    # We must fetch before concluding origin has the branch.
+    mocks.wm.git_service.fetch.assert_called_once()
+    mocks.wm.create_worktree.assert_called_once_with(
+        "proj-local", "feat/recreate", create_new_branch=True, base_branch="feat/recreate"
+    )
+
+
+def test_no_row_rebound_branch_missing_everywhere_raises(mocks, monkeypatch):
+    """No row + rebind + branch missing locally AND on origin →
+    WorktreeUnavailableError carrying the loud "push it from origin" guidance,
+    and NO create off the default branch."""
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/recreate",
+        "worktree_path": ".worktrees/feat/recreate",
+        "project_id": "proj-foreign",
+    }
+    FakePath.existing = set()
+    monkeypatch.setattr(qo.database, "set_session_project", MagicMock())
+    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: p["path"])
+
+    def _branches(_dir, include_remote=False):
+        # Neither local nor origin carries the branch.
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": "origin/main", "is_remote": True},
+            ]
+        return [{"name": "main", "is_remote": False}]
+
+    mocks.wm.git_service.list_branches.side_effect = _branches
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ):
+        with pytest.raises(WorktreeUnavailableError) as ei:
+            _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert ei.value.branch_name == "feat/recreate"
+    assert "origin" in str(ei.value)
+    mocks.wm.create_worktree.assert_not_called()
     mocks.wm.recreate_worktree.assert_not_called()

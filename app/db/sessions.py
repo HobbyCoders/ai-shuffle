@@ -603,6 +603,31 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     return get_session(session_id)
 
 
+def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow]:
+    """Re-point a session at a different ``project_id`` (cross-device rebind).
+
+    On a shared database a session's project row is machine-specific; when the
+    session is adopted / resumed on an install that only has its OWN clone of
+    the same repo (a link-group sibling), the worktree/cwd resolution rebinds
+    onto that local project and records the swap here so subsequent resolution
+    is stable. Deliberately kept separate from the stats-oriented
+    :func:`update_session` — this is a targeted column write that bumps
+    ``updated_at`` and nothing else. Returns the updated row, or ``None`` when
+    no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET project_id = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
+            (project_id, now, session_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 

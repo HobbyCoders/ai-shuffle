@@ -92,6 +92,99 @@ class WorktreeUnavailableError(Exception):
         )
 
 
+def _rebind_worktree_cwd_cross_device(
+    session_id: str,
+    session: Optional[Dict[str, Any]],
+    project: Optional[Dict[str, Any]],
+    worktree: Optional[Dict[str, Any]],
+    branch_name: Optional[str],
+) -> Optional[str]:
+    """Cross-device rebind for a worktree session whose cwd is genuinely gone.
+
+    On a shared database a worktree session's project (and its worktree row) can
+    belong to another, offline install, so its checkout is absent here. When THIS
+    install has a clone of the same repository (matched via the project link
+    group), (re)create the worktree there from its branch and return the new cwd;
+    otherwise return ``None`` so the caller raises the honest "no working
+    directory" error.
+
+    This is the ONE place a worktree is (re)created on the resume path — a
+    deliberate, narrow exception to the "never recreate on resume" rule. It is
+    gated on the cwd being GENUINELY missing (``resolve_existing_worktree_cwd``
+    already returned nothing) AND the repo resolving onto a DIFFERENT install's
+    clone (a link-group sibling, not the session's own project). So it never
+    fires for the same-device stale-status case that self-heals above, nor for a
+    same-device worktree whose folder the user simply removed.
+
+    Returns the rebound cwd, or ``None`` when no local clone is available. Raises
+    ``WorktreeUnavailableError`` when a clone exists but the rebind fails (e.g.
+    the branch can't be recovered), carrying the specific reason.
+    """
+    from app.core.project_links import resolve_runnable_local_project
+    from app.core.worktree_manager import (
+        WorktreeError,
+        resolve_rebound_branch_plan,
+        worktree_manager,
+    )
+
+    project_id = (project or {}).get("id") or (session or {}).get("project_id")
+    if not project_id or not branch_name:
+        return None
+    _stored, local_project = resolve_runnable_local_project(project_id)
+    if local_project is None or local_project.get("id") == project_id:
+        # Rebind ONLY when we resolved onto a DIFFERENT install's clone (a genuine
+        # cross-device relocation). No local clone (None) → let the caller raise.
+        # The session's OWN project being runnable here (same id) means the cwd is
+        # missing for a same-device reason — the worktree folder was removed, not
+        # relocated to another machine — so we must NOT silently recreate it here:
+        # that would resurrect a worktree the user tore down and, for a branch that
+        # only survives on origin, fabricate an empty branch off the default. Raise
+        # the honest "no working directory" error, exactly as before this feature.
+        return None
+
+    try:
+        if worktree and worktree.get("id"):
+            # A worktree row exists but points at a foreign checkout.
+            # recreate_worktree performs the full rebind: link-group sibling,
+            # local repository id, and re-pointed sessions.
+            new_wt = worktree_manager.recreate_worktree(worktree["id"])
+        else:
+            # No linked row (row hard-deleted; only the session's worktree_*
+            # columns remain). Create a fresh worktree in the local clone from
+            # the branch — reusing/recovering it, never fabricating one off the
+            # default (resolve_rebound_branch_plan raises loudly if it can't).
+            main_dir = get_project_working_dir(local_project)
+            create_new, base_branch = resolve_rebound_branch_plan(
+                worktree_manager.git_service, main_dir, branch_name
+            )
+            new_wt = worktree_manager.create_worktree(
+                local_project["id"],
+                branch_name,
+                create_new_branch=create_new,
+                base_branch=base_branch,
+            )
+            if local_project["id"] != project_id:
+                database.set_session_project(session_id, local_project["id"])
+            database.update_session(session_id, worktree_id=new_wt["id"])
+    except WorktreeUnavailableError:
+        raise
+    except WorktreeError as e:
+        raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
+
+    if not worktree_manager.is_worktree_valid(new_wt):
+        raise WorktreeUnavailableError(
+            session_id, branch_name, "recreated worktree is still not valid"
+        )
+    cwd = get_worktree_working_dir(new_wt)
+    logger.info(
+        "[Options] Session %s cross-device rebind → worktree %s at %s (branch '%s')",
+        session_id, new_wt.get("id"), cwd, branch_name,
+    )
+    return cwd
+
+
 def _resolve_session_worktree_cwd(
     session_id: str, project: Optional[Dict[str, Any]]
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
@@ -99,12 +192,19 @@ def _resolve_session_worktree_cwd(
 
     A worktree session resumes exactly like a local session: it only cares that
     its initial working directory still exists on disk. We do NOT consult worktree
-    status, `.git` presence, or recreate/create any worktree on this path. Both
-    the worktree row's path and the session's backup ``worktree_path`` column are
-    tried (see ``resolve_existing_worktree_cwd``); the first existing directory
+    status or `.git` presence, and we do NOT recreate on the ordinary resume path.
+    Both the worktree row's path and the session's backup ``worktree_path`` column
+    are tried (see ``resolve_existing_worktree_cwd``); the first existing directory
     wins. A worktree session must still NEVER silently execute in the project's
     main checkout, so when no directory is on disk we raise rather than fall back
     to main.
+
+    The ONE exception is a cross-device rebind: on a shared database the cwd can be
+    absent only because the session was started on another (offline) install. When
+    THIS install has a clone of the same repo (matched via the project link group),
+    ``_rebind_worktree_cwd_cross_device`` recreates the worktree in that clone
+    rather than dead-ending the resume. This is gated on the cwd being genuinely
+    missing, so it never fires for the same-device stale-status case below.
 
     If a stale ``status`` is observed on a worktree whose directory DOES exist
     (e.g. a per-device ``sync-worktrees`` sweep flipped a healthy row to
@@ -119,7 +219,8 @@ def _resolve_session_worktree_cwd(
 
     Raises:
         WorktreeUnavailableError: the session IS a worktree session but its working
-        directory no longer exists on disk.
+        directory no longer exists on disk and no local clone of the repo is
+        available to rebind onto.
     """
     worktree = cast(Optional[Dict[str, Any]], database.get_worktree_by_session(session_id))
     session = cast(Optional[Dict[str, Any]], database.get_session(session_id))
@@ -159,14 +260,26 @@ def _resolve_session_worktree_cwd(
                 "base_branch": worktree.get("base_branch", "main"),
             }
 
-        # Row exists but no candidate directory is on disk. Do NOT recreate — a
-        # session only needs a cwd; when it's missing, surface an honest error
-        # instead of silently falling back to main. Name the row's location so
-        # the message never lacks a path when the row had one.
+        # Row exists but no candidate directory is on disk. Name the row's
+        # location up front so the error message never lacks a path when the row
+        # had one; we never silently fall back to the main checkout.
         try:
             missing_path = get_worktree_working_dir(worktree)
         except Exception:  # noqa: BLE001 — corrupt/empty path row
             missing_path = worktree.get("worktree_path")
+        # Before raising, try a cross-device rebind: on a shared DB this row can
+        # point at another machine's checkout. If THIS install has a clone of the
+        # same repo, recreate the worktree there. This is the one place we still
+        # (re)create on resume — justified because the cwd is genuinely gone
+        # (unlike the same-device stale-status case self-healed above).
+        rebound_cwd = _rebind_worktree_cwd_cross_device(
+            session_id, session, project, worktree, branch_name
+        )
+        if rebound_cwd:
+            return rebound_cwd, "worktree", {
+                "branch": branch_name or "unknown",
+                "base_branch": worktree.get("base_branch", "main"),
+            }
         raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # No worktree row found via the session join. This is either a normal local
@@ -201,6 +314,18 @@ def _resolve_session_worktree_cwd(
                 )
             except Exception:  # noqa: BLE001
                 missing_path = backup_path
+        # Before raising, try a cross-device rebind (no linked worktree row): on
+        # a shared DB the session's project can belong to another, offline
+        # install; if THIS install has a clone of the same repo, create the
+        # worktree there from the branch instead of dead-ending.
+        rebound_cwd = _rebind_worktree_cwd_cross_device(
+            session_id, session, project, None, branch_name
+        )
+        if rebound_cwd:
+            return rebound_cwd, "worktree", {
+                "branch": branch_name or "unknown",
+                "base_branch": "main",
+            }
         raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # Genuinely not a worktree session — caller uses project/local resolution.
@@ -427,12 +552,45 @@ def build_options_from_profile(
         if working_dir_source == "workspace":
             Path(working_dir).mkdir(parents=True, exist_ok=True)
         else:
-            detail = f"project '{project['name']}'" if working_dir_source == "project" and project.get("name") else working_dir_source
-            raise ValueError(
-                f"Working directory does not exist: {working_dir} (from {detail}). "
-                f"The path may belong to a different install or have been moved — "
-                f"update or remove the project/profile path, or pick another project."
-            )
+            # Cross-device rebind for a plain (non-worktree) project session: if
+            # the project's stored path is foreign but this install has a clone
+            # of the same repo (link group), transparently run there and record
+            # the swap so an adopted session keeps working without user action.
+            rebound_dir = None
+            if working_dir_source == "project" and project and project.get("id"):
+                try:
+                    from app.core.project_links import resolve_runnable_local_project
+
+                    _stored, local_project = resolve_runnable_local_project(project["id"])
+                    if local_project is not None:
+                        candidate = get_project_working_dir(local_project)
+                        if Path(candidate).is_dir():
+                            rebound_dir = candidate
+                            # Rebind the in-scope project row too, so the rebound
+                            # (local) project id — not the stale foreign one —
+                            # flows into create_app_config_server /
+                            # create_builtin_tools_server below.
+                            project = local_project
+                            if session_id:
+                                database.set_session_project(session_id, local_project["id"])
+                except Exception:  # noqa: BLE001 — rebind is best-effort; fall through to the clear error
+                    # Log the ACTUAL failure (a DB error here would otherwise be
+                    # silently converted into the misleading "directory does not
+                    # exist" ValueError below). Fail-open semantics unchanged.
+                    logger.warning(
+                        "[Options] cross-install project rebind failed for %s",
+                        project.get("id") if project else None,
+                        exc_info=True,
+                    )
+            if rebound_dir is not None:
+                working_dir = rebound_dir
+            else:
+                detail = f"project '{project['name']}'" if working_dir_source == "project" and project.get("name") else working_dir_source
+                raise ValueError(
+                    f"Working directory does not exist: {working_dir} (from {detail}). "
+                    f"The path may belong to a different install or have been moved — "
+                    f"update or remove the project/profile path, or pick another project."
+                )
 
     # Get AI tools config (used for MCP tool registration + env vars, not system prompt)
     ai_tools_config = config.get("ai_tools")

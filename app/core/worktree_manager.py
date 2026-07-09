@@ -41,6 +41,50 @@ class WorktreeError(Exception):
     pass
 
 
+def resolve_rebound_branch_plan(
+    git_service_obj, main_dir: str, branch_name: str
+) -> Tuple[bool, Optional[str]]:
+    """Decide how to materialize ``branch_name`` on a sibling clone after a
+    cross-device rebind.
+
+    A rebind lands the session on THIS install's clone of the same repo, whose
+    local refs differ from the device that created the branch. We must NEVER
+    fabricate a fresh branch off the default here — that would silently present
+    an empty branch as the user's unpushed work. So the decision is:
+
+    * branch exists locally → reuse it as-is → ``(create_new=False, base=None)``
+    * else present on origin → create from the pushed tip →
+      ``(create_new=True, base=branch_name)`` — ``add_worktree(new_branch=True,
+      base_branch=branch_name)`` prefers ``origin/{base}`` internally, landing
+      the branch on the pushed tip.
+    * else → raise ``WorktreeError`` (loud, actionable).
+
+    Returns ``(create_new_branch, base_branch)`` for the caller's
+    ``create_worktree`` / ``add_worktree`` call. Shared by ``recreate_worktree``
+    (worktree-row rebind) and query_options' no-row rebind path so the two stay
+    in lockstep.
+    """
+    branches = git_service_obj.list_branches(main_dir, include_remote=False)
+    local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+    if branch_name in local_branch_names:
+        return False, None
+
+    git_service_obj.fetch(main_dir)
+    remote_names = [
+        b["name"]
+        for b in git_service_obj.list_branches(main_dir, include_remote=True)
+    ]
+    if f"origin/{branch_name}" in remote_names:
+        return True, branch_name
+
+    raise WorktreeError(
+        f"Branch '{branch_name}' doesn't exist in the local clone or on "
+        f"origin — it may only exist on the device that created this "
+        f"session. Push it from there (git push -u origin {branch_name}) "
+        f"or start a new session."
+    )
+
+
 class WorktreeManager:
     """
     Manages worktree lifecycle independently from chat sessions.
@@ -1117,12 +1161,18 @@ class WorktreeManager:
         adopted: Dict[str, Any],
         project: Dict[str, Any],
         prior_status: Any,
+        repository_id: Optional[str] = None,
+        rebind_project_id: Optional[str] = None,
     ) -> Dict:
         """
         Adopt an on-disk git worktree (found via
         ``_find_git_worktree_for_branch``) into the DB record instead of
         re-adding it. Flips the record to ACTIVE with the adopted path and
         returns the updated record (same shape ``recreate_worktree`` returns).
+
+        ``repository_id`` / ``rebind_project_id`` are set only on the cross-device
+        rebind path: the worktree row is re-pointed at this install's clone of the
+        repo and its sessions moved onto the local project row.
         """
         adopt_path = Path(adopted["path"])
         stored_path = self._get_relative_worktree_path_from_full(
@@ -1133,13 +1183,28 @@ class WorktreeManager:
             status=WorktreeStatus.ACTIVE,
             worktree_path=stored_path,
             branch_name=branch_name,
+            repository_id=repository_id,
         )
+        if rebind_project_id:
+            self._repoint_worktree_sessions(worktree_id, rebind_project_id)
         logger.info(
             f"Adopted existing on-disk worktree for branch '{branch_name}' "
             f"(worktree_id={worktree_id}, path={adopt_path}, "
             f"prior status was {prior_status}) — skipped git add"
         )
         return updated
+
+    def _repoint_worktree_sessions(self, worktree_id: str, project_id: str) -> None:
+        """Move every session that used this worktree onto ``project_id``.
+
+        Used by the cross-device rebind so a session adopted here stops
+        resolving against the foreign project row that only exists on the
+        original device.
+        """
+        for row in database.get_sessions_for_worktree(worktree_id):
+            session_id = row.get("id")
+            if session_id:
+                database.set_session_project(session_id, project_id)
 
     def recreate_worktree(self, worktree_id: str) -> Dict:
         """
@@ -1188,16 +1253,82 @@ class WorktreeManager:
 
         main_dir = get_project_working_dir(project)
         branch_name = worktree["branch_name"]
+
+        # Cross-device rebind: on a shared database the worktree's project row
+        # can belong to another (offline) machine, so its stored path isn't a git
+        # repo here. Rather than let git fail with "fatal: not a git repository",
+        # rebind onto THIS install's clone of the same repo (matched via the
+        # project link group) and recreate the worktree locally.
+        rebound = False
+        rebound_repo_id: Optional[str] = None
+        rebound_project_id: Optional[str] = None
+        if not (Path(main_dir).is_dir() and self.git_service.is_git_repo(main_dir)):
+            from app.core.project_links import resolve_runnable_local_project
+
+            _stored, local_project = resolve_runnable_local_project(project["id"])
+            local_dir = (
+                get_project_working_dir(local_project) if local_project else None
+            )
+            if (
+                local_project is not None
+                and local_project["id"] != project["id"]
+                and local_dir is not None
+                and self.git_service.is_git_repo(local_dir)
+            ):
+                local_repo = self._ensure_repository_record(
+                    local_project["id"], local_project["path"]
+                )
+                if not local_repo:
+                    raise WorktreeError(
+                        f"Local clone of the repository at '{local_dir}' is not a "
+                        f"git repository — cannot rebind worktree {worktree_id}."
+                    )
+                logger.info(
+                    "Rebound worktree %s from project %s (%s) to local project "
+                    "%s (%s) via link group %s",
+                    worktree_id,
+                    project["id"],
+                    main_dir,
+                    local_project["id"],
+                    local_dir,
+                    project.get("link_group_id"),
+                )
+                project = local_project
+                repo = local_repo
+                main_dir = local_dir
+                rebound = True
+                rebound_repo_id = local_repo["id"]
+                rebound_project_id = local_project["id"]
+            else:
+                raise WorktreeError(
+                    f"This session's project lives at '{main_dir}', which doesn't "
+                    f"exist on this device, and no local clone of the same "
+                    f"repository was found. Clone the repository here and add it as "
+                    f"a project, or resume on the original device."
+                )
+
         default_branch = repo.get("default_branch", "main")
 
-        # Determine if we need to create a new branch or reuse existing
-        branches = self.git_service.list_branches(main_dir, include_remote=False)
-        local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
-        branch_exists = branch_name in local_branch_names
-        create_new = not branch_exists
-
-        # If creating new branch, base it on the default branch (which has merged changes)
-        base_branch = default_branch if create_new else None
+        # Determine if we need to create a new branch or reuse existing.
+        if rebound:
+            # On the rebind path we must NOT fabricate a fresh branch off the
+            # default — that would silently present an empty branch as the user's
+            # unpushed work. The shared helper reuses a local branch, recovers a
+            # pushed one from origin, or raises loudly.
+            create_new, base_branch = resolve_rebound_branch_plan(
+                self.git_service, main_dir, branch_name
+            )
+        else:
+            branches = self.git_service.list_branches(main_dir, include_remote=False)
+            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+            branch_exists = branch_name in local_branch_names
+            if branch_exists:
+                create_new = False
+                base_branch = None
+            else:
+                create_new = True
+                # If creating new branch, base it on the default branch (which has merged changes)
+                base_branch = default_branch
 
         # Generate new worktree path (old path was deleted)
         worktree_path = self._get_worktree_path(project["path"], branch_name)
@@ -1223,7 +1354,8 @@ class WorktreeManager:
         adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
         if adopted is not None:
             return self._adopt_existing_worktree(
-                worktree_id, branch_name, adopted, project, prior_status=worktree["status"]
+                worktree_id, branch_name, adopted, project, prior_status=worktree["status"],
+                repository_id=rebound_repo_id, rebind_project_id=rebound_project_id,
             )
 
         # Create git worktree
@@ -1245,6 +1377,7 @@ class WorktreeManager:
                     return self._adopt_existing_worktree(
                         worktree_id, branch_name, adopted, project,
                         prior_status=worktree["status"],
+                        repository_id=rebound_repo_id, rebind_project_id=rebound_project_id,
                     )
             raise WorktreeError(f"Git failed to recreate worktree: {error_msg or 'Unknown error'}")
 
@@ -1255,13 +1388,17 @@ class WorktreeManager:
             )
         logger.debug(f"Verified worktree directory exists: {worktree_path}")
 
-        # Update existing DB record back to ACTIVE with new path
+        # Update existing DB record back to ACTIVE with new path (and, on a
+        # rebind, the local repository id + re-pointed sessions).
         updated = database.update_worktree(
             worktree_id,
             status=WorktreeStatus.ACTIVE,
             worktree_path=relative_worktree_path,
             branch_name=branch_name,
+            repository_id=rebound_repo_id,
         )
+        if rebound_project_id:
+            self._repoint_worktree_sessions(worktree_id, rebound_project_id)
 
         # NOTE: sdk_session_id is intentionally preserved on reopen.
         # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),

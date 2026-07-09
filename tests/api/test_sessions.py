@@ -1901,6 +1901,202 @@ class TestAdoptSession:
 
         assert response.status_code == 404
 
+    def test_adopt_blocks_when_project_not_local(self, client, mock_database, sample_session):
+        """Preflight: repo isn't cloned on this device → 409, no adopt write."""
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=({"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
+                           "path": "/foreign/missing"}, None),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "isn't available on this device" in detail
+        assert "MyRepo" in detail
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_succeeds_with_warning_when_branch_unpushed(
+        self, client, mock_database, sample_session
+    ):
+        """Preflight resolves onto a sibling clone but the worktree branch isn't
+        pushed → adopt succeeds and the response carries a warning."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        sample_session["worktree_branch"] = "feat/unpushed"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        def _branches(_dir, include_remote=False):
+            if include_remote:
+                return [{"name": "main"}, {"name": "origin/main"}]
+            return [{"name": "main"}]
+
+        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
+                  "path": "/foreign/missing"}
+        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
+
+        git_mock = MagicMock()
+        git_mock.list_branches.side_effect = _branches
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, local),
+        ), patch("app.core.git_service.git_service", git_mock):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["local_project_id"] == "proj-local"
+        assert data["warning"] and "hasn't been pushed" in data["warning"]
+        assert "feat/unpushed" in data["warning"]
+        mock_database.adopt_session.assert_called_once()
+
+    def test_adopt_preflight_error_fails_open(self, client, mock_database, sample_session):
+        """A preflight bug must never make an adoptable session un-adoptable."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            side_effect=RuntimeError("preflight boom"),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["warning"] is None
+        mock_database.adopt_session.assert_called_once()
+
+    def test_adopt_persists_rebind_onto_sibling(self, client, mock_database, sample_session):
+        """Preflight resolves onto a DIFFERENT local clone (a sibling) → the
+        rebind is persisted at adopt time so search/commands/fork immediately
+        see the local project id, closing the adopt→first-send window."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
+                  "path": "/foreign/missing"}
+        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, local),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        assert response.json()["local_project_id"] == "proj-local"
+        mock_database.set_session_project.assert_called_once_with(
+            "test-session-id", "proj-local"
+        )
+
+    def test_adopt_no_rebind_persist_when_project_already_local(
+        self, client, mock_database, sample_session
+    ):
+        """Preflight resolves onto the SAME project id (already local) → no
+        set_session_project write; adoption is only an ownership flip."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        stored = {"id": "proj-1", "name": "MyRepo",
+                  "instance_id": settings.effective_instance_id, "path": "/local/clone"}
+        local = {"id": "proj-1", "name": "MyRepo", "path": "/local/clone"}
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, local),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        assert response.json()["adopted"] is True
+        mock_database.set_session_project.assert_not_called()
+
+    def test_adopt_survives_rebind_persist_failure(self, client, mock_database, sample_session):
+        """A failure persisting the rebind must not undo an already-successful
+        adopt (the send-path lazy rebind still heals it later)."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+        mock_database.set_session_project.side_effect = RuntimeError("db down")
+
+        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
+                  "path": "/foreign/missing"}
+        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, local),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        assert response.json()["adopted"] is True
+        assert response.json()["local_project_id"] == "proj-local"
+
+    def test_adopt_blocks_with_self_device_message_when_own_path_gone(
+        self, client, mock_database, sample_session
+    ):
+        """When the project row belongs to THIS install but its folder is gone,
+        the 409 must NOT tell the user to clone onto 'another device' — it uses a
+        distinct 'no longer exists on this device' message."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+
+        stored = {"id": "proj-1", "name": "MyRepo",
+                  "instance_id": settings.effective_instance_id, "path": "/gone/local/path"}
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, None),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "no longer exists on this device" in detail
+        assert "isn't available on this device" not in detail
+        mock_database.adopt_session.assert_not_called()
+
 
 # =============================================================================
 # Test Create Worktree Session Endpoint
