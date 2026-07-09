@@ -43,6 +43,7 @@ from app.core.rewind_db_sync import (
 from app.core.jsonl_parser import invalidate_parse_cache
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
+from app.core.session_pool import get_session_pool
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse
@@ -584,6 +585,33 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     files_rewound = False
     messages_removed = 0
     errors = []
+
+    # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
+    # touch the transcript. A pooled ``ClaudeSDKClient`` keeps the JSONL file
+    # open and appends to it; a concurrent SDK resume (``rewind_files_via_sdk``)
+    # opens the *same* transcript too. If we truncate/rewrite the file underneath
+    # a live process, its next write lands past the new (shorter) EOF — leaving a
+    # gap of NUL bytes — or flushes a stale buffer, producing duplicate/partial
+    # lines. That corrupts the JSONL, breaks the next resume, and (because the
+    # CLI runs with ``--session-mirror``) propagates the garbage into the
+    # Postgres session store the UI reads. Removing the pool entry first
+    # guarantees the transcript is quiescent; the next turn resumes a fresh
+    # client from the truncated file. Best-effort: an eviction hiccup must not
+    # abort a rewind the user explicitly requested.
+    if request.restore_chat or request.restore_files:
+        try:
+            pool = get_session_pool()
+            if pool.contains(session_id):
+                await pool.remove(session_id)
+                logger.info(
+                    f"Rewind evicted live pooled client for session {session_id} "
+                    f"before mutating transcript {sdk_session_id}"
+                )
+        except Exception as evict_err:
+            logger.error(
+                f"Rewind pool eviction failed for session {session_id}: {evict_err}",
+                exc_info=True,
+            )
 
     # IMPORTANT: File rewind must happen BEFORE chat rewind.
     # Chat rewind truncates the JSONL file, which can remove the target message UUID.

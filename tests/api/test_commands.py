@@ -813,6 +813,98 @@ class TestExecuteRewindEndpoint:
 
         mock_sync_engine.broadcast_session_rewound.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_rewind_evicts_live_pooled_client_before_truncation(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """A rewind MUST evict any live pooled CLI subprocess for the session
+        BEFORE mutating the transcript.
+
+        A pooled ``ClaudeSDKClient`` holds the JSONL open and keeps appending.
+        Truncating/rewriting the file underneath it makes its next write land
+        past the new EOF (a gap of NUL bytes) or flush a stale buffer — the
+        exact JSONL corruption that breaks resume and, via ``--session-mirror``,
+        pollutes the Postgres session store the UI reads. The pool client must
+        be removed first so the next turn resumes fresh from the truncated file.
+        """
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+        }
+        mock_database.get_project.return_value = None
+
+        call_order: list[str] = []
+
+        mock_pool = MagicMock()
+        mock_pool.contains.return_value = True
+
+        async def _remove(_sid):
+            call_order.append("evict")
+            return MagicMock()
+
+        mock_pool.remove = AsyncMock(side_effect=_remove)
+
+        def _truncate(**_kwargs):
+            call_order.append("truncate")
+            return MockRewindResult(
+                success=True,
+                message="Rewind successful",
+                chat_rewound=True,
+                messages_removed=5,
+            )
+
+        mock_jsonl_rewind_service.truncate_to_checkpoint.side_effect = _truncate
+
+        request = RewindRequestV2(
+            target_uuid="uuid-1", restore_chat=True, include_response=True
+        )
+
+        with patch("app.api.commands.get_session_pool", return_value=mock_pool):
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        # The live client was evicted...
+        mock_pool.remove.assert_awaited_once_with("session-1")
+        # ...and that eviction happened BEFORE the transcript was truncated.
+        assert call_order == ["evict", "truncate"], (
+            f"expected eviction before truncation, got {call_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewind_survives_pool_eviction_error(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """A failure while evicting the pooled client must not abort the rewind."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
+            success=True,
+            message="Rewind successful",
+            chat_rewound=True,
+            messages_removed=2,
+        )
+
+        mock_pool = MagicMock()
+        mock_pool.contains.return_value = True
+        mock_pool.remove = AsyncMock(side_effect=RuntimeError("boom"))
+
+        request = RewindRequestV2(target_uuid="uuid-1", restore_chat=True)
+
+        with patch("app.api.commands.get_session_pool", return_value=mock_pool):
+            response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        assert response.chat_rewound is True
+
 
 # =============================================================================
 # Tests for execute_rewind DB/JSONL sync (fix/rewind-db-history-sync)
