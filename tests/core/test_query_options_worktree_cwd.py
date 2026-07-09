@@ -1,13 +1,20 @@
 """
 Tests for worktree working-directory resolution in build_options.
 
-Covers ``_resolve_session_worktree_cwd`` — the helper that guarantees a
-worktree-flagged session NEVER silently executes in the project's main
-checkout. When the linked worktree is missing/inactive it must auto-recreate
-it, and only raise ``WorktreeUnavailableError`` if that fails.
+Covers ``_resolve_session_worktree_cwd`` — the helper that resolves the cwd for a
+session that may be a worktree session.
 
-All DB / worktree-manager access is patched at the boundary used by
-query_options.py so no real Postgres or git is needed.
+New contract (resume like a local session): a worktree session only needs its
+initial working directory to still EXIST on disk. Status, ``.git`` presence, and
+any recreate/create machinery are NOT consulted on the resume path:
+
+  - dir exists  → use it as cwd regardless of the row's status or ``.git``;
+                  self-heal a stale (non-active) status back to 'active'.
+  - dir missing → raise ``WorktreeUnavailableError`` (never recreate, never fall
+                  back to the main checkout).
+
+All DB / worktree-manager / filesystem access is patched at the boundary used by
+query_options.py so no real Postgres, git, or disk is needed.
 """
 
 from dataclasses import dataclass
@@ -15,11 +22,13 @@ from dataclasses import dataclass
 import pytest
 from unittest.mock import MagicMock
 
+import app.core.project_utils as pu
 import app.core.query_options as qo
 from app.core.query_options import (
     _resolve_session_worktree_cwd,
     WorktreeUnavailableError,
 )
+from tests.fake_path import FakePath
 
 SESSION_ID = "ses-abc123"
 
@@ -39,104 +48,127 @@ class Mocks:
     wm: MagicMock
     get_worktree_by_session: MagicMock
     get_session: MagicMock
+    update_worktree: MagicMock
 
 
 @pytest.fixture
 def mocks(monkeypatch) -> Mocks:
-    """Patch the DB + worktree_manager boundary and the path helper."""
+    """Patch the DB + worktree_manager boundary, the path helper, and Path."""
     wm = MagicMock(name="worktree_manager")
     get_wt = MagicMock(name="get_worktree_by_session", return_value=None)
     get_sess = MagicMock(name="get_session", return_value=None)
+    update_wt = MagicMock(name="update_worktree")
 
-    # The lazy import inside the helper resolves to this singleton.
-    monkeypatch.setattr("app.core.worktree_manager.worktree_manager", wm)
-    # Path helper lives in the query_options namespace.
-    monkeypatch.setattr(qo, "get_worktree_working_dir", lambda wt: f"/abs/{wt['worktree_path']}")
+    # worktree_manager is no longer imported by the resume path — patch it anyway
+    # so the "recreate/create NEVER called" assertions are meaningful guards.
+    monkeypatch.setattr("app.core.worktree_manager.worktree_manager", wm, raising=False)
+    # The cwd rule lives in project_utils (resolve_existing_worktree_cwd uses the
+    # project_utils bindings of Path/get_worktree_working_dir); query_options
+    # keeps its OWN from-import of get_worktree_working_dir for error messages.
+    # Patch both namespaces so the fake filesystem governs everything.
+    _resolver = lambda wt: f"/abs/{wt['worktree_path']}"  # noqa: E731
+    monkeypatch.setattr(pu, "get_worktree_working_dir", _resolver)
+    monkeypatch.setattr(pu, "Path", FakePath)
+    monkeypatch.setattr(qo, "get_worktree_working_dir", _resolver)
+    monkeypatch.setattr(qo, "Path", FakePath)
     monkeypatch.setattr(qo.database, "get_worktree_by_session", get_wt)
     monkeypatch.setattr(qo.database, "get_session", get_sess)
-    return Mocks(wm=wm, get_worktree_by_session=get_wt, get_session=get_sess)
+    monkeypatch.setattr(qo.database, "update_worktree", update_wt)
+
+    FakePath.existing = set()
+    yield Mocks(
+        wm=wm,
+        get_worktree_by_session=get_wt,
+        get_session=get_sess,
+        update_worktree=update_wt,
+    )
+    FakePath.existing = set()
 
 
 # ---------------------------------------------------------------------------
-# Happy path: active + valid worktree
+# (a) row active + dir exists → cwd returned, no recreate
 # ---------------------------------------------------------------------------
 
-def test_active_valid_worktree_returns_worktree_cwd(mocks):
+def test_active_row_dir_exists_returns_cwd_no_recreate(mocks):
     mocks.get_worktree_by_session.return_value = _wt(status="active")
-    mocks.wm.is_worktree_valid.return_value = True
+    FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
     working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
     assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
     assert info == {"branch": "feat/foo", "base_branch": "main"}
-    # An active, valid worktree must NOT be recreated.
     mocks.wm.recreate_worktree.assert_not_called()
+    # An already-active row needs no self-heal.
+    mocks.update_worktree.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Inactive / invalid worktree → auto-recreate
+# (b) row status deleted/orphaned/completed + dir exists → cwd + self-heal,
+#     NEVER recreate. This is the regression test for the false-recreate bug.
 # ---------------------------------------------------------------------------
 
-def test_inactive_worktree_is_auto_recreated(mocks):
-    mocks.get_worktree_by_session.return_value = _wt(status="completed", wt_id="wt-1")
-    # Original is not valid (completed) → triggers recreate; recreated is active.
-    mocks.wm.is_worktree_valid.side_effect = lambda wt: wt.get("status") == "active"
-    mocks.wm.recreate_worktree.return_value = _wt(status="active", wt_id="wt-1")
+@pytest.mark.parametrize("stale_status", ["deleted", "orphaned", "completed"])
+def test_stale_status_with_dir_self_heals_and_never_recreates(mocks, stale_status):
+    mocks.get_worktree_by_session.return_value = _wt(status=stale_status, wt_id="wt-7")
+    FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
-    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
-    mocks.wm.recreate_worktree.assert_called_once_with("wt-1")
-    assert mode == "worktree"
     assert working_dir == "/abs/.worktrees/feat/foo"
-
-
-def test_active_but_invalid_on_disk_is_recreated(mocks):
-    """status active but the folder is gone → recreate, never fall back."""
-    mocks.get_worktree_by_session.return_value = _wt(status="active", wt_id="wt-9")
-    # First validity check (original) fails; recreated one passes.
-    mocks.wm.is_worktree_valid.side_effect = [False, True]
-    mocks.wm.recreate_worktree.return_value = _wt(status="active", wt_id="wt-9")
-
-    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
-
-    mocks.wm.recreate_worktree.assert_called_once_with("wt-9")
     assert mode == "worktree"
-    assert working_dir and working_dir.startswith("/abs/")
+    # Regression: the old code called recreate_worktree here. It must NOT now.
+    mocks.wm.recreate_worktree.assert_not_called()
+    # Self-heal: the stale status is corrected back to 'active' on disk-present.
+    mocks.update_worktree.assert_called_once_with("wt-7", status="active")
 
 
 # ---------------------------------------------------------------------------
-# Recreate fails → raise, NEVER main
+# (c) row status active but dir missing → raise, no recreate, honest message
 # ---------------------------------------------------------------------------
 
-def test_recreate_raises_surfaces_worktree_unavailable(mocks):
-    mocks.get_worktree_by_session.return_value = _wt(status="deleted", wt_id="wt-2", branch="fix/bar")
-    mocks.wm.is_worktree_valid.return_value = False
-    mocks.wm.recreate_worktree.side_effect = RuntimeError("git boom")
+def test_active_row_dir_missing_raises_no_recreate(mocks):
+    mocks.get_worktree_by_session.return_value = _wt(status="active", branch="fix/bar")
+    FakePath.existing = set()  # directory is gone
 
     with pytest.raises(WorktreeUnavailableError) as ei:
         _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
+    msg = str(ei.value)
     assert ei.value.branch_name == "fix/bar"
-    assert "git boom" in str(ei.value)
+    # Honest message names the missing path and does NOT mention recreation.
+    assert "/abs/.worktrees/fix/bar" in msg
+    assert "no longer exists" in msg
+    assert "could not be recreated" not in msg
+    mocks.wm.recreate_worktree.assert_not_called()
+    mocks.update_worktree.assert_not_called()
 
 
-def test_recreate_returns_non_active_raises(mocks):
-    mocks.get_worktree_by_session.return_value = _wt(status="completed", wt_id="wt-3", branch="fix/baz")
+# ---------------------------------------------------------------------------
+# (d) dir exists but .git missing → still returns cwd (no is_worktree_valid gate)
+# ---------------------------------------------------------------------------
+
+def test_dir_exists_but_no_git_still_returns_cwd(mocks):
+    """No validity gate: a present directory is enough even without a .git file."""
+    mocks.get_worktree_by_session.return_value = _wt(status="active")
+    FakePath.existing = {"/abs/.worktrees/feat/foo"}
+    # Force any accidental validity check to report invalid — must be irrelevant.
     mocks.wm.is_worktree_valid.return_value = False
-    # Recreate "succeeds" but yields a still-broken worktree.
-    mocks.wm.recreate_worktree.return_value = _wt(status="deleted", wt_id="wt-3")
 
-    with pytest.raises(WorktreeUnavailableError):
-        _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
+    working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert working_dir == "/abs/.worktrees/feat/foo"
+    assert mode == "worktree"
+    # The resume path must not consult is_worktree_valid at all.
+    mocks.wm.is_worktree_valid.assert_not_called()
+    mocks.wm.recreate_worktree.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# No worktree row
+# (e) no row + backup columns + dir exists → cwd from backup, no create
 # ---------------------------------------------------------------------------
 
-def test_worktree_flagged_session_without_row_raises(mocks):
-    """worktree_id was NULLed but the session still records a worktree branch."""
+def test_no_row_backup_dir_exists_returns_backup_cwd(mocks):
     mocks.get_worktree_by_session.return_value = None
     mocks.get_session.return_value = {
         "id": SESSION_ID,
@@ -144,15 +176,47 @@ def test_worktree_flagged_session_without_row_raises(mocks):
         "worktree_branch": "feat/orphaned",
         "worktree_path": ".worktrees/feat/orphaned",
     }
+    FakePath.existing = {"/abs/.worktrees/feat/orphaned"}
+
+    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
+
+    assert working_dir == "/abs/.worktrees/feat/orphaned"
+    assert mode == "worktree"
+    assert info == {"branch": "feat/orphaned", "base_branch": "main"}
+    mocks.wm.create_worktree.assert_not_called()
+    mocks.wm.recreate_worktree.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# (f) no row + backup columns + dir missing → raise, no create
+# ---------------------------------------------------------------------------
+
+def test_no_row_backup_dir_missing_raises_no_create(mocks):
+    mocks.get_worktree_by_session.return_value = None
+    mocks.get_session.return_value = {
+        "id": SESSION_ID,
+        "worktree_id": None,
+        "worktree_branch": "feat/gone",
+        "worktree_path": ".worktrees/feat/gone",
+    }
+    FakePath.existing = set()
 
     with pytest.raises(WorktreeUnavailableError) as ei:
         _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
-    assert ei.value.branch_name == "feat/orphaned"
+    msg = str(ei.value)
+    assert ei.value.branch_name == "feat/gone"
+    assert "/abs/.worktrees/feat/gone" in msg
+    assert "could not be recreated" not in msg
+    mocks.wm.create_worktree.assert_not_called()
+    mocks.wm.recreate_worktree.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# (g) no row + no backup flags → (None, None, None)
+# ---------------------------------------------------------------------------
 
 def test_local_session_returns_none(mocks):
-    """A genuinely non-worktree session resolves to (None, None, None)."""
     mocks.get_worktree_by_session.return_value = None
     mocks.get_session.return_value = {
         "id": SESSION_ID,
@@ -164,118 +228,49 @@ def test_local_session_returns_none(mocks):
     result = _resolve_session_worktree_cwd(SESSION_ID, project={"path": "/repo"})
 
     assert result == (None, None, None)
+    mocks.wm.create_worktree.assert_not_called()
+    mocks.wm.recreate_worktree.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# No linked row but branch + project present → CREATE + link a fresh worktree
-# (the never-a-dead-end path). These exercise the create-from-branch fallback.
+# (h) self-heal update_worktree raising → resume still succeeds
 # ---------------------------------------------------------------------------
 
-def _patch_create_path(mocks, monkeypatch, *, branches, create_returns):
-    """Wire up the DB/manager boundary used by the create+link fallback."""
-    mocks.get_worktree_by_session.return_value = None
-    mocks.get_session.return_value = {
-        "id": SESSION_ID,
-        "worktree_id": None,
-        "worktree_branch": "feat/recreate",
-        "worktree_path": ".worktrees/feat/recreate",
-        "project_id": "proj-1",
-    }
-    monkeypatch.setattr(
-        qo.database, "get_git_repository_by_project",
-        MagicMock(return_value={"default_branch": "main"}),
-    )
-    monkeypatch.setattr(
-        qo.database, "get_project",
-        MagicMock(return_value={"id": "proj-1", "path": "/repo"}),
-    )
-    update_session = MagicMock(name="update_session")
-    monkeypatch.setattr(qo.database, "update_session", update_session)
-    monkeypatch.setattr(qo, "get_project_working_dir", lambda p: "/repo")
-    mocks.wm.git_service.list_branches.return_value = branches
-    mocks.wm.create_worktree.return_value = create_returns
-    mocks.wm.is_worktree_valid.return_value = True
-    return update_session
-
-
-def test_no_row_with_existing_branch_creates_and_links(mocks, monkeypatch):
-    """worktree_id NULLed but branch still exists locally → reuse it, link the new row."""
-    new_wt = _wt(status="active", wt_id="wt-new", branch="feat/recreate")
-    update_session = _patch_create_path(
-        mocks,
-        monkeypatch,
-        branches=[{"name": "feat/recreate", "is_remote": False}],
-        create_returns=new_wt,
-    )
-
-    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
-
-    assert mode == "worktree"
-    assert working_dir == "/abs/.worktrees/feat/recreate"
-    assert info == {"branch": "feat/recreate", "base_branch": "main"}
-    # Reuse existing branch: create_new_branch False, no base_branch.
-    mocks.wm.create_worktree.assert_called_once_with(
-        "proj-1", "feat/recreate", create_new_branch=False, base_branch=None
-    )
-    update_session.assert_called_once_with(SESSION_ID, worktree_id="wt-new")
-
-
-def test_no_row_missing_branch_creates_new_off_default(mocks, monkeypatch):
-    """Branch is gone (merged + pruned) → create a fresh branch off the default."""
-    new_wt = _wt(status="active", wt_id="wt-new2", branch="feat/recreate")
-    _patch_create_path(
-        mocks,
-        monkeypatch,
-        branches=[{"name": "main", "is_remote": False}],
-        create_returns=new_wt,
-    )
+def test_self_heal_failure_does_not_block_resume(mocks):
+    mocks.get_worktree_by_session.return_value = _wt(status="deleted", wt_id="wt-9")
+    FakePath.existing = {"/abs/.worktrees/feat/foo"}
+    mocks.update_worktree.side_effect = RuntimeError("db write boom")
 
     working_dir, mode, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
+    # The heal was attempted and failed, but the resume still returns the cwd.
+    mocks.update_worktree.assert_called_once_with("wt-9", status="active")
+    assert working_dir == "/abs/.worktrees/feat/foo"
     assert mode == "worktree"
-    assert working_dir and working_dir.startswith("/abs/")
-    # Branch missing → create_new_branch True, based on the default branch.
-    mocks.wm.create_worktree.assert_called_once_with(
-        "proj-1", "feat/recreate", create_new_branch=True, base_branch="main"
-    )
+    mocks.wm.recreate_worktree.assert_not_called()
 
 
-def test_no_row_create_failure_raises_unavailable(mocks, monkeypatch):
-    """If git can't create the worktree, surface WorktreeUnavailableError — never main."""
-    _patch_create_path(
-        mocks,
-        monkeypatch,
-        branches=[{"name": "feat/recreate", "is_remote": False}],
-        create_returns=None,
-    )
-    mocks.wm.create_worktree.side_effect = RuntimeError("git add-worktree boom")
+# ---------------------------------------------------------------------------
+# (i) row path missing on disk but the session's BACKUP worktree_path exists →
+#     resume on the backup. adopt/recreate rewrite the ROW path while the
+#     session column is a write-once snapshot, so they can genuinely diverge.
+# ---------------------------------------------------------------------------
 
-    with pytest.raises(WorktreeUnavailableError) as ei:
-        _resolve_session_worktree_cwd(SESSION_ID, project=None)
-
-    assert ei.value.branch_name == "feat/recreate"
-    assert "git add-worktree boom" in str(ei.value)
-
-
-def test_no_row_non_git_project_raises(mocks, monkeypatch):
-    """A worktree-flagged session in a non-git project can't recreate → raises."""
-    mocks.get_worktree_by_session.return_value = None
+def test_row_path_stale_but_session_backup_valid_resumes_on_backup(mocks):
+    row = _wt(status="active", wt_id="wt-3", branch="feat/foo")
+    row["worktree_path"] = ".worktrees/feat/foo-recreated"  # rewritten, gone on disk
+    mocks.get_worktree_by_session.return_value = row
     mocks.get_session.return_value = {
         "id": SESSION_ID,
-        "worktree_id": None,
-        "worktree_branch": "feat/recreate",
-        "worktree_path": ".worktrees/feat/recreate",
-        "project_id": "proj-1",
+        "worktree_id": "wt-3",
+        "worktree_branch": "feat/foo",
+        "worktree_path": ".worktrees/feat/foo",  # original snapshot, still on disk
     }
-    monkeypatch.setattr(
-        qo.database, "get_git_repository_by_project", MagicMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        qo.database, "get_project",
-        MagicMock(return_value={"id": "proj-1", "path": "/repo"}),
-    )
+    FakePath.existing = {"/abs/.worktrees/feat/foo"}
 
-    with pytest.raises(WorktreeUnavailableError):
-        _resolve_session_worktree_cwd(SESSION_ID, project=None)
+    working_dir, mode, info = _resolve_session_worktree_cwd(SESSION_ID, project=None)
 
-    mocks.wm.create_worktree.assert_not_called()
+    assert working_dir == "/abs/.worktrees/feat/foo"
+    assert mode == "worktree"
+    assert info == {"branch": "feat/foo", "base_branch": "main"}
+    mocks.wm.recreate_worktree.assert_not_called()

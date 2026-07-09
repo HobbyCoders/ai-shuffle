@@ -17,10 +17,15 @@ from typing import Optional, Dict, Any, Tuple, cast
 from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
 
 from app.db import database
+from app.db.base import WorktreeStatus
 from app.core.config import settings
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
-from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+from app.core.project_utils import (
+    get_project_working_dir,
+    get_worktree_working_dir,
+    resolve_existing_worktree_cwd,
+)
 from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
 
 # --- Re-exports for backward compatibility ---
@@ -51,24 +56,39 @@ logger = logging.getLogger(__name__)
 
 
 class WorktreeUnavailableError(Exception):
-    """Raised when a worktree-flagged session cannot resolve to a valid, active
-    worktree directory and we refuse to silently fall back to the main checkout.
+    """Raised when a worktree-flagged session's working directory no longer exists
+    on disk and we refuse to silently fall back to the main checkout.
 
     Running a worktree session in the project's main directory is never correct —
-    it lands the user's work on the wrong branch. Callers (the query engines)
-    convert this into a user-visible error event instead of executing in main.
+    it lands the user's work on the wrong branch. A worktree session only needs
+    its initial working directory to exist (exactly like a local session); we do
+    NOT recreate anything on the resume path. When the directory is genuinely
+    gone, callers (the query engines) convert this into a user-visible error
+    event instead of executing in main.
     """
 
-    def __init__(self, session_id: Optional[str], branch_name: Optional[str] = None, reason: str = ""):
+    def __init__(
+        self,
+        session_id: Optional[str],
+        branch_name: Optional[str] = None,
+        reason: str = "",
+        path: Optional[str] = None,
+    ):
         self.session_id = session_id
         self.branch_name = branch_name
         self.reason = reason
-        branch = f" for branch '{branch_name}'" if branch_name else ""
+        self.path = path
+        branch = f" (branch '{branch_name}')" if branch_name else ""
+        where = f" at {path}" if path else ""
         detail = f" ({reason})" if reason else ""
+        hint = (
+            f" — you can ask the agent there to recreate the worktree from "
+            f"branch '{branch_name}'" if branch_name else ""
+        )
         super().__init__(
-            f"The worktree for this session{branch} is unavailable and could not be "
-            f"recreated{detail}. Reopen the worktree or start a new session — refusing "
-            f"to run in the main checkout."
+            f"The working directory for this session{branch} no longer exists"
+            f"{where}{detail}. Start a new session{hint}. Refusing to run in the "
+            f"main checkout."
         )
 
 
@@ -77,12 +97,20 @@ def _resolve_session_worktree_cwd(
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Resolve the working directory for a session that may be a worktree session.
 
-    A worktree session must NEVER silently execute in the project's main checkout.
-    When the linked worktree is missing or not active we auto-recreate it from
-    its branch (last git state). Even when NO worktree record is linked to the
-    session, we create a fresh worktree from the session's backup branch column
-    and link it — worktree sessions are never a dead end. We only raise when git
-    genuinely fails, so we never fall back to running in main.
+    A worktree session resumes exactly like a local session: it only cares that
+    its initial working directory still exists on disk. We do NOT consult worktree
+    status, `.git` presence, or recreate/create any worktree on this path. Both
+    the worktree row's path and the session's backup ``worktree_path`` column are
+    tried (see ``resolve_existing_worktree_cwd``); the first existing directory
+    wins. A worktree session must still NEVER silently execute in the project's
+    main checkout, so when no directory is on disk we raise rather than fall back
+    to main.
+
+    If a stale ``status`` is observed on a worktree whose directory DOES exist
+    (e.g. a per-device ``sync-worktrees`` sweep flipped a healthy row to
+    ``deleted`` in shared Postgres), we self-heal the status back to ``active`` so
+    future session polls stop reporting the worktree as missing. Healing never
+    blocks the resume.
 
     Returns:
         (working_dir, execution_mode, worktree_info) when the session resolves to
@@ -90,123 +118,90 @@ def _resolve_session_worktree_cwd(
         session and the caller should use normal project/local resolution.
 
     Raises:
-        WorktreeUnavailableError: the session IS a worktree session but a valid,
-        active worktree could not be resolved or created (git failure).
+        WorktreeUnavailableError: the session IS a worktree session but its working
+        directory no longer exists on disk.
     """
-    # Lazy import to avoid a circular import (worktree_manager → query_engine).
-    from app.core.worktree_manager import worktree_manager
-
     worktree = cast(Optional[Dict[str, Any]], database.get_worktree_by_session(session_id))
-
-    def _build_info(wt: Dict[str, Any]):
-        return {
-            "branch": wt.get("branch_name", "unknown"),
-            "base_branch": wt.get("base_branch", "main"),
-        }
-
-    if (
-        worktree
-        and worktree.get("status") == "active"
-        and worktree_manager.is_worktree_valid(worktree)
-    ):
-        working_dir = get_worktree_working_dir(worktree)
-        logger.debug(f"[Options] Session {session_id} using worktree cwd: {working_dir}")
-        return working_dir, "worktree", _build_info(worktree)
+    session = cast(Optional[Dict[str, Any]], database.get_session(session_id))
 
     if worktree:
-        # Worktree row exists but is inactive (completed/deleted) or missing on
-        # disk. NEVER fall back to main — try to auto-recreate, else raise.
         branch_name = worktree.get("branch_name")
-        logger.warning(
-            f"[Options] Session {session_id} worktree {worktree.get('id')} is "
-            f"status='{worktree.get('status')}' / invalid on disk — attempting "
-            f"auto-recreate instead of falling back to main"
-        )
+        # Shared rule (resolve_existing_worktree_cwd): try the row's path, then
+        # the session's backup worktree_path — the row path is rewritten by
+        # adopt/recreate while the backup is a write-once snapshot, so they can
+        # diverge and BOTH must be tried. First existing dir wins.
+        working_dir = resolve_existing_worktree_cwd(worktree, session)
+
+        if working_dir:
+            # The cwd exists — that is all a session needs. Use it regardless of
+            # the row's status or whether a `.git` file is present.
+            if worktree.get("status") != WorktreeStatus.ACTIVE:
+                # Self-heal a stale status. A shared-DB per-device sync sweep can
+                # flip a still-healthy worktree to 'deleted'/'orphaned'; the dir is
+                # right here, so correct the row. Never let a healing failure block
+                # the resume.
+                try:
+                    database.update_worktree(worktree["id"], status=WorktreeStatus.ACTIVE)
+                    logger.info(
+                        "[Options] Session %s worktree %s status self-healed to "
+                        "'active' on resume; nothing was recreated (cwd exists at %s)",
+                        session_id, worktree.get("id"), working_dir,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "[Options] Session %s worktree %s status self-heal failed — "
+                        "continuing anyway since the cwd exists on disk",
+                        session_id, worktree.get("id"), exc_info=True,
+                    )
+            logger.debug(f"[Options] Session {session_id} using worktree cwd: {working_dir}")
+            return working_dir, "worktree", {
+                "branch": worktree.get("branch_name", "unknown"),
+                "base_branch": worktree.get("base_branch", "main"),
+            }
+
+        # Row exists but no candidate directory is on disk. Do NOT recreate — a
+        # session only needs a cwd; when it's missing, surface an honest error
+        # instead of silently falling back to main. Name the row's location so
+        # the message never lacks a path when the row had one.
         try:
-            recreated = worktree_manager.recreate_worktree(worktree["id"])
-        except Exception as e:  # noqa: BLE001
-            raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
-        if not (
-            recreated
-            and recreated.get("status") == "active"
-            and worktree_manager.is_worktree_valid(recreated)
-        ):
-            raise WorktreeUnavailableError(
-                session_id, branch_name, "recreated worktree is still not valid"
-            )
-        working_dir = get_worktree_working_dir(recreated)
-        logger.info(
-            f"[Options] Session {session_id} auto-recreated worktree "
-            f"{worktree['id']} at {working_dir}"
-        )
-        return working_dir, "worktree", _build_info(recreated)
+            missing_path = get_worktree_working_dir(worktree)
+        except Exception:  # noqa: BLE001 — corrupt/empty path row
+            missing_path = worktree.get("worktree_path")
+        raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # No worktree row found via the session join. This is either a normal local
     # session OR a worktree session whose worktree row was hard-deleted (the
     # session's worktree_id was NULLed but worktree_branch/path remain). Inspect
     # the session columns to tell them apart — a worktree-flagged session must
     # still not run in main.
-    session = database.get_session(session_id)
     if session and (
         session.get("worktree_id")
         or session.get("worktree_branch")
         or session.get("worktree_path")
     ):
-        # Worktree-flagged session with no linked record. Rather than dead-end,
-        # CREATE a fresh worktree from the branch (last git state) and link it.
-        # Only raise if git genuinely fails — we must NEVER silently run in main.
+        # Worktree-flagged session with no linked record. Resume on the backup
+        # path if it still exists on disk — same "cwd must exist" rule, no
+        # recreation. Otherwise raise; never run in main.
         branch_name = session.get("worktree_branch")
-        if not branch_name:
-            raise WorktreeUnavailableError(
-                session_id, None, "worktree session has no branch to recreate from"
+        working_dir = resolve_existing_worktree_cwd(None, session)
+        if working_dir:
+            logger.debug(
+                f"[Options] Session {session_id} using worktree backup cwd: {working_dir}"
             )
-        project_id = session.get("project_id")
-        if not project_id:
-            raise WorktreeUnavailableError(
-                session_id, branch_name, "worktree session has no project to recreate in"
-            )
-        try:
-            repo = database.get_git_repository_by_project(project_id)
-            project = database.get_project(project_id)
-            if not repo or not project:
-                raise WorktreeUnavailableError(
-                    session_id,
-                    branch_name,
-                    "project is not a git repository — cannot recreate worktree",
+            return working_dir, "worktree", {
+                "branch": branch_name or "unknown",
+                "base_branch": "main",
+            }
+        backup_path = session.get("worktree_path")
+        missing_path = None
+        if backup_path:
+            try:
+                missing_path = get_worktree_working_dir(
+                    {"worktree_path": backup_path, "id": session.get("worktree_id") or "unknown"}
                 )
-            # Detect whether the branch already exists locally; create a new
-            # branch off the default branch only when it doesn't (mirrors
-            # recreate_worktree's branch-existence detection).
-            main_dir = get_project_working_dir(project)
-            branches = worktree_manager.git_service.list_branches(
-                main_dir, include_remote=False
-            )
-            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
-            branch_exists = branch_name in local_branch_names
-            create_new = not branch_exists
-            base_branch = repo.get("default_branch", "main") if create_new else None
-            new_wt = worktree_manager.create_worktree(
-                project_id,
-                branch_name,
-                create_new_branch=create_new,
-                base_branch=base_branch,
-            )
-            database.update_session(session_id, worktree_id=new_wt["id"])
-        except WorktreeUnavailableError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
-        if not worktree_manager.is_worktree_valid(new_wt):
-            raise WorktreeUnavailableError(
-                session_id, branch_name, "recreated worktree is still not valid"
-            )
-        working_dir = get_worktree_working_dir(new_wt)
-        logger.info(
-            f"[Options] Session {session_id} had no linked worktree record — "
-            f"created+linked worktree {new_wt['id']} from branch "
-            f"'{branch_name}' at {working_dir}"
-        )
-        return working_dir, "worktree", _build_info(new_wt)
+            except Exception:  # noqa: BLE001
+                missing_path = backup_path
+        raise WorktreeUnavailableError(session_id, branch_name, path=missing_path)
 
     # Genuinely not a worktree session — caller uses project/local resolution.
     return None, None, None

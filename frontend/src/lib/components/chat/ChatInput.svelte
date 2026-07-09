@@ -241,7 +241,7 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || isUploading || $activeSession.isReopeningWorktree) return;
+		if (!finalPrompt.trim() || isUploading) return;
 
 		// Block sending while a worktree is being auto-created. The send button is
 		// already disabled during creation, but the Enter key path reaches here
@@ -582,18 +582,6 @@
 			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
 		{/if}
 
-		<!-- Worktree reopening spinner (shown briefly while recreating worktree) -->
-		{#if $activeSession.isReopeningWorktree}
-			<Banner severity="info" icon={false}>
-				<span style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;">
-					<svg class="w-4 h-4 flex-shrink-0 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-					</svg>
-					<span>Reopening worktree…</span>
-				</span>
-			</Banner>
-		{/if}
-
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 			<!-- Main Island -->
 			<div class="chat-island" bind:this={islandRef}>
@@ -631,7 +619,7 @@
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
 								initialContent={$activeSession.draft || ''}
-								disabled={!$claudeAuthenticated || $activeSession.isReopeningWorktree}
+								disabled={!$claudeAuthenticated}
 								onTextChange={(text) => {
 									inputValue = text;
 									// Also update plain text for autocomplete (without chip @path serialization)
@@ -647,7 +635,7 @@
 							<!-- Voice Input (delegated to VoiceRecorder component) -->
 							<VoiceRecorder
 								onTranscription={handleTranscription}
-								disabled={!$claudeAuthenticated || isUploading || $activeSession.isReopeningWorktree}
+								disabled={!$claudeAuthenticated || isUploading}
 								bind:isRecording
 								bind:isTranscribing
 							/>
@@ -689,8 +677,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.isReopeningWorktree}
-									title={$activeSession.isReopeningWorktree ? "Reopening worktree..." : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

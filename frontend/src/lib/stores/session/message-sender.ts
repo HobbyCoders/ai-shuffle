@@ -11,7 +11,7 @@ import type { ExecutionMode } from '../types';
 import { api, isApiError } from '$lib/api/client';
 import { toast } from '$lib/stores/toast';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
-import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree, reopenWorktree } from '$lib/api/git';
+import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -213,21 +213,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				return false;
 			}
 
-			// Worktree sessions never block. When the worktree is not materialized
-			// (worktreeDeleted), best-effort reopen it before sending — but the
-			// backend auto-recreates it from the branch on the query path
-			// regardless, so we never set a permanent error or return false here.
-			if (_state.worktreeDeleted) {
-				update(s => ({ ...s, isReopeningWorktree: true, error: null }));
-				if (_state.worktreeId && _state.project) {
-					try {
-						await reopenWorktree(_state.project, _state.worktreeId);
-					} catch {
-						/* best-effort: backend auto-recreates on the query path */
-					}
-				}
-				update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
-			}
+			// Worktree sessions never block on send: the backend resolves/validates
+			// the cwd on the query path (worktreeDeleted is a display-only badge).
 
 			// Cloud setup on first message — offload to the configured second
 			// install. Subsequent messages flow through the normal WS query path

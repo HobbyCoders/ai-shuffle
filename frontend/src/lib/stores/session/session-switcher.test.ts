@@ -68,7 +68,6 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		isCreatingWorktree: false,
 		worktreeError: null,
 		worktreeDeleted: false,
-		isReopeningWorktree: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		wsStreamContent: '',

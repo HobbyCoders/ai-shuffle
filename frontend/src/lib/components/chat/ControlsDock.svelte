@@ -159,7 +159,7 @@
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={!$claudeAuthenticated || isUploading || $activeSession.isReopeningWorktree}
+			disabled={!$claudeAuthenticated || isUploading}
 			class="dock-action-btn"
 			title={isUploading ? 'Uploading...' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
 		>

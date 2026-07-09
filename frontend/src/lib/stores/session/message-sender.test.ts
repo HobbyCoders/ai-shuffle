@@ -41,7 +41,6 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		worktreeCreateNewBranch: false,
 		selectedWorktreeBranch: null,
 		isCreatingWorktree: false,
-		isReopeningWorktree: false,
 		worktreeDeleted: false,
 		worktreeError: null,
 		error: null,
@@ -269,13 +268,14 @@ describe('message-sender "Send now" flags the interrupt follow-up query', () => 
 });
 
 /**
- * Worktree sessions are never a dead end. A session whose worktree folder was
- * cleaned up (worktreeDeleted) must NOT block the send or surface a permanent
- * "worktree deleted" error — it best-effort reopens, clears the flag, and sends
- * the query (carrying worktree_id) so the backend transparently recreates the
- * worktree from its branch on the query path.
+ * Worktree sessions resume like local sessions: they only need their initial
+ * working directory to still exist on disk (enforced backend-side on the query
+ * path). The frontend must NOT try to reopen/recreate the worktree before
+ * sending. `worktreeDeleted` is now a purely informational "dir missing on disk"
+ * badge and no longer gates the send — the message goes out (carrying
+ * worktree_id) untouched, and no reopen call is made.
  */
-describe('message-sender cleaned-up worktree never blocks', () => {
+describe('message-sender worktreeDeleted no longer triggers a pre-send reopen', () => {
 	beforeEach(() => {
 		vi.mocked(reopenWorktree).mockReset();
 		vi.mocked(reopenWorktree).mockResolvedValue(undefined as never);
@@ -293,38 +293,21 @@ describe('message-sender cleaned-up worktree never blocks', () => {
 		});
 	}
 
-	it('best-effort reopens, clears the flag, and sends the query', async () => {
+	it('sends the query without any reopen/recreate call', async () => {
 		const { deps, wsConn, getState } = makeDeps(deletedWorktreeState());
 		const sender = createMessageSender(deps);
 
 		const result = await sender.sendMessage('keep going');
 
 		expect(result).toBe(true);
-		// No permanent block: flag cleared, spinner reset, no error set.
-		expect(getState().worktreeDeleted).toBe(false);
-		expect(getState().isReopeningWorktree).toBe(false);
+		// CRITICAL regression: the removed status-driven recreate machinery must
+		// never fire on send.
+		expect(reopenWorktree).not.toHaveBeenCalled();
 		expect(getState().error).toBeNull();
-		// Best-effort reopen attempted with the session's worktree.
-		expect(reopenWorktree).toHaveBeenCalledWith('proj-1', 'wt-1');
-		// The query went out carrying worktree_id so the backend recreates it.
+		// The query went out carrying worktree_id; the backend resolves the cwd.
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
 		expect((querySends[0][0] as any).worktree_id).toBe('wt-1');
-	});
-
-	it('still sends when the best-effort reopen fails (backend auto-recreates)', async () => {
-		vi.mocked(reopenWorktree).mockRejectedValueOnce(new Error('reopen 500'));
-		const { deps, wsConn, getState } = makeDeps(deletedWorktreeState());
-		const sender = createMessageSender(deps);
-
-		const result = await sender.sendMessage('keep going anyway');
-
-		expect(result).toBe(true);
-		expect(getState().worktreeDeleted).toBe(false);
-		expect(getState().isReopeningWorktree).toBe(false);
-		expect(getState().error).toBeNull();
-		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
-		expect(querySends).toHaveLength(1);
 	});
 });
 
