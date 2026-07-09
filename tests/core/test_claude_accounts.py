@@ -34,10 +34,12 @@ def oauth_tmp(tmp_path):
 
     inst = DirectOAuth(config_dir=tmp_path)
     svc._last_synced_mtime = None
+    svc._last_used_stamp_monotonic = None
     with patch("app.core.claude_accounts.direct_oauth", inst), \
             patch("app.core.oauth.direct_oauth", inst):
         yield inst
     svc._last_synced_mtime = None
+    svc._last_used_stamp_monotonic = None
     set_post_write_hook(None)
 
 
@@ -501,3 +503,96 @@ class TestRename:
         from app.db import database as db
         _set_key(db)
         assert svc.rename_account("nope", "x")["error"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# last_used_at (per-account usage stamp)
+# ---------------------------------------------------------------------------
+
+class TestLastUsed:
+    """last_used_at must advance per-account for the account actually in use,
+    persist in the DB, and never advance for idle siblings.
+
+    Regression: it used to be written ONLY on an explicit switch, so the account
+    you were actually using never had its timestamp updated — every account
+    showed the same stale/blank "last used" and real usage was never recorded.
+    """
+
+    def _seed_three(self, svc, db, oauth_tmp):
+        _set_key(db)
+        _write_file(oauth_tmp, _oauth_dict(access="A"))
+        a = svc.seed_from_credentials_file()
+        for name in ("acct-b", "acct-c"):
+            o = _oauth_dict(access=name)
+            enc = encryption.encrypt_value(json.dumps(o))
+            db.create_claude_account(
+                account_id=name, name=name, credentials=enc,
+                credential_fingerprint=svc._fingerprint(o),
+                expires_at=o["expiresAt"], has_refresh_token=True,
+            )
+        return a
+
+    def test_switch_stamps_only_incoming(self, mock_db, oauth_tmp):
+        """Switching stamps the INCOMING account only; siblings stay untouched."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        a = self._seed_three(svc, db, oauth_tmp)
+
+        svc.switch_account("acct-b")
+        rows = {r["id"]: r for r in db.get_all_claude_accounts()}
+        assert rows["acct-b"]["last_used_at"] is not None
+        assert rows["acct-c"]["last_used_at"] is None
+        assert rows[a]["last_used_at"] is None  # switched away, not "used" by it
+
+    def test_use_advances_only_active(self, mock_db, oauth_tmp):
+        """A hot status poll / post-refresh sync-back advances ONLY the active
+        account — not idle siblings (the core of the reported bug)."""
+        import time
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        a = self._seed_three(svc, db, oauth_tmp)
+
+        svc.switch_account("acct-b")
+        b_after_switch = db.get_claude_account("acct-b")["last_used_at"]
+
+        # Simulate the active account (B) being used: the file on disk holds B's
+        # credential and a status endpoint runs sync-back.
+        svc._last_used_stamp_monotonic = None  # clear throttle (time passed)
+        time.sleep(0.01)
+        assert svc.sync_back_active_account() in ("clean", "synced")
+
+        rows = {r["id"]: r for r in db.get_all_claude_accounts()}
+        assert rows["acct-b"]["last_used_at"] != b_after_switch  # advanced
+        assert rows["acct-c"]["last_used_at"] is None             # idle sibling
+        assert rows[a]["last_used_at"] is None                    # idle sibling
+
+    def test_record_active_account_used_persists_in_db(self, mock_db, oauth_tmp):
+        """The stamp lives in the DB (survives module-state reset ~ restart)."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        self._seed_three(svc, db, oauth_tmp)
+        svc.switch_account("acct-b")
+
+        svc.record_active_account_used()
+        saved = db.get_claude_account("acct-b")["last_used_at"]
+        assert saved is not None
+
+        # Simulate a process restart: wipe in-memory state, re-read from DB.
+        svc._last_synced_mtime = None
+        svc._last_used_stamp_monotonic = None
+        assert db.get_claude_account("acct-b")["last_used_at"] == saved
+
+    def test_record_throttled(self, mock_db, oauth_tmp):
+        """Repeated in-use signals are throttled to bound the DB write rate."""
+        import time
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        self._seed_three(svc, db, oauth_tmp)
+        svc.switch_account("acct-b")
+
+        svc._last_used_stamp_monotonic = None
+        svc.record_active_account_used()
+        first = db.get_claude_account("acct-b")["last_used_at"]
+        time.sleep(0.01)
+        svc.record_active_account_used()  # within throttle window → no-op
+        assert db.get_claude_account("acct-b")["last_used_at"] == first

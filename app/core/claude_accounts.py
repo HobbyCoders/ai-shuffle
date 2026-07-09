@@ -41,6 +41,14 @@ _last_synced_mtime: Optional[float] = None
 _last_pending_warn: float = 0.0
 _PENDING_WARN_INTERVAL = 300.0  # seconds
 
+# Throttle for last_used_at stamping. record_active_account_used() runs from the
+# hot sync-back path (every status poll / after every token refresh), so we cap
+# the DB write to at most once per interval. This is a write-rate optimization
+# only — the authoritative last_used_at value lives in the DB row, so losing this
+# in-memory stamp on restart merely means the next use re-stamps immediately.
+_last_used_stamp_monotonic: Optional[float] = None
+_USED_STAMP_THROTTLE = 60.0  # seconds
+
 # Suppresses sync_back during a deliberate switch write. switch_account writes
 # the INCOMING account's credentials to disk BEFORE it updates the active
 # pointer; the post-write hook (sync_back_active_account) would otherwise fire
@@ -107,13 +115,18 @@ def _oauth_expires_at(oauth_dict: Dict[str, Any]) -> Optional[int]:
         return None
 
 
-def sync_back_active_account() -> str:
+def sync_back_active_account(record_usage: bool = True) -> str:
     """Reconcile the on-disk credentials file back into the active account row.
 
     Returns one of: ``"synced"``, ``"clean"``, ``"pending"``, ``"no_active"``,
     ``"no_file"``. NEVER raises (runs downstream of token refresh and on hot
     status endpoints). The whole body is wrapped so any DB/unexpected error is
     logged and swallowed.
+
+    ``record_usage`` also stamps the active account's ``last_used_at`` (throttled)
+    when the file holds a live credential for it. The pre-switch sync-back passes
+    ``record_usage=False`` so switching stamps only the INCOMING account, not the
+    one being switched away from.
     """
     global _last_synced_mtime, _last_pending_warn
     if _suppress_sync_back:
@@ -132,6 +145,14 @@ def sync_back_active_account() -> str:
             # File missing/unreadable/empty — NEVER overwrite the row with
             # nothing (a force_reauth may be mid-flight, having deleted it).
             return "no_file"
+
+        # The active account has a live credential on disk — it is the account
+        # currently in use on this install. Record usage (throttled) so
+        # last_used_at reflects real activity, not just the last manual switch.
+        # Only the ACTIVE account's timestamp advances; siblings keep the time
+        # they were last active.
+        if record_usage:
+            record_active_account_used(active_id)
 
         # Fast-path: file unchanged since our last sync check.
         mtime = _file_mtime()
@@ -186,6 +207,33 @@ def sync_back_active_account() -> str:
         return "clean"
 
 
+def record_active_account_used(account_id: Optional[str] = None) -> None:
+    """Stamp the active account's ``last_used_at`` to now (throttled).
+
+    Called from the in-use path (sync-back, which runs on hot status endpoints
+    and downstream of every token refresh) so the displayed "last used" reflects
+    real activity rather than only the last manual switch. ONLY the active
+    account is stamped, so siblings keep the time they were last active. The
+    throttle bounds the write rate; the value itself persists in the DB. Never
+    raises (shares the hot path with refresh/status).
+    """
+    global _last_used_stamp_monotonic
+    now = time.monotonic()
+    if (
+        _last_used_stamp_monotonic is not None
+        and now - _last_used_stamp_monotonic < _USED_STAMP_THROTTLE
+    ):
+        return
+    try:
+        active_id = account_id or get_active_account_id()
+        if not active_id:
+            return
+        db.touch_claude_account_last_used(active_id)
+        _last_used_stamp_monotonic = now
+    except Exception as e:  # noqa: BLE001 — must never break refresh/status
+        logger.debug(f"record_active_account_used failed (ignored): {e}")
+
+
 def _reset_mtime_cache() -> None:
     """Stamp the mtime cache to the current file mtime (after a known write)."""
     global _last_synced_mtime
@@ -227,7 +275,9 @@ def switch_account(account_id: str) -> Dict[str, Any]:
     #    asyncio lock. Worst case a concurrent refresh overwrites the file with
     #    the outgoing account's refreshed token; the next status sync-back
     #    reconciles it — transient, accepted for v1.
-    sync_back_active_account()
+    #    record_usage=False: the explicit touch below stamps the INCOMING account;
+    #    the outgoing account should not be re-stamped as "used" by the switch.
+    sync_back_active_account(record_usage=False)
 
     # 2. Decrypt the target account's stored credential.
     oauth_dict = _row_credentials_to_dict(row)
