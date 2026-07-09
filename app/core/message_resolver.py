@@ -209,7 +209,12 @@ class MessageResolver:
                     sdk_session_id, working_dir, use_cache=False
                 )
                 if messages is not None:
-                    return messages
+                    # Raw transcripts record a profile only on user rows; walk the
+                    # turns so seeded history bubbles keep their OWN profile while
+                    # the new turn streams (else they'd fall back to the live
+                    # selector and re-label on a profile switch).
+                    from app.core.cost_utils import attach_turn_profile_ids
+                    return attach_turn_profile_ids(session_id, messages)
                 # Store parse FAILED (raised). Do NOT silently seed [] — a failed
                 # parse here used to drop the whole transcript for the duration of
                 # the turn (only the current user prompt + new output survived the
@@ -223,7 +228,10 @@ class MessageResolver:
                     sdk_session_id,
                     working_dir or _default_working_dir(),
                 )
-                return messages
+                # See the postgres_only branch above: attach per-turn profile so
+                # seeded history keeps its own attribution during the new turn.
+                from app.core.cost_utils import attach_turn_profile_ids
+                return attach_turn_profile_ids(session_id, messages)
             except Exception as e:
                 logger.warning(f"Failed to load history for live store init: {e}")
 

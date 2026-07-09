@@ -2140,18 +2140,14 @@ class ChatWebSocketHandler:
         # Post-processing: merge profile_id for JSONL-sourced messages
         # (DB and live_store messages already include profile_id). Consume the
         # ordered per-content queue so each user message gets its own profile even
-        # when the same prompt repeats under a changed profile. Emit both the
-        # snake_case and camelCase keys the frontend may read.
+        # when the same prompt repeats under a changed profile, and carry that
+        # turn's profile onto its assistant/thinking rows (JSONL stores none) so
+        # each bubble keeps the profile that produced it instead of re-labelling to
+        # the session's CURRENT profile on a switch. Emit both the snake_case and
+        # camelCase keys the frontend may read.
         if resolved.source == "jsonl":
-            from app.core.cost_utils import build_profile_queues
-            profile_queues = build_profile_queues(session_id)
-            for msg in messages:
-                if msg.get("role") == "user":
-                    queue = profile_queues.get(msg.get("content", ""))
-                    if queue:
-                        pid = queue.popleft()
-                        msg["profile_id"] = pid
-                        msg["profileId"] = pid
+            from app.core.cost_utils import attach_turn_profile_ids
+            attach_turn_profile_ids(session_id, messages)
 
         # Enrich session with usage/token data from resolver
         if resolved.usage:
@@ -3365,7 +3361,9 @@ class ChatWebSocketHandler:
         ctx.debug(logger, f"Loaded {len(initial_messages)} initial messages via MessageResolver")
 
         # Start live session with existing messages
-        await live_session_store.start_streaming(session_id, initial_messages)
+        await live_session_store.start_streaming(
+            session_id, initial_messages, profile_id=profile_id
+        )
 
         # Add user message to live store
         user_message_id = f"user-{uuid.uuid4()}"

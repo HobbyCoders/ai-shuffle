@@ -156,6 +156,39 @@ def build_profile_queues(session_id: str) -> Dict[str, "deque[str]"]:
     }
 
 
+def attach_turn_profile_ids(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    *,
+    both_keys: bool = True,
+) -> List[Dict[str, Any]]:
+    """Stamp each message with the profile that produced its turn, in-place.
+
+    Raw JSONL/store transcripts record a profile only on USER rows; the
+    assistant / thinking / tool rows that follow it inherit that turn's
+    profile. Walk the messages in order tracking the current turn's profile
+    (popped positionally from the per-content queue on each user row) and
+    label every row of that turn with it. Without this the UI falls back to
+    the session's CURRENT selector and re-labels historical bubbles whenever
+    the user switches profiles — the exact bug this addresses.
+
+    A user row whose content has no matching DB profile (unresolved turn)
+    leaves ``current_turn_profile`` None; those rows are left untouched rather
+    than mislabelled. Returns the same list for chaining.
+    """
+    profile_queues = build_profile_queues(session_id)
+    current_turn_profile: Optional[str] = None
+    for m in messages:
+        if m.get("role") == "user":
+            queue = profile_queues.get(m.get("content", ""))
+            current_turn_profile = queue.popleft() if queue else None
+        if current_turn_profile is not None:
+            m["profile_id"] = current_turn_profile
+            if both_keys:
+                m["profileId"] = current_turn_profile
+    return messages
+
+
 def update_profile_map(session_id: str, content: str, profile_id: str) -> None:
     """
     Update the profile map cache with a new user message.

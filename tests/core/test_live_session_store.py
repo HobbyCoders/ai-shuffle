@@ -1632,3 +1632,71 @@ class TestTruncateAfterUuid:
         # nothing new since the snapshot it just received → None.
         post_trim_since = second["last_update_id"]
         assert store.get_session_since("session-1", post_trim_since) is None
+
+
+# =============================================================================
+# Per-message profile attribution
+# =============================================================================
+
+class TestProfileAttribution:
+    """Each bubble must be labelled by the profile that produced it, not the
+    session's live selector. Regression for the 'switch profile re-labels every
+    assistant message' bug."""
+
+    @pytest.mark.asyncio
+    async def test_streamed_assistant_and_thinking_carry_turn_profile(self, store):
+        """Messages produced during the turn are stamped with the turn's profile."""
+        await store.start_streaming("s1", initial_messages=[], profile_id="prof-current")
+        await store.start_assistant_message("s1", "asst-1")
+        await store.append_text("s1", "hello")
+        await store.append_thinking("s1", "hmm")
+
+        by_type = {m.type: m for m in store.get_session("s1").messages}
+        assert by_type["text"].profile_id == "prof-current"
+        assert by_type["thinking"].profile_id == "prof-current"
+        # And it survives serialization (the shape the client actually reads).
+        dumped = store.get_session_dict("s1")["messages"]
+        assert all(
+            m["profile_id"] == "prof-current"
+            for m in dumped
+            if m["type"] in ("text", "thinking")
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_text_without_prior_start_carries_turn_profile(self, store):
+        """The create-branch of append_text (no prior streaming text) stamps too."""
+        await store.start_streaming("s1", initial_messages=[], profile_id="prof-x")
+        await store.append_text("s1", "direct text")
+
+        text = next(m for m in store.get_session("s1").messages if m.type == "text")
+        assert text.profile_id == "prof-x"
+
+    @pytest.mark.asyncio
+    async def test_seeded_history_keeps_its_own_profile_not_the_new_turn(self, store):
+        """History bubbles keep their seeded profile while a NEW-profile turn
+        streams — they must NOT re-label to the current turn's profile."""
+        history = [
+            {"id": "u0", "role": "user", "content": "old q", "profile_id": "prof-old"},
+            {"id": "a0", "role": "assistant", "type": "text",
+             "content": "old a", "profile_id": "prof-old"},
+        ]
+        await store.start_streaming("s1", initial_messages=history, profile_id="prof-new")
+        await store.start_assistant_message("s1", "a1")
+        await store.append_text("s1", "new a")
+
+        dumped = store.get_session_dict("s1")["messages"]
+        seeded = next(m for m in dumped if m["id"] == "a0")
+        streamed = next(m for m in dumped if m["id"] == "a1")
+        assert seeded["profile_id"] == "prof-old"
+        assert streamed["profile_id"] == "prof-new"
+
+    @pytest.mark.asyncio
+    async def test_no_profile_id_emitted_when_turn_has_none(self, store):
+        """A turn with no profile (legacy/backfill) emits no profile_id key
+        rather than a null — matching the optional-field contract."""
+        await store.start_streaming("s1", initial_messages=[], profile_id=None)
+        await store.start_assistant_message("s1", "a1")
+        await store.append_text("s1", "hi")
+
+        dumped = store.get_session_dict("s1")["messages"]
+        assert all("profile_id" not in m for m in dumped)

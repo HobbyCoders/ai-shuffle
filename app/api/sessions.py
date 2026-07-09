@@ -522,14 +522,19 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
                 # Transform to expected format for SessionWithMessages
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
+                current_turn_profile = None
                 for i, m in enumerate(jsonl_messages):
-                    # Resolve this message's profile (user rows only) by consuming
-                    # the ordered per-content queue built from the DB user rows.
-                    msg_profile_id = None
+                    # Resolve this message's profile. A user row reads its OWN
+                    # profile from the ordered per-content queue built from the DB
+                    # user rows; that profile then carries to the turn's
+                    # assistant/thinking rows (which the JSONL transcript stores
+                    # without a profile) so each bubble keeps the profile that
+                    # produced it instead of falling back to the session's CURRENT
+                    # profile when the user switches selection.
                     if m.get("role") == "user":
                         queue = profile_queues.get(m.get("content", ""))
-                        if queue:
-                            msg_profile_id = queue.popleft()
+                        current_turn_profile = queue.popleft() if queue else None
+                    msg_profile_id = current_turn_profile
                     # Timestamps live in metadata (not Pydantic datetime fields);
                     # the frontend reads them directly from metadata for display.
                     msg_data = {
@@ -1095,12 +1100,6 @@ async def get_live_session(
                     "metadata",
                 )
 
-                # Per-message profile resolution — same ordered-queue merge as
-                # GET /{id}: JSONL entries carry no DB row id, so each user
-                # message consumes its content's queue built from the DB rows.
-                from app.core.cost_utils import build_profile_queues
-                profile_queues = build_profile_queues(session_id)
-
                 # Transform to live format
                 for m in jsonl_messages:
                     msg = {
@@ -1114,13 +1113,16 @@ async def get_live_session(
                         value = m.get(field)
                         if value is not None:
                             msg[field] = value
-
-                    if msg["role"] == "user":
-                        queue = profile_queues.get(msg["content"])
-                        if queue:
-                            msg["profile_id"] = queue.popleft()
-
                     messages.append(msg)
+
+                # Per-message profile resolution — same ordered-queue merge as
+                # GET /{id}: JSONL entries carry no DB row id, so each user
+                # message consumes its content's queue built from the DB rows,
+                # and that profile carries to the turn's assistant/thinking rows
+                # so each bubble keeps the profile that produced it (rather than
+                # re-labelling to the session's CURRENT profile on a switch).
+                from app.core.cost_utils import attach_turn_profile_ids
+                attach_turn_profile_ids(session_id, messages)
 
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")

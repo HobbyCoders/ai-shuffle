@@ -47,6 +47,20 @@ def test_assistant_row_surfaces_jsonl_uuid():
     assert msg["role"] == "assistant"
 
 
+def test_assistant_and_thinking_rows_surface_profile_id():
+    """Assistant/thinking rows carry their own profile_id so the UI labels each
+    bubble with the profile that produced it — not the session's current one."""
+    asst = _transform_row(_row(role="assistant", content="hi", profile_id="p-1"))
+    assert asst["profile_id"] == "p-1"
+
+    think = _transform_row(_row(role="thinking", content="hmm", profile_id="p-1"))
+    assert think["profile_id"] == "p-1"
+
+    # A row written before assistant-stamping (NULL) must stay None, not crash.
+    legacy = _transform_row(_row(role="assistant", content="hi"))
+    assert legacy["profile_id"] is None
+
+
 def test_subagent_row_surfaces_agent_usage_from_meta():
     """A persisted subagent card exposes its stored agent_usage as agentUsage."""
     usage = {"total_tokens": 42, "tool_uses": 3, "duration_ms": 100}

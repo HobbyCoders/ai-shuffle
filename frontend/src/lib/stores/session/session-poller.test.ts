@@ -209,6 +209,10 @@ describe('session-poller · loadSession reconciliation', () => {
 				messages: [
 					{ id: 'msg-camel', role: 'user', type: 'text', content: 'q1', streaming: false, profileId: 'profile-a' },
 					{ id: 'msg-snake', role: 'user', type: 'text', content: 'q2', streaming: false, profile_id: 'profile-b' },
+					// Assistant reply now carries its turn's profile (snake_case from
+					// the /live DB fast path) — this is what stops assistant bubbles
+					// re-labelling to the current selection on a profile switch.
+					{ id: 'msg-asst', role: 'assistant', type: 'text', content: 'reply', streaming: false, profile_id: 'profile-a' },
 					{ id: 'msg-none', role: 'assistant', type: 'text', content: 'a', streaming: false },
 				],
 			})
@@ -219,6 +223,7 @@ describe('session-poller · loadSession reconciliation', () => {
 		const byId = new Map(session!.messages.map(m => [m.id, m]));
 		expect(byId.get('msg-camel')!.profileId).toBe('profile-a');
 		expect(byId.get('msg-snake')!.profileId).toBe('profile-b');
+		expect(byId.get('msg-asst')!.profileId).toBe('profile-a');
 		expect(byId.get('msg-none')!.profileId).toBeUndefined();
 	});
 
