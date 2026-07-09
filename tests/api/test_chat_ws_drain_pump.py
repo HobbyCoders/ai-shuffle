@@ -768,6 +768,127 @@ async def test_pump_completed_update_then_notification_unparks_exactly_once():
     assert pending[0]["summary"] == "done it"  # came from the notification frame
 
 
+def _system_chip_events(captured):
+    """The subset of captured dispatch_event payloads that render a system chip."""
+    return [
+        e for e in captured
+        if e.get("type") == "system" and e.get("subtype") == "task_updated"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pump_synthesizes_task_updated_chip_from_notification_alone():
+    """RC2 (parked 'Task Updated' chip): a NORMAL background completion between
+    turns arrives ONLY as a TaskNotificationMessage (no task_updated patch). The
+    pump must SYNTHESIZE the same ``{"type":"system","subtype":"task_updated"}``
+    chip the in-stream loop renders so a completion landing while PARKED drops a
+    visible card — the Part-2 failure this fix closes."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
+
+    client = _FakeClient(
+        [_notif("task-1", status="completed", uuid="u-1", tool_use_id="tu-1",
+                summary="done it")],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    captured = []
+
+    async def _capture(event, ectx, st):
+        captured.append(event)
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # (a) EXACTLY one 'task_updated' system chip synthesized for the completion.
+    chips = _system_chip_events(captured)
+    assert len(chips) == 1
+    chip = chips[0]
+    data = chip["data"]
+    # (b) shape the frontend SystemMessage.svelte 'task_updated' case reads:
+    #     data.task_id, data.status / data.patch.status, data.summary.
+    assert data["task_id"] == "task-1"
+    assert data["status"] == "completed"
+    assert data["patch"]["status"] == "completed"
+    assert data["summary"] == "done it"
+    # (c) regression: the unpark still fired (Part 1 still works).
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pump_no_double_chip_when_update_and_notification_both_arrive():
+    """Dedup: when a completion emits BOTH a TaskUpdatedMessage(completed) AND a
+    TaskNotificationMessage(completed) — the maintainers' 'normal completion'
+    model — exactly ONE 'task_updated' chip renders (the generic converter's chip
+    from the update; the notification synth must NOT double it)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient(
+        [
+            _updated("task-1", status="completed", uuid="uu-1"),
+            _notif("task-1", status="completed", uuid="u-1", tool_use_id="tu-1",
+                   summary="done it"),
+        ],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    captured = []
+
+    async def _capture(event, ectx, st):
+        captured.append(event)
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Exactly ONE chip for task-1 despite two terminal frames.
+    chips = _system_chip_events(captured)
+    assert len(chips) == 1
+    handler._deliver_unpark.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pump_suppressed_foreground_notification_synthesizes_no_chip():
+    """A synchronous sub-agent's at-rest notification is suppress-foreground'd (no
+    unpark) — it must ALSO synthesize no chip, mirroring the in-stream path where
+    a foreground/synchronous sub-agent renders no standalone 'Task Updated' card."""
+    task_registry.start_task("sess-1", "task-1", "agent", "sync sub-agent")
+    # NO mark_background_launch → the notification is suppressed as foreground.
+
+    client = _FakeClient(
+        [_notif("task-1", status="completed", uuid="u-1", tool_use_id="tu-x",
+                summary="inline")],
+        hang=False,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    captured = []
+
+    async def _capture(event, ectx, st):
+        captured.append(event)
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert _system_chip_events(captured) == []
+    handler._deliver_unpark.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_pump_ignores_non_terminal_task_updated():
     """A 'running'/'pending' TaskUpdatedMessage must neither complete the task nor

@@ -414,6 +414,47 @@ def _task_status_events_from_message(message: Any) -> List[Dict[str, Any]]:
     }]
 
 
+def _task_status_event_from_notification(message: Any) -> List[Dict[str, Any]]:
+    """Synthesize a parked-state "Task Updated" chip from a terminal
+    ``TaskNotificationMessage``.
+
+    RC2 Part-2 gap: a NORMALLY-completed background sub-agent reports its terminal
+    state BETWEEN turns as a ``TaskNotificationMessage`` (carrying status + summary
+    + output_file) — NOT as a ``TaskUpdatedMessage``. In-stream that notification is
+    consumed by ``handle_task_notification`` (which completes the sub-agent node but
+    deliberately renders NO card), so the only user-visible completion chip comes
+    from the ``task_updated`` SystemMessage branch. While PARKED there is no such
+    branch, so a completion that arrives only as a notification produced no chip
+    (the observed bug). This mirrors the in-stream ``task_updated`` chip shape from
+    a notification so the drain pump can dispatch it through the identical
+    ``handle_system`` -> ``add_system_message`` chain.
+
+    The synthesized ``data`` matches exactly what the frontend
+    ``SystemMessage.svelte`` ``task_updated`` case reads: ``task_id``, ``status``
+    (also mirrored under ``patch.status`` since that branch prefers the patch), and
+    ``summary`` (its description fallback). Returns ``[]`` for anything that is not
+    a ``TaskNotificationMessage``.
+    """
+    if not isinstance(message, TaskNotificationMessage):
+        return []
+    status = getattr(message, "status", None)
+    status_str = status.value if hasattr(status, "value") else (
+        str(status) if status is not None else None
+    )
+    return [{
+        "type": "system",
+        "subtype": "task_updated",
+        "data": {
+            "task_id": getattr(message, "task_id", None),
+            "status": status_str,
+            "summary": getattr(message, "summary", None),
+            # The frontend prefers patch.status; mirror it so the chip renders the
+            # same "task xxx / <status>" content the in-stream task_updated card does.
+            "patch": {"status": status_str},
+        },
+    }]
+
+
 def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
     """Read a completed background task's full result off the local disk.
 
