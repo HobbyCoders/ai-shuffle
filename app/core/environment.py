@@ -17,6 +17,7 @@ from app.db import database
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
+from app.core.model_registry import has_1m_context
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,22 @@ def inject_claude_code_auth(env: Dict[str, str]) -> Dict[str, str]:
         )
     # No key → inject nothing; OAuth account credentials remain in effect.
     return env
+
+
+def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
+    """Force the standard 200k context window unless ``model`` explicitly opted
+    into the 1M window via the app's ``[1m]`` suffix.
+
+    The bundled Claude CLI runs natively-1M models (e.g. ``fable`` →
+    ``claude-fable-5``) AND every ``[1m]`` variant at 1M *by default*; the sole
+    lever that forces the standard 200k window back on is the
+    ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` env var (truthy → 200k, per the CLI's
+    boolean-env parser). We set it explicitly in both directions so a value
+    inherited from the server's own environment can never leak the wrong window
+    into a spawn — and so a bare ``fable``/custom native-1M model does not
+    silently run at 1M when the user never enabled it.
+    """
+    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if has_1m_context(model) else "1"
 
 
 def _build_env_with_ai_tools(
