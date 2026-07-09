@@ -250,13 +250,20 @@
 	// forcing the {#each} to re-diff every message. That made streaming get
 	// progressively choppier as a session grew. A plain object (not $state)
 	// avoids Svelte 5 compiling these into reactive signals inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; items: DisplayItem[] } =
-		{ messages: null, isStreaming: false, items: [] };
+	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; groupingEnabled: boolean; items: DisplayItem[] } =
+		{ messages: null, isStreaming: false, groupingEnabled: true, items: [] };
 
 	const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const isStreamingNow = $activeSession.isStreaming;
-		if (messages === _displayCache.messages && isStreamingNow === _displayCache.isStreaming) {
+		// When grouping is off, groupable tools fall through to the plain
+		// single-message path (system grouping is unaffected by this toggle).
+		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
+		if (
+			messages === _displayCache.messages
+			&& isStreamingNow === _displayCache.isStreaming
+			&& groupingEnabled === _displayCache.groupingEnabled
+		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
 			// cached array reference so downstream {#each} skips re-diffing.
 			return _displayCache.items;
@@ -279,7 +286,7 @@
 
 			if (msg.id) seenIds.add(msg.id);
 
-			if (isGroupableTool(msg)) {
+			if (groupingEnabled && isGroupableTool(msg)) {
 				// Only group strictly consecutive groupable tools.
 				// Any assistant text/thinking between tools breaks the group.
 				const tools: ChatMessage[] = [msg];
@@ -328,6 +335,7 @@
 
 		_displayCache.messages = messages;
 		_displayCache.isStreaming = isStreamingNow;
+		_displayCache.groupingEnabled = groupingEnabled;
 		_displayCache.items = items;
 		return items;
 	});

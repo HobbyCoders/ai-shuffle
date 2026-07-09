@@ -51,6 +51,14 @@
 			</div>
 		</div>
 		<div class="set-row">
+			<div class="lab"><h4>Group tool calls</h4><p>Collapse consecutive tool calls into one expandable card.</p></div>
+			<div class="ctl">
+				<button type="button" class="switch" class:on={chatPrefs.groupToolCalls}
+					role="switch" aria-checked={chatPrefs.groupToolCalls} aria-label="Group tool calls"
+					onclick={() => chatPreferences.setGroupToolCalls(!chatPrefs?.groupToolCalls)}><i></i></button>
+			</div>
+		</div>
+		<div class="set-row">
 			<div class="lab"><h4>Expand todo list by default</h4><p>Task list starts expanded.</p></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.todosStartExpanded}
