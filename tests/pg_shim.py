@@ -222,10 +222,34 @@ class ShimConnection:
         return cur
 
     def commit(self):
-        return self._conn.commit()
+        return self._commit_or_rollback(self._conn.commit)
 
     def rollback(self):
-        return self._conn.rollback()
+        return self._commit_or_rollback(self._conn.rollback)
+
+    @staticmethod
+    def _commit_or_rollback(fn):
+        """Run commit/rollback with psycopg2's idle-is-a-no-op semantics.
+
+        psycopg2 (and Postgres) treat ``commit()``/``rollback()`` on a
+        connection with no open transaction as a harmless no-op — the real
+        ``_PgDictConnection`` the app uses does exactly that. SQLite instead
+        raises ``OperationalError: cannot commit - no transaction is active``.
+
+        The harness shares ONE ``check_same_thread=False`` connection across
+        Starlette's ``BaseHTTPMiddleware`` task group, so a read-only
+        ``get_db()`` body (which still calls ``conn.commit()`` on exit) can
+        reach commit after another task already ended the (auto-)transaction —
+        a race that surfaces only under interleaving and flakes CI. Swallow ONLY
+        that idle-transaction error, matching psycopg2; any real failure
+        (locked db, disk full, …) still propagates.
+        """
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "no transaction is active" in str(e):
+                return None
+            raise
 
     def close(self):
         return self._conn.close()
