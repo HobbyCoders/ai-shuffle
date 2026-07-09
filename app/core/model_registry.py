@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
-ModelFamily = Literal["haiku", "sonnet", "opus"]
+ModelFamily = Literal["haiku", "sonnet", "opus", "fable"]
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,8 @@ class ModelOption:
     """A selectable Claude model and its capabilities."""
 
     value: str
-    """Canonical model ID persisted to storage and sent to the SDK."""
+    """Model identifier (an Agent SDK shorthand alias) persisted to storage and
+    sent to the SDK."""
 
     label: str
     """Human-facing label for dropdowns and badges."""
@@ -59,29 +60,33 @@ CONTEXT_1M_WINDOW = 1_000_000
 # reported by ``GET /api/models``. Only base models live here; the 1M variants
 # are derived on demand via ``CONTEXT_1M_SUFFIX``.
 MODELS: Tuple[ModelOption, ...] = (
-    ModelOption("claude-haiku-4-5",  "Haiku 4.5",  "haiku",  200_000, supports_1m=False),
-    ModelOption("claude-sonnet-4-6", "Sonnet 4.6", "sonnet", 200_000, supports_1m=True),
-    ModelOption("claude-opus-4-6",   "Opus 4.6",   "opus",   200_000, supports_1m=True),
-    ModelOption("claude-opus-4-7",   "Opus 4.7",   "opus",   200_000, supports_1m=True),
-    ModelOption("claude-opus-4-8",   "Opus 4.8",   "opus",   200_000, supports_1m=True),
+    ModelOption("haiku",  "Haiku",  "haiku",  200_000, supports_1m=False),
+    ModelOption("sonnet", "Sonnet", "sonnet", 200_000, supports_1m=True),
+    ModelOption("opus",   "Opus",   "opus",   200_000, supports_1m=True),
+    ModelOption("fable",  "Fable",  "fable",  200_000, supports_1m=True),
 )
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "sonnet"
 """Default model used when nothing is configured yet."""
 
 INHERIT_VALUE = ""
 """Sentinel meaning 'inherit from parent' (used by subagents)."""
 
-# Legacy short slugs still persisted in older user data. Map to the closest
-# canonical model so older profiles/subagents round-trip cleanly. We treat
-# these as read-only aliases — storage is rewritten on the next save, never
-# eagerly.
+# Older user data stored full model IDs before the presets moved to Agent SDK
+# shorthand aliases. Map those to the closest shorthand so older
+# profiles/subagents round-trip cleanly. We treat these as read-only aliases —
+# storage is rewritten on the next save, never eagerly. Explicit [1m] entries
+# are required because normalize_model does an exact-string lookup.
 LEGACY_MODEL_MAP: Dict[str, str] = {
-    "haiku": "claude-haiku-4-5",
-    "sonnet": "claude-sonnet-4-6",
-    "sonnet[1m]": "claude-sonnet-4-6[1m]",
-    "opus": "claude-opus-4-8",
-    "opus[1m]": "claude-opus-4-8[1m]",
+    "claude-haiku-4-5": "haiku",
+    "claude-sonnet-4-6": "sonnet",
+    "claude-sonnet-4-6[1m]": "sonnet[1m]",
+    "claude-opus-4-6": "opus",
+    "claude-opus-4-6[1m]": "opus[1m]",
+    "claude-opus-4-7": "opus",
+    "claude-opus-4-7[1m]": "opus[1m]",
+    "claude-opus-4-8": "opus",
+    "claude-opus-4-8[1m]": "opus[1m]",
 }
 
 
@@ -96,7 +101,7 @@ def normalize_model(value: Optional[str]) -> str:
     """Resolve a stored model string to its canonical form.
 
     - ``None`` / empty → ``""`` (inherit / unset)
-    - Legacy short slug → canonical full ID
+    - Legacy full model ID → shorthand alias
     - Any other string → returned as-is (custom models pass through).
     """
     if not value:

@@ -511,6 +511,13 @@
   border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 }
 
+/* Fable — distinct hue to set it apart from the primary-tinted model badges */
+.card-badge--fable {
+  background: color-mix(in oklch, var(--info) 15%, transparent);
+  color: var(--info);
+  border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
+}
+
 .card-badge--inherit {
   background: var(--surface-1);
   color: var(--text-secondary);

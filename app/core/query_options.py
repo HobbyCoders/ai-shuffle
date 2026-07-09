@@ -576,9 +576,9 @@ def build_options_from_profile(
         logger.debug("[Claude CLI stderr] %s", line)
 
     # Process model selection.
-    # All supported model IDs (claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-6,
-    # claude-opus-4-7, claude-opus-4-8) and their [1m] variants are native CLI aliases —
-    # pass through as-is.
+    # The preset model values (haiku, sonnet, opus, fable) and their [1m] variants
+    # are native Agent SDK / CLI shorthand aliases; custom model IDs pass through
+    # as-is too.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
     betas_to_use = []

@@ -29,7 +29,7 @@ from app.core.mcp_service import McpServerConfig, McpServerType
 
 
 def _profile():
-    return {"id": "t", "config": {"model": "claude-opus-4-8", "tools_preset": "claude_code"}}
+    return {"id": "t", "config": {"model": "opus", "tools_preset": "claude_code"}}
 
 
 class TestBuiltinShape:

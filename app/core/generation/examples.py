@@ -19,7 +19,7 @@ SUBAGENT_EXAMPLES: List[Dict[str, Any]] = [
             "name": "Security Code Reviewer",
             "description": "Use this agent to review code for security vulnerabilities, unsafe patterns, and potential attack vectors. Invoke when reviewing PRs with security-sensitive changes, auditing authentication/authorization code, or before deploying to production.",
             "tools": ["Read", "Grep", "Glob", "WebSearch"],
-            "model": "claude-opus-4-7",
+            "model": "opus",
             "prompt": '''You are a Security Code Reviewer, a specialized agent focused on identifying security vulnerabilities, unsafe patterns, and potential attack vectors in code.
 
 ## Core Responsibilities
@@ -127,7 +127,7 @@ Structure your findings as:
             "name": "Python Test Writer",
             "description": "Use this agent to write pytest-based unit and integration tests for Python code. Invoke when adding test coverage, implementing TDD, or verifying functionality after changes.",
             "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-            "model": "claude-sonnet-4-6",
+            "model": "sonnet",
             "prompt": '''You are a Python Test Writer, specialized in creating comprehensive pytest-based test suites following TDD principles and Python testing best practices.
 
 ## Core Responsibilities
@@ -253,7 +253,7 @@ When writing tests, include:
             "name": "Codebase Explorer",
             "description": "Use this agent to quickly explore and understand codebases. Invoke when you need to find files, understand project structure, locate specific code patterns, or get an overview of how components connect.",
             "tools": ["Read", "Grep", "Glob"],
-            "model": "claude-haiku-4-5",
+            "model": "haiku",
             "prompt": '''You are a Codebase Explorer, a fast and efficient agent for navigating and understanding code repositories.
 
 ## Core Responsibilities
@@ -353,7 +353,7 @@ PROFILE_EXAMPLES: List[Dict[str, Any]] = [
         "output": {
             "name": "Deep Code Review",
             "description": "Profile for comprehensive code review sessions with extended reasoning for complex analysis",
-            "model": "claude-sonnet-4-6",
+            "model": "sonnet",
             "permission_mode": "default",
             "thinking_mode": "think",
             "system_prompt_type": "preset",
@@ -384,7 +384,7 @@ Always provide actionable feedback with code examples.''',
         "output": {
             "name": "Quick Assistant",
             "description": "Fast, lightweight profile for quick questions and codebase exploration",
-            "model": "claude-haiku-4-5",
+            "model": "haiku",
             "permission_mode": "default",
             "thinking_mode": "default",
             "system_prompt_type": "preset",
@@ -412,7 +412,7 @@ Always provide actionable feedback with code examples.''',
         "output": {
             "name": "Creative Studio",
             "description": "Profile with AI image and video generation capabilities for creative projects",
-            "model": "claude-sonnet-4-6",
+            "model": "sonnet",
             "permission_mode": "acceptEdits",
             "thinking_mode": "default",
             "system_prompt_type": "custom",

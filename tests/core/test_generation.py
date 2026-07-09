@@ -78,9 +78,9 @@ class TestToolMapping:
         """Should return appropriate model for each domain."""
         from app.core.generation.tool_mapping import get_model_for_domain
 
-        assert get_model_for_domain("exploration") == "claude-haiku-4-5"  # Fast
-        assert get_model_for_domain("security") == "claude-opus-4-8"  # Complex analysis
-        assert get_model_for_domain("code-review") == "claude-sonnet-4-6"  # Balanced
+        assert get_model_for_domain("exploration") == "haiku"  # Fast
+        assert get_model_for_domain("security") == "opus"  # Complex analysis
+        assert get_model_for_domain("code-review") == "sonnet"  # Balanced
 
     def test_get_thinking_mode_for_domain(self):
         """Should return appropriate thinking mode for each domain."""

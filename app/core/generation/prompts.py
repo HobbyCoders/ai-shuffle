@@ -153,13 +153,13 @@ Subagents are specialized AI assistants that the main Claude agent can delegate 
   - Available tools: {available_tools}
 
 - **model**: Model override for this subagent
-  - "claude-haiku-4-5": Fast, cheap - use for simple searches, summaries, quick tasks
-  - "claude-sonnet-4-6": Balanced - use for most analysis, coding, moderate complexity
-  - "claude-sonnet-4-6[1m]": Sonnet 4.6 with 1M context window
-  - "claude-opus-4-6" / "claude-opus-4-6[1m]": Powerful - complex reasoning, architecture
-  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Highly capable - security analysis, deep reasoning
-  - "claude-opus-4-8" / "claude-opus-4-8[1m]": Most capable - hardest reasoning, security, long-running tasks
+  - "haiku": Fast, cheap - use for simple searches, summaries, quick tasks
+  - "sonnet": Balanced - use for most analysis, coding, moderate complexity
+  - "sonnet[1m]": Sonnet with 1M context window
+  - "opus" / "opus[1m]": Powerful - complex reasoning, architecture, security analysis
+  - "fable" / "fable[1m]": Most capable - hardest reasoning, security, long-running tasks
   - null: Inherit from parent (default)
+  - Any other string is treated as a custom model ID and passed through unchanged
 
 ## Domain Templates
 
@@ -204,7 +204,7 @@ Output ONLY a valid JSON object (no markdown code blocks, no explanation):
   "name": "Human Readable Name",
   "description": "Clear description of when to invoke this agent. Be specific about use cases.",
   "tools": ["Read", "Grep", "Glob"],
-  "model": "claude-sonnet-4-6",
+  "model": "sonnet",
   "prompt": "Comprehensive system prompt following the structure guidelines above..."
 }}
 
@@ -288,12 +288,12 @@ Profiles are pre-configured settings for Claude sessions. They control:
 
 ### Model & Thinking
 - **model**: Claude model to use
-  - "claude-haiku-4-5": Fast, cheap - quick tasks, exploration
-  - "claude-sonnet-4-6": Balanced - general coding, analysis (default)
-  - "claude-sonnet-4-6[1m]": Sonnet 4.6 with 1M context - large codebases
-  - "claude-opus-4-6" / "claude-opus-4-6[1m]": Powerful - complex reasoning, architecture
-  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Highly capable - deep reasoning, long-running tasks
-  - "claude-opus-4-8" / "claude-opus-4-8[1m]": Most capable - hardest reasoning, long-running tasks
+  - "haiku": Fast, cheap - quick tasks, exploration
+  - "sonnet": Balanced - general coding, analysis (default)
+  - "sonnet[1m]": Sonnet with 1M context - large codebases
+  - "opus" / "opus[1m]": Powerful - complex reasoning, architecture, deep reasoning
+  - "fable" / "fable[1m]": Most capable - hardest reasoning, long-running tasks
+  - Any other string is treated as a custom model ID and passed through unchanged
 
 - **thinking_mode**: Depth of reasoning
   - "default": Standard thinking
@@ -351,12 +351,12 @@ Profiles are pre-configured settings for Claude sessions. They control:
 
 | Use Case | Model | Permission | Thinking | Tools |
 |----------|-------|------------|----------|-------|
-| Quick Questions | claude-haiku-4-5 | default | default | all |
-| Code Review | claude-sonnet-4-6 | default | think | Read, Grep, Glob only |
-| Development | claude-sonnet-4-6 | acceptEdits | think | all |
-| Automation | claude-sonnet-4-6 | bypassPermissions | default | all |
-| Architecture | claude-opus-4-7 | default | ultra_think | Read, Grep, Glob |
-| Creative Work | claude-sonnet-4-6 | acceptEdits | default | all + AI tools |
+| Quick Questions | haiku | default | default | all |
+| Code Review | sonnet | default | think | Read, Grep, Glob only |
+| Development | sonnet | acceptEdits | think | all |
+| Automation | sonnet | bypassPermissions | default | all |
+| Architecture | opus | default | ultra_think | Read, Grep, Glob |
+| Creative Work | sonnet | acceptEdits | default | all + AI tools |
 
 ## System Prompt Guidelines
 
@@ -383,7 +383,7 @@ Output ONLY a valid JSON object (no markdown code blocks, no explanation):
 {{
   "name": "Profile Name",
   "description": "What this profile is for",
-  "model": "claude-sonnet-4-6",
+  "model": "sonnet",
   "permission_mode": "default",
   "thinking_mode": "default",
   "system_prompt_type": "preset",

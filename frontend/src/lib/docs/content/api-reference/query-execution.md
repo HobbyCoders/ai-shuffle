@@ -40,7 +40,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `model` | string | Model override (e.g. `claude-sonnet-4-6`) |
+| `model` | string | Model override (e.g. `sonnet`, or a custom model id) |
 | `permission_mode` | string | `default`, `auto`, `acceptEdits`, `plan`, `bypassPermissions` |
 | `system_prompt_append` | string | Text appended to the profile's system prompt |
 | `max_turns` | integer | Maximum conversation turns |
@@ -53,7 +53,7 @@ curl -X POST http://localhost:8000/api/v1/query \
   "response": "Async/await in Python is a way to write...",
   "session_id": "sess_abc123",
   "metadata": {
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
     "duration_ms": 2500,
     "total_cost_usd": 0.003,
     "tokens_in": 150,

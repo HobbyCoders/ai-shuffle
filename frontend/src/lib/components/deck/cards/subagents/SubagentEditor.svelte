@@ -251,7 +251,7 @@
 						{/if}
 					</div>
 					{#if customModelMode}
-						<input type="text" value={formModel} oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-opus-4-6" />
+						<input type="text" value={formModel} oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-sonnet-4-5" />
 					{/if}
 				</div>
 			</div>

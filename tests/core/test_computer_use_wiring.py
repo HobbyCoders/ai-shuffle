@@ -21,7 +21,7 @@ _CU_TOOLS = set(get_computer_use_tool_names())
 
 
 def _profile(computer_use=None):
-    config = {"model": "claude-opus-4-8", "tools_preset": "claude_code"}
+    config = {"model": "opus", "tools_preset": "claude_code"}
     if computer_use is not None:
         config["computer_use"] = computer_use
     return {"id": "t", "config": config}
@@ -103,7 +103,7 @@ class TestProfileConfigPersistence:
     def test_enabled_survives_model_dump(self):
         from app.core.models import ProfileConfig
 
-        cfg = ProfileConfig(**{"model": "claude-opus-4-8", "computer_use": {"enabled": True}})
+        cfg = ProfileConfig(**{"model": "opus", "computer_use": {"enabled": True}})
         dumped = cfg.model_dump(exclude_none=True)
         assert dumped.get("computer_use", {}).get("enabled") is True
 
