@@ -145,11 +145,16 @@ async def adopt_session_endpoint(
     Semantics:
       * Already local (this install, or a legacy NULL owner) → no-op, returns
         ``adopted=False`` so the caller just opens it.
-      * Owned elsewhere but that device is still **online** (heartbeat within the
-        last ~90s) → refuse with 409: it may be actively streaming there, and two
-        installs driving one SDK session at once corrupts the transcript. The
-        user should stop it on that device (or wait for it to go offline) first.
-      * Owned elsewhere and that device is offline / unregistered → adopt it.
+      * Owned elsewhere and **actively streaming** → refuse with 409: two
+        installs driving one live SDK session at once corrupts the transcript.
+        The user should stop it on that device first. Per-session streaming
+        state is fanned out across the cluster (``apply_remote_streaming_change``)
+        and stale remote entries are swept when the owner goes offline, so
+        ``is_session_streaming`` is authoritative even for a remote-owned
+        session — and, unlike the install-level "online" heartbeat, it does not
+        block adoption of an idle session just because the owning install
+        happens to run 24/7.
+      * Owned elsewhere but idle (not streaming) → adopt it.
 
     Worktree sessions keep working after adoption: only the owner column changes,
     so the existing ``recreate_worktree`` adopt-on-disk path rebinds the worktree
@@ -171,16 +176,20 @@ async def adopt_session_endpoint(
             status="already_local",
         )
 
-    # Owned by another install: refuse while that device is live so we never
-    # wrestle an actively-streaming session away mid-turn.
-    install = await run_sync(database.get_install, owner)
-    if install and install.get("online"):
-        device = install.get("device_name") or "another device"
+    # Owned by another install: refuse only while the session is actually live
+    # (streaming) so we never wrestle an in-flight SDK turn away mid-stream. The
+    # install-level "online" heartbeat is the wrong granularity — a 24/7 install
+    # would make all of its idle sessions permanently unadoptable.
+    from app.core.sync_engine import sync_engine
+
+    if sync_engine.is_session_streaming(session_id):
+        install = await run_sync(database.get_install, owner)
+        device = (install or {}).get("device_name") or "another device"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"This session is active on {device}. Stop it there, or wait "
-                "until that device goes offline, before resuming it here."
+                f"This session is currently running on {device}. "
+                "Stop it there before resuming it here."
             ),
         )
 

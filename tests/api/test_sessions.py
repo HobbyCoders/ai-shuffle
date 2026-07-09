@@ -1773,6 +1773,7 @@ class TestAdoptSession:
         adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
         mock_database.adopt_session.return_value = adopted_row
 
+        # Not streaming (real sync_engine has an empty streaming set) → adopt.
         response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 200
@@ -1784,8 +1785,41 @@ class TestAdoptSession:
             "test-session-id", settings.effective_instance_id
         )
 
-    def test_adopt_foreign_online_session_conflicts(self, client, mock_database, sample_session):
-        """Refuse to adopt while the owning device is still online (may be streaming)."""
+    def test_adopt_foreign_online_but_idle_session_succeeds(self, client, mock_database, sample_session):
+        """Owner install ONLINE but the session is NOT streaming → adopt succeeds.
+
+        A 24/7 install must not block adoption of its idle sessions: the gate is
+        per-session streaming state, not the install-level online heartbeat.
+        """
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {
+            "device_name": "Studio Mac",
+            "online": True,
+        }
+        adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
+        mock_database.adopt_session.return_value = adopted_row
+
+        # Owner online, but is_session_streaming() is False for this idle session.
+        with patch(
+            "app.core.sync_engine.sync_engine.is_session_streaming",
+            return_value=False,
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["status"] == "adopted"
+        assert data["instance_id"] == settings.effective_instance_id
+        mock_database.adopt_session.assert_called_once_with(
+            "test-session-id", settings.effective_instance_id
+        )
+
+    def test_adopt_foreign_streaming_session_conflicts(self, client, mock_database, sample_session):
+        """Refuse to adopt while the session is actively streaming on its owner."""
         sample_session["instance_id"] = "other-install-xyz"
         mock_database.get_session.return_value = sample_session
         mock_database.get_install.return_value = {
@@ -1793,10 +1827,30 @@ class TestAdoptSession:
             "online": True,
         }
 
-        response = client.post("/api/v1/sessions/test-session-id/adopt")
+        with patch(
+            "app.core.sync_engine.sync_engine.is_session_streaming",
+            return_value=True,
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 409
         assert "Studio Mac" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_streaming_session_missing_install_conflicts(self, client, mock_database, sample_session):
+        """Streaming + no install row → still 409, message falls back to 'another device'."""
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = None
+
+        with patch(
+            "app.core.sync_engine.sync_engine.is_session_streaming",
+            return_value=True,
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "another device" in response.json()["detail"]
         mock_database.adopt_session.assert_not_called()
 
     def test_adopt_session_not_found(self, client, mock_database):
