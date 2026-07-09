@@ -90,28 +90,24 @@ def slugify_branch(msg: str, prefix: str) -> str:
 
 
 # =============================================================================
-# AI Generation Endpoints
+# Shared Generation Helpers
 # =============================================================================
+# The core generation logic lives here so both the HTTP endpoints below and the
+# server-side finish/ship orchestrator (app/api/git_operations.py) share a
+# single source of truth for prompts and output cleanup — no HTTP self-calls.
 
-@router.post("/generate-commit-message", response_model=GenerateCommitMessageResponse)
-async def generate_commit_message(
-    request: Request,
-    project_id: str,
-    body: GenerateCommitMessageRequest,
-    worktree_id: Optional[str] = None,
-    token: str = Depends(require_auth)
-):
-    """
-    Generate a commit message using AI based on the current diff.
 
-    When worktree_id is provided, generates message based on worktree's diff.
+async def generate_commit_message_for_dir(
+    working_dir: str, include_unstaged: bool = True
+) -> str:
+    """Generate a commit message from the working directory's diff.
+
+    Raises HTTPException(400) when the directory is not a git repository or has
+    no changes to describe.
     """
     from app.api.generation import generate_with_claude
 
     t_start = time.perf_counter()
-    check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
-
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -120,7 +116,7 @@ async def generate_commit_message(
 
     t_diff_start = time.perf_counter()
     diff_text = await run_git(
-        git_service.get_diff_text, working_dir, include_unstaged=body.include_unstaged
+        git_service.get_diff_text, working_dir, include_unstaged=include_unstaged
     )
     t_diff_ms = (time.perf_counter() - t_diff_start) * 1000
     if not diff_text.strip():
@@ -153,33 +149,25 @@ Return ONLY the commit message text, nothing else.
 
     t_total_ms = (time.perf_counter() - t_start) * 1000
     logger.info(
-        f"[ship-it-timing] generate-commit-message project={project_id} "
+        f"[ship-it-timing] generate-commit-message "
         f"total={t_total_ms:.0f}ms diff_fetch={t_diff_ms:.0f}ms "
         f"ai_call={t_ai_ms:.0f}ms diff_bytes={len(diff_text)}"
     )
 
-    return GenerateCommitMessageResponse(message=message)
+    return message
 
 
-@router.post("/generate-pr-description", response_model=GeneratePRDescriptionResponse)
-async def generate_pr_description(
-    request: Request,
-    project_id: str,
-    body: GeneratePRDescriptionRequest,
-    worktree_id: Optional[str] = None,
-    token: str = Depends(require_auth)
-):
-    """
-    Generate a PR title and description using AI based on branch commits.
+async def generate_pr_description_for_dir(
+    working_dir: str, base_branch: str = "main"
+) -> tuple[str, str]:
+    """Generate a ``(title, body)`` PR description from the branch's commits.
 
-    When worktree_id is provided, generates description from worktree's branch.
+    Raises HTTPException(400) when the directory is not a git repository or has
+    no commits ahead of the base branch.
     """
     from app.api.generation import generate_with_claude, extract_json_from_response
 
     t_start = time.perf_counter()
-    check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
-
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -188,7 +176,7 @@ async def generate_pr_description(
 
     t_log_start = time.perf_counter()
     commit_log, diff_stat = await run_git(
-        git_service.get_branch_log, working_dir, base_branch=body.base_branch
+        git_service.get_branch_log, working_dir, base_branch=base_branch
     )
     t_log_ms = (time.perf_counter() - t_log_start) * 1000
 
@@ -237,11 +225,53 @@ Return ONLY the JSON object, no markdown code blocks or explanation."""
 
     t_total_ms = (time.perf_counter() - t_start) * 1000
     logger.info(
-        f"[ship-it-timing] generate-pr-description project={project_id} "
+        f"[ship-it-timing] generate-pr-description "
         f"total={t_total_ms:.0f}ms branch_log={t_log_ms:.0f}ms "
         f"ai_call={t_ai_ms:.0f}ms log_bytes={len(commit_log)}"
     )
 
+    return title, pr_body
+
+
+# =============================================================================
+# AI Generation Endpoints
+# =============================================================================
+
+@router.post("/generate-commit-message", response_model=GenerateCommitMessageResponse)
+async def generate_commit_message(
+    request: Request,
+    project_id: str,
+    body: GenerateCommitMessageRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a commit message using AI based on the current diff.
+
+    When worktree_id is provided, generates message based on worktree's diff.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+    message = await generate_commit_message_for_dir(working_dir, body.include_unstaged)
+    return GenerateCommitMessageResponse(message=message)
+
+
+@router.post("/generate-pr-description", response_model=GeneratePRDescriptionResponse)
+async def generate_pr_description(
+    request: Request,
+    project_id: str,
+    body: GeneratePRDescriptionRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a PR title and description using AI based on branch commits.
+
+    When worktree_id is provided, generates description from worktree's branch.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+    title, pr_body = await generate_pr_description_for_dir(working_dir, body.base_branch)
     return GeneratePRDescriptionResponse(title=title, body=pr_body)
 
 
