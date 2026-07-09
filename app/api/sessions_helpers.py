@@ -71,8 +71,14 @@ class ImportJSONLResponse(BaseModel):
 
 
 class ForkSessionRequest(BaseModel):
-    """Request body for forking a session"""
-    message_index: int
+    """Request body for forking a session.
+
+    ``message_index`` is optional: omit it (or send ``null``) to fork the
+    ENTIRE conversation — the sessions-board "Fork" action, which duplicates a
+    whole session rather than branching from a specific message. When provided,
+    the fork happens up to and including that 0-based display-message index.
+    """
+    message_index: Optional[int] = None
 
 
 class ForkSessionResponse(BaseModel):
@@ -82,6 +88,18 @@ class ForkSessionResponse(BaseModel):
     parent_session_id: str
     fork_point_message_index: int
     message_count: int
+    status: str
+
+
+class AdoptSessionResponse(BaseModel):
+    """Response for the cross-device 'Resume here' adopt action.
+
+    ``adopted`` is True when ownership was re-pointed to this install; False
+    when the session was already local (a no-op — the caller just opens it).
+    """
+    session_id: str
+    instance_id: str
+    adopted: bool
     status: str
 
 

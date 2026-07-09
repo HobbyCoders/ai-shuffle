@@ -28,7 +28,7 @@ fork_router = APIRouter(tags=["Sessions"])
 async def fork_session(
     request: Request,
     session_id: str,
-    body: ForkSessionRequest,
+    body: ForkSessionRequest = ForkSessionRequest(),
     token: str = Depends(require_auth)
 ):
     """
@@ -93,14 +93,24 @@ async def fork_session(
             continue
         display_entries.append(entry)
 
-    # Validate message_index
-    if body.message_index < 0 or body.message_index >= len(display_entries):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid message_index: {body.message_index}. Session has {len(display_entries)} messages (0-{len(display_entries)-1})"
-        )
+    # Resolve the fork point. A null/omitted message_index means "fork the whole
+    # session" (the sessions-board Fork action) → the last display message.
+    if body.message_index is None:
+        if not display_entries:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot fork an empty session"
+            )
+        fork_message_index = len(display_entries) - 1
+    else:
+        if body.message_index < 0 or body.message_index >= len(display_entries):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid message_index: {body.message_index}. Session has {len(display_entries)} messages (0-{len(display_entries)-1})"
+            )
+        fork_message_index = body.message_index
 
-    # Find the actual index in original_entries that corresponds to the message_index in display_entries
+    # Find the actual index in original_entries that corresponds to the fork_message_index in display_entries
     display_count = 0
     fork_entry_index = 0
     for i, entry in enumerate(original_entries):
@@ -112,7 +122,7 @@ async def fork_session(
         if entry.get("isSidechain"):
             continue
 
-        if display_count == body.message_index:
+        if display_count == fork_message_index:
             fork_entry_index = i
             break
         display_count += 1
@@ -138,7 +148,7 @@ async def fork_session(
         title=fork_title,
         api_user_id=api_user_id,
         parent_session_id=session_id,
-        fork_point_message_index=body.message_index
+        fork_point_message_index=fork_message_index
     )
 
     # Update with SDK session ID
@@ -182,13 +192,13 @@ async def fork_session(
             detail="Failed to create forked session"
         )
 
-    logger.debug(f"Forked session {session_id} to {new_session_id} at message index {body.message_index}")
+    logger.debug(f"Forked session {session_id} to {new_session_id} at message index {fork_message_index}")
 
     return ForkSessionResponse(
         session_id=new_session_id,
         title=fork_title,
         parent_session_id=session_id,
-        fork_point_message_index=body.message_index,
+        fork_point_message_index=fork_message_index,
         message_count=fork_entry_index + 1,
         status="success"
     )

@@ -1500,6 +1500,130 @@ class TestForkSession:
         assert response.status_code == 400
         assert "Invalid message_index" in response.json()["detail"]
 
+    def test_fork_whole_session_when_index_omitted(self, client, mock_database, sample_session, temp_dir):
+        """Omitting message_index forks the entire session (board 'Fork' action)."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        sample_session["project_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.create_session.return_value = {"id": "forked-session-id"}
+
+        jsonl_entries = [
+            {"type": "user", "message": {"role": "user", "content": "Hello"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "Hi!"}},
+            {"type": "user", "message": {"role": "user", "content": "More"}},
+        ]
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text("\n".join(json.dumps(e) for e in jsonl_entries))
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter(jsonl_entries)
+                    (temp_dir / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
+
+                    # No body at all → message_index defaults to None → whole session.
+                    response = client.post("/api/v1/sessions/test-session-id/fork")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        # Fork point is the LAST display message (index 2 of 3).
+        assert data["fork_point_message_index"] == 2
+        assert data["message_count"] == 3
+
+    def test_fork_whole_empty_session_rejected(self, client, mock_database, sample_session, temp_dir):
+        """Forking a session with no display messages (no index) is a 400."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text("")
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter([])
+                    response = client.post("/api/v1/sessions/test-session-id/fork", json={})
+
+        assert response.status_code == 400
+        assert "empty session" in response.json()["detail"].lower()
+
+
+# =============================================================================
+# Test Adopt Session Endpoint ("Resume here" cross-device)
+# =============================================================================
+
+class TestAdoptSession:
+    """Test POST /api/v1/sessions/{session_id}/adopt endpoint."""
+
+    def test_adopt_local_session_is_noop(self, client, mock_database, sample_session):
+        """A session already owned locally (NULL instance_id) → adopted=False, no write."""
+        sample_session["instance_id"] = None
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is False
+        assert data["status"] == "already_local"
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_foreign_offline_session_succeeds(self, client, mock_database, sample_session):
+        """A foreign session whose owner is offline is re-pointed to this install."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {
+            "device_name": "Studio Mac",
+            "online": False,
+        }
+        adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
+        mock_database.adopt_session.return_value = adopted_row
+
+        response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["status"] == "adopted"
+        assert data["instance_id"] == settings.effective_instance_id
+        mock_database.adopt_session.assert_called_once_with(
+            "test-session-id", settings.effective_instance_id
+        )
+
+    def test_adopt_foreign_online_session_conflicts(self, client, mock_database, sample_session):
+        """Refuse to adopt while the owning device is still online (may be streaming)."""
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {
+            "device_name": "Studio Mac",
+            "online": True,
+        }
+
+        response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "Studio Mac" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_session_not_found(self, client, mock_database):
+        """Unknown session → 404."""
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/adopt")
+
+        assert response.status_code == 404
+
 
 # =============================================================================
 # Test Create Worktree Session Endpoint
