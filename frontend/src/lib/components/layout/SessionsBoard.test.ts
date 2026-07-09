@@ -213,3 +213,69 @@ describe('SessionsBoard action rail', () => {
 		expect(mocks.toggleSessionFavorite).toHaveBeenCalledWith('a');
 	});
 });
+
+/**
+ * Regression: the clear-session confirmation used to blank itself out after a
+ * mere 3s via a fire-and-forget timer, so users perceived "the confirm button
+ * vanished as if I never clicked". The confirm window is now 8s and its timer is
+ * cancelled whenever the confirm is resolved or replaced, so cancelling can't
+ * leave a stale timer that later clears a fresh confirm.
+ */
+describe('SessionsBoard clear-session confirm timer', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	// Arm the confirm on the "Local one" row by clicking its Clear button.
+	async function armConfirm() {
+		const clear = rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement;
+		await fireEvent.click(clear);
+	}
+	const confirmVisible = () =>
+		rowFor('Local one').querySelector('[title="Confirm clear"]') !== null;
+
+	it('keeps the confirm past 3s and up to <8s, then auto-resets after 8s', async () => {
+		renderBoard();
+		await armConfirm();
+		expect(confirmVisible()).toBe(true);
+
+		// Old behavior blanked it here — it must still be showing.
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(confirmVisible()).toBe(true);
+
+		// Still armed right up to the new 8s deadline.
+		await vi.advanceTimersByTimeAsync(4900);
+		expect(confirmVisible()).toBe(true);
+
+		// Past 8s the safety auto-reset fires and the plain Clear button returns.
+		await vi.advanceTimersByTimeAsync(200);
+		expect(confirmVisible()).toBe(false);
+		expect(rowFor('Local one').querySelector('[title="Clear session"]')).toBeTruthy();
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+
+	it('cancelling clears the timer so a re-armed confirm is not blanked at the old deadline', async () => {
+		renderBoard();
+
+		// Arm, then cancel partway through the window — this must cancel timer #1.
+		await armConfirm();
+		await vi.advanceTimersByTimeAsync(4000);
+		const cancel = rowFor('Local one').querySelector('[title="Cancel"]') as HTMLElement;
+		await fireEvent.click(cancel);
+		expect(confirmVisible()).toBe(false);
+
+		// Re-arm a moment later → a FRESH 8s timer (#2) with its own deadline.
+		await vi.advanceTimersByTimeAsync(1000);
+		await armConfirm();
+		expect(confirmVisible()).toBe(true);
+
+		// Cross the first timer's original deadline. If it were still alive it would
+		// clear this fresh confirm out from under the user — it must stay armed.
+		await vi.advanceTimersByTimeAsync(3200);
+		expect(confirmVisible()).toBe(true);
+
+		// The fresh timer still auto-resets on schedule, and nothing was deleted.
+		await vi.advanceTimersByTimeAsync(4900);
+		expect(confirmVisible()).toBe(false);
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+});

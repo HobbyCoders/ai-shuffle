@@ -66,6 +66,12 @@
 	let selectedKey = $state<string | null>(null);
 	let deletingSessionId = $state<string | null>(null);
 	let deleteLoading = $state(false);
+	// Safety auto-reset for the delete confirmation: if the user arms "Clear" but
+	// walks away, drop the confirm state after a while so a stale confirm can't
+	// fire later. The timer id is kept so we can cancel it whenever the confirm is
+	// resolved or replaced — a fire-and-forget timer used to blank the confirm out
+	// from under the user (it looked like the button vanished on its own).
+	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 	// Mobile only: which row has its action rail expanded out of the ⋮ menu.
 	// Single value = one open at a time; desktop keeps the always-inline rail.
 	let actionsOpenId = $state<string | null>(null);
@@ -324,7 +330,7 @@
 		// reaches the window is outside an open rail — collapse it.
 		if (actionsOpenId !== null) {
 			actionsOpenId = null;
-			deletingSessionId = null;
+			disarmDeleteConfirm();
 		}
 	}
 	function handleFilterWindowKeydown(e: KeyboardEvent) {
@@ -332,6 +338,7 @@
 			deviceMenuOpen = false;
 			linkMenuOpen = false;
 			actionsOpenId = null;
+			disarmDeleteConfirm();
 		}
 	}
 
@@ -354,7 +361,7 @@
 		e.stopPropagation();
 		if (actionsOpenId === id) {
 			actionsOpenId = null;
-			deletingSessionId = null;
+			disarmDeleteConfirm();
 		} else {
 			actionsOpenId = id;
 		}
@@ -426,9 +433,32 @@
 		}
 	}
 
+	// Arm the delete confirmation on a row and (re)start its safety auto-reset.
+	// Cancels any prior timer first so re-arming on another row can't leave a
+	// stale timer that later blanks the new confirm.
+	function armDeleteConfirm(id: string) {
+		disarmDeleteConfirm();
+		deletingSessionId = id;
+		deleteConfirmTimer = setTimeout(() => {
+			if (deletingSessionId === id) deletingSessionId = null;
+			deleteConfirmTimer = null;
+		}, 8000);
+	}
+	// Clear the confirm state and cancel its pending auto-reset timer. Use this
+	// anywhere `deletingSessionId` is dropped so no orphaned timer survives.
+	function disarmDeleteConfirm() {
+		if (deleteConfirmTimer !== null) {
+			clearTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = null;
+		}
+		deletingSessionId = null;
+	}
+
 	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
 		if (deletingSessionId === id) {
+			// Confirmed — the pending auto-reset is now moot; cancel it and delete.
+			disarmDeleteConfirm();
 			deleteLoading = true;
 			try {
 				if (activeId === id) onNewSession();
@@ -440,13 +470,12 @@
 				deletingSessionId = null;
 			}
 		} else {
-			deletingSessionId = id;
-			setTimeout(() => { if (deletingSessionId === id) deletingSessionId = null; }, 3000);
+			armDeleteConfirm(id);
 		}
 	}
 	function cancelDelete(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
-		deletingSessionId = null;
+		disarmDeleteConfirm();
 	}
 	// Open a session from its row — but never while that row is showing its
 	// delete confirmation (or the delete is in flight). The confirm button is
