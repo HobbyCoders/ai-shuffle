@@ -214,6 +214,12 @@ class LiveSession:
     messages: List[LiveMessage] = field(default_factory=list)
     is_streaming: bool = True
     last_update_id: int = 0  # Monotonically increasing for efficient polling
+    # The value last_update_id held at THIS turn's start (carried forward across
+    # turns, not reset to 1). A park-poller holding a since_update_id from a
+    # PREVIOUS turn predates turn_start_update_id; get_session_since serves it a
+    # full non-destructive snapshot so the unpark follow-up turn's messages are
+    # not starved by a stale cross-turn cursor. See get_session_since.
+    turn_start_update_id: int = 0
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # The profile driving THIS streaming turn. Messages produced during the turn
@@ -601,11 +607,26 @@ class LiveSessionStore:
             # stream_start event arrives with fresh usage data (~300ms gap).
             prev_session = self._sessions.get(session_id)
 
+            # Carry the update-id counter forward across turns instead of resetting
+            # it to 1. A parked session's follow-up (unpark) turn used to build a
+            # fresh LiveSession with last_update_id=1, but a park-poller still holds
+            # a since_update_id cursor from the PREVIOUS turn (e.g. 50). A counter
+            # restarting at 1..~20 never exceeds that stale cursor, so the poller is
+            # starved — it never sees is_streaming=true and never receives the
+            # follow-up's messages until a page refresh resets its cursor to 0.
+            # Carrying forward keeps the counter monotonic across turns.
+            # trim_update_id / needs_full_refresh are deliberately NOT carried: they
+            # are turn-local and correctly reset with the new object.
+            carried = prev_session.last_update_id if prev_session else 0
+
             session = LiveSession(
                 session_id=session_id,
                 messages=messages,
                 is_streaming=True,
-                last_update_id=1,
+                # +1 so the very first park-poll after this turn starts sees an
+                # update immediately (strictly greater than the carried cursor).
+                last_update_id=carried + 1,
+                turn_start_update_id=carried + 1,
                 initial_message_count=len(messages),
                 profile_id=profile_id,
             )
@@ -2230,6 +2251,24 @@ class LiveSessionStore:
             return session.to_dict()
         return None
 
+    def _full_snapshot(
+        self,
+        session: LiveSession,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build a full (non-delta) snapshot payload for get_session_since.
+
+        initial_message_count=0 tells the frontend to treat this as a full
+        set of messages rather than a delta slice. full_refresh_reason is set
+        only when a reason is given (destructive/attributed refreshes); its
+        absence selects the client's protective union-merge branch.
+        """
+        result = session.to_dict(delta_only=False)
+        result['initial_message_count'] = 0
+        if reason is not None:
+            result['full_refresh_reason'] = reason
+        return result
+
     def get_session_since(
         self,
         session_id: str,
@@ -2254,8 +2293,35 @@ class LiveSessionStore:
         if not session:
             return None
 
+        # Cross-turn cursor problem (parked poller + unpark follow-up):
+        # A park-poller holds a since_update_id cursor from a PREVIOUS turn. When
+        # the unpark follow-up turn starts, start_streaming builds a fresh
+        # LiveSession. Two ways the cursor can fall outside this incarnation:
+        #
+        #   (a) cursor AHEAD of the counter (since_update_id > last_update_id):
+        #       impossible under monotonic counters within one incarnation, so the
+        #       cursor came from a LOST incarnation (e.g. a server restart recreated
+        #       the store). Serve a full snapshot.
+        #   (b) cursor PREDATES this turn (since_update_id < turn_start_update_id):
+        #       the typical parked poller across the unpark boundary. Handled below,
+        #       AFTER the destructive trim/needs_full_refresh branches so those keep
+        #       their tags.
+        #
+        # Both serve a FULL NON-DESTRUCTIVE snapshot (initial_message_count=0, no
+        # full_refresh_reason). Critical: the seed history can be SHORTER than what
+        # the FE currently displays; only the FE's reason-less union-merge branch
+        # protects against visual truncation. Tagging 'rewind'/'discard' here would
+        # make the client take a possibly-short snapshot verbatim and wipe messages.
+        if since_update_id > session.last_update_id:
+            # Do NOT consume the one-shot needs_full_refresh flag here — it
+            # belongs to in-range pollers. If a stale lost-incarnation poller
+            # cleared it, it would STEAL a pending compaction/rewind refresh
+            # from a legitimate in-range poller (multi-device). Serve the
+            # snapshot and leave session state untouched.
+            return self._full_snapshot(session)
+
         if session.last_update_id <= since_update_id:
-            return None  # No updates since last check
+            return None  # No updates since last check (cursor == counter)
 
         # A rewind trim invalidates EVERY poller whose knowledge predates it —
         # not just the first device to poll (which would consume the one-shot
@@ -2269,11 +2335,7 @@ class LiveSessionStore:
             # The one-shot flag (if still pending) is superseded by this snapshot.
             session.needs_full_refresh = False
             session.full_refresh_reason = None
-            result = session.to_dict(delta_only=False)
-            if result is not None:
-                result['initial_message_count'] = 0
-                result['full_refresh_reason'] = 'rewind'
-            return result
+            return self._full_snapshot(session, reason='rewind')
 
         # After compaction, force a full response so the frontend gets a
         # clean snapshot of all messages instead of a potentially stale delta.
@@ -2287,12 +2349,16 @@ class LiveSessionStore:
             # rather than union-merging its (now-trimmed) extra messages back in.
             reason = session.full_refresh_reason
             session.full_refresh_reason = None
-            result = session.to_dict(delta_only=False)
-            if result is not None:
-                result['initial_message_count'] = 0
-                if reason is not None:
-                    result['full_refresh_reason'] = reason
-            return result
+            return self._full_snapshot(session, reason=reason)
+
+        # Cross-turn parked poller: the cursor predates THIS turn's start. This is
+        # the common unpark case — the poller held a since_update_id from a prior
+        # turn, and the counter has been carried forward (start_streaming), so the
+        # cursor is a valid-but-stale value below turn_start_update_id. Serve a full
+        # NON-DESTRUCTIVE snapshot. Placed AFTER the trim/needs_full_refresh
+        # branches so a destructive rewind/discard keeps its authoritative tag.
+        if since_update_id < session.turn_start_update_id:
+            return self._full_snapshot(session)
 
         # Delta polls: skip initial history messages (frontend already has them)
         delta_only = since_update_id > 0
