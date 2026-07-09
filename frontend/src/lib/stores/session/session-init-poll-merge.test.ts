@@ -137,6 +137,41 @@ describe('session-init · client-only message splice ordering', () => {
 			'msg-1', 'user-1700000000', 'msg-2', 'sys-1',
 		]);
 	});
+
+	it('keeps each client-only system card after its own anchor when the server payload REORDERS present messages (compaction)', async () => {
+		// At a compaction/turn boundary the poller re-seeds from the durable
+		// transcript, so the server payload can RE-ORDER present messages relative
+		// to the client array. The client-only cards (hooks/system) must each stay
+		// after their OWN preceding present neighbor. The old precomputed-index +
+		// single-global-offset splice shoved a later card past an earlier present
+		// message (sys-b jumped ahead of msg-p1) because the anchors were no longer
+		// monotonic in the server payload's order.
+		const harness = makeHarness();
+		await harness.init();
+		const pollCb = harness.onPollApplied.mock.calls[0][0] as
+			(sessionId: string, data: PollAppliedData) => void;
+
+		// Client array (correct at render time): P1, SysA, P2, SysB.
+		harness.setState(baseState({
+			messages: [
+				msg('msg-p1', 'assistant', 'p1'),
+				msg('sys-a', 'system', 'hook a', 'system'),
+				msg('msg-p2', 'assistant', 'p2'),
+				msg('sys-b', 'system', 'hook b', 'system'),
+			],
+		}));
+
+		// Server payload re-orders the present pair to [P2, P1].
+		pollCb(SID, pollData([
+			msg('msg-p2', 'assistant', 'p2'),
+			msg('msg-p1', 'assistant', 'p1'),
+		]));
+
+		// SysA stays after P1, SysB stays after P2.
+		expect(harness.getState().messages.map(m => m.id)).toEqual([
+			'msg-p2', 'sys-b', 'msg-p1', 'sys-a',
+		]);
+	});
 });
 
 describe('session-init · poll-error toast guard reset', () => {

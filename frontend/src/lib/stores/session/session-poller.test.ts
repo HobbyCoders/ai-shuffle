@@ -928,4 +928,62 @@ describe('session-poller · anchored union-merge insertion order', () => {
 		// And crucially the tail order is preserved (no jump-to-head duplicate).
 		expect(msgs.map(m => m.content)).toEqual(['A', 'shared reply', 'partial']);
 	});
+
+	it('keeps each missing card after its own anchor when the compaction snapshot REORDERS present messages (non-monotonic anchors)', async () => {
+		// THE COMPACTION SCRAMBLE. At a compaction/turn boundary the live store is
+		// re-seeded from the durable transcript, so present messages arrive under a
+		// DIFFERENT id family (uuid-matched) AND can be RE-ORDERED relative to the
+		// client's current array (the id-family switch + granularity/summary
+		// re-block). Meanwhile uuid-less cards (compact_boundary + system rows the
+		// parser never reproduces the same way) are "missing" and must be spliced
+		// back, each immediately AFTER its own preceding present neighbor.
+		//
+		// The anchored-insertion splice pre-computes anchor indices ONCE and shifts
+		// every insert by a single GLOBAL offset — correct ONLY when the anchors are
+		// monotonic in SNAPSHOT order. When the snapshot orders present messages
+		// NON-monotonically vs the client array, the global offset shoves a missing
+		// card past its anchor → the cards "jump around". A page refresh loads the
+		// durable transcript into an EMPTY client (snapshot taken verbatim) so it
+		// "settles" — the exact reported symptom.
+		//
+		// Client array (correct at the time it rendered): P1, Ma(sys), P2, Mb(sys).
+		// Compaction snapshot re-orders the present pair to [P2, P1] (id-family
+		// switch, uuid-matched) and drops the two uuid-less system cards.
+		// Correct union-merge: Ma stays after P1, Mb stays after P2 → [P2, Mb, P1, Ma].
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'p1-live', role: 'assistant', type: 'text', content: 'p1', streaming: false, jsonlUuid: 'uP1' },
+				{ id: 'ma-live', role: 'system', type: 'system', content: 'ma', systemSubtype: 'hook_event', streaming: false },
+				{ id: 'p2-live', role: 'assistant', type: 'text', content: 'p2', streaming: false, jsonlUuid: 'uP2' },
+				{ id: 'mb-live', role: 'system', type: 'system', content: 'mb', systemSubtype: 'hook_event', streaming: false },
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				fullRefreshReason: 'compaction',
+				messages: [
+					// Present pair, id-family switched (uuid match) and REORDERED.
+					{ id: 'text-uP2-0', role: 'assistant', type: 'text', content: 'p2', streaming: false, uuid: 'uP2' },
+					{ id: 'text-uP1-0', role: 'assistant', type: 'text', content: 'p1', streaming: false, uuid: 'uP1' },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const session = sessionStateManager.getSession(SID);
+		const order = session!.messages.map(m => m.content);
+		// Each missing card must stay anchored to ITS OWN preceding neighbor.
+		expect(order).toEqual(['p2', 'mb', 'p1', 'ma']);
+	});
 });

@@ -761,28 +761,30 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}
 				if (clientOnlyEntries.length > 0) {
 					finalMessages = [...finalMessages];
-					const idToIndex = new Map<string, number>();
-					for (let i = 0; i < finalMessages.length; i++) {
-						if (finalMessages[i].id) idToIndex.set(finalMessages[i].id, i);
-					}
-					// The single-offset splice below assumes entries arrive in
-					// ascending insert position. They were collected in TWO passes
-					// (system msgs, then optimistic users), so a late-anchored
-					// system msg can precede an early-anchored user msg and the
-					// offset math would shove the user msg past it. Restore the
-					// original s.messages ordering before splicing.
+					// Restore the original s.messages ordering: the entries were
+					// collected in TWO passes (system msgs, then optimistic users).
 					clientOnlyEntries.sort((a, b) => a.srcIdx - b.srcIdx);
-					let offset = 0;
-					for (const { msg, anchorId } of clientOnlyEntries) {
-						let insertIdx: number;
-						if (anchorId && idToIndex.has(anchorId)) {
-							insertIdx = idToIndex.get(anchorId)! + 1 + offset;
-						} else {
-							insertIdx = 0 + offset;
+					// Splice each entry after its OWN anchor, looked up in the LIVE
+					// (mutating) array. A precomputed index + single global offset is
+					// only correct when anchors are monotonic in the SERVER payload's
+					// order; when the server re-orders present messages relative to the
+					// client array (the compaction id-family switch), the offset shoves
+					// a card past its anchor → the "jump around" scramble. Adjacent
+					// client-only entries chain after the previously-placed one so a
+					// contiguous run (or several sharing one anchor) keeps its order.
+					let prevSrcIdx = -2;
+					let prevPlacedId: string | null = null;
+					for (const { msg, anchorId, srcIdx } of clientOnlyEntries) {
+						const effectiveAnchor =
+							srcIdx === prevSrcIdx + 1 && prevPlacedId ? prevPlacedId : anchorId;
+						let insertIdx = 0;
+						if (effectiveAnchor) {
+							const idx = finalMessages.findIndex(x => x.id === effectiveAnchor);
+							insertIdx = idx >= 0 ? idx + 1 : 0;
 						}
-						insertIdx = Math.min(insertIdx, finalMessages.length);
 						finalMessages.splice(insertIdx, 0, msg);
-						offset++;
+						prevSrcIdx = srcIdx;
+						prevPlacedId = msg.id;
 					}
 				}
 
