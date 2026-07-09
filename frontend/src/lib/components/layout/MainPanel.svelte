@@ -397,11 +397,10 @@
 	// Git action prompts (send to chat instead of running git directly)
 	// =========================================================================
 	// The mutating git buttons (Commit / Push / Pull / Create PR / Finish /
-	// Ship It) no longer call the git API. Instead, clicking the main part of a
-	// button sends a pre-written prompt to the active chat so the AI agent
-	// performs the operation with its own git/gh tools. The split-button chevron
-	// opens an editable popover (GitPromptPopover) so the user can tweak the
-	// wording before sending. Read-only git state machinery below is unchanged.
+	// Ship It) no longer call the git API. Instead, clicking a button sends a
+	// pre-written prompt to the active chat so the AI agent performs the
+	// operation with its own git/gh tools. The prompt wording is configured in
+	// Settings → Git Actions. Read-only git state machinery below is unchanged.
 
 	// Upstream tracking state (drives prompt wording + quick-action guards).
 	const currentBranchForPrompt = $derived($branchStore.find(b => b.current));
@@ -519,11 +518,6 @@
 							onClickPull={handleQuickPull}
 							onClickInitRepo={() => showInitRepoModal = true}
 							onClickShipIt={handleShipIt}
-							onSendPrompt={sendGitPrompt}
-							commitPrompt={gitPrompt('commit')}
-							createPRPrompt={gitPrompt('createPR')}
-							finishPrompt={gitPrompt('finish')}
-							pullPrompt={gitPrompt('pull')}
 							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
 					{/if}
