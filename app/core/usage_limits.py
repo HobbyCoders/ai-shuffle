@@ -155,7 +155,13 @@ class UsageLimitsMonitor:
         # switches so an in-flight poll (started against the OLD account) can be
         # detected and discarded instead of overwriting the new account's data,
         # and so clients can drop out-of-order snapshots.
-        self._generation: int = 0
+        #
+        # Seeded from the epoch clock (NOT 0) so that after a backend restart
+        # the very first generation already exceeds anything the previous
+        # process broadcast. An open browser tab keeps its last-seen generation
+        # in memory; a near-0 restart seed would make it drop every
+        # post-restart snapshot and wedge stale until a manual reload.
+        self._generation: int = int(time.time())
 
     def current_generation(self) -> int:
         return self._generation
@@ -166,8 +172,11 @@ class UsageLimitsMonitor:
         Called synchronously on a successful account switch. A poll that began
         before this bump will see its captured generation differ from the
         current one at commit time and discard its (now-stale) result.
+
+        Strictly increases AND keeps pace with the epoch clock, so generations
+        stay monotonic even across a rapid restart-then-switch sequence.
         """
-        self._generation += 1
+        self._generation = max(self._generation + 1, int(time.time()))
         return self._generation
 
     def _snapshot(self) -> Dict[str, Any]:

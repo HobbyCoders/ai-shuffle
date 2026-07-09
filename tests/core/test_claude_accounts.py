@@ -183,7 +183,8 @@ class TestSwitch:
 
         before = usage_limits_monitor.current_generation()
         assert svc.switch_account("acct-b")["success"]
-        assert usage_limits_monitor.current_generation() == before + 1
+        # Strictly greater (bump may jump to the current epoch, not just +1).
+        assert usage_limits_monitor.current_generation() > before
 
     def test_failed_switch_does_not_bump_generation(self, mock_db, oauth_tmp):
         from app.core import claude_accounts as svc

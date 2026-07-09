@@ -12,6 +12,7 @@ Covers:
 """
 
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -242,11 +243,28 @@ class TestGenerationGuard:
     def test_snapshot_includes_generation(self, monitor):
         assert monitor._snapshot()["generation"] == monitor.current_generation()
 
-    def test_bump_generation_increments(self, monitor):
+    def test_initial_generation_seeded_from_epoch(self):
+        """A fresh monitor (e.g. after a backend restart) must start at an
+        epoch-derived generation, NOT 0/near-0. Otherwise an open browser tab
+        holding a pre-restart generation would drop every post-restart snapshot
+        (they all carry a generation, so the frontend's no-generation escape
+        hatch never fires) and the indicator would wedge stale until a reload.
+        """
+        fresh = UsageLimitsMonitor()
+        assert fresh.current_generation() >= int(time.time()) - 5
+        # Strictly greater than any plausible pre-restart bump counter.
+        assert fresh.current_generation() > 1_000_000
+
+    def test_bump_generation_strictly_increases(self, monitor):
         g0 = monitor.current_generation()
-        assert monitor.bump_generation() == g0 + 1
-        assert monitor.current_generation() == g0 + 1
-        assert monitor._snapshot()["generation"] == g0 + 1
+        g1 = monitor.bump_generation()
+        assert g1 > g0
+        assert monitor.current_generation() == g1
+        assert monitor._snapshot()["generation"] == g1
+        # Monotonic across repeated bumps and never behind the epoch clock.
+        g2 = monitor.bump_generation()
+        assert g2 > g1
+        assert g2 >= int(time.time()) - 5
 
     @pytest.mark.asyncio
     async def test_stale_fetch_discarded_when_generation_bumped_midflight(self, monitor):

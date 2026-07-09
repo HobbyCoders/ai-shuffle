@@ -75,6 +75,29 @@ describe('rateLimit.applySnapshot', () => {
 		expect(rateLimit.current.windows.five_hour.utilization).toBe(44);
 	});
 
+	it('recovers after a backend restart (epoch-seeded generation applies)', () => {
+		// Pre-restart: tab has seen some generation from the old process. The
+		// backend seeds its counter from the epoch clock, so even the FIRST
+		// post-restart snapshot must carry a generation greater than anything
+		// the old process produced — the tab applies it and un-wedges.
+		const preRestartGen = Math.floor(Date.now() / 1000) - 10_000;
+		rateLimit.applySnapshot({
+			available: true,
+			generation: preRestartGen,
+			windows: [{ type: 'five_hour', utilization: 20, resets_at: future() }],
+		});
+		rateLimit.markStale();
+
+		const postRestartGen = Math.floor(Date.now() / 1000); // fresh epoch seed
+		rateLimit.applySnapshot({
+			available: true,
+			generation: postRestartGen,
+			windows: [{ type: 'five_hour', utilization: 7, resets_at: future() }],
+		});
+		expect(rateLimit.current.windows.five_hour.utilization).toBe(7);
+		expect(rateLimit.current.stale).toBe(false);
+	});
+
 	it('markStale sets stale; a fresh available snapshot clears it', () => {
 		rateLimit.applySnapshot({
 			available: true,
