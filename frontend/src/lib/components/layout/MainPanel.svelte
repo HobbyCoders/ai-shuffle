@@ -19,6 +19,7 @@
 	import { toast } from '$lib/stores/toast';
 	import { Download } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
+	import { buildGitActionPrompt, type GitActionKey, type GitPromptContext } from '$lib/utils/git-action-prompts';
 	import ChatView from './ChatView.svelte';
 	import SessionsBoard from './SessionsBoard.svelte';
 	import BuildPage from './BuildPage.svelte';
@@ -409,83 +410,26 @@
 		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
 	);
 
-	/** Append "on branch `<name>`" if a branch is known. */
-	function branchSuffix(): string {
-		const branch = $gitStatus?.current_branch;
-		return branch ? ` (current branch: \`${branch}\`)` : '';
+	/**
+	 * Assemble the prompt context from the current derived git/GitHub state and
+	 * the saved git-action preferences. Reading these stores inside the builder
+	 * wrappers (which are called from the template) keeps the prompts reactive.
+	 */
+	function gitPromptContext(): GitPromptContext {
+		return {
+			branch: $gitStatus?.current_branch ?? null,
+			defaultBranch: $githubRepoInfo?.default_branch ?? 'main',
+			needsPull,
+			isOnDefaultBranch,
+			branchPRNumber: branchPR?.number ?? null,
+			prefs: gitActionPreferences.current,
+		};
 	}
 
-	/** Build the commit prompt, honoring saved next-step + include-unstaged prefs. */
-	function buildCommitPrompt(): string {
-		const prefs = gitActionPreferences.current;
-		const staged = prefs.includeUnstaged
-			? 'Stage and commit all current changes (including untracked files)'
-			: 'Commit the currently staged changes';
-		let prompt = `${staged} with a clear, conventional-commit-style message that summarizes what changed${branchSuffix()}.`;
-
-		// Honor the saved "next step" preference, but guard against invalid states.
-		let nextStep = prefs.nextStep;
-		if (needsPull) nextStep = 'commit';
-		else if (nextStep === 'pr' && isOnDefaultBranch) nextStep = 'push';
-
-		if (nextStep === 'push') {
-			prompt += ' Then push the branch to its remote.';
-		} else if (nextStep === 'pr') {
-			prompt += ' Then push the branch and open a pull request into the default branch with a descriptive title and summary.';
-		}
-		return prompt;
-	}
-
-	/** Build the push prompt. */
-	function buildPushPrompt(): string {
-		return `Push the current branch to its remote${branchSuffix()}.`;
-	}
-
-	/** Build the pull prompt, honoring saved pull strategy + auto-stash. */
-	function buildPullPrompt(): string {
-		const prefs = gitActionPreferences.current;
-		const strategy = prefs.pullStrategy === 'rebase' ? 'rebasing onto' : 'merging';
-		const stash = prefs.autoStash
-			? ' If there are uncommitted local changes, stash them first and restore them afterward.'
-			: '';
-		return `Pull the latest changes from the remote for the current branch${branchSuffix()}, ${strategy} the upstream changes into your local work.${stash} If there are conflicts, stop and tell me which files conflict.`;
-	}
-
-	/** Build the create-PR prompt. */
-	function buildCreatePRPrompt(): string {
-		return `Push the current branch${branchSuffix()} and open a pull request into the default branch with a descriptive title and a summary of what changed.`;
-	}
-
-	/** Build the finish/merge prompt, honoring saved merge method + cleanup. */
-	function buildFinishPrompt(): string {
-		const prefs = gitActionPreferences.current;
-		const pr = branchPR ? `pull request #${branchPR.number}` : 'the open pull request for this branch';
-		const method = prefs.mergeMethod === 'squash'
-			? 'squash-merge'
-			: prefs.mergeMethod === 'rebase'
-				? 'rebase-merge'
-				: 'merge';
-		const cleanup = prefs.cleanupAfterMerge
-			? ' After it merges, delete the branch. If this is a worktree session, do not try to remove or delete the worktree folder itself — this session is running inside it and holds a lock on it, so removal will fail; leave the worktree directory cleanup to the app.'
-			: '';
-		return `${method.charAt(0).toUpperCase() + method.slice(1)} ${pr} into the default branch.${cleanup}`;
-	}
-
-	/** Build the Ship It pipeline prompt. */
-	function buildShipItPrompt(): string {
-		const prefs = gitActionPreferences.current;
-		const method = prefs.mergeMethod === 'squash'
-			? 'squash-merge'
-			: prefs.mergeMethod === 'rebase'
-				? 'rebase-merge'
-				: 'merge';
-		const cleanup = prefs.cleanupAfterMerge
-			? ', then delete the branch. Do not try to remove or delete the worktree folder itself — this session is running inside it and holds a lock on it, so removal will fail; leave the worktree directory cleanup to the app'
-			: '';
-		const prStep = branchPR
-			? `then ${method} the existing pull request #${branchPR.number} into the default branch`
-			: `open a pull request into the default branch with a descriptive title and summary, then ${method} it`;
-		return `Ship this branch end to end${branchSuffix()}: commit all current changes with a clear conventional-commit message, push the branch, ${prStep}${cleanup}. If anything fails along the way, stop and tell me what went wrong.`;
+	// Delegate to the pure builder (which applies custom-message overrides +
+	// placeholder substitution, falling back to the structured default).
+	function gitPrompt(action: GitActionKey): string {
+		return buildGitActionPrompt(action, gitPromptContext());
 	}
 
 	/**
@@ -511,12 +455,12 @@
 	}
 
 	// --- Quick-action handlers: main button click sends the prompt immediately ---
-	function handleQuickCommit() { sendGitPrompt(buildCommitPrompt()); }
-	function handlePush() { sendGitPrompt(buildPushPrompt()); }
-	function handleQuickPull() { sendGitPrompt(buildPullPrompt()); }
-	function handleQuickCreatePR() { sendGitPrompt(buildCreatePRPrompt()); }
-	function handleQuickFinish() { sendGitPrompt(buildFinishPrompt()); }
-	function handleShipIt() { sendGitPrompt(buildShipItPrompt()); }
+	function handleQuickCommit() { sendGitPrompt(gitPrompt('commit')); }
+	function handlePush() { sendGitPrompt(gitPrompt('push')); }
+	function handleQuickPull() { sendGitPrompt(gitPrompt('pull')); }
+	function handleQuickCreatePR() { sendGitPrompt(gitPrompt('createPR')); }
+	function handleQuickFinish() { sendGitPrompt(gitPrompt('finish')); }
+	function handleShipIt() { sendGitPrompt(gitPrompt('shipIt')); }
 
 	// Download the raw Claude session history (.jsonl) for the active chat.
 	let downloadingJsonl = $state(false);
@@ -576,10 +520,10 @@
 							onClickInitRepo={() => showInitRepoModal = true}
 							onClickShipIt={handleShipIt}
 							onSendPrompt={sendGitPrompt}
-							commitPrompt={buildCommitPrompt()}
-							createPRPrompt={buildCreatePRPrompt()}
-							finishPrompt={buildFinishPrompt()}
-							pullPrompt={buildPullPrompt()}
+							commitPrompt={gitPrompt('commit')}
+							createPRPrompt={gitPrompt('createPR')}
+							finishPrompt={gitPrompt('finish')}
+							pullPrompt={gitPrompt('pull')}
 							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
 					{/if}
