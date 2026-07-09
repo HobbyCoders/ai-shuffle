@@ -1,16 +1,20 @@
 <script lang="ts">
 	/**
 	 * UsageLimitIndicator — compact glass pill (next to <ContextUsageBar /> in the
-	 * controls dock) showing the highest-utilization Claude usage window, plus a
-	 * click/tap popover listing ALL current limit windows with a progress bar, %,
-	 * and reset countdown.
+	 * controls dock) showing ONLY the 5-hour ('five_hour') Claude usage window,
+	 * plus a click/tap popover listing ALL current limit windows with a progress
+	 * bar, %, and reset countdown.
+	 *
+	 * The pill headline is pinned to the 5-hour window and never falls back to
+	 * another window: if `five_hour` isn't known yet the pill stays hidden. The
+	 * weekly (`seven_day`) and Fable/Opus windows only appear inside the popover.
 	 *
 	 * Data source: the `rateLimit` store, fed by the backend usage poller
 	 * (`usage_snapshot` WS event + the `/usage/limits` REST fetch on load) and by
 	 * live SDK `rate_limit` events. Utilization is normalised to 0–100 percent in
 	 * the store, so both sources land on the same scale.
 	 *
-	 * The pill renders once at least one window is known (data persists across
+	 * The pill renders once the 5-hour window is known (data persists across
 	 * reloads). Each window flips to 0% the moment its `resets_at` passes.
 	 *
 	 * Popover interaction mirrors OverrideDropdown: a wrapper with `bind:this`, a
@@ -55,11 +59,11 @@
 		}))
 	);
 
-	// Headline: the window closest to its cap (ties resolved by display order).
-	const headline = $derived.by<WindowItem | null>(() => {
-		if (items.length === 0) return null;
-		return items.reduce((max, it) => (it.pct > max.pct ? it : max), items[0]);
-	});
+	// Headline: pinned to the 5-hour window only — never falls back to another
+	// window. Stays null (pill hidden) until the 5-hour window is known.
+	const headline = $derived.by<WindowItem | null>(
+		() => items.find((it) => it.type === 'five_hour') ?? null
+	);
 
 	const hasValue = $derived(headline != null);
 	const displayPct = $derived(headline?.pct ?? 0);

@@ -1,10 +1,11 @@
 /**
  * UsageLimitIndicator — render + interaction behaviour.
  *
- * The pill surfaces the highest-utilization Claude usage window and opens a
- * popover listing all windows. It renders nothing until at least one window is
- * known. The `rateLimit` store is a singleton; each test resets it to a known
- * state via `applySnapshot` (which replaces the window map).
+ * The pill surfaces ONLY the 5-hour ('five_hour') Claude usage window and opens
+ * a popover listing all windows. It renders nothing until the 5-hour window is
+ * known — it never falls back to another window. The `rateLimit` store is a
+ * singleton; each test resets it to a known state via `applySnapshot` (which
+ * replaces the window map).
  */
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -58,7 +59,7 @@ describe('UsageLimitIndicator', () => {
 		expect(container.querySelector('.usage-text')?.textContent).toBe('0%');
 	});
 
-	it('surfaces the highest-utilization window in the pill', () => {
+	it('pins the pill to the 5-hour window regardless of higher windows', () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [
@@ -67,9 +68,33 @@ describe('UsageLimitIndicator', () => {
 			],
 		});
 		const { container } = render(UsageLimitIndicator);
-		// Headline is the 77% Fable window (also drives the warning severity).
-		expect(container.querySelector('.usage-text')?.textContent).toBe('77%');
-		expect(container.querySelector('.usage-indicator.warning')).not.toBeNull();
+		// Pill shows the 5-hour window's 12%, NOT the higher 77% Fable window.
+		expect(container.querySelector('.usage-text')?.textContent).toBe('12%');
+		expect(container.querySelector('.usage-indicator.warning')).toBeNull();
+	});
+
+	it('shows the 5-hour pct even when it is lower than the weekly window', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [
+				{ type: 'five_hour', utilization: 30, resets_at: future() },
+				{ type: 'seven_day', utilization: 85, resets_at: future() },
+			],
+		});
+		const { container } = render(UsageLimitIndicator);
+		// Pill tracks five_hour (30%), never the higher weekly (85%) window.
+		expect(container.querySelector('.usage-text')?.textContent).toBe('30%');
+		expect(container.querySelector('.usage-indicator.warning')).toBeNull();
+	});
+
+	it('renders nothing when only non-five_hour windows are known', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'seven_day', utilization: 60, resets_at: future() }],
+		});
+		const { container } = render(UsageLimitIndicator);
+		// No five_hour window → pill hidden (no fallback to another window).
+		expect(container.querySelector('.usage-indicator')).toBeNull();
 	});
 
 	it('dims the pill (stale) while an account switch is pending', () => {
