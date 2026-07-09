@@ -1023,12 +1023,15 @@ def _terminal_event(task_id="task-1", *, status="completed", uuid="u-1",
 
 
 def test_latch_ignores_prior_turn_orphan_not_started_this_turn():
-    """In-stream latch: a notification for a task NOT started this turn (a
-    prior-turn orphan leaking from the pooled-client buffer) latches nothing —
-    its unpark fate was decided in its own turn."""
+    """In-stream latch: a FOREGROUND notification for a task NOT started this turn
+    (a prior-turn orphan leaking from the pooled-client buffer, with no recorded
+    background launch) latches nothing — it fails the background gate, exactly as
+    the drain pump would reject it, so no latch is needed. (A background cross-turn
+    completion DOES latch — see test_latch_arms_cross_turn_in_stream_completion.)"""
     task_registry.reset_all()
     # NOTE: we deliberately do NOT call mark_started_this_turn — this models an
     # orphan whose TaskStartedMessage belonged to an EARLIER turn (already reset).
+    # No mark_background_launch either → it is foreground and never latches.
     cwh._latch_terminal_notification(_terminal_event("orphan-1"), "sess-1")
 
     assert task_registry.was_unparked("sess-1", "orphan-1") is False
@@ -1245,6 +1248,41 @@ def test_latch_skips_foreground_work():
     )
 
     assert task_registry.was_unparked("sess-1", "task-1") is False
+    task_registry.reset_all()
+
+
+def test_latch_arms_cross_turn_in_stream_completion():
+    """THE DUPLICATE-NOTIFICATION REGRESSION: a background sub-agent launched in
+    an EARLIER turn (so NOT started-this-turn) that comes to rest IN-STREAM during
+    a LATER turn is a genuine FIRST delivery by the CLI — it MUST latch the pump
+    off, or the between-turns drain pump re-delivers the same <task-notification>
+    as a spurious follow-up turn (the duplicate the user saw).
+
+    The old ``suppress-orphan`` early return skipped ``mark_unparked`` for any task
+    not started this turn, so this cross-turn in-stream delivery never armed the
+    latch. Because the pump admits any task passing the background gate and dedups
+    ONLY on ``mark_unparked``, the un-armed latch left the token unspent and the
+    pump fired a second delivery.
+
+    Fix contract: the latch uses the SAME background-launch gate as the pump, so a
+    cross-turn background completion latches. ``mark_unparked`` afterward must
+    return False (the token was already spent by the in-stream latch)."""
+    task_registry.reset_all()
+    # Simulate a PRIOR-turn launch: the background launch is recorded (it survives
+    # per-turn resets) but the task is NOT in the started-this-turn set — exactly
+    # the state after ``reset_started_this_turn`` ran at the later turn's start.
+    task_registry.mark_background_launch("sess-1", "tu-1")
+    task_registry.reset_started_this_turn("sess-1")
+    assert task_registry.was_started_this_turn("sess-1", "task-1") is False
+
+    cwh._latch_terminal_notification(
+        _terminal_event("task-1", tool_use_id="tu-1", uuid="u-1"), "sess-1"
+    )
+
+    # The in-stream latch armed the one-unpark-per-task token: the pump's gate now
+    # finds it already spent and takes the dedup branch (delivers nothing).
+    assert task_registry.was_unparked("sess-1", "task-1") is True
+    assert task_registry.mark_unparked("sess-1", "task-1") is False
     task_registry.reset_all()
 
 

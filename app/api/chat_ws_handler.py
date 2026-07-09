@@ -60,7 +60,8 @@ def _log_unpark_decision(
     and whether delivery fired ("deliver"/"deliver-killed") vs was suppressed/
     deduped. These fire once per terminal-task decision (NOT per message/delta), so
     they are low-frequency and safe to keep at INFO. ``path`` is "in-stream" or
-    "pump"; ``decision`` is a short verb ("stash"/"suppress-orphan"/"deliver"/…).
+    "pump"; ``decision`` is a short verb ("cli-delivered-in-turn"/
+    "cli-delivered-cross-turn"/"suppress-foreground"/"deliver"/"dedup"/…).
     """
     try:
         from app.core.task_registry import task_registry
@@ -312,6 +313,20 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
     diagnostic trail. No-op for non-terminal / non-notification events, so it is
     safe to call for every streamed event. Registry completion is recorded
     upstream in ``_record_task_message`` regardless, so indicators never strand.
+
+    Admission MUST mirror the drain pump's own gate (``_drain_notifications_impl``):
+    the pump delivers any task passing ``was_background_launch`` /
+    ``is_sdk_background_task`` and dedups ONLY on ``mark_unparked``. So the latch
+    arms for the SAME set the pump would deliver, regardless of whether the task
+    started this turn — a background sub-agent launched in an EARLIER turn that
+    comes to rest IN-STREAM during a LATER turn is a genuine first delivery by the
+    CLI, and NOT arming it there let the pump re-deliver the identical
+    ``<task-notification>`` as a spurious follow-up turn (the duplicate-completion
+    bug). ``started_this_turn`` therefore affects only the diagnostic label, never
+    whether the latch is armed. Arming is safe for a truly replayed orphan too:
+    ``mark_unparked`` is idempotent (already-latched → no-op). A FOREGROUND task
+    (no recorded background launch) fails the gate and needs no latch — the pump
+    rejects it as well.
     """
     from app.core.task_registry import task_registry
 
@@ -324,27 +339,12 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
     output_file = event.get("output_file")
     status = event.get("status")
     signature = event.get("uuid") or f"{output_file}:{status}"
-
-    # Prior-turn orphan leaking from the pooled-client buffer: nothing to latch —
-    # its unpark fate was decided in its own turn; just leave the audit line.
     started_this_turn = task_registry.was_started_this_turn(session_id, task_id)
-    if not started_this_turn:
-        _log_unpark_decision(
-            path="in-stream",
-            session_id=session_id,
-            task_id=task_id,
-            status=status,
-            signature=signature,
-            started_this_turn=False,
-            decision="suppress-orphan",
-        )
-        return
 
     # Foreground work (a synchronous sub-agent, or a plain Bash/PowerShell call —
     # the CLI emits local_bash task messages for those too): its result already
-    # returned INLINE as a tool_result this turn. No latch needed — the unpark
-    # gates (was_background_launch / is_sdk_background_task) keep it out of the
-    # drain pump as well.
+    # returned INLINE as a tool_result. No latch needed — the same gate keeps it
+    # out of the drain pump, so it can never be re-delivered.
     if not (
         task_registry.was_background_launch(session_id, event.get("tool_use_id"))
         or task_registry.is_sdk_background_task(session_id, task_id)
@@ -355,11 +355,15 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
             task_id=task_id,
             status=status,
             signature=signature,
-            started_this_turn=True,
+            started_this_turn=started_this_turn,
             decision="suppress-foreground",
         )
         return
 
+    # Genuine background task the CLI delivered in-stream: ALWAYS latch so the
+    # drain pump finds the one-unpark-per-task token spent and never re-delivers.
+    # started_this_turn only distinguishes the diagnostic label (in-turn launch vs
+    # a prior-turn launch completing during a later turn).
     task_registry.mark_unparked(session_id, task_id)
     _log_unpark_decision(
         path="in-stream",
@@ -367,8 +371,8 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
         task_id=task_id,
         status=status,
         signature=signature,
-        started_this_turn=True,
-        decision="cli-delivered-in-turn",
+        started_this_turn=started_this_turn,
+        decision="cli-delivered-in-turn" if started_this_turn else "cli-delivered-cross-turn",
     )
 
 
