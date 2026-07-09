@@ -241,18 +241,24 @@ def _extract_final_assistant_text(output_file: str) -> Optional[str]:
     sub-agent's raw JSONL transcript (agent-*.jsonl shape). Dumping that whole
     file verbatim as ``<result>`` (the old ``_read_task_output_file`` behaviour)
     floods the parent's context with the entire transcript; the model only needs
-    the agent's final answer. Reuse the existing agent-transcript parser
-    (``transform_agent_entries`` over ``parse_jsonl_file``) and return the LAST
-    assistant text block. Returns ``None`` on any failure / empty or unreadable
-    transcript so the caller can fall back to the short summary.
+    the agent's final answer. Reuse the canonical agent-transcript parser
+    (``parse_agent_history``) and return the LAST assistant entry's text — JOINED
+    across all of that entry's text blocks, not just the trailing block. Returns
+    ``None`` on any failure / empty or unreadable transcript so the caller can
+    fall back to the raw output file / short summary.
+
+    ``transform_agent_entries`` emits ONE ``{"type": "text", ...}`` child per text
+    block, each id'd ``agent-text-<entry-uuid>`` — so every text block from the
+    same assistant entry shares one ``id``. Grouping the trailing text children by
+    that shared id reconstructs the last assistant message's full text.
     """
     if not output_file:
         return None
     from pathlib import Path
-    from app.core.jsonl_parser import parse_jsonl_file, transform_agent_entries
+    from app.core.jsonl_parser import parse_agent_history
 
     try:
-        children = transform_agent_entries(parse_jsonl_file(Path(output_file)))
+        children = parse_agent_history(Path(output_file))
     except Exception:
         logger.debug(
             "failed to parse task output_file %r for final assistant text",
@@ -260,13 +266,21 @@ def _extract_final_assistant_text(output_file: str) -> Optional[str]:
             exc_info=True,
         )
         return None
-    final_text: Optional[str] = None
-    for child in children:
-        if child.get("type") == "text":
-            text = child.get("content") or ""
-            if text.strip():
-                final_text = text
-    return final_text
+
+    text_children = [
+        c for c in children
+        if c.get("type") == "text" and (c.get("content") or "").strip()
+    ]
+    if not text_children:
+        return None
+    # The last assistant entry = the source entry of the final text child. All its
+    # text blocks share the same ``id`` (embeds the entry uuid); join them in order.
+    last_id = text_children[-1].get("id")
+    parts = [
+        c.get("content") or "" for c in text_children if c.get("id") == last_id
+    ]
+    joined = "\n".join(p for p in parts if p.strip())
+    return joined or None
 
 
 def _build_task_notification_prompt(pending: list) -> str:
@@ -276,11 +290,15 @@ def _build_task_notification_prompt(pending: list) -> str:
     wakes with each sub-agent's result. ``<result>`` carries the sub-agent's FINAL
     assistant message, extracted from its transcript via
     ``_extract_final_assistant_text`` (the raw transcript file is huge — the model
-    only needs the final answer); it falls back to the short ``summary`` when the
-    transcript is missing/unreadable/empty. The returned string always contains
-    the literal ``<task-notification>`` substring, so the existing user-message
-    filters keep it from rendering as a chat bubble.
+    only needs the final answer). When the transcript yields no assistant text it
+    falls back to the RAW output-file read (``query_engine._read_task_output_file``
+    — this restores backgrounded SHELL stdout, whose plain-text output_file parses
+    to no assistant entries), then the short ``summary``. The returned string
+    always contains the literal ``<task-notification>`` substring, so the existing
+    user-message filters keep it from rendering as a chat bubble.
     """
+    from app.core.query_engine import _read_task_output_file
+    from app.core.query_streaming import truncate_large_payload
 
     def _esc(value: Any) -> str:
         return "" if value is None else str(value)
@@ -288,11 +306,17 @@ def _build_task_notification_prompt(pending: list) -> str:
     blocks: List[str] = []
     for note in pending:
         output_file = note.get("output_file") or ""
+        # Fallback chain: parsed final assistant text → raw output-file read
+        # (backgrounded-shell stdout) → short summary → "".
         result_text = _extract_final_assistant_text(output_file)
+        if not result_text:
+            result_text = _read_task_output_file(output_file) or None
         if not result_text:
             result_text = note.get("summary") or ""
         if result_text and len(result_text) > _MAX_TASK_RESULT_CHARS:
-            result_text = result_text[:_MAX_TASK_RESULT_CHARS] + "\n…[truncated]"
+            # truncate via the shared helper (matches query_engine's own use)
+            # instead of a naive head-slice.
+            result_text = truncate_large_payload(result_text, _MAX_TASK_RESULT_CHARS)
         usage = note.get("usage") or {}
         usage_xml = (
             "  <usage>\n"
@@ -465,7 +489,9 @@ async def _deliver_unpark_impl(
         ctx.info(logger, "Unpark: a live turn already owns the session — yielding (no clobber)")
         return False
 
-    synth_prompt = _build_task_notification_prompt(pending)
+    # Runs the transcript parse + file reads off the event loop (matches the
+    # run_sync pattern used for the DB write just below).
+    synth_prompt = await run_sync(_build_task_notification_prompt, pending)
 
     ctx.debug(
         logger,
@@ -552,80 +578,6 @@ async def _deliver_unpark_impl(
         task_registry.clear_unpark_pending(session_id)
         ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
         return False
-
-
-def _task_notification_row_matches(
-    content: Optional[str], task_id: Optional[str], tool_use_id: Optional[str]
-) -> bool:
-    """True if ``content`` is a ``<task-notification>`` body for THIS completion.
-
-    Keys on the ACTUAL ``<task-id>`` / ``<tool-use-id>`` sub-tags the CLI writes
-    into its injected user-lane steering message (either identifies the task),
-    reusing the shared field extractor so the tag names stay in one place.
-    """
-    if not content or "<task-notification>" not in content:
-        return False
-    from app.core.jsonl_parser import _extract_task_notification_field
-
-    if task_id:
-        tid = _extract_task_notification_field(content, "task-id")
-        if tid and tid == task_id:
-            return True
-    if tool_use_id:
-        tuid = _extract_task_notification_field(content, "tool-use-id")
-        if tuid and tuid == tool_use_id:
-            return True
-    return False
-
-
-async def _cli_delivered_task_notification_in_stream(
-    session_id: str, task_id: Optional[str], tool_use_id: Optional[str]
-) -> bool:
-    """Did the CLI already inject this completion's ``<task-notification>`` in-stream?
-
-    The typed ``TaskNotificationMessage`` can arrive on the pooled client AFTER
-    the parent turn's ``ResultMessage`` — so the in-stream latch
-    (``_latch_terminal_notification``) never ran and never spent
-    ``mark_unparked``. But when a background sub-agent comes to rest MID-turn the
-    CLI enqueues its OWN ``<task-notification>`` user-lane steering message into
-    the model's context (AI Shuffle deliberately does not yield that user message
-    as an event — see ``query_engine`` — but it is retained in the session's
-    messages). If such a row exists for THIS task, the model already acknowledged
-    the completion this turn, so the between-turns drain pump must NOT re-deliver
-    it (the duplicate-completion straddle bug).
-
-    Checks the in-memory live store first (cheapest); falls back to the persisted
-    session rows (the CLI-injected row is stored with the turn — see
-    ``db_message_loader``'s ``<task-notification>`` handling). Fully defensive:
-    any lookup failure returns ``False`` so a genuine at-rest completion is never
-    wrongly suppressed.
-    """
-    if not (task_id or tool_use_id):
-        return False
-
-    # 1) In-memory live store (cheapest, no I/O).
-    try:
-        session = live_session_store.get_session(session_id)
-    except Exception:
-        session = None
-    if session is not None:
-        for msg in getattr(session, "messages", None) or []:
-            if getattr(msg, "role", None) == "user" and _task_notification_row_matches(
-                getattr(msg, "content", None), task_id, tool_use_id
-            ):
-                return True
-
-    # 2) Persisted session rows (DB fallback).
-    try:
-        rows = await run_sync(database.get_session_messages, session_id)
-    except Exception:
-        rows = None
-    for row in rows or []:
-        if row.get("role") == "user" and _task_notification_row_matches(
-            row.get("content"), task_id, tool_use_id
-        ):
-            return True
-    return False
 
 
 def _drop_drain_pump_self(session_id: str, drain_pumps: "Dict[str, asyncio.Task]") -> None:
@@ -1146,32 +1098,14 @@ async def _drain_notifications_impl(
                 task_id = frame.get("task_id")
                 output_file = frame.get("output_file")
                 signature = frame.get("uuid") or f"{output_file}:{status}"
-                # CLI-DELIVERED-IN-STREAM GATE (straddle fix): the typed
-                # TaskNotificationMessage can arrive on the pooled client AFTER
-                # the parent turn's ResultMessage, so the in-stream latch
-                # (_latch_terminal_notification) never ran and never spent
-                # mark_unparked. But when the sub-agent came to rest MID-turn the
-                # CLI still injected its OWN <task-notification> user-lane steering
-                # message into the model's context — the model already saw this
-                # completion this turn. Re-delivering it here as a follow-up turn
-                # is the duplicate-completion bug. Detect the CLI's user-lane row
-                # for this task, spend the one-unpark token, and suppress. ADDITIVE:
-                # a new suppression reason only — the foreground gate above and the
-                # mark_unparked dedup below are unchanged.
-                if await _cli_delivered_task_notification_in_stream(
-                    session_id, task_id, frame.get("tool_use_id")
-                ):
-                    task_registry.mark_unparked(session_id, task_id)
-                    _log_unpark_decision(
-                        path="pump",
-                        session_id=session_id,
-                        task_id=task_id,
-                        status=status,
-                        signature=signature,
-                        started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
-                        decision="cli-delivered-userlane",
-                    )
-                    continue
+                # Straddle dedup: a sub-agent that came to rest MID-turn had its
+                # <task-notification> injected in-stream by the CLI as a user-lane
+                # steering message; query_engine._latch_cli_task_notifications
+                # already spent mark_unparked at the source. So the typed
+                # notification reaching the pump AFTER the parent ResultMessage is
+                # suppressed here by the EXISTING per-task dedup below (no store
+                # scans, no table reads, no end_streaming timing hazard).
+                #
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
                 # for its whole life. The newer CLI re-emits a terminal notification
                 # with a FRESH uuid each time the agent comes to rest, which used to

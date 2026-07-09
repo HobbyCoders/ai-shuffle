@@ -219,7 +219,13 @@ def _patch_deliver_boundaries(stack):
     assert isinstance(stack, ExitStack)
 
     async def _fake_run_sync(fn, *a, **k):
-        return None
+        # Execute the wrapped sync callable (matches real run_sync semantics) so
+        # e.g. _build_task_notification_prompt returns its actual string; DB-write
+        # callables (add_session_message) are patched separately below.
+        try:
+            return fn(*a, **k)
+        except Exception:
+            return None
 
     stack.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
 
