@@ -305,9 +305,13 @@ def test_row_dir_missing_rebinds_via_recreate(mocks):
 
     assert mode == "worktree"
     assert working_dir == "/abs/.worktrees/feat/foo-local"
-    # recreate_worktree owns the rebind (sibling, repo id, re-pointed sessions).
-    mocks.wm.recreate_worktree.assert_called_once_with("wt-x")
+    # recreate_worktree owns the rebind (sibling, repo id) and is told which single
+    # session to re-point — never all sessions on the worktree (follow-up #2).
+    mocks.wm.recreate_worktree.assert_called_once_with("wt-x", rebind_session_id=SESSION_ID)
     assert info["branch"] == "feat/foo"
+    # follow-up #3: the local project the session was rebound onto is surfaced so
+    # build_options can refresh its in-memory project for THIS send (MCP servers).
+    assert info["rebound_project"] == {"id": "proj-local", "path": "/local/clone"}
 
 
 def test_row_dir_missing_no_sibling_raises(mocks):

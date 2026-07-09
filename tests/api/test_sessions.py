@@ -1962,6 +1962,61 @@ class TestAdoptSession:
         assert "feat/unpushed" in data["warning"]
         mock_database.adopt_session.assert_called_once()
 
+    def test_adopt_no_false_warning_when_branch_pushed_but_unfetched(
+        self, client, mock_database, sample_session
+    ):
+        """follow-up #4: the worktree branch IS on origin but hasn't been fetched
+        into this clone yet. The preflight must fetch first so it sees
+        origin/<branch> and does NOT emit a false 'hasn't been pushed' warning.
+        Pre-fix (offline listing, no fetch) this returned a bogus warning."""
+        from app.core.config import settings
+        from app.core.worktree_manager import reset_fetch_cache
+
+        reset_fetch_cache()
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        sample_session["worktree_branch"] = "feat/pushed"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        # The remote-tracking ref for the branch only appears AFTER a fetch — the
+        # exact "pushed elsewhere, not yet fetched here" race the warning tripped on.
+        state = {"fetched": False}
+
+        def _fetch(_dir, remote="origin"):
+            state["fetched"] = True
+            return True
+
+        def _branches(_dir, include_remote=False):
+            names = [{"name": "main"}]
+            if include_remote:
+                names.append(
+                    {"name": "origin/feat/pushed"} if state["fetched"]
+                    else {"name": "origin/main"}
+                )
+            return names
+
+        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
+                  "path": "/foreign/missing"}
+        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
+        git_mock = MagicMock()
+        git_mock.fetch.side_effect = _fetch
+        git_mock.list_branches.side_effect = _branches
+        with patch(
+            "app.core.project_links.resolve_runnable_local_project",
+            return_value=(stored, local),
+        ), patch("app.core.git_service.git_service", git_mock):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["warning"] is None  # no FALSE unpushed warning
+        git_mock.fetch.assert_called_once()  # freshened origin refs at adopt time
+
     def test_adopt_preflight_error_fails_open(self, client, mock_database, sample_session):
         """A preflight bug must never make an adoptable session un-adoptable."""
         from app.core.config import settings

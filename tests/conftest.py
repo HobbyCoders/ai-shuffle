@@ -414,6 +414,24 @@ def reset_environment():
 
 
 @pytest.fixture(autouse=True)
+def reset_worktree_fetch_cache():
+    """Clear the cross-device rebind fetch de-dup cache between tests.
+
+    ``worktree_manager`` caches recent ``git fetch`` calls (keyed by clone dir) so
+    a fetch primed at adopt time isn't repeated on the send hot path. That module
+    -level state would otherwise leak across tests — e.g. a fetch primed for a
+    fixed path like ``/local/clone`` in one test would make a later test's
+    ``fetch.assert_called_once()`` see zero calls. Reset before each test.
+    """
+    try:
+        from app.core.worktree_manager import reset_fetch_cache
+        reset_fetch_cache()
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def prevent_real_cli_tool_discovery():
     """
     Guard against tests launching the real ``claude`` CLI for tool discovery.

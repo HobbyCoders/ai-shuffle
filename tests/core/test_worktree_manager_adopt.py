@@ -379,7 +379,8 @@ def _setup_rebind(mgr, db, tmp_path, *, local_project):
 
 def test_recreate_rebinds_to_link_group_sibling(manager, tmp_path):
     """(a) Stored path missing + local sibling → worktree created under the
-    sibling, repository_id re-pointed, sessions moved via set_session_project."""
+    sibling, repository_id re-pointed, and ONLY the resumed session moved via
+    set_session_project."""
     mgr, db = manager
     local_dir = tmp_path / "local-clone"
     local_dir.mkdir()
@@ -398,7 +399,7 @@ def test_recreate_rebinds_to_link_group_sibling(manager, tmp_path):
         "app.core.project_links.resolve_runnable_local_project",
         return_value=({"id": "proj-foreign"}, local_project),
     ):
-        mgr.recreate_worktree("wt-1")
+        mgr.recreate_worktree("wt-1", rebind_session_id="ses-1")
 
     # add_worktree ran against the LOCAL clone with the existing branch.
     _, add_kwargs = mgr.git_service.add_worktree.call_args
@@ -407,8 +408,69 @@ def test_recreate_rebinds_to_link_group_sibling(manager, tmp_path):
     # repository_id re-pointed to the local repo on the final write.
     _, upd_kwargs = db.update_worktree.call_args
     assert upd_kwargs["repository_id"] == "repo-local"
-    # Sessions moved onto the local project row.
+    # ONLY the resumed session was moved onto the local project row.
     db.set_session_project.assert_called_once_with("ses-1", "proj-local")
+
+
+def test_recreate_rebind_scopes_repoint_to_resumed_session(manager, tmp_path):
+    """follow-up #2: a worktree can back several sessions (forks). Resuming ONE of
+    them cross-device must move ONLY that session onto the local project row — the
+    #493 code re-pointed EVERY session on the worktree via
+    get_sessions_for_worktree, corrupting sibling forks' binding on their home
+    device. Here two sessions share the worktree; only 'ses-1' is resumed."""
+    mgr, db = manager
+    local_dir = tmp_path / "local-clone"
+    local_dir.mkdir()
+    local_project = {"id": "proj-local", "path": str(local_dir), "link_group_id": "git:abc"}
+    _setup_rebind(mgr, db, tmp_path, local_project=local_project)
+    # The worktree backs two sessions — a fork edge. If the old broad repoint were
+    # still in place this would move both.
+    db.get_sessions_for_worktree.return_value = [{"id": "ses-1"}, {"id": "ses-2-fork"}]
+
+    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
+    mgr.git_service.list_worktrees.return_value = []
+    mgr.git_service.add_worktree.return_value = (True, None)
+    target = tmp_path / "local-clone" / "worktrees" / "wt-bb7d"
+    target.mkdir(parents=True)
+    monkeypatch_path(mgr, target)
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, local_project),
+    ):
+        mgr.recreate_worktree("wt-1", rebind_session_id="ses-1")
+
+    # Exactly one repoint — the resumed session — never the sibling fork.
+    db.set_session_project.assert_called_once_with("ses-1", "proj-local")
+    repointed = {c.args[0] for c in db.set_session_project.call_args_list}
+    assert "ses-2-fork" not in repointed
+
+
+def test_recreate_rebind_no_session_repoints_nothing(manager, tmp_path):
+    """follow-up #2: the manual reopen endpoint calls recreate_worktree without a
+    session id. With no single session to scope to, we re-point NOTHING rather
+    than clobber every session on the worktree."""
+    mgr, db = manager
+    local_dir = tmp_path / "local-clone"
+    local_dir.mkdir()
+    local_project = {"id": "proj-local", "path": str(local_dir), "link_group_id": "git:abc"}
+    _setup_rebind(mgr, db, tmp_path, local_project=local_project)
+    db.get_sessions_for_worktree.return_value = [{"id": "ses-1"}, {"id": "ses-2"}]
+
+    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
+    mgr.git_service.list_worktrees.return_value = []
+    mgr.git_service.add_worktree.return_value = (True, None)
+    target = tmp_path / "local-clone" / "worktrees" / "wt-bb7d"
+    target.mkdir(parents=True)
+    monkeypatch_path(mgr, target)
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, local_project),
+    ):
+        mgr.recreate_worktree("wt-1")  # no rebind_session_id
+
+    db.set_session_project.assert_not_called()
 
 
 def test_recreate_rebind_recovers_branch_from_origin(manager, tmp_path):
@@ -512,3 +574,85 @@ def test_create_add_failure_other_error_raises(manager, tmp_path):
 
     assert "Git failed to create worktree" in str(ei.value)
     db.create_worktree.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# follow-up #1: the cross-device rebind fetch is primed at adopt time and cached,
+# so ``resolve_rebound_branch_plan`` does not block the SEND hot path on a repeat
+# ``git fetch``. (The blocking fetch was the reviewer's first follow-up.)
+# ---------------------------------------------------------------------------
+
+def test_resolve_rebound_branch_plan_reuses_primed_fetch(tmp_path):
+    """A fetch primed at adopt time (note_repo_fetched) is reused: the plan does
+    NOT fetch again when it must consult origin for a non-local branch."""
+    from app.core.worktree_manager import (
+        resolve_rebound_branch_plan,
+        note_repo_fetched,
+        reset_fetch_cache,
+    )
+
+    reset_fetch_cache()
+    main_dir = str(tmp_path / "clone")
+    git = MagicMock(name="git_service")
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": "origin/feat/x", "is_remote": True},
+            ]
+        # branch NOT local → would otherwise fetch
+        return [{"name": "main", "is_remote": False}]
+
+    git.list_branches.side_effect = _branches
+
+    # Adopt-time primed the fetch for this dir.
+    note_repo_fetched(main_dir)
+
+    create_new, base = resolve_rebound_branch_plan(git, main_dir, "feat/x")
+
+    assert (create_new, base) == (True, "feat/x")
+    git.fetch.assert_not_called()  # hot path did not re-fetch
+
+
+def test_resolve_rebound_branch_plan_fetches_when_not_primed(tmp_path):
+    """Control: with no primed fetch, the plan DOES fetch once to freshen refs
+    before deciding the branch is recoverable from origin."""
+    from app.core.worktree_manager import resolve_rebound_branch_plan, reset_fetch_cache
+
+    reset_fetch_cache()
+    main_dir = str(tmp_path / "clone-2")
+    git = MagicMock(name="git_service")
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": "origin/feat/y", "is_remote": True},
+            ]
+        return [{"name": "main", "is_remote": False}]
+
+    git.list_branches.side_effect = _branches
+
+    create_new, base = resolve_rebound_branch_plan(git, main_dir, "feat/y")
+
+    assert (create_new, base) == (True, "feat/y")
+    git.fetch.assert_called_once_with(main_dir)
+
+
+def test_fetch_repo_cached_force_always_fetches_and_primes(tmp_path):
+    """Adopt uses force=True: it always fetches (freshness for the advisory) and
+    records the timestamp so a following send-path call skips."""
+    from app.core.worktree_manager import (
+        fetch_repo_cached,
+        reset_fetch_cache,
+    )
+
+    reset_fetch_cache()
+    main_dir = str(tmp_path / "clone-3")
+    git = MagicMock(name="git_service")
+
+    assert fetch_repo_cached(git, main_dir, force=True) is True
+    # A subsequent non-forced call within the TTL is a cache hit (no fetch).
+    assert fetch_repo_cached(git, main_dir) is False
+    git.fetch.assert_called_once_with(main_dir)
