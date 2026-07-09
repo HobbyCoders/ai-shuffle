@@ -204,6 +204,154 @@ def _detect_components_from_entry(svc, entry: Dict[str, Any]) -> Dict[str, bool]
     }
 
 
+# Passive, user-invoked component types an *implicit* plugin (a git repo added as
+# a source but carrying no .claude-plugin/marketplace.json) is allowed to expose.
+# Deliberately excludes hooks and MCP servers: those execute automatically, so
+# auto-adopting them from a repo merely added as a source would be a footgun.
+IMPLICIT_COMPONENTS = ("skills", "commands", "agents")
+
+
+def _resolve_implicit_component_dir(root: Path, component: str) -> Optional[Path]:
+    """Locate a component's source directory in a marketplace-less repo.
+
+    Searches, in priority order:
+        <root>/<component>            (plugin-style at the repo root)
+        <root>/.claude/<component>   (project-style, e.g. .claude/skills)
+        <root>/.agents/<component>   (multi-tool convention, e.g. remotion)
+
+    Returns the first existing directory, or None. is_dir() follows symlinks, so
+    a symlinked component dir resolves correctly.
+    """
+    for candidate in (root / component, root / ".claude" / component, root / ".agents" / component):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _skills_dir_has_skill(skills_dir: Path) -> bool:
+    """True iff skills_dir contains at least one <name>/SKILL.md."""
+    try:
+        for child in skills_dir.iterdir():
+            if child.is_dir() and (child / "SKILL.md").exists():
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _dir_has_markdown(md_dir: Path) -> bool:
+    """True iff md_dir contains at least one *.md file (recursively)."""
+    try:
+        return next(md_dir.glob("**/*.md"), None) is not None
+    except OSError:
+        return False
+
+
+def discover_implicit_components(svc, root: Path) -> Dict[str, Any]:
+    """Detect skills/commands/agents in a marketplace-less repo (implicit plugin).
+
+    A component only counts as present if its directory actually holds usable
+    content (skills need <name>/SKILL.md; commands/agents need at least one *.md),
+    so an empty or irrelevant directory does not conjure a phantom plugin.
+
+    Returns per-component resolved source Paths plus has_* booleans and an "any"
+    convenience flag.
+    """
+    skills_dir = _resolve_implicit_component_dir(root, "skills")
+    commands_dir = _resolve_implicit_component_dir(root, "commands")
+    agents_dir = _resolve_implicit_component_dir(root, "agents")
+
+    has_skills = bool(skills_dir and _skills_dir_has_skill(skills_dir))
+    has_commands = bool(commands_dir and _dir_has_markdown(commands_dir))
+    has_agents = bool(agents_dir and _dir_has_markdown(agents_dir))
+
+    return {
+        "skills_dir": skills_dir if has_skills else None,
+        "commands_dir": commands_dir if has_commands else None,
+        "agents_dir": agents_dir if has_agents else None,
+        "has_skills": has_skills,
+        "has_commands": has_commands,
+        "has_agents": has_agents,
+        "any": has_skills or has_commands or has_agents,
+    }
+
+
+def _copy_tree_resolving_symlinks(src: Path, dst: Path) -> None:
+    """Copy `src` into `dst`, materializing symlinks as real files.
+
+    Unlike `shutil.copytree(..., symlinks=False, ignore_dangling_symlinks=True)`,
+    this resolves relative symlinks correctly: `Path.exists()`/`is_dir()` follow the
+    link relative to its own location (kernel semantics), whereas copytree checks the
+    raw link target against the current working directory and so wrongly drops valid
+    relative symlinks (e.g. remotion's `.claude/skills/x -> ../../.agents/skills/x`).
+    Genuinely-broken links are skipped.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.iterdir():
+        target = dst / entry.name
+        if entry.is_symlink() and not entry.exists():
+            continue  # genuinely dangling link -- skip
+        if entry.is_dir():  # follows symlinks to directories
+            _copy_tree_resolving_symlinks(entry, target)
+        else:
+            shutil.copy2(entry, target)  # follows symlinks to real files
+
+
+def _install_implicit_plugin(
+    svc, plugin_id: str, marketplace_id: str, mp_path: Path, implicit: Dict[str, Any], scope: str
+) -> PluginInfo:
+    """Install a marketplace-less repo as a single implicit plugin.
+
+    Materializes the discovered skills/commands/agents into the plugin cache under
+    a normalized <cache>/<component>/ layout so the ordinary enable + skill-discovery
+    path (which reads <install>/skills/<name>/SKILL.md) works unchanged. Symlinks are
+    resolved to real files so repos that symlink their skills (e.g. .claude/skills ->
+    .agents/skills) install correctly.
+    """
+    plugin_name = plugin_id.rsplit("@", 1)[0]
+    version = svc._get_marketplace_head_version(marketplace_id) or "0.0.0"
+
+    cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.exists():
+        _force_rmtree(cache_path)
+    cache_path.mkdir(parents=True)
+
+    for component in IMPLICIT_COMPONENTS:
+        src = implicit.get(f"{component}_dir")
+        if src:
+            _copy_tree_resolving_symlinks(src, cache_path / component)
+
+    # Ensure scripts have execute permissions (mirror install_plugin).
+    for script in cache_path.rglob("*.sh"):
+        current_mode = script.stat().st_mode
+        script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
+    if "plugins" not in installed:
+        installed["plugins"] = {}
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    installed["plugins"][plugin_id] = [{
+        "scope": scope,
+        "installPath": str(cache_path),
+        "version": version,
+        "installedAt": now,
+        "lastUpdated": now,
+        "isLocal": True,
+        # Marks a repo installed as an implicit plugin (no marketplace.json entry).
+        # Update checks skip these; see plugin_updates.check_for_updates.
+        "implicit": True,
+    }]
+    svc._write_json_file(svc.INSTALLED_FILE, installed)
+
+    svc.enable_plugin(plugin_id)
+
+    for p in svc.get_installed_plugins():
+        if p.id == plugin_id:
+            return p
+    return svc.get_installed_plugins()[-1]
+
+
 def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
     """
     Install a plugin from a marketplace.
@@ -236,6 +384,15 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
     # Look up plugin in marketplace.json
     entry = svc._find_plugin_in_manifest(marketplace_id, plugin_name)
     if not entry:
+        # No manifest entry. If the marketplace has no manifest at all and the repo
+        # itself carries skills/commands/agents, install it as an implicit
+        # single-plugin (canonical id "<mp>@<mp>").
+        if plugin_name == marketplace_id and svc._get_marketplace_manifest(mp_path) is None:
+            implicit = discover_implicit_components(svc, mp_path)
+            if implicit["any"]:
+                return _install_implicit_plugin(
+                    svc, plugin_id, marketplace_id, mp_path, implicit, scope
+                )
         raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
     source = entry.get("source", "")

@@ -239,6 +239,29 @@ class PluginService:
         """Infer plugin components from marketplace.json entry keys."""
         return _inst_mod._detect_components_from_entry(self, entry)
 
+    def _discover_implicit_components(self, root: Path) -> Dict[str, Any]:
+        """Detect skills/commands/agents in a marketplace-less repo (implicit plugin)."""
+        return _inst_mod.discover_implicit_components(self, root)
+
+    def _resolve_component_dir(self, root: Path, component: str) -> Optional[Path]:
+        """Resolve a component dir at the repo root or under .claude/ or .agents/."""
+        return _inst_mod._resolve_implicit_component_dir(root, component)
+
+    @staticmethod
+    def _readme_first_line(directory: Path) -> Optional[str]:
+        """First non-empty, non-heading line of README.md in `directory`, truncated."""
+        readme = directory / "README.md"
+        if not readme.exists():
+            return None
+        try:
+            for line in readme.read_text(encoding="utf-8").strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line[:200]
+        except (IOError, UnicodeDecodeError):
+            pass
+        return None
+
     @staticmethod
     def _fetch_github_readme(marketplace_path: str) -> Optional[str]:
         """Try to fetch README.md from a GitHub repo URL stored in marketplace_path.
@@ -306,7 +329,31 @@ class PluginService:
             manifest = self._get_marketplace_manifest(mp_path)
 
             if not manifest:
-                logger.warning(f"No marketplace.json found for {mp.id} at {mp_path}")
+                # No marketplace.json -- treat the repo itself as a single implicit
+                # plugin if it carries skills/commands/agents (e.g. a repo whose
+                # skills live in .claude/skills or .agents/skills). Passive,
+                # user-invoked components only; never hooks/MCP.
+                implicit = self._discover_implicit_components(mp_path)
+                if not implicit["any"]:
+                    logger.warning(f"No marketplace.json or skills found for {mp.id} at {mp_path}")
+                    continue
+
+                plugin_id = f"{mp.id}@{mp.id}"
+                description = self._readme_first_line(mp_path) or "Skills discovered in this repository"
+                available.append(AvailablePlugin(
+                    id=plugin_id,
+                    name=mp.id,
+                    marketplace=mp.id,
+                    marketplace_path=str(mp_path),
+                    description=description,
+                    has_commands=implicit["has_commands"],
+                    has_agents=implicit["has_agents"],
+                    has_skills=implicit["has_skills"],
+                    has_hooks=False,
+                    has_mcp=False,
+                    installed=plugin_id in installed_plugins,
+                    enabled=enabled_plugins.get(plugin_id, False),
+                ))
                 continue
 
             plugin_root = manifest.get("metadata", {}).get("pluginRoot") if isinstance(manifest.get("metadata"), dict) else None
@@ -627,24 +674,23 @@ class PluginService:
                 readme=readme
             )
 
-        # Collect commands
+        # Collect commands / agents / skills. Component dirs may live at the repo
+        # root or under .claude/ or .agents/ (implicit, marketplace-less plugins).
         commands = []
-        commands_dir = plugin_path / "commands"
-        if commands_dir.exists():
+        commands_dir = self._resolve_component_dir(plugin_path, "commands")
+        if commands_dir:
             for cmd_file in commands_dir.glob("**/*.md"):
                 commands.append(cmd_file.stem)
 
-        # Collect agents
         agents = []
-        agents_dir = plugin_path / "agents"
-        if agents_dir.exists():
+        agents_dir = self._resolve_component_dir(plugin_path, "agents")
+        if agents_dir:
             for agent_file in agents_dir.glob("**/*.md"):
                 agents.append(agent_file.stem)
 
-        # Collect skills
         skills = []
-        skills_dir = plugin_path / "skills"
-        if skills_dir.exists():
+        skills_dir = self._resolve_component_dir(plugin_path, "skills")
+        if skills_dir:
             for skill_dir in skills_dir.iterdir():
                 if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
                     skills.append(skill_dir.name)
