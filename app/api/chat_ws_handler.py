@@ -555,6 +555,7 @@ async def _drain_notifications_impl(
         _record_task_message,
         _subagent_events_from_message,
         _task_status_events_from_message,
+        _task_status_event_from_notification,
         _task_notification_frame,
         _task_update_terminal_status,
         ResultMessage,
@@ -635,6 +636,12 @@ async def _drain_notifications_impl(
 
         agen = client.receive_messages()
         batch_deadline: Optional[float] = None
+        # RC2 (parked "Task Updated" chip): task_ids for which a task_updated chip
+        # was ALREADY dispatched this pump run — either by the generic converter
+        # below (a real TaskUpdatedMessage) or by the notification synth. A normal
+        # completion can emit BOTH a TaskUpdatedMessage(completed) AND a terminal
+        # TaskNotificationMessage; deduping here keeps the card single.
+        _chipped_task_ids: set = set()
         # PERSISTENT READ FUTURE (F1): every timed read below uses ONE future per
         # __anext__ call, kept alive across timeouts via ``asyncio.wait`` (which,
         # unlike ``wait_for``, never cancels it). Cancelling a pending __anext__
@@ -772,8 +779,16 @@ async def _drain_notifications_impl(
                 # chain here. If the live store has no session (cleanup raced),
                 # add_system_message logs + drops it — must not crash the pump.
                 try:
-                    for _status_ev in _task_status_events_from_message(message):
+                    _status_evs = _task_status_events_from_message(message)
+                    for _status_ev in _status_evs:
                         await dispatch_event(_status_ev, sub_ectx, sub_state)
+                    if _status_evs:
+                        # A real TaskUpdatedMessage chip already rendered for this
+                        # task — record it so a following terminal notification for
+                        # the SAME task does not synthesize a duplicate chip below.
+                        _tu_tid = getattr(message, "task_id", None)
+                        if _tu_tid:
+                            _chipped_task_ids.add(_tu_tid)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: task-status chip re-dispatch failed: {_exc}")
 
@@ -1035,6 +1050,25 @@ async def _drain_notifications_impl(
                     started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
                     decision="deliver",
                 )
+                # RC2 (parked "Task Updated" chip): a normal background completion
+                # arrives between turns ONLY as this TaskNotificationMessage (no
+                # task_updated patch), so the generic converter above yielded
+                # nothing and — while PARKED — no completion card ever rendered.
+                # Synthesize the SAME {"type":"system","subtype":"task_updated"}
+                # chip the in-stream loop renders and dispatch it through the
+                # identical handle_system -> add_system_message chain (live-store
+                # update_id bump -> park-poller renders it). Only on the DELIVER
+                # path: suppress-foreground (synchronous sub-agent) and dedup
+                # notifications continue'd out above, so — like in-stream — a
+                # foreground/duplicate completion drops no card. Guard against a
+                # task_updated chip already emitted for this task this run.
+                if task_id and task_id not in _chipped_task_ids:
+                    try:
+                        for _chip_ev in _task_status_event_from_notification(message):
+                            await dispatch_event(_chip_ev, sub_ectx, sub_state)
+                        _chipped_task_ids.add(task_id)
+                    except Exception as _exc:
+                        ctx.debug(logger, f"Drain pump: notification chip synth failed: {_exc}")
                 pending.append({
                     "task_id": task_id,
                     "status": status,
