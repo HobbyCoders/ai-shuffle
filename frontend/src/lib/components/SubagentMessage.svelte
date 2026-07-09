@@ -159,8 +159,8 @@
 	}
 </script>
 
-<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-	<summary class="subagent-summary w-full min-w-0 px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
+<details class="w-full border border-border rounded-lg overflow-hidden group">
+	<summary class="subagent-summary w-full min-w-0 px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
 		{#if statusInfo.isRunning}
 			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -220,7 +220,7 @@
 	</summary>
 
 	<!-- Expanded content -->
-	<div class="bg-card border-t border-border">
+	<div>
 		<div class="max-h-[32rem] overflow-y-auto">
 			<!-- Initial prompt section -->
 			{#if message.agentPrompt}
@@ -358,12 +358,8 @@
 </details>
 
 <style>
-	.subagent-summary {
-		background: color-mix(in oklch, var(--muted) 30%, transparent);
-	}
-
 	.subagent-summary:hover {
-		background: color-mix(in oklch, var(--muted) 50%, transparent);
+		background: var(--hover-overlay);
 	}
 
 	.subagent-summary:focus-visible {
