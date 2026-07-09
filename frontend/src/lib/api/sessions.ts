@@ -115,6 +115,10 @@ export interface AdoptSessionResponse {
 	/** True when ownership was re-pointed here; false when already local (no-op). */
 	adopted: boolean;
 	status: string;
+	/** Non-blocking advisory from the cross-device rebind preflight (e.g. an unpushed branch). */
+	warning?: string | null;
+	/** Local clone the session was rebound onto, when a link-group sibling was used. */
+	local_project_id?: string | null;
 }
 
 // ============================================================================

@@ -402,9 +402,18 @@ def _installs(*specs):
 
 @pytest.fixture
 def svc_env():
-    """Patch the service's database facade and pin this install's id to ME."""
+    """Patch the service's database facade and pin this install's id to ME.
+
+    The cross-install resolution helpers (``resolve_local_project`` /
+    ``_local_candidate`` / ``_link_group_siblings``) now live in
+    ``app.core.project_links`` and read ``database``/``settings`` from THAT
+    module, so patch both modules to the same mocks — ``should_run_scheduled_here``
+    still calls them plus its own ``database``/``settings`` in automation_service.
+    """
     with patch("app.core.automation_service.database") as db, \
-         patch("app.core.automation_service.settings") as st:
+         patch("app.core.automation_service.settings") as st, \
+         patch("app.core.project_links.database", db), \
+         patch("app.core.project_links.settings", st):
         st.effective_instance_id = ME
         db.get_projects_in_link_group.return_value = []
         yield db

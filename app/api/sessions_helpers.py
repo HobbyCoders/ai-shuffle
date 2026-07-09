@@ -101,6 +101,11 @@ class AdoptSessionResponse(BaseModel):
     instance_id: str
     adopted: bool
     status: str
+    # Cross-device rebind preflight (populated only when the session carries a
+    # project): a non-blocking advisory (e.g. an unpushed worktree branch) and
+    # the local clone the session was rebound onto, when a sibling was used.
+    warning: Optional[str] = None
+    local_project_id: Optional[str] = None
 
 
 class CreateWorktreeSessionRequest(BaseModel):

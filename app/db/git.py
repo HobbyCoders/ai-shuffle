@@ -378,8 +378,15 @@ def update_worktree(
     status: Optional[str] = None,
     worktree_path: Optional[str] = None,
     branch_name: Optional[str] = None,
+    repository_id: Optional[str] = None,
 ) -> Optional[WorktreeRow]:
-    """Update a worktree"""
+    """Update a worktree.
+
+    ``repository_id`` is re-pointed only during a cross-device worktree rebind
+    (worktree_manager.recreate_worktree), when the stored repo belongs to a
+    project that lives on another machine and the worktree is recreated under
+    this install's clone of the same repo.
+    """
     existing = get_worktree(worktree_id)
     if not existing:
         return None
@@ -399,6 +406,9 @@ def update_worktree(
     if branch_name is not None:
         updates.append("branch_name = %s")
         values.append(branch_name)
+    if repository_id is not None:
+        updates.append("repository_id = %s")
+        values.append(repository_id)
 
     if updates:
         values.append(worktree_id)

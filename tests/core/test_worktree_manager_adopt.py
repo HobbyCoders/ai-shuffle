@@ -19,7 +19,7 @@ style).
 from pathlib import Path
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import app.core.worktree_manager as wm_module
 from app.core.worktree_manager import WorktreeManager, WorktreeError
@@ -94,12 +94,14 @@ def test_recreate_adopts_existing_when_branch_checked_out(manager, tmp_path):
 
     # ADOPTED — add_worktree must NOT be called.
     mgr.git_service.add_worktree.assert_not_called()
-    # Record flipped to ACTIVE with the adopted path.
+    # Record flipped to ACTIVE with the adopted path. Non-rebind path →
+    # repository_id passes through as None (no cross-device rebind occurred).
     db.update_worktree.assert_called_once_with(
         "wt-1",
         status=WorktreeStatus.ACTIVE,
         worktree_path=str(wt_dir),
         branch_name=BRANCH,
+        repository_id=None,
     )
     assert result["status"] == WorktreeStatus.ACTIVE
     assert result["worktree_path"] == str(wt_dir)
@@ -195,6 +197,7 @@ def test_recreate_add_failure_already_used_falls_back_to_adopt(manager, tmp_path
         status=WorktreeStatus.ACTIVE,
         worktree_path=str(wt_dir),
         branch_name=BRANCH,
+        repository_id=None,
     )
     assert result["status"] == WorktreeStatus.ACTIVE
 
@@ -335,6 +338,161 @@ def test_create_add_failure_already_used_falls_back_to_adopt(manager, tmp_path):
     _, kwargs = db.create_worktree.call_args
     assert kwargs["worktree_path"] == str(wt_dir)
     assert result["worktree_path"] == str(wt_dir)
+
+
+# ---------------------------------------------------------------------------
+# recreate_worktree: cross-device rebind onto a local clone of the same repo
+# ---------------------------------------------------------------------------
+
+def _setup_rebind(mgr, db, tmp_path, *, local_project):
+    """Stored project's checkout is missing; rebind resolves to ``local_project``.
+
+    Wires the DB boundary and the ``resolve_runnable_local_project`` return so
+    recreate_worktree takes the rebind path. Returns nothing — callers set up the
+    branch/worktree git mocks for their specific scenario.
+    """
+    db.get_worktree.return_value = {
+        "id": "wt-1",
+        "status": WorktreeStatus.ORPHANED,
+        "branch_name": BRANCH,
+        "repository_id": "repo-foreign",
+    }
+    db.get_git_repository.return_value = {
+        "id": "repo-foreign",
+        "project_id": "proj-foreign",
+        "default_branch": "main",
+    }
+    # Stored project lives on another device: path is missing here.
+    db.get_project.return_value = {
+        "id": "proj-foreign",
+        "path": "/foreign/missing",
+        "link_group_id": "git:abc",
+    }
+    db.get_sessions_for_worktree.return_value = [{"id": "ses-1"}]
+    db.update_worktree.return_value = {
+        "id": "wt-1",
+        "status": WorktreeStatus.ACTIVE,
+    }
+    # This install's clone of the same repo.
+    mgr._ensure_repository_record = lambda pid, ppath: {"id": "repo-local"}
+
+
+def test_recreate_rebinds_to_link_group_sibling(manager, tmp_path):
+    """(a) Stored path missing + local sibling → worktree created under the
+    sibling, repository_id re-pointed, sessions moved via set_session_project."""
+    mgr, db = manager
+    local_dir = tmp_path / "local-clone"
+    local_dir.mkdir()
+    local_project = {"id": "proj-local", "path": str(local_dir), "link_group_id": "git:abc"}
+    _setup_rebind(mgr, db, tmp_path, local_project=local_project)
+
+    # Branch exists locally in the clone → reuse (create_new=False).
+    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
+    mgr.git_service.list_worktrees.return_value = []  # nothing to adopt
+    mgr.git_service.add_worktree.return_value = (True, None)
+    target = tmp_path / "local-clone" / "worktrees" / "wt-bb7d"
+    target.mkdir(parents=True)
+    monkeypatch_path(mgr, target)
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, local_project),
+    ):
+        mgr.recreate_worktree("wt-1")
+
+    # add_worktree ran against the LOCAL clone with the existing branch.
+    _, add_kwargs = mgr.git_service.add_worktree.call_args
+    assert add_kwargs["main_dir"] == str(local_dir)
+    assert add_kwargs["new_branch"] is False
+    # repository_id re-pointed to the local repo on the final write.
+    _, upd_kwargs = db.update_worktree.call_args
+    assert upd_kwargs["repository_id"] == "repo-local"
+    # Sessions moved onto the local project row.
+    db.set_session_project.assert_called_once_with("ses-1", "proj-local")
+
+
+def test_recreate_rebind_recovers_branch_from_origin(manager, tmp_path):
+    """(b) Branch missing locally but origin/<branch> exists → add_worktree with
+    new_branch=True, base_branch=<branch> (lands on the pushed tip)."""
+    mgr, db = manager
+    local_dir = tmp_path / "local-clone"
+    local_dir.mkdir()
+    local_project = {"id": "proj-local", "path": str(local_dir), "link_group_id": "git:abc"}
+    _setup_rebind(mgr, db, tmp_path, local_project=local_project)
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": f"origin/{BRANCH}", "is_remote": True},
+            ]
+        return [{"name": "main", "is_remote": False}]
+
+    mgr.git_service.list_branches.side_effect = _branches
+    mgr.git_service.list_worktrees.return_value = []
+    mgr.git_service.add_worktree.return_value = (True, None)
+    target = tmp_path / "local-clone" / "worktrees" / "wt-bb7d"
+    target.mkdir(parents=True)
+    monkeypatch_path(mgr, target)
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, local_project),
+    ):
+        mgr.recreate_worktree("wt-1")
+
+    mgr.git_service.fetch.assert_called_once()
+    _, add_kwargs = mgr.git_service.add_worktree.call_args
+    assert add_kwargs["new_branch"] is True
+    assert add_kwargs["base_branch"] == BRANCH
+
+
+def test_recreate_rebind_branch_missing_everywhere_raises(manager, tmp_path):
+    """(c) Branch missing locally AND not on origin → WorktreeError with a
+    push-instruction, and NO add_worktree with a default base."""
+    mgr, db = manager
+    local_dir = tmp_path / "local-clone"
+    local_dir.mkdir()
+    local_project = {"id": "proj-local", "path": str(local_dir), "link_group_id": "git:abc"}
+    _setup_rebind(mgr, db, tmp_path, local_project=local_project)
+
+    def _branches(_dir, include_remote=False):
+        if include_remote:
+            return [
+                {"name": "main", "is_remote": False},
+                {"name": "origin/main", "is_remote": True},
+            ]
+        return [{"name": "main", "is_remote": False}]
+
+    mgr.git_service.list_branches.side_effect = _branches
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, local_project),
+    ):
+        with pytest.raises(WorktreeError) as ei:
+            mgr.recreate_worktree("wt-1")
+
+    assert "git push -u origin" in str(ei.value)
+    mgr.git_service.add_worktree.assert_not_called()
+
+
+def test_recreate_rebind_no_local_clone_raises_early(manager, tmp_path):
+    """(d) Stored path missing + no local clone → early WorktreeError, git never
+    touched (no branch listing, no add_worktree)."""
+    mgr, db = manager
+    _setup_rebind(mgr, db, tmp_path, local_project=None)
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign", "path": "/foreign/missing"}, None),
+    ):
+        with pytest.raises(WorktreeError) as ei:
+            mgr.recreate_worktree("wt-1")
+
+    assert "no local clone" in str(ei.value)
+    mgr.git_service.add_worktree.assert_not_called()
+    mgr.git_service.list_branches.assert_not_called()
 
 
 def test_create_add_failure_other_error_raises(manager, tmp_path):
