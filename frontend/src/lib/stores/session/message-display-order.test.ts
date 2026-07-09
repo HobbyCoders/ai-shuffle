@@ -39,7 +39,7 @@ function isGroupableSystem(msg: ChatMessage): boolean {
 	return msg.type === 'system' && GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 }
 
-function buildDisplayItems(messages: ChatMessage[]): DisplayItem[] {
+function buildDisplayItems(messages: ChatMessage[], groupingEnabled = true): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	const seenIds = new Set<string>();
 	let i = 0;
@@ -47,7 +47,7 @@ function buildDisplayItems(messages: ChatMessage[]): DisplayItem[] {
 		const msg = messages[i];
 		if (msg.id && seenIds.has(msg.id)) { i++; continue; }
 		if (msg.id) seenIds.add(msg.id);
-		if (isGroupableTool(msg)) {
+		if (groupingEnabled && isGroupableTool(msg)) {
 			const tools: ChatMessage[] = [msg];
 			const indices: number[] = [i];
 			let j = i + 1;
@@ -140,5 +140,41 @@ describe('MessageArea display order (text -> tool -> text)', () => {
 		];
 		const items = buildDisplayItems(messages);
 		expect(items.some(it => it.kind === 'tool_group')).toBe(false);
+	});
+});
+
+describe('MessageArea tool grouping toggle (groupToolCalls)', () => {
+	const consecutiveTools = () => [
+		u('u-1', 'do the thing'),
+		toolUse('tool-1', 'Bash'),
+		toolUse('tool-2', 'Read'),
+		toolUse('tool-3', 'Grep'),
+	];
+
+	it('flag on (default): consecutive tools still collapse into one tool_group', () => {
+		expect(shape(buildDisplayItems(consecutiveTools(), true))).toEqual([
+			'user',
+			'toolgroup[Bash,Read,Grep]',
+		]);
+	});
+
+	it('flag off: each tool renders as its own message item in original order', () => {
+		expect(shape(buildDisplayItems(consecutiveTools(), false))).toEqual([
+			'user',
+			'tool:Bash',
+			'tool:Read',
+			'tool:Grep',
+		]);
+		// No tool_group items are produced when grouping is disabled.
+		expect(buildDisplayItems(consecutiveTools(), false).some(it => it.kind === 'tool_group')).toBe(false);
+	});
+
+	it('flag off: system grouping is unaffected by the tool toggle', () => {
+		const messages = [
+			{ id: 's-1', role: 'system', type: 'system', systemSubtype: 'hook_started', content: '', streaming: false } as unknown as ChatMessage,
+			{ id: 's-2', role: 'system', type: 'system', systemSubtype: 'hook_response', content: '', streaming: false } as unknown as ChatMessage,
+		];
+		const items = buildDisplayItems(messages, false);
+		expect(items.some(it => it.kind === 'system_group')).toBe(true);
 	});
 });
