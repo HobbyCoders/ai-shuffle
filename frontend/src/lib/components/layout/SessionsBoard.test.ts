@@ -130,8 +130,8 @@ const remoteSession = makeSession({
 function renderBoard() {
 	const onOpenSession = vi.fn();
 	const onNewSession = vi.fn();
-	render(SessionsBoard, { props: { onOpenSession, onNewSession } });
-	return { onOpenSession, onNewSession };
+	const result = render(SessionsBoard, { props: { onOpenSession, onNewSession } });
+	return { onOpenSession, onNewSession, unmount: result.unmount };
 }
 
 /** The `.row` whose title matches (scoped to the row list — the same title
@@ -277,5 +277,23 @@ describe('SessionsBoard clear-session confirm timer', () => {
 		await vi.advanceTimersByTimeAsync(4900);
 		expect(confirmVisible()).toBe(false);
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+
+	// Regression: the auto-reset timer used to be cancelled on every interactive
+	// path (cancel / re-arm / confirm) but NOT on component teardown, so an armed
+	// confirm surviving an unmount (e.g. navigating away) left a pending timer
+	// that would fire post-unmount and write to state no longer on screen.
+	it('cancels the pending auto-reset timer on unmount', async () => {
+		const { unmount } = renderBoard();
+		await armConfirm();
+		expect(confirmVisible()).toBe(true);
+		expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+		unmount();
+
+		// The timer must be cancelled, not merely orphaned — advancing well past
+		// its 8s deadline must not throw or warn from a post-unmount state write.
+		expect(vi.getTimerCount()).toBe(0);
+		expect(() => vi.advanceTimersByTime(10000)).not.toThrow();
 	});
 });

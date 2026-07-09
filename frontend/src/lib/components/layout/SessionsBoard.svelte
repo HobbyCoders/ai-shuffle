@@ -11,6 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
+	import { onDestroy } from 'svelte';
 	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
@@ -454,6 +455,12 @@
 		}
 		deletingSessionId = null;
 	}
+	// The 8s auto-reset timer above outlives the component unless cancelled: if
+	// the board unmounts while a confirm is armed (e.g. the user navigates away),
+	// the timer would otherwise fire post-unmount and write to `deletingSessionId`.
+	onDestroy(() => {
+		disarmDeleteConfirm();
+	});
 
 	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
