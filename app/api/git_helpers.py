@@ -174,6 +174,26 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
 _repo_record_cache: Dict[str, Tuple[Optional[dict], float]] = {}
 _REPO_RECORD_TTL = 60.0  # seconds
 
+# Sentinel returned by peek_repo_record_cache on a miss. A fresh cache entry may
+# legitimately be None (project is not a git repo), so None cannot signal "miss".
+_CACHE_MISS = object()
+
+
+def peek_repo_record_cache(project_id: str) -> Any:
+    """Return the cached git_repositories record for *project_id* if still fresh.
+
+    Returns the cached value (which may be ``None`` for a known non-repo) on a
+    hit, or the module-level ``_CACHE_MISS`` sentinel when there is no fresh
+    entry. This lets hot pollers short-circuit BEFORE submitting a ``run_git``
+    job: ``ensure_git_repository_record`` performs the same TTL check, but only
+    AFTER the executor has already accepted the job, so a cache hit still burned
+    a GitPool queue/worker slot on every /git/status poll (2s cadence).
+    """
+    cached = _repo_record_cache.get(project_id)
+    if cached and (time.monotonic() - cached[1]) < _REPO_RECORD_TTL:
+        return cached[0]
+    return _CACHE_MISS
+
 
 def _auto_link_from_repo(project_id: str, repo: Optional[dict]) -> None:
     """Best-effort: keep the project's link_group_id derived from its git remote.

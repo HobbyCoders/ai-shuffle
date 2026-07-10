@@ -7,7 +7,6 @@ Provides endpoints for worktree management including:
 - Browse files within worktrees
 """
 
-import asyncio
 import logging
 import os
 from datetime import datetime
@@ -124,6 +123,42 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
         # Legacy field
         session=legacy_session_info
     )
+
+
+def _collect_worktree_statuses(worktrees: list) -> dict:
+    """Compute git status for every existing worktree in a SINGLE git-pool job.
+
+    The list endpoint previously submitted one ``run_git`` job PER worktree, so a
+    project with N worktrees instantly queued N jobs onto the 4-worker GitPool.
+    On the main project (~40+ worktrees) every /git/worktrees call spiked the
+    queue to depth ~35 (matching the observed bursts). Running the per-worktree
+    ``git status`` calls sequentially inside one job occupies exactly ONE worker
+    regardless of worktree count. ``git_service.get_status`` keeps its own
+    short-TTL cache, so most calls here are cheap cache hits during polling.
+
+    Returns a map of ``worktree_id -> status dict`` (or ``None`` when the status
+    could not be read); worktrees that don't exist on disk are skipped entirely,
+    preserving the previous behaviour of never setting ``git_status`` for them.
+    """
+    statuses: dict = {}
+    for wt in worktrees:
+        if not wt.get("exists", True):
+            continue
+        wt_id = wt.get("id", "?")
+        try:
+            worktree_full_path = get_worktree_working_dir(wt)
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Worktree {wt_id} has invalid path, skipping status: {e}"
+            )
+            statuses[wt_id] = None
+            continue
+        try:
+            statuses[wt_id] = git_service.get_status(worktree_full_path)
+        except Exception as e:
+            logger.warning(f"Failed to get git status for worktree {wt_id}: {e}")
+            statuses[wt_id] = None
+    return statuses
 
 
 def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
@@ -302,25 +337,15 @@ async def list_worktrees(
 
     worktrees = worktree_manager.get_worktrees_for_project(project_id)
 
-    # Optionally fetch git status for each existing worktree (in parallel threads)
+    # Optionally fetch git status for each existing worktree.
+    # All per-worktree `git status` calls run sequentially inside ONE git-pool
+    # job (see _collect_worktree_statuses) instead of one job per worktree, so
+    # this costs a single GitPool worker regardless of how many worktrees exist.
     if include_status:
-        async def _fetch_wt_status(wt):
+        statuses = await run_git(_collect_worktree_statuses, worktrees)
+        for wt in worktrees:
             if wt.get("exists", True):
-                try:
-                    worktree_full_path = get_worktree_working_dir(wt)
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Worktree {wt.get('id', '?')} has invalid path, skipping status: {e}")
-                    wt["git_status"] = None
-                    return
-                try:
-                    wt["git_status"] = await run_git(
-                        git_service.get_status, worktree_full_path
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to get git status for worktree {wt['id']}: {e}")
-                    wt["git_status"] = None
-
-        await asyncio.gather(*[_fetch_wt_status(wt) for wt in worktrees])
+                wt["git_status"] = statuses.get(wt.get("id"))
 
     worktree_infos = [_convert_worktree_to_info(wt) for wt in worktrees]
 
