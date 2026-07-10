@@ -112,6 +112,8 @@
 			? ($activeView!.type as BuildSub)
 			: undefined
 	);
+	// One-shot deep-link target (profile/subagent id) to open in its editor.
+	const buildRequestedItemId = $derived($activeView?.itemId ?? undefined);
 
 	// Get the active session state (if in chat view)
 	const activeTab = $derived(
@@ -794,7 +796,7 @@
 		{:else if isBuildView}
 			<!-- Unified Build page (hosts Profiles/Subagents/MCP/Plugins/Hooks) -->
 			<div class="feature-panel">
-				<BuildPage requestedSub={buildRequestedSub} />
+				<BuildPage requestedSub={buildRequestedSub} requestedItemId={buildRequestedItemId} />
 			</div>
 		{:else if $activeView.type === 'project'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->

@@ -138,7 +138,7 @@
 	/**
 	 * Open a feature page (settings, files, plugins, etc.)
 	 */
-	function handleOpenFeature(type: ViewType) {
+	function handleOpenFeature(type: ViewType, itemId?: string | null) {
 		if (type === 'chat') {
 			handleNewSession();
 			return;
@@ -147,10 +147,10 @@
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
 			requestAnimationFrame(() => {
-				layout.openFeaturePage(type as Exclude<ViewType, 'chat'>);
+				layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
 			});
 		} else {
-			layout.openFeaturePage(type as Exclude<ViewType, 'chat'>);
+			layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
 		}
 	}
 
@@ -418,13 +418,13 @@
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectProfile(_id: string) {
-		handleOpenFeature('profile');
+	function handleSpotlightSelectProfile(id: string) {
+		handleOpenFeature('profile', id);
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectSubagent(_id: string) {
-		handleOpenFeature('subagent');
+	function handleSpotlightSelectSubagent(id: string) {
+		handleOpenFeature('subagent', id);
 		showSpotlight = false;
 	}
 
