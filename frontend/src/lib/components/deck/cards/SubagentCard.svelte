@@ -15,6 +15,7 @@
 	 */
 	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		getModelBadgeClass as getModelBadgeClassShared,
 		getModelLabel,
@@ -67,13 +68,27 @@
 		embedded?: boolean;
 		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
 		onDetailChange?: (detail: boolean) => void;
+		/** One-shot deep-link: open this subagent's editor once, after data loads. */
+		initialSelectedId?: string | null;
 	}
 
 	let {
 		mobile = false,
 		embedded = false,
-		onDetailChange
+		onDetailChange,
+		initialSelectedId
 	}: Props = $props();
+
+	// Consume the deep-link exactly once, after the target subagent has loaded.
+	let deepLinkConsumed = false;
+	$effect(() => {
+		if (!initialSelectedId || deepLinkConsumed) return;
+		const target = subagents.find((s) => s.id === initialSelectedId);
+		if (!target) return; // not loaded yet — wait for the next run
+		deepLinkConsumed = true;
+		handleEdit(target);
+		layout.clearFeatureItemId();
+	});
 
 	// View mode state
 	type ViewMode = 'list' | 'editor';

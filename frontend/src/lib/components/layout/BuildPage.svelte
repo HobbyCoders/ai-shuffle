@@ -32,8 +32,10 @@
 	interface Props {
 		/** Deep-link target (e.g. "Configure agents →", "Manage plugins"). */
 		requestedSub?: BuildSub;
+		/** One-shot deep-link item id (profile/subagent) to open in its editor. */
+		requestedItemId?: string | null;
 	}
-	let { requestedSub }: Props = $props();
+	let { requestedSub, requestedItemId }: Props = $props();
 
 	const STORAGE_KEY = 'ai-shuffle-build-subtab';
 	const SUBS: BuildSub[] = ['profile', 'subagent', 'mcp', 'plugins', 'hooks'];
@@ -139,9 +141,9 @@
 		     toggle (rendering it in two branches would remount it → loop). -->
 		<div class="bp-inner">
 			{#if sub === 'profile'}
-				<ProfileCard embedded onDetailChange={(d) => (detail = d)} />
+				<ProfileCard embedded initialSelectedId={requestedItemId} onDetailChange={(d) => (detail = d)} />
 			{:else if sub === 'subagent'}
-				<SubagentCard embedded onDetailChange={(d) => (detail = d)} />
+				<SubagentCard embedded initialSelectedId={requestedItemId} onDetailChange={(d) => (detail = d)} />
 			{:else if sub === 'mcp'}
 				<McpManagerCard embedded onDetailChange={(d) => (detail = d)} />
 			{:else if sub === 'plugins'}

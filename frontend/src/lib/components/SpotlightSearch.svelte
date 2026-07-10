@@ -1,7 +1,17 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { listCommands, type Command } from '$lib/api/commands';
+  import { Users, Bot } from 'lucide-svelte';
   import type { Session } from '$lib/api/client';
+  import type { Profile } from '$lib/api/client';
+  import { searchSessionsPaginated, type SessionSearchResult } from '$lib/api/sessions';
+  import { api } from '$lib/api/client';
+  import { profiles as profilesStore } from '$lib/stores/app-data.svelte';
+  import { sanitizeHtml } from '$lib/utils/sanitize';
+
+  interface Subagent {
+    id: string;
+    name: string;
+    description: string;
+  }
 
   interface Props {
     visible: boolean;
@@ -9,18 +19,42 @@
     currentProjectId?: string;
     onClose: () => void;
     onSelectSession: (session: Session) => void;
-    onSelectCommand: (command: Command) => void;
+    onSelectProfile: (id: string) => void;
+    onSelectSubagent: (id: string) => void;
     onNewChat: () => void;
     onOpenSettings: () => void;
   }
 
-  let { visible, sessions, currentProjectId, onClose, onSelectSession, onSelectCommand, onNewChat, onOpenSettings }: Props = $props();
+  let {
+    visible,
+    sessions,
+    currentProjectId,
+    onClose,
+    onSelectSession,
+    onSelectProfile,
+    onSelectSubagent,
+    onNewChat,
+    onOpenSettings
+  }: Props = $props();
 
   let searchQuery = $state('');
-  let commands = $state<Command[]>([]);
   let selectedIndex = $state(0);
   let searchInput = $state<HTMLInputElement | undefined>(undefined);
   let listElement = $state<HTMLDivElement | undefined>(undefined);
+
+  // Session search (server-side FTS, debounced). Empty query falls back to the
+  // 5 most-recent sessions from the `sessions` prop (instant, no network).
+  let sessionResults = $state<SessionSearchResult[]>([]);
+  let isSearchingSessions = $state(false);
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Monotonic token so a stale in-flight search can't clobber a newer one.
+  let searchToken = 0;
+
+  // Profiles + subagents: loaded once when the palette opens, filtered client-side.
+  let subagents = $state<Subagent[]>([]);
+  let dataLoaded = false;
+
+  const profiles = $derived<Profile[]>($profilesStore ?? []);
 
   // Quick actions (derived so prop references stay reactive)
   const quickActions = $derived([
@@ -28,76 +62,137 @@
     { id: 'settings', label: 'Open settings', icon: 'settings', action: onOpenSettings }
   ]);
 
-  // Computed filtered items
-  let filteredSessions = $derived.by(() => {
-    if (!searchQuery.trim()) {
-      return sessions.slice(0, 5); // Show 5 most recent
+  const trimmedQuery = $derived(searchQuery.trim());
+
+  // Sessions to render: recent-5 when empty, otherwise server results.
+  const displaySessions = $derived.by<SessionSearchResult[]>(() => {
+    if (!trimmedQuery) {
+      return sessions.slice(0, 5).map((s) => ({
+        ...s,
+        match_type: 'title' as const,
+        match_snippet: null,
+        match_time: null
+      }));
     }
-    const query = searchQuery.toLowerCase();
-    return sessions.filter(s =>
-      s.title?.toLowerCase().includes(query) ||
-      s.id.toLowerCase().includes(query)
-    ).slice(0, 10);
+    return sessionResults;
   });
 
-  let filteredCommands = $derived.by(() => {
-    if (!searchQuery.trim()) {
-      return commands.slice(0, 5);
-    }
-    const query = searchQuery.toLowerCase();
-    return commands.filter(cmd =>
-      cmd.name.toLowerCase().includes(query) ||
-      cmd.description.toLowerCase().includes(query)
-    ).slice(0, 10);
-  });
-
-  let filteredQuickActions = $derived.by(() => {
-    if (!searchQuery.trim()) {
-      return quickActions;
-    }
-    const query = searchQuery.toLowerCase();
-    return quickActions.filter(action =>
-      action.label.toLowerCase().includes(query)
+  const filteredProfiles = $derived.by(() => {
+    if (!trimmedQuery) return profiles;
+    const q = trimmedQuery.toLowerCase();
+    return profiles.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.description ?? '').toLowerCase().includes(q)
     );
   });
 
-  // Total items for keyboard navigation
-  let allItems = $derived.by(() => {
-    const items: Array<{ type: 'session' | 'command' | 'action'; data: any }> = [];
+  const filteredSubagents = $derived.by(() => {
+    if (!trimmedQuery) return subagents;
+    const q = trimmedQuery.toLowerCase();
+    return subagents.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        (s.description ?? '').toLowerCase().includes(q)
+    );
+  });
 
-    filteredSessions.forEach(s => items.push({ type: 'session', data: s }));
-    filteredCommands.forEach(c => items.push({ type: 'command', data: c }));
-    filteredQuickActions.forEach(a => items.push({ type: 'action', data: a }));
+  const filteredQuickActions = $derived.by(() => {
+    if (!trimmedQuery) return quickActions;
+    const q = trimmedQuery.toLowerCase();
+    return quickActions.filter((action) => action.label.toLowerCase().includes(q));
+  });
 
+  // Ordered group list drives both rendering and keyboard navigation.
+  type ItemType = 'session' | 'profile' | 'subagent' | 'action';
+  const groups = $derived<Array<{ type: ItemType; items: unknown[] }>>([
+    { type: 'session', items: displaySessions },
+    { type: 'profile', items: filteredProfiles },
+    { type: 'subagent', items: filteredSubagents },
+    { type: 'action', items: filteredQuickActions }
+  ]);
+
+  const allItems = $derived.by(() => {
+    const items: Array<{ type: ItemType; data: any }> = [];
+    for (const group of groups) {
+      for (const data of group.items) {
+        items.push({ type: group.type, data });
+      }
+    }
     return items;
   });
 
-  // Load commands when visible changes
+  // Global (flat) index for a group's local item, used by keyboard nav + data-index.
+  function getGlobalIndex(type: ItemType, localIndex: number): number {
+    let offset = 0;
+    for (const group of groups) {
+      if (group.type === type) break;
+      offset += group.items.length;
+    }
+    return offset + localIndex;
+  }
+
+  // Reset + focus + one-time data load when the palette opens.
   $effect(() => {
     if (visible) {
-      fetchCommands();
       searchQuery = '';
       selectedIndex = 0;
-      // Focus search input
-      setTimeout(() => {
-        searchInput?.focus();
-      }, 50);
+      sessionResults = [];
+      isSearchingSessions = false;
+      loadAuxData();
+      setTimeout(() => searchInput?.focus(), 50);
     }
   });
 
-  // Reset selected index when items change
+  // Keep the selection in-bounds as results change.
   $effect(() => {
-    if (allItems.length > 0 && selectedIndex >= allItems.length) {
-      selectedIndex = 0;
+    if (selectedIndex >= allItems.length) {
+      selectedIndex = allItems.length > 0 ? allItems.length - 1 : 0;
     }
   });
 
-  async function fetchCommands() {
+  // Debounced server-side session search on query change.
+  $effect(() => {
+    const q = searchQuery;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (!q.trim()) {
+      sessionResults = [];
+      isSearchingSessions = false;
+      return;
+    }
+    isSearchingSessions = true;
+    debounceTimer = setTimeout(() => runSessionSearch(q), 300);
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
+  });
+
+  async function loadAuxData() {
+    if (dataLoaded) return;
+    dataLoaded = true;
     try {
-      const result = await listCommands(currentProjectId);
-      commands = result.commands;
+      subagents = await api.get<Subagent[]>('/subagents');
     } catch (error) {
-      console.error('Failed to fetch commands:', error);
+      console.error('Failed to load subagents:', error);
+      subagents = [];
+    }
+  }
+
+  async function runSessionSearch(query: string) {
+    const token = ++searchToken;
+    try {
+      const res = await searchSessionsPaginated(query, {
+        projectId: currentProjectId,
+        limit: 10
+      });
+      if (token !== searchToken) return; // stale
+      sessionResults = res.items;
+    } catch (error) {
+      if (token !== searchToken) return;
+      console.error('Failed to search sessions:', error);
+      sessionResults = [];
+    } finally {
+      if (token === searchToken) isSearchingSessions = false;
     }
   }
 
@@ -150,8 +245,11 @@
       case 'session':
         onSelectSession(item.data);
         break;
-      case 'command':
-        onSelectCommand(item.data);
+      case 'profile':
+        onSelectProfile(item.data.id);
+        break;
+      case 'subagent':
+        onSelectSubagent(item.data.id);
         break;
       case 'action':
         item.data.action();
@@ -160,10 +258,14 @@
     onClose();
   }
 
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
-      onClose();
-    }
+  function renderSnippet(snippet: string): string {
+    // Match snippets carry **bold** markers around the hit — render them as marks.
+    return sanitizeHtml(
+      snippet.replace(
+        /\*\*(.*?)\*\*/g,
+        '<mark class="bg-yellow-500/30 text-foreground px-0.5 rounded">$1</mark>'
+      )
+    );
   }
 
   function formatTimeAgo(dateStr: string): string {
@@ -181,16 +283,7 @@
     return date.toLocaleDateString();
   }
 
-  // Calculate item index for a given section and local index
-  function getGlobalIndex(type: 'session' | 'command' | 'action', localIndex: number): number {
-    let offset = 0;
-    if (type === 'command') {
-      offset = filteredSessions.length;
-    } else if (type === 'action') {
-      offset = filteredSessions.length + filteredCommands.length;
-    }
-    return offset + localIndex;
-  }
+  const hasAnyItems = $derived(allItems.length > 0);
 </script>
 
 <svelte:window onkeydown={handleKeyDown} />
@@ -224,7 +317,7 @@
           bind:this={searchInput}
           bind:value={searchQuery}
           type="text"
-          placeholder="Search sessions, commands, settings..."
+          placeholder="Search chats, profiles, subagents..."
           class="flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-none text-base"
         />
         <kbd class="hidden sm:inline-flex items-center px-2 py-1 text-xs text-muted-foreground bg-muted rounded">
@@ -234,71 +327,112 @@
 
       <!-- Results -->
       <div bind:this={listElement} class="max-h-[60vh] overflow-y-auto">
-        {#if allItems.length === 0}
+        {#if !hasAnyItems && !isSearchingSessions}
           <div class="px-4 py-8 text-center text-muted-foreground">
             <p>No results found</p>
           </div>
         {:else}
-          <!-- Recent Sessions -->
-          {#if filteredSessions.length > 0}
+          <!-- Chats -->
+          {#if displaySessions.length > 0}
             <div class="px-4 py-2">
               <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Recent Sessions
+                Chats
               </h3>
             </div>
-            {#each filteredSessions as session, index}
+            {#each displaySessions as session, index}
               {@const globalIndex = getGlobalIndex('session', index)}
+              {@const matchCount = session.match_count ?? 1}
               <button
                 type="button"
                 data-index={globalIndex}
-                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
+                class="spotlight-item w-full px-4 py-2.5 flex items-start gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
                 onclick={() => { onSelectSession(session); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
-                <svg class="w-5 h-5 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg class="w-5 h-5 mt-0.5 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
                 <div class="flex-1 min-w-0">
-                  <p class="text-sm text-foreground truncate">
-                    {session.title || 'Untitled session'}
-                  </p>
+                  <div class="flex items-center gap-2">
+                    <p class="text-sm text-foreground truncate">
+                      {session.title || 'Untitled session'}
+                    </p>
+                    {#if matchCount > 1}
+                      <span class="flex-shrink-0 text-[0.65rem] px-1.5 py-0.5 bg-muted rounded text-muted-foreground">
+                        {matchCount} matches
+                      </span>
+                    {/if}
+                  </div>
+                  {#if session.match_snippet}
+                    <p class="text-xs text-muted-foreground truncate mt-0.5">
+                      {@html renderSnippet(session.match_snippet)}
+                    </p>
+                  {/if}
                 </div>
-                <span class="text-xs text-muted-foreground flex-shrink-0">
-                  {formatTimeAgo(session.updated_at)}
+                <span class="text-xs text-muted-foreground flex-shrink-0 mt-0.5">
+                  {formatTimeAgo(session.match_time || session.updated_at)}
                 </span>
               </button>
             {/each}
           {/if}
 
-          <!-- Commands -->
-          {#if filteredCommands.length > 0}
-            <div class="px-4 py-2 {filteredSessions.length > 0 ? 'border-t border-border' : ''}">
+          <!-- Loading spinner row while a session search is in flight -->
+          {#if isSearchingSessions}
+            <div class="px-4 py-3 flex items-center gap-3 text-muted-foreground">
+              <div class="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+              <span class="text-sm">Searching…</span>
+            </div>
+          {/if}
+
+          <!-- Profiles -->
+          {#if filteredProfiles.length > 0}
+            <div class="px-4 py-2 {displaySessions.length > 0 ? 'border-t border-border' : ''}">
               <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Commands
+                Profiles
               </h3>
             </div>
-            {#each filteredCommands as command, index}
-              {@const globalIndex = getGlobalIndex('command', index)}
+            {#each filteredProfiles as profile, index}
+              {@const globalIndex = getGlobalIndex('profile', index)}
               <button
                 type="button"
                 data-index={globalIndex}
                 class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
-                onclick={() => { onSelectCommand(command); onClose(); }}
+                onclick={() => { onSelectProfile(profile.id); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
-                {#if command.type === 'interactive'}
-                  <svg class="w-5 h-5 text-purple-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                {:else}
-                  <svg class="w-5 h-5 text-blue-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                {/if}
+                <Users class="w-5 h-5 text-blue-400 flex-shrink-0" strokeWidth={1.8} />
                 <div class="flex-1 min-w-0">
-                  <span class="text-sm text-foreground font-mono">/{command.name}</span>
-                  <span class="text-sm text-muted-foreground ml-2">-</span>
-                  <span class="text-sm text-muted-foreground ml-2 truncate">{command.description}</span>
+                  <p class="text-sm text-foreground truncate">{profile.name}</p>
+                  {#if profile.description}
+                    <p class="text-xs text-muted-foreground truncate">{profile.description}</p>
+                  {/if}
+                </div>
+              </button>
+            {/each}
+          {/if}
+
+          <!-- Subagents -->
+          {#if filteredSubagents.length > 0}
+            <div class="px-4 py-2 {displaySessions.length > 0 || filteredProfiles.length > 0 ? 'border-t border-border' : ''}">
+              <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Subagents
+              </h3>
+            </div>
+            {#each filteredSubagents as agent, index}
+              {@const globalIndex = getGlobalIndex('subagent', index)}
+              <button
+                type="button"
+                data-index={globalIndex}
+                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
+                onclick={() => { onSelectSubagent(agent.id); onClose(); }}
+                onmouseenter={() => selectedIndex = globalIndex}
+              >
+                <Bot class="w-5 h-5 text-purple-400 flex-shrink-0" strokeWidth={1.8} />
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm text-foreground truncate">{agent.name}</p>
+                  {#if agent.description}
+                    <p class="text-xs text-muted-foreground truncate">{agent.description}</p>
+                  {/if}
                 </div>
               </button>
             {/each}
@@ -306,7 +440,7 @@
 
           <!-- Quick Actions -->
           {#if filteredQuickActions.length > 0}
-            <div class="px-4 py-2 {filteredSessions.length > 0 || filteredCommands.length > 0 ? 'border-t border-border' : ''}">
+            <div class="px-4 py-2 {displaySessions.length > 0 || filteredProfiles.length > 0 || filteredSubagents.length > 0 ? 'border-t border-border' : ''}">
               <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Quick Actions
               </h3>

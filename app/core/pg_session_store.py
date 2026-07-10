@@ -28,7 +28,7 @@ Blocking I/O
 The SDK calls :meth:`append`/:meth:`load` from an event loop. psycopg2 is
 synchronous, so every DB operation is dispatched to a worker thread via
 ``asyncio.to_thread``. This matches the pattern used elsewhere in the backend
-(see ``app/api/search.py``, ``app/core/startup.py``).
+(see ``app/core/startup.py``).
 
 Feature flag
 ------------

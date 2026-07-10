@@ -18,7 +18,6 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
-	import type { Command } from '$lib/api/commands';
 
 	// Layout components
 	import AppLayout from '$lib/components/layout/AppLayout.svelte';
@@ -29,7 +28,6 @@
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
-	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { requestPermissionIfNeeded } from '$lib/services/notifications';
@@ -42,7 +40,6 @@
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
 	let showSpotlight = $state(false);
-	let showAdvancedSearch = $state(false);
 
 	// Tag state
 	let allTags: Tag[] = $state([]);
@@ -139,7 +136,7 @@
 	/**
 	 * Open a feature page (settings, files, plugins, etc.)
 	 */
-	function handleOpenFeature(type: ViewType) {
+	function handleOpenFeature(type: ViewType, itemId?: string | null) {
 		if (type === 'chat') {
 			handleNewSession();
 			return;
@@ -148,10 +145,10 @@
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
 			requestAnimationFrame(() => {
-				layout.openFeaturePage(type as Exclude<ViewType, 'chat'>);
+				layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
 			});
 		} else {
-			layout.openFeaturePage(type as Exclude<ViewType, 'chat'>);
+			layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
 		}
 	}
 
@@ -336,7 +333,6 @@
 				allowInInput: true,
 				action: () => {
 					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
-					else if (showAdvancedSearch) showAdvancedSearch = false;
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
 					else if (showKnowledgeModal) showKnowledgeModal = false;
@@ -362,12 +358,12 @@
 			}),
 			registerShortcut({
 				id: 'advanced-search',
-				description: 'Advanced search',
+				description: 'Search everything',
 				key: 'f',
 				cmdOrCtrl: true,
 				shift: true,
 				category: 'navigation',
-				action: () => { showAdvancedSearch = !showAdvancedSearch; }
+				action: () => { showSpotlight = !showSpotlight; }
 			})
 		];
 
@@ -419,7 +415,13 @@
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectCommand(_command: Command) {
+	function handleSpotlightSelectProfile(id: string) {
+		handleOpenFeature('profile', id);
+		showSpotlight = false;
+	}
+
+	function handleSpotlightSelectSubagent(id: string) {
+		handleOpenFeature('subagent', id);
 		showSpotlight = false;
 	}
 
@@ -485,23 +487,14 @@
 		currentProjectId={$activeSession?.project}
 		onClose={() => showSpotlight = false}
 		onSelectSession={handleSpotlightSelectSession}
-		onSelectCommand={handleSpotlightSelectCommand}
+		onSelectProfile={handleSpotlightSelectProfile}
+		onSelectSubagent={handleSpotlightSelectSubagent}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
 	/>
 
 	<!-- Keyboard Shortcuts Modal -->
 	<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
-
-	<!-- Advanced Search Modal (Cmd+Shift+F) -->
-	<AdvancedSearch
-		visible={showAdvancedSearch}
-		onClose={() => showAdvancedSearch = false}
-		onSelectSession={(sessionId) => {
-			handleOpenSession(sessionId);
-			showAdvancedSearch = false;
-		}}
-	/>
 
 	<!-- Import Session Modal -->
 	<ImportSessionModal

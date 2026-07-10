@@ -14,6 +14,7 @@
 	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
+	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		getDefaultModel,
 		getModelBadgeClass as getModelBadgeClassShared,
@@ -88,13 +89,27 @@
 		/** Reports whether the section is in a full-canvas detail/editor state so
 		 *  the Build page can hide its heading + sub-nav while editing. */
 		onDetailChange?: (detail: boolean) => void;
+		/** One-shot deep-link: open this profile's editor once, after data loads. */
+		initialSelectedId?: string | null;
 	}
 
 	let {
 		mobile = false,
 		embedded = false,
-		onDetailChange
+		onDetailChange,
+		initialSelectedId
 	}: Props = $props();
+
+	// Consume the deep-link exactly once, after the target profile has loaded.
+	let deepLinkConsumed = false;
+	$effect(() => {
+		if (!initialSelectedId || deepLinkConsumed) return;
+		const target = profiles.find((p) => p.id === initialSelectedId);
+		if (!target) return; // profiles not loaded yet — wait for the next run
+		deepLinkConsumed = true;
+		openEditForm(target);
+		layout.clearFeatureItemId();
+	});
 
 	// Internal data state - loaded from stores/API
 	let allSubagents = $state<Subagent[]>([]);

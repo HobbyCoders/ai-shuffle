@@ -33,6 +33,12 @@ interface ActiveView {
 	type: ViewType;
 	/** Session ID for chat views, null for new chat */
 	sessionId?: string | null;
+	/**
+	 * Deep-link target within a feature page (e.g. a profile/subagent id to open
+	 * in its editor). One-shot: never persisted to localStorage and cleared after
+	 * the target page consumes it, so a reload doesn't re-open the editor.
+	 */
+	itemId?: string | null;
 }
 
 interface LayoutState {
@@ -71,11 +77,18 @@ function loadPersistedState(): Partial<LayoutState> | null {
 function persistState(state: LayoutState) {
 	if (!browser) return;
 	try {
+		// Strip the one-shot deep-link itemId so a reload never re-opens an editor.
+		const persistedView = state.activeView
+			? (() => {
+					const { itemId: _itemId, ...rest } = state.activeView;
+					return rest;
+				})()
+			: null;
 		localStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
 				sidebarCollapsed: state.sidebarCollapsed,
-				activeView: state.activeView,
+				activeView: persistedView,
 				sidebarWidth: state.sidebarWidth
 			})
 		);
@@ -159,12 +172,24 @@ export const layout = {
 		}));
 	},
 
-	/** Navigate to a feature page */
-	openFeaturePage(type: Exclude<ViewType, 'chat'>) {
+	/** Navigate to a feature page, optionally deep-linking to an item id. */
+	openFeaturePage(type: Exclude<ViewType, 'chat'>, itemId?: string | null) {
 		_update((s) => ({
 			...s,
-			activeView: { type, sessionId: null }
+			activeView: { type, sessionId: null, itemId: itemId ?? null }
 		}));
+	},
+
+	/**
+	 * Clear the one-shot deep-link itemId once a feature page has consumed it,
+	 * so remounts (e.g. switching Build sub-tabs) don't re-open the editor.
+	 */
+	clearFeatureItemId() {
+		_update((s) =>
+			s.activeView?.itemId == null
+				? s
+				: { ...s, activeView: { ...s.activeView, itemId: null } }
+		);
 	},
 
 	/** Set sidebar width (clamped to min/max) */

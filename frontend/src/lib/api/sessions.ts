@@ -72,6 +72,11 @@ export interface SessionSearchResult extends Session {
 	match_type: 'title' | 'content';
 	match_snippet: string | null;
 	match_time: string | null;
+	/**
+	 * Number of matching messages in the session. Added by the store-FTS CTE on
+	 * the paginated search endpoint; older/absent responses are treated as 1.
+	 */
+	match_count?: number;
 }
 
 /**
