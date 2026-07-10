@@ -52,6 +52,32 @@ def _reap_task_killed(session_id: str, task_id: str) -> None:
         task_registry.complete_task(session_id, task_id, "killed")
 
 
+def _mark_task_stopped_by_user(session_id: str, task_id: str) -> None:
+    """Mark a background task ``killed`` in the registry on an EXPLICIT user stop.
+
+    Called after the SDK ``stop_task`` control request is issued for a LIVE
+    background sub-agent. Records the terminal transition (with user attribution)
+    directly instead of relying on a CLI ``stopped`` frame — the row must reach a
+    terminal status exactly once even when no such frame flows back. ``killed``
+    (not ``completed``) so the durable retention window shows the deliberate stop
+    and the guaranteed terminal-surface callback fires (it is gated on
+    error/killed). Idempotent via ``complete_task`` + ``mark_terminal_notified``.
+    """
+    from app.core.task_registry import (
+        task_registry,
+        USER_STOP_SUMMARY,
+        USER_STOP_REASON,
+    )
+
+    task_registry.complete_task(
+        session_id,
+        task_id,
+        "killed",
+        summary=USER_STOP_SUMMARY,
+        reason=USER_STOP_REASON,
+    )
+
+
 async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session.
 
@@ -197,6 +223,19 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     try:
         await state.client.stop_task(task_id)
         logger.debug(f"Requested SDK stop_task for {task_id} in session {session_id}")
+        # Record the terminal transition on the registry row OURSELVES rather than
+        # waiting for a CLI "stopped" frame to flow back through the streaming loop.
+        # The historical design relied on that frame reaching
+        # ``query_engine._record_task_message`` — but a parked session (its turn's
+        # receive_response already returned) has no in-stream reader, and the
+        # scoped ``stop_task`` may emit no terminal frame at all, so the row stayed
+        # ``running`` forever (frozen "phantom running" agent until restart). This
+        # mirrors the shell / ghost-reap branches above, which already mark the
+        # registry immediately. Idempotent: any later CLI ``stopped`` frame that
+        # DOES arrive re-completes to the same terminal state as a harmless no-op,
+        # and the guaranteed terminal-surface callback fires exactly once
+        # (``mark_terminal_notified`` latch), so this never double-surfaces.
+        _mark_task_stopped_by_user(session_id, task_id)
         return {"ok": True, "kind": "agent", "task_id": task_id}
     except Exception as e:
         logger.error(
