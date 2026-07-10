@@ -153,41 +153,10 @@ describe('UsageLimitIndicator', () => {
 		expect(container.textContent).toContain('Fable 5 limit');
 	});
 
-	it('dedupes popover sections that share a Claude account', async () => {
-		// Two installs, ONE shared account → a single section, not two.
-		rateLimit.applySnapshot({
-			available: true,
-			windows: [],
-			self_instance_id: 'primary',
-			snapshots: [
-				{
-					instance_id: 'primary',
-					device_name: 'Studio',
-					account_email: 'shared@example.com',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
-				},
-				{
-					instance_id: 'worker',
-					device_name: 'Worker',
-					account_email: 'shared@example.com',
-					available: true,
-					windows: [{ type: 'five_hour', utilization: 88, resets_at: future() }],
-				},
-			],
-		});
-		const { container } = render(UsageLimitIndicator);
-		// Pill tracks the self install (primary), 12% — not the worker's 88%.
-		expect(container.querySelector('.usage-text')?.textContent).toBe('12%');
-
-		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
-		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
-		expect(container.textContent).toContain('Studio');
-		expect(container.textContent).not.toContain('Worker');
-	});
-
-	it('shows one section per install when the accounts differ', async () => {
+	it('shows ONLY the resolved (self) install — never other installs windows', async () => {
+		// Two installs on DIFFERENT accounts. With no remote target the widget
+		// resolves to the self install (primary) and must show only its window —
+		// the worker's account never bleeds into the same popover.
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -210,17 +179,48 @@ describe('UsageLimitIndicator', () => {
 			],
 		});
 		const { container } = render(UsageLimitIndicator);
+		// Pill tracks the self install (primary), 12% — not the worker's 88%.
+		expect(container.querySelector('.usage-text')?.textContent).toBe('12%');
+
 		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
-		expect(container.querySelectorAll('.popover-section').length).toBe(2);
-		expect(container.querySelectorAll('.popover-row').length).toBe(2);
+		// A single section for the resolved install only.
+		expect(container.querySelectorAll('.popover-section').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).toContain('Studio');
-		expect(container.textContent).toContain('Worker');
+		expect(container.textContent).toContain('a@example.com');
+		// The worker's device / account / usage never appear here.
+		expect(container.textContent).not.toContain('Worker');
+		expect(container.textContent).not.toContain('b@example.com');
+		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('labels an unlabeled non-self section "Other device", not "This device"', async () => {
+	it('heads the self section with the resolved install device + account label', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					device_name: 'Studio',
+					account_email: 'a@example.com',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
+				},
+			],
+		});
+		const { container } = render(UsageLimitIndicator);
+		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
+		expect(container.querySelectorAll('.popover-section').length).toBe(1);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Studio');
+		expect(container.querySelector('.section-account')?.textContent).toBe('a@example.com');
+	});
+
+	it('unlabeled self keeps the flat popover (no header, no other installs)', async () => {
 		// Self install has no device/account label; a live event for a REMOTE
-		// install (no metadata) creates a bare second bucket. Only the true self
-		// may default to "This device" — the remote bucket must not claim it too.
+		// install (no metadata) creates a bare second bucket. Resolving to the
+		// unlabeled self keeps the original headerless popover — and the remote
+		// bucket is never rendered alongside it.
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -237,9 +237,12 @@ describe('UsageLimitIndicator', () => {
 		});
 		const { container } = render(UsageLimitIndicator);
 		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
-		const devices = Array.from(container.querySelectorAll('.section-device')).map((el) => el.textContent);
-		expect(devices).toContain('This device');
-		expect(devices).toContain('Other device');
-		expect(devices.filter((d) => d === 'This device').length).toBe(1);
+		// Unlabeled self → no section header at all.
+		expect(container.querySelector('.popover-section')).toBeNull();
+		expect(container.textContent).not.toContain('This device');
+		expect(container.textContent).not.toContain('Other device');
+		// Only the self window is shown (12%), not the worker's live 50%.
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.textContent).not.toContain('50%');
 	});
 });
