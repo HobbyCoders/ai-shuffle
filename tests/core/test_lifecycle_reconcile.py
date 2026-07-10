@@ -337,12 +337,20 @@ async def test_never_raises(mock_db, monkeypatch):
 
 
 async def test_periodic_sweep_discovers_and_repairs(mock_db):
-    """reconcile_all_once discovers candidates from the real sources."""
+    """reconcile_all_once discovers candidates from the real sources.
+
+    Assertions are scoped to THIS session's latch (not exact sweep totals):
+    under the full suite, leftover state from unrelated tests can legitimately
+    appear among the sweep's candidates.
+    """
     sid = "lrec-sweep"
     task_registry.mark_unpark_pending(sid)
 
-    assert await lr.reconcile_all_once() == 0  # observation 1 for the latch
-    assert await lr.reconcile_all_once() == 1
+    await lr.reconcile_all_once()  # observation 1 for the latch
+    assert task_registry.is_unpark_pending(sid) is True  # confirm-twice gate
+
+    repaired = await lr.reconcile_all_once()
+    assert repaired >= 1
     assert task_registry.is_unpark_pending(sid) is False
 
 

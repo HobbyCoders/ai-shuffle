@@ -140,9 +140,11 @@ def _log_repair(action: str, session_id: str, detail: str) -> None:
 
 async def _check_parked_marker(session_id: str, snap) -> bool:
     """R1: durable parked marker set while the derived state is idle."""
+    from app.core.lifecycle_state import STATE_IDLE
+
     if not CHECKS_ENABLED.get("parked_marker"):
         return False
-    if not (snap.parked_task_kind and snap.state == "idle"):
+    if not (snap.parked_task_kind and snap.state == STATE_IDLE):
         _clear_observation("parked_marker", session_id)
         return False
     if not _observe("parked_marker", session_id, GRACE_SECONDS):
