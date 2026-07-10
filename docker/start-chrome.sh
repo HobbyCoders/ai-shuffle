@@ -38,11 +38,41 @@ ln -sfn "$NM_DIR" "$PROFILE/NativeMessagingHosts"
 # A recreated container gets a new hostname, but the persisted profile volume
 # may still hold the old container's SingletonLock — Chrome then refuses to
 # start ("profile in use by another computer"). Clear the stale lock when no
-# Chrome is actually running here.
-if ! pgrep -f 'chrome.*--ozone-platform=headless' >/dev/null 2>&1; then
+# Chrome is actually running here. The guard matches on our exact profile dir
+# (--user-data-dir=$PROFILE), NOT a generic "chrome --ozone-platform=headless":
+# an UNRELATED headless Chrome sharing this box (e.g. a Remotion/Puppeteer render
+# also launched with --ozone-platform=headless) would otherwise falsely satisfy
+# the old guard and make us SKIP this cleanup — leaving both the stale lock and
+# the crashing token DB (below) in place.
+#
+# SAME GUARD, second job: drop the profile's persisted OAuth2 refresh-token
+# stores. If a Google account was ever signed into this browser (e.g. during a
+# "Set up browser" session), Chrome persists an encrypted refresh token in the
+# webdata DBs below. On the NEXT launch, MutableProfileOAuth2TokenServiceDelegate
+# eagerly loads that token (log: "MutablePO2TS::RefreshTokenIsAvailable" right
+# before the trap) and decrypts it through OSCrypt. Under --ozone-platform=headless
+# there is no Secret Service / keyring / session dbus to satisfy OSCrypt, so the
+# decrypt hits a CHECK/IMMEDIATE_CRASH and Chromium aborts with SIGTRAP (rc=133,
+# ~0s uptime) — a hard crash-loop the supervisor can't escape.
+#
+# This is DISTINCT from the first-run crash handled below: a fresh (token-less)
+# profile always survives, and Chrome's own self-planted "First Run" sentinel is
+# harmless on relaunch (verified) — so it is NOT the sentinel that crashes an
+# aged profile, it is the persisted token. The crash was traced by bisecting a
+# copy of the real crash-looping profile: removing ONLY these two DBs makes it
+# survive; no launch flag (--password-store=basic, --use-mock-keychain,
+# --allow-browser-signin=false) nor dbus env (dbus-run-session, unix:path=/dev/null)
+# prevents it. This browser drives automation via the Claude-in-Chrome extension +
+# native messaging (NativeMessagingHosts symlink), which needs no Google sign-in,
+# so discarding a stale token is free — Chrome recreates empty DBs on launch.
+if ! pgrep -f -- "--user-data-dir=$PROFILE" >/dev/null 2>&1; then
     rm -f "$PROFILE/SingletonLock" \
           "$PROFILE/SingletonSocket" \
           "$PROFILE/SingletonCookie" 2>/dev/null || true
+    rm -f "$PROFILE/Default/Web Data" \
+          "$PROFILE/Default/Web Data-journal" \
+          "$PROFILE/Default/Account Web Data" \
+          "$PROFILE/Default/Account Web Data-journal" 2>/dev/null || true
 fi
 
 # DevTools (CDP) wiring. Two independent knobs:
@@ -119,6 +149,11 @@ MEM_ARGS=(
 # Letting Chrome go through its real first-run flow is harmless here: this is a
 # fully offscreen headless tab (no visible first-run UI to click through) and
 # the extension force-install policy applies regardless of first-run state.
+# NOTE: this first-run crash only affects an UNINITIALIZED profile. Chrome's own
+# "First Run" sentinel, self-planted after a successful first run, is harmless on
+# relaunch — so it does NOT explain the rc=133 crash-loop seen on aged persistent
+# profiles. That one is the persisted-OAuth-token crash handled by the webdata-DB
+# cleanup near the SingletonLock block above.
 # --ozone-platform=headless: full browser (extensions, native messaging)
 #   rendered offscreen — no X server / Xvfb required. (Plain --headless does
 #   NOT load extensions or native messaging, so we must use ozone headless.)
