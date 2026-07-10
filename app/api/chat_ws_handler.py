@@ -601,6 +601,160 @@ async def _deliver_unpark_impl(
         return False
 
 
+def register_terminal_notification_callback() -> None:
+    """Register the chat layer's guaranteed terminal-notification callback.
+
+    Called ONCE from ``startup.start_services``. From then on, every
+    error/killed transition of the parent's OWN background work in
+    ``task_registry.complete_task`` fires ``_on_task_terminal`` exactly once
+    per task — covering the kill paths that previously surfaced NOTHING to the
+    parent (force-eviction reaps, ghost reaps, pool teardown).
+    """
+    from app.core.task_registry import task_registry
+
+    task_registry.set_terminal_notification_callback(_on_task_terminal)
+
+
+def _on_task_terminal(session_id: str, task: Dict[str, Any]) -> None:
+    """SYNC registry callback: schedule the async terminal-surface work.
+
+    ``complete_task`` is synchronous, so this only schedules; it must never
+    raise (the registry also guards, belt-and-braces). No running loop (a
+    sync/threaded caller) → nothing to schedule; the durable retention row
+    (``_recent_terminal``) still covers /live for the window.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    t = loop.create_task(_surface_terminal_notification(session_id, task))
+    t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
+async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) -> None:
+    """Guaranteed terminal surface for an error/killed background task (4b).
+
+    1. LIVE chip: synthesize the same ``task_updated`` system chip the drain
+       pump renders, once per task lifetime (shared ``mark_chipped`` latch, so
+       a pump-rendered chip is never duplicated).
+    2. DURABLE row: persist the chip via ``database.add_session_message`` so
+       the kill survives a reload (the live buffer may already be reaped — the
+       force-eviction case — or be reset by the restart that caused the kill).
+    3. UNPARK: hand off ONE consolidated unpark via ``_deliver_unpark_impl``
+       ONLY when a live pooled client exists and the server is NOT shutting
+       down (DECISION: durable-chip-only during shutdown). ``mark_unparked``
+       dedups against the drain pump's own delivery for the same task.
+    """
+    from app.core import startup as _startup
+    from app.core.task_registry import task_registry
+
+    task_id = task.get("id")
+    status = task.get("status") or "killed"
+    summary = task.get("summary")
+    data: Dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        # SystemMessage.svelte's task_updated branch prefers patch.status.
+        "patch": {"status": status},
+    }
+    if task.get("reason"):
+        data["reason"] = task.get("reason")
+
+    # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
+    if task_registry.mark_chipped(session_id, task_id, "terminal"):
+        task_registry.mark_chipped(session_id, task_id, "start")
+        try:
+            await live_session_store.add_system_message(
+                session_id,
+                content=summary or "",
+                subtype="task_updated",
+                data=data,
+            )
+        except Exception:
+            logger.debug(
+                "terminal-surface live chip failed for %s/%s",
+                session_id, task_id, exc_info=True,
+            )
+
+    # 2) DURABLE row — survives reload / restart (mirrors _row_for_system).
+    try:
+        await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="system",
+            content=summary or "",
+            metadata={"subtype": "task_updated", "system_data": data},
+        )
+    except Exception:
+        logger.debug(
+            "terminal-surface durable row failed for %s/%s",
+            session_id, task_id, exc_info=True,
+        )
+
+    # 3) Consolidated unpark — only with a live client, never during shutdown.
+    if getattr(_startup, "is_shutting_down", False):
+        return
+    try:
+        from app.core.session_pool import get_session_pool
+
+        state = get_session_pool().peek(session_id)
+        if state is None or not state.adapter.is_alive():
+            return  # no live client — the durable chip is the surface
+    except Exception:
+        return
+    if not task_registry.mark_unparked(session_id, task_id):
+        return  # this task's one-unpark token is already spent (pump/CLI path)
+
+    try:
+        session_row = await run_sync(database.get_session, session_id)
+    except Exception:
+        session_row = None
+    if not session_row:
+        return
+
+    from app.core.headless_query_runner import HeadlessChatHandler
+
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    handler.current_session_id = session_id
+    ctx = StreamingContext(
+        session_id=session_id,
+        device_id=handler.device_id,
+        message_id=str(uuid.uuid4()),
+        user_id=handler.user_id,
+    )
+    pending = [{
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        "output_file": None,
+        "uuid": None,
+        "usage": None,
+        "tool_use_id": task.get("toolUseId"),
+    }]
+
+    def _set_query_task(t: "asyncio.Task") -> None:
+        handler.query_task = t
+
+    try:
+        await _deliver_unpark_impl(
+            pending=pending,
+            session_id=session_id,
+            profile_id=session_row.get("profile_id"),
+            project_id=session_row.get("project_id"),
+            worktree_id=session_row.get("worktree_id"),
+            ctx=ctx,
+            final_metadata=None,
+            run_query=handler.run_query,
+            set_query_task=_set_query_task,
+        )
+    except Exception:
+        logger.debug(
+            "terminal-surface unpark handoff failed for %s/%s",
+            session_id, task_id, exc_info=True,
+        )
+
+
 def _drop_drain_pump_self(session_id: str, drain_pumps: "Dict[str, asyncio.Task]") -> None:
     """Remove the CURRENT pump task from the registry iff the entry is still us.
 
@@ -1241,10 +1395,23 @@ async def _drain_notifications_impl(
                         started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
                         decision="deliver-killed",
                     )
+                    # Shutdown-origin attribution (item 4a): a kill landing
+                    # while the server tears down is a restart consequence —
+                    # the unpark payload's summary must say so (the payload is
+                    # what reaches the parent's <task-notification> prompt).
+                    from app.core import startup as _startup_mod
+                    from app.core.task_registry import (
+                        SERVER_SHUTDOWN_SUMMARY as _SD_SUMMARY,
+                    )
+                    _u_summary = (
+                        _SD_SUMMARY
+                        if getattr(_startup_mod, "is_shutting_down", False)
+                        else None
+                    )
                     pending.append({
                         "task_id": _u_task_id,
                         "status": _u_status,
-                        "summary": None,
+                        "summary": _u_summary,
                         "output_file": None,
                         "uuid": _u_uuid,
                         "usage": None,

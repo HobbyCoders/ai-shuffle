@@ -2145,10 +2145,29 @@ class LiveSessionStore:
                     # instead of the row silently vanishing), then fall through past
                     # the guards to actually remove the session.
                     try:
-                        from app.core.task_registry import task_registry
+                        from app.core import startup as _startup
+                        from app.core.task_registry import (
+                            task_registry,
+                            SERVER_SHUTDOWN_SUMMARY,
+                            SERVER_SHUTDOWN_REASON,
+                        )
+                        # Shutdown-origin attribution (item 4a): a force reap
+                        # during server teardown is a restart consequence, not
+                        # a task failure — stamp the terminal record so it says
+                        # so. This site can't otherwise know the reap's origin.
+                        _shutdown_reap = getattr(_startup, "is_shutting_down", False)
                         reaped = 0
                         for rec in task_registry.get_active(session_id):
-                            task_registry.complete_task(session_id, rec["id"], "killed")
+                            if _shutdown_reap:
+                                task_registry.complete_task(
+                                    session_id, rec["id"], "killed",
+                                    summary=SERVER_SHUTDOWN_SUMMARY,
+                                    reason=SERVER_SHUTDOWN_REASON,
+                                )
+                            else:
+                                task_registry.complete_task(
+                                    session_id, rec["id"], "killed"
+                                )
                             reaped += 1
                         if reaped:
                             logger.warning(

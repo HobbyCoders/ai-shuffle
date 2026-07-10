@@ -364,6 +364,14 @@ async def start_services() -> None:
     from app.services.fal_catalog import catalog_service
     catalog_service.load_from_db()
 
+    # Guaranteed terminal notification (lifecycle batch, item 4b): register the
+    # chat layer's callback ONCE so every error/killed transition of a parent's
+    # own background work surfaces a durable terminal chip (and, when a live
+    # client exists, one consolidated unpark) — even on kill paths with no
+    # reader (force-eviction reaps, ghost reaps, pool teardown).
+    from app.api.chat_ws_handler import register_terminal_notification_callback
+    register_terminal_notification_callback()
+
 
 def start_background_tasks() -> List[asyncio.Task]:
     """Phase 6: Start periodic background tasks. Returns tasks for shutdown cancellation."""
