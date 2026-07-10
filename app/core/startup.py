@@ -483,6 +483,20 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(_periodic_usage_limits()))
     logger.info("Usage-limits poll task started (every 5 minutes, first run in 5s)")
 
+    # Runtime lifecycle reconciler (Phase 1): periodic latch/marker-only drift
+    # repair sweep over every session the lifecycle sources know about. Skips
+    # itself entirely while is_shutting_down; each repair is age-gated,
+    # confirm-twice, and recorded via record_error. See
+    # app/core/lifecycle_reconcile.py.
+    from app.core.lifecycle_reconcile import (
+        RECONCILE_INTERVAL_SECONDS,
+        periodic_reconcile_loop,
+    )
+    tasks.append(asyncio.create_task(periodic_reconcile_loop()))
+    logger.info(
+        f"Lifecycle reconcile task started (every {int(RECONCILE_INTERVAL_SECONDS)}s)"
+    )
+
     return tasks
 
 
