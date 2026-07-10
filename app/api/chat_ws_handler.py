@@ -962,6 +962,31 @@ async def _drain_notifications_impl(
                                     "Drain pump: CLI-wake stream_start broadcast "
                                     f"failed: {_bexc}",
                                 )
+                            # WAKE-TURN STREAMING STATE (Half 1): the CLI's own
+                            # wake turn is now streaming content into the live
+                            # store — reflect it on the live session so /live
+                            # reports is_streaming=true and clients treat it
+                            # like a real turn (composer locks, pollers
+                            # upshift). set_streaming mutates the EXISTING
+                            # LiveSession in place — NEVER start_streaming here
+                            # (it rebuilds the session and wipes the parked
+                            # message buffer the wake turn appends to). The
+                            # pump's own start gate reads the POOL
+                            # SessionState.is_streaming, a distinct flag this
+                            # never touches. Cleared by the finalize's
+                            # end_streaming below and by every pump exit path
+                            # (leak guard: a stranded True freezes the
+                            # composer with no turn left to ever end it).
+                            try:
+                                await live_session_store.set_streaming(
+                                    session_id, True
+                                )
+                            except Exception as _sexc:
+                                ctx.debug(
+                                    logger,
+                                    "Drain pump: wake set_streaming(True) "
+                                    f"failed: {_sexc}",
+                                )
                             # Belt-and-braces for a park-poller mid-cycle: keep the
                             # unpark_pending latch UP while this wake turn is being
                             # forwarded so a poll that samples between complete_task
@@ -1442,12 +1467,25 @@ async def _drain_notifications_impl(
         # so the awaiter sees the cancellation.
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
+        # Leak guard (Half 1): a wake turn was mid-forward — drop the live
+        # store's streaming flag or it strands True forever (frozen composer).
+        if _cli_wake_latched:
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
         _drop_drain_pump_self(session_id, _drain_pumps)
         raise
     except Exception as exc:
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
+        # Leak guard (Half 1): same stranded-True hazard as the cancel path.
+        if _cli_wake_latched:
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
         # If we were winding down a force-cancelled turn when the read stream died,
         # evict: a dead read loop makes the client broken by definition — its stale
         # frame will never be consumed, so it must not stay pooled behind the
@@ -1484,6 +1522,17 @@ async def _drain_notifications_impl(
     if _cli_wake_latched and not pending:
         task_registry.clear_unpark_pending(session_id)
 
+    # Leak guard (Half 1): a wake still latched at a normal exit means its
+    # ResultMessage never arrived through this pump — drop the live store's
+    # streaming flag or it strands True forever (frozen composer). When
+    # ``pending`` will be delivered below, the delivery's own end_streaming /
+    # start_streaming supersedes this; clearing first is an idempotent no-op.
+    if _cli_wake_latched:
+        try:
+            await live_session_store.set_streaming(session_id, False)
+        except Exception:
+            pass
+
     if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
@@ -1496,6 +1545,12 @@ async def _drain_notifications_impl(
             # Drop the early latch: no follow-up will stream, so a polling client
             # must not be held in park-poll waiting for one.
             task_registry.clear_unpark_pending(session_id)
+            # And the wake-turn streaming flag: a finalize-with-pending left it
+            # to this delivery, which is now suppressed (idempotent if clear).
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
             return
         logger.info(
             "Drain pump: delivering unpark follow-up [pending=%d, session=%s]",

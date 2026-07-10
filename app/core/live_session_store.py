@@ -672,6 +672,33 @@ class LiveSessionStore:
             logger.debug("clearing parked_task_kind failed", exc_info=True)
         return session
 
+    async def set_streaming(self, session_id: str, streaming: bool) -> None:
+        """Flip ``is_streaming`` on the EXISTING LiveSession in place.
+
+        Wake-turn streaming state (lifecycle batch, item 2): when the between-
+        turns drain pump forwards a CLI-owned wake turn, the session IS
+        streaming — but ``start_streaming`` must NOT be used to say so: it
+        REBUILDS the LiveSession (wiping the message buffer back to
+        ``initial_messages``), which would destroy the parked transcript the
+        wake turn is appending to. This primitive only mutates the flag on the
+        existing object and bumps ``last_update_id`` so pollers wake.
+
+        No-op when the session is absent (never creates one) or when the flag
+        already holds the requested value (no spurious update-id churn).
+        """
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            if session.is_streaming == bool(streaming):
+                return
+            session.is_streaming = bool(streaming)
+            self._increment_update_id(session)
+            logger.debug(
+                f"set_streaming({streaming}) for session {session_id} "
+                f"(update_id={session.last_update_id})"
+            )
+
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
         """Add a user message to the session."""
         async with self._get_session_lock(session_id):
