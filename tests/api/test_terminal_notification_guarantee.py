@@ -23,6 +23,7 @@ branches, and the real drain pump reader.
 """
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,6 +31,7 @@ import pytest
 import app.api.chat_ws_handler as cwh
 import app.api.ws_cleanup as ws_cleanup
 import app.core.startup as startup
+from app.core import task_persistence
 from app.core.live_session_store import live_session_store
 from app.core.task_registry import (
     task_registry,
@@ -58,12 +60,27 @@ async def _isolate():
     ws_cleanup._drain_pumps.clear()
     _saved_window = cwh._UNPARK_BATCH_WINDOW_SECONDS
     cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.05
-    yield
-    cwh._UNPARK_BATCH_WINDOW_SECONDS = _saved_window
-    startup.is_shutting_down = False
-    task_registry.reset_all()
-    ws_cleanup._drain_pumps.clear()
-    await live_session_store.cleanup_ended_session(SESSION, force=True)
+    # ROOT-CAUSE ISOLATION (cross-test flake): every ``start_task`` /
+    # ``complete_task`` also enqueues a durable ``task_persistence`` snapshot,
+    # whose consumer writes to the DB on its OWN ``asyncio.to_thread``. The test
+    # harness routes the whole DB layer at ONE shared ``check_same_thread=False``
+    # sqlite connection, so that snapshot write runs concurrently with the
+    # terminal-surface coroutine's own ``to_thread`` durable write — two worker
+    # threads committing on one connection. One commit then trips
+    # ``sqlite3.OperationalError: cannot commit transaction - SQL statements in
+    # progress``; the surface write swallows it and drops the ``session_messages``
+    # row this file asserts on. The collision is timing-dependent, so it only
+    # bit under full-suite CPU load (the tests passed when run alone).
+    # ``task_persistence`` is orthogonal to the terminal-surface guarantee — it
+    # writes the ``background_tasks`` table, never ``session_messages`` — so
+    # disable it here to give the surface write exclusive use of the connection.
+    with patch.object(task_persistence, "is_enabled", return_value=False):
+        yield
+        cwh._UNPARK_BATCH_WINDOW_SECONDS = _saved_window
+        startup.is_shutting_down = False
+        task_registry.reset_all()
+        ws_cleanup._drain_pumps.clear()
+        await live_session_store.cleanup_ended_session(SESSION, force=True)
 
 
 def _make_db_session():
@@ -71,6 +88,50 @@ def _make_db_session():
         database.create_session(session_id=SESSION, profile_id="default")
     except Exception:
         pass  # already exists
+
+
+async def _drain_terminal_surface(*, timeout: float = 5.0):
+    """Await the fire-and-forget terminal-surface coroutine to completion.
+
+    ``complete_task`` fires the registry callback SYNCHRONOUSLY, and
+    ``_on_task_terminal`` schedules ``_surface_terminal_notification`` via
+    ``loop.create_task`` — so by the time ``complete_task`` (or the
+    force-eviction reap that calls it) returns, the surface task already exists
+    on this loop. The surface coroutine writes its durable row from a worker
+    thread (``run_sync`` → ``asyncio.to_thread``).
+
+    The original tests slept a FIXED, short budget (0.1–0.2s) and then read the
+    row; under full-suite CPU load that budget was too small, so the write had
+    not landed yet → the test flaked (0 rows). Polling the DB to wait for the
+    row is NOT a fix here: the shim shares ONE ``check_same_thread=False``
+    sqlite connection, so a poll-read issued from a worker thread races the
+    surface write on that same connection and the (swallowed) write loses.
+    Instead, await the surface coroutine ITSELF — deterministic under any load,
+    and no concurrent DB access to corrupt the single-connection write.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task()
+            and not t.done()
+            and getattr(t.get_coro(), "__name__", "")
+            == "_surface_terminal_notification"
+        ]
+        if not pending:
+            return
+        await asyncio.wait(pending, timeout=deadline - time.monotonic())
+
+
+async def _terminal_rows(task_id: str):
+    """Durable ``system`` terminal rows the surface callback persisted for ``task_id``."""
+    rows = await run_sync(database.get_session_messages, SESSION)
+    return [
+        r for r in rows
+        if r["role"] == "system"
+        and ((r.get("metadata") or {}).get("system_data") or {}).get("task_id")
+        == task_id
+    ]
 
 
 # ===========================================================================
@@ -150,17 +211,9 @@ async def test_force_eviction_reap_surfaces_exactly_one_terminal_row():
     removed = await live_session_store.cleanup_ended_session(SESSION, force=True)
     assert removed is True
 
-    # Let the scheduled callback surface work run.
-    for _ in range(20):
-        await asyncio.sleep(0.01)
-
-    rows = await run_sync(database.get_session_messages, SESSION)
-    terminal_rows = [
-        r for r in rows
-        if r["role"] == "system"
-        and ((r.get("metadata") or {}).get("system_data") or {}).get("task_id")
-        == "t-reaped"
-    ]
+    # Await the scheduled surface coroutine rather than guessing a fixed sleep.
+    await _drain_terminal_surface()
+    terminal_rows = await _terminal_rows("t-reaped")
     assert len(terminal_rows) == 1, (
         f"expected exactly ONE durable terminal surface, got "
         f"{len(terminal_rows)}: {terminal_rows}"
@@ -184,10 +237,7 @@ async def test_callback_hands_off_one_consolidated_unpark_with_live_client():
     with patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch.object(cwh, "_deliver_unpark_impl", new=deliver):
         task_registry.complete_task(SESSION, "t-live", "killed")
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-            if deliver.await_count:
-                break
+        await _drain_terminal_surface()
 
     deliver.assert_awaited_once()
     kwargs = deliver.await_args.kwargs
@@ -209,16 +259,11 @@ async def test_callback_durable_chip_only_when_no_live_client():
     with patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch.object(cwh, "_deliver_unpark_impl", new=deliver):
         task_registry.complete_task(SESSION, "t-noclient", "killed")
-        for _ in range(10):
-            await asyncio.sleep(0.01)
+        await _drain_terminal_surface()
 
     deliver.assert_not_awaited()
-    rows = await run_sync(database.get_session_messages, SESSION)
-    assert any(
-        r["role"] == "system"
-        and ((r.get("metadata") or {}).get("system_data") or {}).get("task_id")
-        == "t-noclient"
-        for r in rows
+    assert await _terminal_rows("t-noclient"), (
+        "expected a durable terminal chip for t-noclient"
     )
 
 
@@ -238,16 +283,11 @@ async def test_callback_durable_chip_only_during_shutdown():
     with patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch.object(cwh, "_deliver_unpark_impl", new=deliver):
         task_registry.complete_task(SESSION, "t-shutdown", "killed")
-        for _ in range(10):
-            await asyncio.sleep(0.01)
+        await _drain_terminal_surface()
 
     deliver.assert_not_awaited()
-    rows = await run_sync(database.get_session_messages, SESSION)
-    assert any(
-        r["role"] == "system"
-        and ((r.get("metadata") or {}).get("system_data") or {}).get("task_id")
-        == "t-shutdown"
-        for r in rows
+    assert await _terminal_rows("t-shutdown"), (
+        "expected a durable terminal chip for t-shutdown"
     )
 
 
