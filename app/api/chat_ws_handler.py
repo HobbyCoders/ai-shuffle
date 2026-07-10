@@ -479,6 +479,24 @@ async def _deliver_unpark_impl(
     if not pending:
         return False
 
+    # SHUTDOWN GUARD (lifecycle batch, item 1): while the server is tearing
+    # down, no NEW follow-up turn may start — the pooled SDK clients are being
+    # disconnected underneath it, so the run_query would die mid-spawn (or pin
+    # a subprocess past the pool shutdown). The completions are already latched
+    # (mark_unparked), so nothing re-fires on the next boot; the durable
+    # terminal chip / reap attribution is the surviving surface. Drop the
+    # unpark_pending latch so a still-connected poller isn't held park-polling
+    # for a follow-up that will never stream.
+    from app.core import startup as _startup
+    if getattr(_startup, "is_shutting_down", False):
+        task_registry.clear_unpark_pending(session_id)
+        ctx.info(
+            logger,
+            "Unpark: server shutting down — not starting a follow-up turn "
+            f"({len(pending)} pending dropped)",
+        )
+        return False
+
     # Busy-write guard: if a user query won the race and already owns a live
     # turn, the unpark must yield — overwriting _active_chat_sessions and
     # querying would write into the mid-turn CLI and kill it. The completions

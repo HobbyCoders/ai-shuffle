@@ -478,21 +478,36 @@ def start_background_tasks() -> List[asyncio.Task]:
     return tasks
 
 
+# Process-wide "we are tearing down" flag. Set FIRST inside shutdown_services
+# (before any teardown step runs) and never cleared for the process lifetime.
+# Consulted by the lifecycle-notification paths so they degrade gracefully:
+#   - unpark delivery (_deliver_unpark_impl / the registry terminal-notification
+#     callback) must NOT start a new run_query follow-up turn while the pooled
+#     clients are being torn down — the durable terminal chip is persisted
+#     instead;
+#   - shutdown-origin task reaps stamp "Server restarted — background task
+#     stopped" (reason="server_shutdown") so the kill is attributed honestly
+#     instead of looking like a user/task failure.
+is_shutting_down: bool = False
+
+
 async def shutdown_services() -> None:
-    """Shutdown async services in correct dependency order."""
-    from app.core.http_client import close_http_client
-    await close_http_client()
+    """Shutdown async services in correct dependency order.
 
-    # Close database connection pool (Postgres)
-    from app.db.base import close_pool
-    close_pool()
+    ORDER MATTERS (lifecycle-notification batch, item 1). The old order closed
+    the Postgres pool FIRST, so every later teardown step (pump finalize
+    writes, reap persistence, parked-marker writes) hit a closed pool and its
+    durable writes were lost. The pinned order is:
 
-    # Shutdown automations before connectors, since automations may use them
-    from app.core.automation_manager import automation_manager
-    await automation_manager.shutdown()
-
-    from app.core.connectors.manager import connector_manager
-    await connector_manager.shutdown_all()
+        1. is_shutting_down = True   (gates new unpark follow-ups everywhere)
+        2. stop_all_drain_pumps      (pumps must stop reading clients about to die)
+        3. session pool shutdown     (disconnect SDK subprocesses; reaps may write)
+        4. in-memory reset_all()s    (live store / permissions / task registry)
+        5. remaining services        (http client, automations, connectors)
+        6. close_pool — VERY LAST    (every step above may still need the DB)
+    """
+    global is_shutting_down
+    is_shutting_down = True
 
     # Stop any between-turns drain pumps BEFORE disconnecting the pooled SDK
     # clients they read (single-reader invariant — a pump must not be reading a
@@ -523,4 +538,20 @@ async def shutdown_services() -> None:
         task_registry.reset_all()
     except Exception:
         pass
+
+    from app.core.http_client import close_http_client
+    await close_http_client()
+
+    # Shutdown automations before connectors, since automations may use them
+    from app.core.automation_manager import automation_manager
+    await automation_manager.shutdown()
+
+    from app.core.connectors.manager import connector_manager
+    await connector_manager.shutdown_all()
+
+    # Close the database connection pool (Postgres) VERY LAST: every teardown
+    # step above may still persist durable state (terminal chips, reap
+    # attribution, parked markers) and would otherwise die on a closed pool.
+    from app.db.base import close_pool
+    close_pool()
 
