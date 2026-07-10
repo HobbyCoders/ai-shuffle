@@ -343,6 +343,81 @@ def test_entrypoint_falls_back_to_project_id_when_unlinked(memdb, memdir):
     assert memdb.get_memory_file("p1", "fact.md")["content"] == "local"
 
 
+# =============================================================================
+# Worktree cwd anchoring (regression: sync silently no-op'd for worktrees)
+# =============================================================================
+
+def test_repo_root_strips_worktree_suffix():
+    # A worktree cwd folds back to its main checkout before slugging.
+    assert (
+        memory_sync._repo_root_for_working_dir(
+            "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
+        )
+        == "/workspace/ai-shuffle"
+    )
+    # Deeper nesting under the worktree still reduces to the repo root.
+    assert (
+        memory_sync._repo_root_for_working_dir(
+            "/repo/.claude/worktrees/name/sub/dir"
+        )
+        == "/repo"
+    )
+    # A plain (non-worktree) cwd is left untouched.
+    assert memory_sync._repo_root_for_working_dir("/workspace/proj") == "/workspace/proj"
+
+
+def test_memory_dir_for_worktree_cwd_matches_main_checkout(tmp_path):
+    # The resolved memory dir for a worktree cwd is the MAIN checkout's slug dir,
+    # not a per-worktree slug the CLI never writes into.
+    projects = tmp_path / "projects"
+    with patch.object(memory_sync.settings, "claude_projects_dir", projects):
+        main = memory_sync.memory_dir_for_working_dir("/workspace/ai-shuffle")
+        worktree = memory_sync.memory_dir_for_working_dir(
+            "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
+        )
+    assert worktree == main
+
+
+def test_worktree_session_syncs_to_main_project_memory_dir(memdb, tmp_path):
+    # End to end: a worktree session's cwd is <repo>/.claude/worktrees/<name>,
+    # but the CLI wrote native memory to the MAIN checkout's slug dir. push must
+    # operate on that main dir — proof is that the file the CLI left there gets
+    # uploaded, rather than a scan of an empty/absent worktree slug dir no-op'ing.
+    main_repo = "/workspace/ai-shuffle"
+    worktree_cwd = "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
+    projects = tmp_path / "projects"
+    main_slug = memory_sync.get_project_dir_name(main_repo)
+    main_mem = projects / main_slug / "memory"
+    main_mem.mkdir(parents=True)
+    write_file(main_mem, "MEMORY.md", "worktree turn wrote this", T0)
+
+    project = {"id": "p1", "link_group_id": KEY, "path": main_repo}
+    with patch.object(memory_sync.settings, "agent_memory_sync", True), \
+         patch.object(memory_sync.settings, "claude_projects_dir", projects), \
+         patch.object(memory_sync.database, "get_project", return_value=project):
+        memory_sync.push_memory_sync("p1", worktree_cwd)
+
+    assert memdb.get_memory_file(KEY, "MEMORY.md")["content"] == "worktree turn wrote this"
+
+
+def test_target_anchors_on_project_path_over_session_cwd(memdb, tmp_path):
+    # Even when the raw cwd is a worktree, _resolve_target slugs the project's
+    # root path (main checkout), so reconcile pulls DB files into the main dir.
+    main_repo = "/workspace/ai-shuffle"
+    worktree_cwd = "/workspace/ai-shuffle/.claude/worktrees/fix-thing-bb7d"
+    projects = tmp_path / "projects"
+    main_mem = projects / memory_sync.get_project_dir_name(main_repo) / "memory"
+
+    memdb.seed_live("MEMORY.md", "shared index", T0)
+    project = {"id": "p1", "link_group_id": KEY, "path": main_repo}
+    with patch.object(memory_sync.settings, "agent_memory_sync", True), \
+         patch.object(memory_sync.settings, "claude_projects_dir", projects), \
+         patch.object(memory_sync.database, "get_project", return_value=project):
+        memory_sync.reconcile_memory_sync("p1", worktree_cwd)
+
+    assert (main_mem / "MEMORY.md").read_text(encoding="utf-8") == "shared index"
+
+
 def test_push_entrypoint_delete_gate_requires_prior_reconcile(memdb, memdir):
     # DB has a file; local dir is empty. Without a prior reconcile in this
     # process the gate must block tombstoning even though the dir exists.

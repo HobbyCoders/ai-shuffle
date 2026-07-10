@@ -35,12 +35,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.core.jsonl_parser import get_project_dir_name
+from app.core.project_utils import get_project_working_dir
 from app.db import agent_memory as memdb
 from app.db import database
 
@@ -114,22 +116,62 @@ def memory_key_for_project(project: dict) -> Optional[str]:
     return project.get("link_group_id") or project.get("id")
 
 
-def _resolve_memory_key(project_id: str) -> Optional[str]:
+# A session's cwd may be a git worktree at ``<repo>/.claude/worktrees/<name>``
+# (see worktree_manager.py). The Claude CLI anchors a project's NATIVE memory
+# dir to the MAIN checkout's slug regardless of the worktree cwd, so slugging
+# the worktree path targets a per-worktree mirror the CLI never populates —
+# sync then silently no-ops. Reduce such a cwd to its repo root before slugging.
+_WORKTREE_MARKER_RE = re.compile(r"[\\/]\.claude[\\/]worktrees[\\/]")
+
+
+def _repo_root_for_working_dir(working_dir: str) -> str:
+    """Strip a trailing ``.claude/worktrees/<name>`` segment to the repo root."""
+    match = _WORKTREE_MARKER_RE.search(working_dir)
+    return working_dir[: match.start()] if match else working_dir
+
+
+def memory_dir_for_working_dir(working_dir: str) -> Optional[Path]:
+    """`<claude_projects>/<slug>/memory/` for a session's working directory.
+
+    Worktree cwds are folded back to the main checkout first (see above) so the
+    slug matches the dir the CLI actually writes memory into.
+    """
+    try:
+        anchor = _repo_root_for_working_dir(working_dir)
+        return settings.get_claude_projects_dir / get_project_dir_name(anchor) / "memory"
+    except Exception:  # noqa: BLE001
+        logger.debug("memory_sync: could not resolve memory dir for %r", working_dir, exc_info=True)
+        return None
+
+
+def _resolve_target(
+    project_id: str, working_dir: str
+) -> Tuple[Optional[str], Optional[Path]]:
+    """Resolve a session's (memory_key, memory_dir), anchored on the project.
+
+    The memory dir is slugged from the PROJECT record's root path (its main
+    checkout), not the raw session cwd: a worktree session runs under
+    ``<repo>/.claude/worktrees/<name>`` but the CLI writes native memory to the
+    main checkout's slug dir. Falling back to ``working_dir`` (itself folded to
+    a repo root by ``memory_dir_for_working_dir``) preserves behaviour when the
+    project lookup yields nothing.
+    """
     try:
         project = database.get_project(project_id)
     except Exception:  # noqa: BLE001 — never break the caller
         logger.debug("memory_sync: get_project failed for %s", project_id, exc_info=True)
-        return None
-    return memory_key_for_project(project)
-
-
-def memory_dir_for_working_dir(working_dir: str) -> Optional[Path]:
-    """`<claude_projects>/<slug>/memory/` for a session's working directory."""
+        project = None
+    memory_key = memory_key_for_project(project)
+    if not memory_key:
+        return None, None
+    anchor = working_dir
     try:
-        return settings.get_claude_projects_dir / get_project_dir_name(working_dir) / "memory"
-    except Exception:  # noqa: BLE001
-        logger.debug("memory_sync: could not resolve memory dir for %r", working_dir, exc_info=True)
-        return None
+        resolved = get_project_working_dir(project)
+        if resolved:
+            anchor = resolved
+    except Exception:  # noqa: BLE001 — fall back to the session cwd
+        logger.debug("memory_sync: could not resolve project working dir", exc_info=True)
+    return memory_key, memory_dir_for_working_dir(anchor)
 
 
 def _scan_local(memory_dir: Path) -> _LocalState:
@@ -214,6 +256,12 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str]) -> 
     # Files only on local disk are left as-is; push() uploads them.
     _reconciled_keys.add(memory_key)
     _local_baseline[memory_key] = present
+    # One visible line so a silently-mis-resolved dir (e.g. a worktree slug the
+    # CLI never writes) can't hide as a clean no-op ever again.
+    logger.info(
+        "memory_sync: reconcile key=%s dir=%s db_files=%d local_files=%d",
+        memory_key, memory_dir, len(db_rows), len(local),
+    )
 
 
 def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
@@ -249,6 +297,10 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
     # now ours to track; files we tombstoned are gone. A peer file still absent
     # here stays out of the baseline until a reconcile materializes it.
     _local_baseline[memory_key] = set(local.keys())
+    logger.info(
+        "memory_sync: push key=%s dir=%s db_files=%d local_files=%d deletes=%s",
+        memory_key, memory_dir, len(db_rows), len(local), allow_deletes,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +311,7 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
 def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str]) -> None:
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key = _resolve_memory_key(project_id)
-    memory_dir = memory_dir_for_working_dir(working_dir) if memory_key else None
+    memory_key, memory_dir = _resolve_target(project_id, working_dir)
     if not memory_key or memory_dir is None:
         return
     reconcile(memory_key, memory_dir, settings.effective_instance_id)
@@ -269,8 +320,7 @@ def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str])
 def push_memory_sync(project_id: Optional[str], working_dir: Optional[str]) -> None:
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key = _resolve_memory_key(project_id)
-    memory_dir = memory_dir_for_working_dir(working_dir) if memory_key else None
+    memory_key, memory_dir = _resolve_target(project_id, working_dir)
     if not memory_key or memory_dir is None:
         return
     allow_deletes = memory_key in _reconciled_keys and memory_dir.exists()
