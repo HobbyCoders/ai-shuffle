@@ -486,6 +486,69 @@ class TestSearchSessions:
         assert len(data) == 1
         assert data[0]["is_favorite"] is True
 
+    def test_search_sessions_passes_match_count(self, client, mock_database):
+        """match_count from the DB layer must surface in the search response so
+        the UI can show how many places a session matched (title/legacy/store)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "s1",
+                "title": "T",
+                "profile_id": "default",
+                "status": "active",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "content",
+                "match_count": 3,
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        assert response.json()[0]["match_count"] == 3
+
+    def test_search_sessions_match_count_defaults_to_one(self, client, mock_database):
+        """A result without match_count defaults to 1 (back-compat for callers
+        that predate the field)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "s1",
+                "title": "T",
+                "profile_id": "default",
+                "status": "active",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "title",
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        assert response.json()[0]["match_count"] == 1
+
+    def test_search_paginated_passes_match_count(self, client, mock_database):
+        """The paginated search endpoint must pass match_count through each item."""
+        result = {
+            "id": "s1",
+            "title": "T",
+            "profile_id": "default",
+            "status": "active",
+            "created_at": "2024-01-15T10:30:00",
+            "updated_at": "2024-01-15T10:30:00",
+            "match_type": "content",
+            "match_count": 5,
+        }
+        mock_database.search_sessions_paginated.return_value = ([result], 1)
+
+        with patch("app.api.sessions_helpers.get_tags_for_sessions", return_value={}), \
+                patch("app.api.sessions_helpers.get_fork_info_for_sessions", return_value={}):
+            response = client.get("/api/v1/sessions/search/paginated?q=test")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["items"][0]["match_count"] == 5
+
     def test_search_sessions_with_filters(self, client, mock_database):
         """Should search with project and profile filters."""
         mock_database.search_sessions.return_value = []
