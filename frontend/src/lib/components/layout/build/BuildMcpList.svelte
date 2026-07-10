@@ -9,6 +9,7 @@
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import { getServerTypeLabel, getScopeLabel } from '$lib/api/mcp';
 	import { Server, Terminal, Zap, Globe, Trash2, Plus, Search, Info, AlertCircle, X } from 'lucide-svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	interface Props {
 		servers: McpServerInfo[];
@@ -24,6 +25,27 @@
 	let searchQuery = $state('');
 	let pendingName = $state<string | null>(null);
 	let pendingLoading = $state(false);
+	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// RowActionMenu already stops propagation before calling this, so the row's
+	// own click (open the editor) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, id: string) {
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	// Any click reaching the window is outside an open tray (tray buttons all stop
+	// propagation) — collapse it and disarm any pending confirmation.
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		pendingName = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			pendingName = null;
+		}
+	}
 
 	const filtered = $derived(
 		searchQuery.trim()
@@ -65,6 +87,8 @@
 		}
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="bml">
 	<div class="bml-toolbar">
@@ -108,9 +132,15 @@
 			<div class="bml-actions"></div>
 		{:else}
 			<div class="bml-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-				<button class="bml-act bml-act--danger" title="Delete" onclick={() => (pendingName = server.name)}>
-					<Trash2 size={15} strokeWidth={1.7} />
-				</button>
+				<RowActionMenu
+					open={actionsOpenId === server.name}
+					onToggle={(e) => toggleRowActions(e, server.name)}
+					label="Server actions"
+				>
+					<button class="bml-act bml-act--danger" title="Delete" onclick={() => { actionsOpenId = null; pendingName = server.name; }}>
+						<Trash2 size={15} strokeWidth={1.7} />
+					</button>
+				</RowActionMenu>
 			</div>
 		{/if}
 	{/snippet}
@@ -121,8 +151,8 @@
 				<div class="bml-row bml-row--confirm">
 					<p class="bml-confirm-text">Delete <strong>{server.name}</strong>? This can't be undone.</p>
 					<div class="bml-confirm-actions">
-						<button class="bml-btn" onclick={() => (pendingName = null)} disabled={pendingLoading}>Cancel</button>
-						<button class="bml-btn bml-btn--danger" onclick={confirmDelete} disabled={pendingLoading}>Delete</button>
+						<button class="bml-btn" onclick={(e) => { e.stopPropagation(); pendingName = null; }} disabled={pendingLoading}>Cancel</button>
+						<button class="bml-btn bml-btn--danger" onclick={(e) => { e.stopPropagation(); confirmDelete(); }} disabled={pendingLoading}>Delete</button>
 					</div>
 				</div>
 			{:else if server.builtin}
@@ -236,15 +266,12 @@
 	.bml-dot.on { background: var(--success, #3b9c6e); }
 
 	/* Fixed width reserves the delete-button slot so built-in (non-deletable) rows
-	   keep their meta column aligned with custom rows. */
-	.bml-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 28px; opacity: 0; transition: opacity 120ms ease; }
-	.bml-row:hover .bml-actions, .bml-row:focus-within .bml-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.bml-actions { opacity: 1; }
-	}
+	   keep their meta column aligned with custom rows. Reveal is signalled to
+	   RowActionMenu through the inherited --ram-reveal custom property (0 hidden /
+	   1 shown); it owns the button opacity + the touch/narrow ⋮ collapse. */
+	.bml-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 28px; }
+	.bml-row { --ram-reveal: 0; }
+	.bml-row:hover, .bml-row:focus-within { --ram-reveal: 1; }
 	.bml-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
 		background: transparent; border: 1px solid transparent; border-radius: 7px;
@@ -284,6 +311,5 @@
 	@media (max-width: 639px) {
 		.bml-search { max-width: none; }
 		.bml-meta { display: none; }
-		.bml-actions { opacity: 1; }
 	}
 </style>

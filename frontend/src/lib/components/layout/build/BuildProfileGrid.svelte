@@ -11,6 +11,7 @@
 	 */
 	import type { Profile } from '$lib/api/client';
 	import { Users, Download, Trash2, RotateCcw, Plus, Sparkles, Upload, Search } from 'lucide-svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	interface GroupState {
 		profiles?: {
@@ -64,6 +65,28 @@
 	let searchQuery = $state('');
 	let deletingId = $state<string | null>(null);
 	let deleteLoading = $state(false);
+	// Touch/narrow only: which card has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// RowActionMenu already stops propagation before calling this, so the card's
+	// own click (open the editor) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, id: string) {
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	// The ⋮ toggle and tray buttons all stop propagation, so any click that
+	// reaches the window is outside an open tray — collapse it and disarm any
+	// pending delete confirmation.
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		deletingId = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			deletingId = null;
+		}
+	}
 
 	const filtered = $derived(
 		searchQuery.trim()
@@ -97,6 +120,8 @@
 	}
 </script>
 
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
+
 <div class="bpg">
 	<div class="bpg-toolbar">
 		<div class="bpg-search">
@@ -119,8 +144,8 @@
 				<div class="bpg-card bpg-card--deleting">
 					<p class="bpg-del-text">Delete <strong>{profile.name}</strong>? This can't be undone.</p>
 					<div class="bpg-del-actions">
-						<button class="bpg-btn" onclick={() => (deletingId = null)} disabled={deleteLoading}>Cancel</button>
-						<button class="bpg-btn bpg-btn--danger" onclick={confirmDelete} disabled={deleteLoading}>Delete</button>
+						<button class="bpg-btn" onclick={(e) => { e.stopPropagation(); deletingId = null; }} disabled={deleteLoading}>Cancel</button>
+						<button class="bpg-btn bpg-btn--danger" onclick={(e) => { e.stopPropagation(); confirmDelete(); }} disabled={deleteLoading}>Delete</button>
 					</div>
 				</div>
 			{:else}
@@ -157,19 +182,25 @@
 					</div>
 
 					<div class="bpg-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-						{#if profile.is_builtin && profile.is_modified}
-							<button class="bpg-act" title="Revert to defaults" onclick={() => onRevertProfile(profile.id)}>
-								<RotateCcw size={15} strokeWidth={1.7} />
+						<RowActionMenu
+							open={actionsOpenId === profile.id}
+							onToggle={(e) => toggleRowActions(e, profile.id)}
+							label="Profile actions"
+						>
+							{#if profile.is_builtin && profile.is_modified}
+								<button class="bpg-act" title="Revert to defaults" onclick={() => { actionsOpenId = null; onRevertProfile(profile.id); }}>
+									<RotateCcw size={15} strokeWidth={1.7} />
+								</button>
+							{/if}
+							<button class="bpg-act" title="Export" onclick={() => { actionsOpenId = null; onExportProfile(profile.id); }}>
+								<Download size={15} strokeWidth={1.7} />
 							</button>
-						{/if}
-						<button class="bpg-act" title="Export" onclick={() => onExportProfile(profile.id)}>
-							<Download size={15} strokeWidth={1.7} />
-						</button>
-						{#if !profile.is_builtin}
-							<button class="bpg-act bpg-act--danger" title="Delete" onclick={() => (deletingId = profile.id)}>
-								<Trash2 size={15} strokeWidth={1.7} />
-							</button>
-						{/if}
+							{#if !profile.is_builtin}
+								<button class="bpg-act bpg-act--danger" title="Delete" onclick={() => { actionsOpenId = null; deletingId = profile.id; }}>
+									<Trash2 size={15} strokeWidth={1.7} />
+								</button>
+							{/if}
+						</RowActionMenu>
 					</div>
 				</div>
 			{/if}
@@ -279,19 +310,16 @@
 	}
 	.bpg-meta .bpg-sep { opacity: 0.4; }
 
-	/* Hover actions */
+	/* Hover actions — a fixed top-right anchor for the RowActionMenu. Reveal of the
+	   card's action buttons is signalled to RowActionMenu through the inherited
+	   --ram-reveal custom property (0 hidden / 1 shown); the component owns the
+	   button opacity + the touch/narrow ⋮ collapse + slide-out. */
 	.bpg-actions {
 		position: absolute; top: 10px; right: 10px;
-		display: flex; gap: 2px; opacity: 0;
-		transition: opacity 120ms ease;
+		display: flex; gap: 2px;
 	}
-	.bpg-card:hover .bpg-actions, .bpg-card:focus-within .bpg-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.bpg-actions { opacity: 1; }
-	}
+	.bpg-card { --ram-reveal: 0; }
+	.bpg-card:hover, .bpg-card:focus-within { --ram-reveal: 1; }
 	.bpg-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
 		background: color-mix(in oklch, var(--card) 70%, transparent);
@@ -337,7 +365,6 @@
 	@media (max-width: 639px) {
 		.bpg-grid { grid-template-columns: 1fr; }
 		.bpg-search { max-width: none; }
-		.bpg-actions { opacity: 1; }
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.bpg-card, .bpg-new { transition: none; }

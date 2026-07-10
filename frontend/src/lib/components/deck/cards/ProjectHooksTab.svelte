@@ -35,6 +35,22 @@
 	let activeTab = $state<Tab>('custom');
 	let searchQuery = $state('');
 
+	// Touch/narrow only: which custom-hook row has its collapsed ⋮ tray expanded
+	// (one at a time; desktop keeps the always-inline hover rail). The ⋮ toggle
+	// and tray buttons stop propagation, so any click reaching the window is
+	// outside an open tray — collapse it.
+	let actionsOpenId = $state<string | null>(null);
+	function toggleRowActions(e: MouseEvent | KeyboardEvent, id: string) {
+		e.stopPropagation();
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') actionsOpenId = null;
+	}
+
 	// Test result
 	let testResult = $state<{ hookId: string; result: HookTestResult } | null>(null);
 
@@ -115,6 +131,8 @@
 	);
 </script>
 
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
+
 <div class="ptab">
 	{#if $hooksLoading}
 		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
@@ -171,9 +189,11 @@
 							{hook}
 							testing={$hookTesting[hook.id] || false}
 							saving={$hookSaving[hook.id] || false}
+							menuOpen={actionsOpenId === hook.id}
+							onToggleMenu={(e) => toggleRowActions(e, hook.id)}
 							onDelete={() => handleDeleteHook(hook.id)}
 							onToggle={() => handleToggleHook(hook.id, !hook.enabled)}
-							onTest={() => handleTestHook(hook.id)}
+							onTest={() => { actionsOpenId = null; handleTestHook(hook.id); }}
 						/>
 					{/each}
 				</div>

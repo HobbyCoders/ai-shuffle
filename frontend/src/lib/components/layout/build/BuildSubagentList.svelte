@@ -7,6 +7,7 @@
 	 * only (matches the Studio-v2 mockup's `.listrows` layout, not its palette).
 	 */
 	import { Bot, Download, Trash2, RotateCcw, Plus, Sparkles, Upload, Search } from 'lucide-svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	interface Subagent {
 		id: string;
@@ -50,6 +51,27 @@
 	let searchQuery = $state('');
 	let pending = $state<{ id: string; kind: 'delete' | 'revert' } | null>(null);
 	let pendingLoading = $state(false);
+	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// RowActionMenu already stops propagation before calling this, so the row's
+	// own click (open the editor) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, id: string) {
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	// Any click reaching the window is outside an open tray (tray buttons all stop
+	// propagation) — collapse it and disarm any pending confirmation.
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		pending = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			pending = null;
+		}
+	}
 
 	const filtered = $derived(
 		searchQuery.trim()
@@ -85,6 +107,8 @@
 	}
 </script>
 
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
+
 <div class="bsl">
 	<div class="bsl-toolbar">
 		<div class="bsl-search">
@@ -113,10 +137,10 @@
 						{/if}
 					</p>
 					<div class="bsl-confirm-actions">
-						<button class="bsl-btn" onclick={() => (pending = null)} disabled={pendingLoading}>Cancel</button>
+						<button class="bsl-btn" onclick={(e) => { e.stopPropagation(); pending = null; }} disabled={pendingLoading}>Cancel</button>
 						<button
 							class="bsl-btn {pending.kind === 'delete' ? 'bsl-btn--danger' : 'bsl-btn--primary'}"
-							onclick={confirmPending}
+							onclick={(e) => { e.stopPropagation(); confirmPending(); }}
 							disabled={pendingLoading}
 						>
 							{pending.kind === 'delete' ? 'Delete' : 'Restore'}
@@ -145,19 +169,25 @@
 						<span class="bsl-tag">{toolsLabel(agent)}</span>
 					</div>
 					<div class="bsl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-						{#if agent.is_builtin && agent.is_modified}
-							<button class="bsl-act" title="Revert to defaults" onclick={() => (pending = { id: agent.id, kind: 'revert' })}>
-								<RotateCcw size={15} strokeWidth={1.7} />
+						<RowActionMenu
+							open={actionsOpenId === agent.id}
+							onToggle={(e) => toggleRowActions(e, agent.id)}
+							label="Subagent actions"
+						>
+							{#if agent.is_builtin && agent.is_modified}
+								<button class="bsl-act" title="Revert to defaults" onclick={() => { actionsOpenId = null; pending = { id: agent.id, kind: 'revert' }; }}>
+									<RotateCcw size={15} strokeWidth={1.7} />
+								</button>
+							{/if}
+							<button class="bsl-act" title="Export" onclick={() => { actionsOpenId = null; onExport(agent.id); }}>
+								<Download size={15} strokeWidth={1.7} />
 							</button>
-						{/if}
-						<button class="bsl-act" title="Export" onclick={() => onExport(agent.id)}>
-							<Download size={15} strokeWidth={1.7} />
-						</button>
-						{#if !agent.is_builtin}
-							<button class="bsl-act bsl-act--danger" title="Delete" onclick={() => (pending = { id: agent.id, kind: 'delete' })}>
-								<Trash2 size={15} strokeWidth={1.7} />
-							</button>
-						{/if}
+							{#if !agent.is_builtin}
+								<button class="bsl-act bsl-act--danger" title="Delete" onclick={() => { actionsOpenId = null; pending = { id: agent.id, kind: 'delete' }; }}>
+									<Trash2 size={15} strokeWidth={1.7} />
+								</button>
+							{/if}
+						</RowActionMenu>
 					</div>
 				</div>
 			{/if}
@@ -254,15 +284,13 @@
 	}
 
 	/* Fixed width reserves space for the max action count (2: revert/delete + export),
-	   so the meta column stays aligned across rows regardless of which buttons a row shows. */
-	.bsl-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 58px; opacity: 0; transition: opacity 120ms ease; }
-	.bsl-row:hover .bsl-actions, .bsl-row:focus-within .bsl-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.bsl-actions { opacity: 1; }
-	}
+	   so the meta column stays aligned across rows regardless of which buttons a row shows.
+	   Reveal is signalled to RowActionMenu through the inherited --ram-reveal custom
+	   property (0 hidden / 1 shown); it owns the button opacity + the touch/narrow ⋮
+	   collapse + slide-out. */
+	.bsl-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 58px; }
+	.bsl-row { --ram-reveal: 0; }
+	.bsl-row:hover, .bsl-row:focus-within { --ram-reveal: 1; }
 	.bsl-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
 		background: transparent; border: 1px solid transparent; border-radius: 7px;
@@ -299,6 +327,5 @@
 	@media (max-width: 639px) {
 		.bsl-search { max-width: none; }
 		.bsl-meta { display: none; }
-		.bsl-actions { opacity: 1; }
 	}
 </style>

@@ -13,6 +13,7 @@
 		Search, Plus, Terminal, Globe, MessageSquare, Zap, Play, Trash2,
 		AlertCircle, X, Loader2, FileCode
 	} from 'lucide-svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	type Tab = 'app' | 'project' | 'plugins';
 
@@ -56,6 +57,27 @@
 	let searchQuery = $state('');
 	let pendingDelete = $state<string | null>(null);
 	let pendingLoading = $state(false);
+	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// RowActionMenu already stops propagation before calling this, so the row's
+	// own click (open the editor) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, id: string) {
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	// Any click reaching the window is outside an open tray (tray buttons all stop
+	// propagation) — collapse it and disarm any pending confirmation.
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		pendingDelete = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			pendingDelete = null;
+		}
+	}
 
 	const eventColors: Record<string, string> = {
 		PreToolUse: 'var(--info)',
@@ -111,6 +133,7 @@
 		if (id === activeTab) return;
 		activeTab = id;
 		pendingDelete = null;
+		actionsOpenId = null;
 	}
 
 	// Icon by hook delivery type.
@@ -140,6 +163,8 @@
 		}
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="bhl">
 	<!-- Tabs (underline sub-nav, left-aligned) -->
@@ -221,8 +246,8 @@
 						<div class="bhl-row bhl-row--confirm">
 							<p class="bhl-confirm-text">Delete <strong>{hook.name}</strong>? This can't be undone.</p>
 							<div class="bhl-confirm-actions">
-								<button class="bhl-btn bhl-btn--sm" onclick={() => (pendingDelete = null)} disabled={pendingLoading}>Cancel</button>
-								<button class="bhl-btn bhl-btn--sm bhl-btn--danger" onclick={confirmDelete} disabled={pendingLoading}>Delete</button>
+								<button class="bhl-btn bhl-btn--sm" onclick={(e) => { e.stopPropagation(); pendingDelete = null; }} disabled={pendingLoading}>Cancel</button>
+								<button class="bhl-btn bhl-btn--sm bhl-btn--danger" onclick={(e) => { e.stopPropagation(); confirmDelete(); }} disabled={pendingLoading}>Delete</button>
 							</div>
 						</div>
 					{:else}
@@ -249,12 +274,18 @@
 								<span class="bhl-tag">{hook.hook_type}</span>
 							</div>
 							<div class="bhl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-								<button class="bhl-act" title="Test hook" onclick={() => onTest(hook.id)} disabled={testing[hook.id] || saving[hook.id]}>
-									{#if testing[hook.id]}<Loader2 size={15} class="bhl-spin" />{:else}<Play size={15} strokeWidth={1.7} />{/if}
-								</button>
-								<button class="bhl-act bhl-act--danger" title="Delete hook" onclick={() => (pendingDelete = hook.id)} disabled={saving[hook.id]}>
-									<Trash2 size={15} strokeWidth={1.7} />
-								</button>
+								<RowActionMenu
+									open={actionsOpenId === hook.id}
+									onToggle={(e) => toggleRowActions(e, hook.id)}
+									label="Hook actions"
+								>
+									<button class="bhl-act" title="Test hook" onclick={() => { actionsOpenId = null; onTest(hook.id); }} disabled={testing[hook.id] || saving[hook.id]}>
+										{#if testing[hook.id]}<Loader2 size={15} class="bhl-spin" />{:else}<Play size={15} strokeWidth={1.7} />{/if}
+									</button>
+									<button class="bhl-act bhl-act--danger" title="Delete hook" onclick={() => { actionsOpenId = null; pendingDelete = hook.id; }} disabled={saving[hook.id]}>
+										<Trash2 size={15} strokeWidth={1.7} />
+									</button>
+								</RowActionMenu>
 							</div>
 							<button
 								class="bhl-toggle"
@@ -389,14 +420,12 @@
 	.bhl-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 	.bhl-tag { font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 
-	.bhl-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
-	.bhl-row:hover .bhl-actions, .bhl-row:focus-within .bhl-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.bhl-actions { opacity: 1; }
-	}
+	/* Reveal is signalled to RowActionMenu through the inherited --ram-reveal custom
+	   property (0 hidden / 1 shown); it owns the button opacity + the touch/narrow ⋮
+	   collapse. The enable/disable toggle sits outside it, always visible. */
+	.bhl-actions { display: flex; gap: 2px; flex-shrink: 0; }
+	.bhl-row { --ram-reveal: 0; }
+	.bhl-row:hover, .bhl-row:focus-within { --ram-reveal: 1; }
 	.bhl-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.bhl-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.bhl-act:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -435,6 +464,5 @@
 	@media (max-width: 639px) {
 		.bhl-search { max-width: none; }
 		.bhl-meta { display: none; }
-		.bhl-actions { opacity: 1; }
 	}
 </style>

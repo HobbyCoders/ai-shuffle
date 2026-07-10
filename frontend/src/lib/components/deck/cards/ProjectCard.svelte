@@ -18,6 +18,7 @@
 	} from 'lucide-svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 	import ProjectMcpTab from './ProjectMcpTab.svelte';
@@ -66,6 +67,28 @@
 	let deletingId = $state<string | null>(null);
 	let deleteLoading = $state(false);
 	let confirmingRemove = $state(false);
+
+	// Touch/narrow only (list view): which row has its collapsed ⋮ action tray
+	// expanded. One open at a time; desktop keeps the always-inline hover rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// The ⋮ toggle and every tray button stop propagation, so any click reaching
+	// the window is outside an open tray — collapse it and disarm any pending
+	// list delete confirmation.
+	function toggleRowActions(e: MouseEvent | KeyboardEvent, id: string) {
+		e.stopPropagation();
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		if (viewMode === 'list' && deletingId !== null) deletingId = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			if (viewMode === 'list') deletingId = null;
+		}
+	}
 
 	// Get selected project
 	const selectedProject = $derived($projects.find((p) => p.id === selectedProjectId));
@@ -122,6 +145,8 @@
 		confirmingRemove = false;
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 {#if viewMode === 'detail' && selectedProject}
 	<!-- ─────────────────────────── DETAIL ─────────────────────────── -->
@@ -253,8 +278,8 @@
 											{/if}
 										</div>
 										<div class="pc-confirm-actions">
-											<button class="pc-btn pc-btn--sm" onclick={() => (deletingId = null)} disabled={deleteLoading}>Cancel</button>
-											<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={handleDeleteProject} disabled={deleteLoading}>
+											<button class="pc-btn pc-btn--sm" onclick={(e) => { e.stopPropagation(); deletingId = null; }} disabled={deleteLoading}>Cancel</button>
+											<button class="pc-btn pc-btn--sm pc-btn--danger" onclick={(e) => { e.stopPropagation(); handleDeleteProject(); }} disabled={deleteLoading}>
 												{#if deleteLoading}<Loader2 size={13} class="pc-spin" />{/if}
 												{project.session_count && project.session_count > 0 ? 'Delete all' : 'Delete'}
 											</button>
@@ -281,11 +306,15 @@
 										<div class="pc-meta">
 											<span class="pc-tag">{project.session_count || 0} session{project.session_count === 1 ? '' : 's'}</span>
 										</div>
-										<div class="pc-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-											<button class="pc-act pc-act--danger" title="Delete" onclick={(e) => { e.stopPropagation(); deletingId = project.id; }}>
+										<RowActionMenu
+											open={actionsOpenId === project.id}
+											onToggle={(e) => toggleRowActions(e, project.id)}
+											label="Project actions"
+										>
+											<button class="pc-act pc-act--danger" title="Delete" onclick={(e) => { e.stopPropagation(); actionsOpenId = null; deletingId = project.id; }}>
 												<Trash2 size={15} strokeWidth={1.7} />
 											</button>
-										</div>
+										</RowActionMenu>
 										<span class="pc-chev"><ChevronRight size={16} strokeWidth={1.7} /></span>
 									</div>
 								{/if}
@@ -477,14 +506,11 @@
 	.pc-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 	.pc-tag { font-family: var(--font-mono, monospace); font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 
-	.pc-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
-	.pc-row:hover .pc-actions, .pc-row:focus-within .pc-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.pc-actions { opacity: 1; }
-	}
+	/* Row-hover reveal of the action rail is signalled to RowActionMenu through the
+	   inherited --ram-reveal custom property (0 hidden / 1 shown); the component
+	   owns the button opacity + the touch/narrow ⋮ collapse + slide-out. */
+	.pc-row { --ram-reveal: 0; }
+	.pc-row:hover, .pc-row:focus-within { --ram-reveal: 1; }
 	.pc-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.pc-act--danger:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 	.pc-chev { display: grid; place-items: center; color: var(--muted-foreground); flex-shrink: 0; }
@@ -514,7 +540,6 @@
 		.pc-wrap { padding: 18px 16px 24px; }
 		.pc-search { max-width: none; }
 		.pc-meta { display: none; }
-		.pc-actions { opacity: 1; }
 		.pc-hero { flex-wrap: wrap; }
 		.pc-hero-acts { margin-left: 0; width: 100%; }
 	}
