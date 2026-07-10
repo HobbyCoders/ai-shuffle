@@ -78,6 +78,16 @@ _FAILURE_STATUSES = frozenset({"error", "killed"})
 SERVER_SHUTDOWN_SUMMARY = "Server restarted — background task stopped"
 SERVER_SHUTDOWN_REASON = "server_shutdown"
 
+# Kill attribution for an EXPLICIT user-initiated stop (the "x" on the live
+# background-tasks strip, or "Stop, and also stop background agents"). The stop
+# path records the terminal transition on the registry row ITSELF — it must not
+# rely on a CLI "stopped" frame flowing back (a parked session has no reader for
+# it, and the scoped stop may emit none) or the row stays "running" forever.
+# These stamp WHO stopped it so the terminal chip / retention row reads as a
+# deliberate user stop, not a mysterious failure.
+USER_STOP_SUMMARY = "Stopped by user"
+USER_STOP_REASON = "user_stopped"
+
 
 # Value vocabulary (documented, not enforced): the registry deliberately does NOT
 # reject unknown values, so a new SDK kind/status can flow through without a code
