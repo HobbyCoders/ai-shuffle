@@ -65,14 +65,26 @@ class SessionNotifier {
 
 		// Any streaming data event means state has changed on the server
 		if (isUpdateEvent(msgType) || isUpdateEvent(eventType)) {
-			// Resilient fallback: if we get a streaming update event but the
-			// poller isn't in streaming mode, start it. This handles cases
-			// where the stream_start event was lost (e.g., WS reconnect,
-			// timing issue, or message dropped on mobile).
-			if (
-				(eventType === 'stream_chunk' || msgType === 'chunk' || msgType === 'stream_delta') &&
-				!sessionPoller.isPolling(sessionId)
-			) {
+			// Resilient fallback: ANY server-side update event for a session we
+			// are NOT currently polling means the server holds live state we are
+			// not tracking. The critical case is a SERVER-INITIATED WAKE turn (an
+			// unpark: a backgrounded agent came to rest while this session was
+			// parked, so the CLI/app started a follow-up turn). Its `stream_start`
+			// broadcast is NOT reliably re-delivered to a re-attached / idle socket
+			// (see session-poller's switch-back note), and it can also arrive as a
+			// `message_added` / `system` / `subagent_*` / `messages_updated` event
+			// rather than a `stream_chunk`. Previously only the `stream_chunk`
+			// family restarted a stopped poller; every other update event fell to a
+			// one-shot `pollNow`, which renders the delivered messages but never
+			// ARMS a running poller — so the wake's `is_streaming=true` flip is
+			// never observed and the streaming indicator + stop button never appear
+			// (the session looks idle yet is streaming and cannot be interrupted).
+			//
+			// Start a real poll loop instead: it converges on `/live`'s
+			// `is_streaming` regardless of the missed WS edge, and self-limits — a
+			// poll that turns out fully idle (no streaming, no active tasks, no
+			// `unpark_pending`) stops the poller on the very next tick.
+			if (!sessionPoller.isPolling(sessionId)) {
 				sessionPoller.startStreaming(sessionId);
 				return;
 			}
