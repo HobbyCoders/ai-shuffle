@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.query_engine import (
-    _latch_cli_task_notifications,
     _read_task_output_file,
     _task_notification_frame,
 )
@@ -104,82 +103,128 @@ class TestTaskNotificationFrame:
 
 
 # =============================================================================
-# _latch_cli_task_notifications — in-process straddle latch
+# _cli_turn_events_from_message — CLI-driven (autonomous) turn converter
 #
-# When the CLI injects a <task-notification> user-lane steering message MID-turn
-# (which flows through stream_to_websocket as a plain-text UserMessage), we spend
-# mark_unparked at the source so the between-turns drain pump's existing per-task
-# dedup suppresses the straddle duplicate. RED against pre-latch code (the token
-# is never spent, so the pump re-delivers).
+# Round 4 of the duplicate-notification fix: when a top-level backgrounded
+# Task/Agent completes while the parent is parked, the CLI injects its OWN
+# wake turn on the pooled client. The drain pump forwards that turn's top-level
+# content through the normal dispatch pipeline using this pure converter.
+# (PR #498's text-sniffing _latch_cli_task_notifications was removed as
+# proven-dead: at-rest injections never pass through stream_to_websocket.)
 # =============================================================================
 
-def _cli_task_notification_text(task_id="task-1", tool_use_id="tu-1"):
-    """The unindented CLI-format steering message the SDK injects in-stream."""
-    return (
-        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
-        "<task-notification>\n"
-        f"<task-id>{task_id}</task-id>\n"
-        f"<tool-use-id>{tool_use_id}</tool-use-id>\n"
-        "<status>completed</status>\n"
-        "<summary>done</summary>\n"
-        "</task-notification>"
-    )
+from claude_agent_sdk import (
+    AssistantMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
+from app.core.query_engine import _cli_turn_events_from_message
 
 
-class TestLatchCliTaskNotifications:
+class TestCliTurnEventsFromMessage:
     def setup_method(self):
         task_registry.reset_all()
 
     def teardown_method(self):
         task_registry.reset_all()
 
-    def test_spends_mark_unparked_for_task_id(self):
-        text = _cli_task_notification_text("task-1", "tu-1")
-        assert task_registry.was_unparked("sess-1", "task-1") is False
-        _latch_cli_task_notifications("sess-1", text)
-        # Token spent — a later pump mark_unparked returns False (dedup → suppress).
-        assert task_registry.was_unparked("sess-1", "task-1") is True
-        assert task_registry.mark_unparked("sess-1", "task-1") is False
+    def test_assistant_text_becomes_chunk(self):
+        msg = AssistantMessage(content=[TextBlock("the answer")], model="m")
+        events = _cli_turn_events_from_message("sess-1", msg, {})
+        assert events == [{"type": "chunk", "content": "the answer"}]
 
-    def test_multiple_blocks_all_latched(self):
-        text = (
-            _cli_task_notification_text("task-1", "tu-1")
-            + "\n"
-            + _cli_task_notification_text("task-2", "tu-2")
+    def test_whitespace_only_text_dropped(self):
+        msg = AssistantMessage(content=[TextBlock("\n\n")], model="m")
+        assert _cli_turn_events_from_message("sess-1", msg, {}) == []
+
+    def test_thinking_becomes_thinking_block_marker(self):
+        msg = AssistantMessage(
+            content=[ThinkingBlock(thinking="hmm", signature="s")], model="m"
         )
-        _latch_cli_task_notifications("sess-1", text)
-        assert task_registry.was_unparked("sess-1", "task-1") is True
-        assert task_registry.was_unparked("sess-1", "task-2") is True
+        events = _cli_turn_events_from_message("sess-1", msg, {})
+        assert events == [{"type": "thinking_block", "content": "hmm"}]
 
-    def test_idempotent_relatch_is_harmless(self):
-        text = _cli_task_notification_text("task-1", "tu-1")
-        _latch_cli_task_notifications("sess-1", text)
-        # The app's OWN synthetic unpark prompt flows back as a UserMessage on a
-        # follow-up turn; re-latching the same task must not error / re-arm.
-        _latch_cli_task_notifications("sess-1", text)
-        assert task_registry.was_unparked("sess-1", "task-1") is True
-
-    def test_resolves_task_via_tool_use_id_when_no_task_id(self):
-        # A block with only <tool-use-id> resolves the task via the registry's
-        # recorded launch tool_use_id.
-        task_registry.start_task(
-            "sess-1", "task-9", "agent", "bg work", tool_use_id="tu-9"
+    def test_plain_tool_use_and_result_flow_with_name_resolution(self):
+        names = {}
+        use = AssistantMessage(
+            content=[ToolUseBlock(id="t1", name="Read", input={"file_path": "/x"})],
+            model="m",
         )
-        text = (
-            "<task-notification>\n"
-            "<tool-use-id>tu-9</tool-use-id>\n"
-            "<status>completed</status>\n"
-            "</task-notification>"
+        events = _cli_turn_events_from_message("sess-1", use, names)
+        assert events == [
+            {"type": "tool_use", "name": "Read", "id": "t1", "input": {"file_path": "/x"}}
+        ]
+        res = UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content="data", is_error=False)]
         )
-        _latch_cli_task_notifications("sess-1", text)
-        assert task_registry.was_unparked("sess-1", "task-9") is True
+        revents = _cli_turn_events_from_message("sess-1", res, names)
+        assert revents == [{
+            "type": "tool_result",
+            "name": "Read",
+            "tool_use_id": "t1",
+            "output": "data",
+            "is_error": False,
+        }]
 
-    def test_no_task_id_no_tool_use_id_is_skipped(self):
-        text = "<task-notification>\n<status>completed</status>\n</task-notification>"
-        # No crash; nothing latched.
-        _latch_cli_task_notifications("sess-1", text)
-        assert task_registry.was_unparked("sess-1", "task-1") is False
+    def test_task_tool_becomes_subagent_start(self):
+        msg = AssistantMessage(
+            content=[ToolUseBlock(
+                id="t2", name="Agent",
+                input={"description": "probe", "prompt": "go", "subagent_type": "Explore"},
+            )],
+            model="m",
+        )
+        events = _cli_turn_events_from_message("sess-1", msg, {})
+        assert events == [{
+            "type": "subagent_start",
+            "tool_id": "t2",
+            "agent_type": "Explore",
+            "description": "probe",
+            "prompt": "go",
+            "agent_id": "t2",
+        }]
 
-    def test_non_notification_text_is_noop(self):
-        _latch_cli_task_notifications("sess-1", "just a normal user message")
-        assert task_registry._unparked.get("sess-1") in (None, set())
+    def test_run_in_background_input_arms_launch_gate(self):
+        msg = AssistantMessage(
+            content=[ToolUseBlock(
+                id="t3", name="Agent",
+                input={"description": "bg", "prompt": "go", "run_in_background": True},
+            )],
+            model="m",
+        )
+        _cli_turn_events_from_message("sess-1", msg, {})
+        assert task_registry.was_background_launch("sess-1", "t3") is True
+
+    def test_launch_ack_tool_result_arms_launch_gate(self):
+        # A CLI-driven turn launches an async Agent (no input flag); the launch
+        # ACK ToolResult is what reveals backgroundness — the converter must arm
+        # the gate or the chained agent's own wake would read as foreground.
+        names = {"t4": "Agent"}
+        res = UserMessage(content=[ToolResultBlock(
+            tool_use_id="t4",
+            content="Async agent launched successfully. It is working in the background.",
+            is_error=False,
+        )])
+        _cli_turn_events_from_message("sess-1", res, names)
+        assert task_registry.was_background_launch("sess-1", "t4") is True
+
+    def test_injected_user_string_is_hidden(self):
+        msg = UserMessage(content=(
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+            "<task-notification>\n<task-id>task-1</task-id>\n</task-notification>"
+        ))
+        assert _cli_turn_events_from_message("sess-1", msg, {}) == []
+
+    def test_subagent_inner_messages_excluded(self):
+        # parent_tool_use_id set → belongs to _subagent_events_from_message.
+        msg = AssistantMessage(
+            content=[TextBlock("inner")], model="m", parent_tool_use_id="tu-1"
+        )
+        assert _cli_turn_events_from_message("sess-1", msg, {}) == []
+
+    def test_non_chat_messages_yield_nothing(self):
+        assert _cli_turn_events_from_message("sess-1", SimpleNamespace(), {}) == []
