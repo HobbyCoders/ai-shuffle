@@ -194,6 +194,42 @@ async def relay_message(
     _raise_for_status(resp, "cluster message")
 
 
+async def relay_project_upload(
+    session: Dict[str, Any],
+    *,
+    content: bytes,
+    filename: str,
+    path: str = "",
+    worktree_id: str = "",
+) -> Dict[str, Any]:
+    """Relay a chat attachment to the install that OWNS the session.
+
+    The session's agent runs on the owning install, so the bytes must land in
+    *that* install's project/worktree uploads dir — writing to the viewer's disk
+    would leave the message referencing a path the agent can't read. Posts the
+    multipart file to the owner's ``/cluster/sessions/{id}/upload`` and returns
+    its owner-rooted ``{filename, path, full_path, size, sizeFormatted}`` so the
+    message references a readable path. Raises ``InstallOffline`` when the owner
+    is unreachable so the caller can surface an actionable 4xx.
+    """
+    base_url, sid = resolve_target(session)
+    async with httpx.AsyncClient(timeout=UPLOAD_TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{base_url}/api/v1/cluster/sessions/{sid}/upload",
+                files={"file": (filename, content)},
+                data={"path": path or "", "worktree_id": worktree_id or ""},
+                headers=_cluster_headers(),
+            )
+        except httpx.HTTPError as e:
+            raise InstallOffline(f"Could not reach owning install: {e}") from e
+    _raise_for_status(resp, "cluster upload")
+    body = resp.json()
+    if not isinstance(body, dict):
+        raise CloudRelayError("Peer install upload returned an unexpected response")
+    return body
+
+
 async def relay_queue_message(
     session: Dict[str, Any],
     content: str,
