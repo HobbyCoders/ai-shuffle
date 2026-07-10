@@ -4,13 +4,14 @@
  *
  * These mount the real board with its store/api dependencies mocked, then drive
  * the rail buttons that appear on every session row. Covered:
- *  - both new buttons render on each row, alongside Favorite/Clear
- *  - the Resume tooltip is conditional: "Open" for a local row, "Resume here …"
- *    (with the owning device) for a cross-install/remote row
+ *  - Fork/Favorite/Clear render on every row; Resume renders ONLY on remote
+ *    (cross-install) rows — a local row's own click already opens it, so a
+ *    same-device "Open" button would be redundant and is hidden entirely
+ *  - the Resume tooltip on a remote row reads "Resume here …" tagged with the
+ *    owning device
  *  - clicking Fork forks that row's session and opens the NEW one, and does NOT
  *    open the clicked row (stopPropagation) — the row click would open its own id
- *  - clicking Resume on a remote row adopts-then-opens; on a local row it opens
- *    directly without adopting
+ *  - clicking Resume on a remote row adopts-then-opens
  *  - the pre-existing Favorite rail action still fires
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -156,7 +157,7 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('SessionsBoard action rail', () => {
-	it('renders Resume + Fork buttons on every row, next to Favorite/Clear', () => {
+	it('renders Fork/Favorite/Clear on every row, next to each other', () => {
 		renderBoard();
 		// One Fork + one Clear + one Favorite per row (two rows).
 		expect(screen.getAllByTitle('Fork session')).toHaveLength(2);
@@ -164,11 +165,17 @@ describe('SessionsBoard action rail', () => {
 		expect(screen.getAllByTitle('Favorite')).toHaveLength(2);
 	});
 
-	it('gives the Resume button a conditional tooltip (Open vs Resume here + device)', () => {
+	it('hides the Resume/Open action for a same-device (local) session row', () => {
 		renderBoard();
-		// Local row → plain open.
-		expect(rowFor('Local one').querySelector('[title="Open"]')).toBeTruthy();
-		// Remote row → adopt-and-resume, tagged with the owning device.
+		const localRow = rowFor('Local one');
+		expect(localRow.querySelector('[title="Open"]')).toBeNull();
+		expect(localRow.querySelector('[title^="Resume here"]')).toBeNull();
+		// The row still carries its other actions — only Resume is gone.
+		expect(localRow.querySelector('[title="Fork session"]')).toBeTruthy();
+	});
+
+	it('shows the Resume action, tagged with the owning device, for a remote session row', () => {
+		renderBoard();
 		expect(rowFor('Remote one').querySelector('[title="Resume here (Mac Studio)"]')).toBeTruthy();
 	});
 
@@ -192,16 +199,6 @@ describe('SessionsBoard action rail', () => {
 
 		expect(mocks.adoptSession).toHaveBeenCalledWith('b');
 		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('b'));
-	});
-
-	it('resumes a local session by opening it directly, without adopting', async () => {
-		const { onOpenSession } = renderBoard();
-		const resume = rowFor('Local one').querySelector('[title="Open"]') as HTMLElement;
-
-		await fireEvent.click(resume);
-
-		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('a'));
-		expect(mocks.adoptSession).not.toHaveBeenCalled();
 	});
 
 	it('still fires the pre-existing Favorite rail action', async () => {

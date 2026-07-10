@@ -394,27 +394,26 @@
 		await forkAndOpen(s);
 	}
 	// "Resume here" adopts a foreign-instance session to this install and opens
-	// it; for a local session there is nothing to adopt, so it is a plain open
-	// and the tooltip reads "Open" instead.
+	// it. It is only ever rendered for remote (cross-install) rows — a local row
+	// has nothing to adopt and the row's own click already opens it, so the
+	// button would be a redundant "Open" (see the `session.is_remote` guard
+	// around its markup below).
 	function resumeTitle(s: Session): string {
-		if (!s.is_remote) return 'Open';
 		return s.device_name ? `Resume here (${s.device_name})` : 'Resume here';
 	}
 
-	// "Resume here": adopt a foreign-instance session to this install (a no-op
-	// server-side for a local session), reload so worktree/ownership fields are
-	// fresh, then open. Worktree sessions rebind via the existing recreate path.
+	// "Resume here": adopt a foreign-instance session to this install, reload so
+	// worktree/ownership fields are fresh, then open. Worktree sessions rebind via
+	// the existing recreate path.
 	async function resumeHere(s: Session) {
 		try {
-			if (s.is_remote) {
-				const res = await adoptSession(s.id);
-				await appData.loadSessions();
-				// Non-blocking cross-device advisory (e.g. an unpushed worktree
-				// branch): surface it before opening so the user knows the send
-				// may fail until they push, but still let them in.
-				if (res?.warning) {
-					toast.push(res.warning, { tone: 'warning' });
-				}
+			const res = await adoptSession(s.id);
+			await appData.loadSessions();
+			// Non-blocking cross-device advisory (e.g. an unpushed worktree
+			// branch): surface it before opening so the user knows the send
+			// may fail until they push, but still let them in.
+			if (res?.warning) {
+				toast.push(res.warning, { tone: 'warning' });
 			}
 			onOpenSession(s.id);
 		} catch (e) {
@@ -814,13 +813,15 @@
 			onToggle={(e) => toggleRowActions(e, session.id)}
 			label="Session actions"
 		>
-			<button
-				class="row-action"
-				title={resumeTitle(session)}
-				onclick={(e) => handleResume(e, session)}
-			>
-				<Play size={13} strokeWidth={1.6} />
-			</button>
+			{#if session.is_remote}
+				<button
+					class="row-action"
+					title={resumeTitle(session)}
+					onclick={(e) => handleResume(e, session)}
+				>
+					<Play size={13} strokeWidth={1.6} />
+				</button>
+			{/if}
 			<button
 				class="row-action"
 				title="Fork session"
