@@ -909,6 +909,50 @@ async def _drain_notifications_impl(
                         _cli_evs = _cli_turn_events_from_message(
                             session_id, message, _cli_tool_names
                         )
+                        if _cli_evs and not _cli_turn_forwarded:
+                            # FIRST forwarded event of a CLI-owned wake turn —
+                            # emit the client-facing engagement signal a normal
+                            # turn's run_query emits at start. A connected but
+                            # IDLE viewing client's poller went idle when the
+                            # parent turn ended (the #502 bounded park poll only
+                            # covers fresh loads / time-bounded windows); its
+                            # ONLY rescue is the WS parked-watcher, which restarts
+                            # polling on a stream_start/chunk/end broadcast.
+                            # dispatch_event below DOES broadcast stream_start via
+                            # the handler chain — but ONLY once, gated behind the
+                            # pump's shared ``sub_state.stream_started`` latch that
+                            # never resets across the pump's lifetime, so the
+                            # SECOND+ CLI wake turn lands silently (content in the
+                            # live store, update_id bumped, but no WS signal) and
+                            # an idle client renders nothing until a manual
+                            # refresh — the observed bug. Broadcast stream_start
+                            # explicitly for EVERY wake turn's first forwarded
+                            # event so any connected client re-engages its poller.
+                            try:
+                                await sync_engine.broadcast_stream_start(
+                                    session_id=session_id,
+                                    message_id=ctx.message_id,
+                                    source_device_id=None,
+                                    usage=None,
+                                    user_id=user_id,
+                                    project_id=project_id,
+                                    worktree_id=worktree_id,
+                                )
+                            except Exception as _bexc:
+                                ctx.debug(
+                                    logger,
+                                    "Drain pump: CLI-wake stream_start broadcast "
+                                    f"failed: {_bexc}",
+                                )
+                            # Belt-and-braces for a park-poller mid-cycle: keep the
+                            # unpark_pending latch UP while this wake turn is being
+                            # forwarded so a poll that samples between complete_task
+                            # and the turn finalize doesn't read (is_streaming=False,
+                            # activeTasks=[]) and stop. Released at the turn's
+                            # ResultMessage finalize (and the exit paths via
+                            # ``_cli_wake_latched``).
+                            task_registry.mark_unpark_pending(session_id)
+                            _cli_wake_latched = True
                         for _cli_ev in _cli_evs:
                             if _cli_ev.get("type") == "thinking_block":
                                 # No dispatchable thinking event type exists —
@@ -1011,6 +1055,29 @@ async def _drain_notifications_impl(
                                     metadata={},
                                     interrupted=False,
                                 )
+                                # Matching engagement-END signal for the
+                                # stream_start we broadcast when this wake turn's
+                                # first event was forwarded. ``end_streaming``
+                                # above only MUTATES the live store (marks the
+                                # forwarded messages non-streaming + bumps
+                                # update_id) — it does NOT broadcast over the WS,
+                                # so without this a client that engaged on the
+                                # stream_start never sees the turn close (and the
+                                # parked-watcher's stream_end restart is lost).
+                                try:
+                                    await sync_engine.broadcast_stream_end(
+                                        session_id=session_id,
+                                        message_id=ctx.message_id,
+                                        metadata={},
+                                        interrupted=False,
+                                        source_device_id=None,
+                                    )
+                                except Exception as _bexc:
+                                    ctx.debug(
+                                        logger,
+                                        "Drain pump: CLI-wake stream_end "
+                                        f"broadcast failed: {_bexc}",
+                                    )
                                 logger.info(
                                     "Drain pump: CLI-driven turn finalized in "
                                     "live view [session=%s]",

@@ -2057,6 +2057,149 @@ async def test_pump_shell_completion_still_app_delivered_exactly_once():
 
 
 # ---------------------------------------------------------------------------
+# 6z. CLI-OWNED WAKE — CLIENT ENGAGEMENT BROADCAST (follow-up to PR #503)
+#     Observed live: a CLI-owned wake turn's content landed in the live store
+#     and update_id bumped, but a CONNECTED, IDLE viewing client rendered
+#     nothing until a manual refresh. The poller goes idle after a turn ends;
+#     its only rescue is the WS parked-watcher, which restarts polling on a
+#     stream_start/chunk/end broadcast. The pump forwards via dispatch_event
+#     whose stream_start broadcast is gated behind the pump's shared
+#     ``sub_state.stream_started`` latch (fires at most ONCE per pump lifetime),
+#     so the second+ wake turn lands silently. The pump must broadcast
+#     stream_start on the FIRST forwarded event of EVERY wake turn and a
+#     matching stream_end at its ResultMessage finalize.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_cli_wake_broadcasts_stream_engagement():
+    """The pump must emit a stream_start engagement signal on the first forwarded
+    event of a CLI-owned wake turn (so a connected idle client's parked-watcher
+    restarts its poller) and a matching stream_end when the turn's ResultMessage
+    finalizes. dispatch_event is mocked so the ONLY thing that can broadcast is
+    the pump itself — RED against pre-fix main (the pump broadcast nothing;
+    engagement rode solely on dispatch_event's once-per-pump-lifetime start)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    injection = UserMessage(content=_cli_injection_user_string("task-1", "tu-1"))
+    answer = AssistantMessage(
+        content=[TextBlock("Agent finished — results look good.")], model="claude"
+    )
+    client = _FakeClient(
+        [
+            _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done"),
+            injection,
+            answer,
+            _result_msg(),
+        ],
+        hang=False,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    fake_sync = MagicMock(
+        broadcast_stream_start=AsyncMock(),
+        broadcast_stream_end=AsyncMock(),
+    )
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
+        cwh.live_session_store, "end_streaming", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # (a) the pump announced the wake turn to connected clients with stream_start.
+    fake_sync.broadcast_stream_start.assert_awaited_once()
+    assert fake_sync.broadcast_stream_start.await_args.kwargs["session_id"] == "sess-1"
+    # (b) and closed it with a matching stream_end at the turn's ResultMessage.
+    fake_sync.broadcast_stream_end.assert_awaited_once()
+    assert fake_sync.broadcast_stream_end.await_args.kwargs["session_id"] == "sess-1"
+    # (c) the wake stays app-unpark-free (cli-owned class).
+    handler._deliver_unpark.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pump_cli_wake_broadcasts_stream_start_per_turn():
+    """The core of the observed bug: TWO CLI-owned wake turns in one pump run
+    (the parent parks, a first agent completes and the CLI answers, then a second
+    agent completes and the CLI answers again). Each wake turn must get its OWN
+    stream_start — the pre-fix path fired stream_start at most ONCE for the whole
+    pump lifetime (shared ``sub_state.stream_started`` latch), so the SECOND wake
+    turn landed silently and an idle client showed nothing until refresh."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg agent 1")
+    task_registry.start_task("sess-1", "task-2", "agent", "bg agent 2")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+    task_registry.mark_background_launch("sess-1", "tu-2")
+
+    def _wake(task_id, tool_use_id, uuid, text):
+        return [
+            _notif(task_id, uuid=uuid, tool_use_id=tool_use_id, summary="done"),
+            UserMessage(content=_cli_injection_user_string(task_id, tool_use_id)),
+            AssistantMessage(content=[TextBlock(text)], model="claude"),
+            _result_msg(),
+        ]
+
+    client = _FakeClient(
+        _wake("task-1", "tu-1", "u-1", "first agent done")
+        + _wake("task-2", "tu-2", "u-2", "second agent done"),
+        hang=False,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    fake_sync = MagicMock(
+        broadcast_stream_start=AsyncMock(),
+        broadcast_stream_end=AsyncMock(),
+    )
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
+        cwh.live_session_store, "end_streaming", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # BOTH wake turns engaged connected clients — one stream_start + stream_end each.
+    assert fake_sync.broadcast_stream_start.await_count == 2
+    assert fake_sync.broadcast_stream_end.await_count == 2
+    handler._deliver_unpark.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pump_no_stream_broadcast_when_nothing_forwarded():
+    """NEGATIVE: a pump run that forwards NO CLI wake turn content (a cli-owned
+    completion whose injection turn never arrives before the stream ends) must
+    NOT emit a spurious stream_start/stream_end — there is nothing to render."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    # Only the terminal notification arrives, then the stream ends — the CLI's
+    # injection turn (user string + answer) never lands, so no content forwards.
+    client = _FakeClient(
+        [_notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")],
+        hang=False,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    fake_sync = MagicMock(
+        broadcast_stream_start=AsyncMock(),
+        broadcast_stream_end=AsyncMock(),
+    )
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
+        cwh.live_session_store, "end_streaming", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    fake_sync.broadcast_stream_start.assert_not_awaited()
+    fake_sync.broadcast_stream_end.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # 7. Result-content fix — <result> carries the sub-agent's FINAL assistant
 #    message (all text blocks of the last assistant entry, joined), not the raw
 #    JSONL dump; falls back to the raw output file (restoring backgrounded-shell
