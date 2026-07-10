@@ -11,13 +11,23 @@ Two operations drive it from the session lifecycle (see app/core/query_engine.py
   memory dir up to date with the DB (and pushes any local-only files up), so
   the agent reads the latest shared memory.
 * **push** — runs after each turn, once the CLI has flushed memory to disk.
-  Upserts changed/new local files and tombstones files deleted locally.
+  Upserts changed/new local files and tombstones files *genuinely* deleted
+  locally — those that were in this process's reconcile baseline and have since
+  disappeared. A DB row that was never in our baseline (a topic file a peer
+  install just authored, or one that only lives in a peer's memory dir) is NOT a
+  local delete and is never tombstoned; reconcile pulls it down instead.
 
 Conflict resolution is last-write-wins by timestamp (DB ``updated_at`` vs local
 mtime). This assumes cluster clocks are roughly NTP-synced; simultaneous edits
 to the *same* memory file from overlapping sessions on different installs are
 rare in practice (memory writes are sparse and the nightly consolidation is the
 main rewriter). Everything here is best-effort and must never break a turn.
+
+Deletes are propagated non-destructively: like the notes sync worker, an install
+never tombstones a shared file merely because its own local dir lacks it — only
+a file it demonstrably HELD and then dropped. This is what stops two installs
+that share a memory_key (git link group) but keep separate on-disk memory dirs
+(different project slugs / worktrees) from mirror-deleting each other's files.
 """
 
 from __future__ import annotations
@@ -41,8 +51,25 @@ logger = logging.getLogger(__name__)
 # authoritative — otherwise a stale/empty local dir could wrongly wipe the DB.
 _reconciled_keys: set = set()
 
+# Per-memory_key baseline: the set of relative_paths this process has confirmed
+# were materialized locally (pulled from the DB during reconcile, or uploaded by
+# us during push). This is the three-way-merge anchor that lets push tell a
+# genuine LOCAL DELETE (a path that WAS in our baseline and is now gone) apart
+# from a path that merely never existed here — one a peer install just added to
+# the shared DB after our last reconcile, or that lives only in a peer's memory
+# dir. Without this anchor, push tombstoned every DB row absent from the local
+# scan, so concurrent installs/worktrees (same memory_key, different memory dir)
+# mirror-deleted each other's freshly-authored topic files.
+_local_baseline: Dict[str, set] = {}
+
 # (content, sha256, mtime) for each local memory file, keyed by relative path.
 _LocalState = Dict[str, Tuple[str, str, datetime]]
+
+
+def reset_state() -> None:
+    """Clear all in-memory sync state (reconcile gate + baselines). For tests."""
+    _reconciled_keys.clear()
+    _local_baseline.clear()
 
 
 def _sha256(text: str) -> str:
@@ -159,18 +186,25 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str]) -> 
     db_rows = {r["relative_path"]: r for r in memdb.get_memory_files(memory_key)}
     local = _scan_local(memory_dir)
 
+    # Track which paths end up materialized locally so push can distinguish a
+    # genuine local delete from a never-here path. Seed with local-only files
+    # (present but not in the DB) — they belong to us and push will upload them.
+    present = set(local.keys())
+
     for rel, row in db_rows.items():
         db_dt = _as_dt(row.get("updated_at"))
         if row.get("deleted"):
             # Remote deletion: drop the local copy unless local is newer (revived).
             if rel in local and db_dt >= local[rel][2]:
                 _remove_local(memory_dir, rel)
+                present.discard(rel)
             continue
 
         db_content = row.get("content") or ""
         db_hash = row.get("content_hash") or _sha256(db_content)
         if rel not in local:
             _write_local(memory_dir, rel, db_content)
+            present.add(rel)
         else:
             _, local_hash, local_mtime = local[rel]
             if local_hash != db_hash and db_dt >= local_mtime:
@@ -179,6 +213,7 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str]) -> 
 
     # Files only on local disk are left as-is; push() uploads them.
     _reconciled_keys.add(memory_key)
+    _local_baseline[memory_key] = present
 
 
 def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
@@ -199,9 +234,21 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
                 memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
 
     if allow_deletes:
-        for rel, row in db_rows.items():
-            if not row.get("deleted") and rel not in local:
+        # Only tombstone a GENUINE local delete: a path we had in our baseline
+        # (materialized here by a prior reconcile/push) that has since vanished
+        # from disk. A live DB row we never held is a peer's file — leave it be,
+        # reconcile will pull it down. This is the guard that stops installs
+        # sharing a memory_key but not a memory dir from wiping each other.
+        baseline = _local_baseline.get(memory_key, set())
+        for rel in baseline - set(local.keys()):
+            row = db_rows.get(rel)
+            if row is not None and not row.get("deleted"):
                 memdb.tombstone_memory_file(memory_key, rel, instance_id)
+
+    # Refresh the baseline to the current on-disk set: files we just uploaded are
+    # now ours to track; files we tombstoned are gone. A peer file still absent
+    # here stays out of the baseline until a reconcile materializes it.
+    _local_baseline[memory_key] = set(local.keys())
 
 
 # ---------------------------------------------------------------------------

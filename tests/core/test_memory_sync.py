@@ -98,9 +98,9 @@ def memdir(tmp_path):
 
 @pytest.fixture(autouse=True)
 def reset_reconciled():
-    memory_sync._reconciled_keys.clear()
+    memory_sync.reset_state()
     yield
-    memory_sync._reconciled_keys.clear()
+    memory_sync.reset_state()
 
 
 # =============================================================================
@@ -212,12 +212,59 @@ def test_push_uploads_new_local_file(memdb, memdir):
     assert row["updated_by"] == "inst-a"
 
 
-def test_push_tombstones_local_deletion_when_allowed(memdb, memdir):
-    memdb.seed_live("gone.md", "was here", T0)  # DB has it, local doesn't
+def test_push_tombstones_genuine_local_deletion(memdb, memdir):
+    # A file we HELD (reconciled down into the baseline) and then deleted on disk
+    # is a real delete -> tombstone it so peers drop their copies too.
+    memdb.seed_live("gone.md", "was here", T0)
+    memory_sync.reconcile(KEY, memdir, "inst-a")  # pulls gone.md down -> baseline
+    os.remove(memdir / "gone.md")                 # user/agent deletes it locally
 
     memory_sync.push(KEY, memdir, "inst-a", allow_deletes=True)
 
     assert memdb.get_memory_file(KEY, "gone.md")["deleted"] is True
+
+
+def test_push_does_not_tombstone_unheld_db_file(memdb, memdir):
+    # Regression for the cross-install mirror-delete data loss: a live DB row this
+    # install never materialized (a peer authored it, or it only lives in a peer's
+    # memory dir) must NOT be tombstoned by our push even with deletes allowed.
+    memory_sync.reconcile(KEY, memdir, "inst-a")     # baseline is empty
+    memdb.seed_live("peer.md", "peer authored", T0)  # appears AFTER our reconcile
+
+    memory_sync.push(KEY, memdir, "inst-a", allow_deletes=True)
+
+    row = memdb.get_memory_file(KEY, "peer.md")
+    assert row["deleted"] is False
+    assert row["content"] == "peer authored"
+
+
+def test_push_does_not_tombstone_peer_file_added_during_our_turn(memdb, memdir):
+    # Two installs share a memory_key but keep separate memory dirs. We reconcile,
+    # author our own file, and a peer adds theirs to the DB mid-turn. Our push must
+    # upload ours and leave the peer's file untouched (was the file-loss bug).
+    write_file(memdir, "ours.md", "our fact", T0)
+    memory_sync.reconcile(KEY, memdir, "inst-a")     # baseline = {ours.md}
+    memdb.seed_live("theirs.md", "peer fact", T0 + timedelta(minutes=5))
+
+    memory_sync.push(KEY, memdir, "inst-a", allow_deletes=True)
+
+    assert memdb.get_memory_file(KEY, "ours.md")["content"] == "our fact"
+    assert memdb.get_memory_file(KEY, "theirs.md")["deleted"] is False
+
+
+def test_reconcile_materializes_peer_file_after_it_survives_push(memdb, memdir):
+    # End-to-end index/file consistency: the peer's live row survives our push
+    # (above), so a subsequent reconcile pulls the topic file down onto disk —
+    # no dangling MEMORY.md links.
+    memory_sync.reconcile(KEY, memdir, "inst-a")
+    memdb.seed_live("MEMORY.md", "- see peer topic", T0)
+    memdb.seed_live("peer-topic.md", "the topic body", T0)
+
+    memory_sync.push(KEY, memdir, "inst-a", allow_deletes=True)
+    memory_sync.reconcile(KEY, memdir, "inst-a")
+
+    assert read_file(memdir, "peer-topic.md") == "the topic body"
+    assert memdb.get_memory_file(KEY, "peer-topic.md")["deleted"] is False
 
 
 def test_push_empty_dir_guard_does_not_tombstone(memdb, memdir):
