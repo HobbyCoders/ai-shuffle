@@ -848,7 +848,24 @@ async def handle_done(
 
         # Notify watching mobile devices that the session finished (best-effort,
         # non-blocking). Skip user-initiated interrupts — the user is present.
-        if not is_interrupted:
+        # PARK-NOTIFICATION GATE (lifecycle batch, item 5): a turn ending with
+        # background work still running means the session PARKS, not finishes —
+        # its unpark follow-up (or the CLI's own wake) is still coming, so a
+        # "Session finished" push/toast here would lie, once per park/unpark
+        # cycle. Gate BOTH sinks on the pool-eviction predicate
+        # (has_active_background_work); the eventual fully-idle turn end fires
+        # exactly one notification. Permission (#3) and user-question (#4)
+        # notification sites are deliberately untouched.
+        _still_parked = False
+        try:
+            from app.core.task_registry import task_registry
+
+            _still_parked = task_registry.has_active_background_work(
+                ectx.session_id
+            )
+        except Exception:
+            pass  # best-effort gate — never break the turn end
+        if not is_interrupted and not _still_parked:
             session_name = (session_row or {}).get("title") or "Your session"
 
             # OS/mobile push adapter (unchanged) — reaches devices not on this page.

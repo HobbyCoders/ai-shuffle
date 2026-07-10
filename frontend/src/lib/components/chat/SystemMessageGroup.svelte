@@ -15,6 +15,12 @@
 
 	let { messages }: Props = $props();
 
+	// ToolUseGroup-style persisted expand: bind the <details> open state to
+	// component state so a user's expand survives streaming re-renders (an
+	// unbound `open` attribute resets to collapsed whenever the group's
+	// children re-render mid-stream, snapping the panel shut while reading).
+	let detailsOpen = $state(false);
+
 	// If every message is a hook_* subtype, label the group "hooks".
 	// Otherwise use the more generic "system messages".
 	const allHooks = $derived(
@@ -53,7 +59,7 @@
 
 <div class="w-full system-message-group">
 	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden group">
+		<details class="w-full border border-border rounded-lg overflow-hidden group" bind:open={detailsOpen}>
 			<summary class="system-group-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator -->
 				{#if hasError}

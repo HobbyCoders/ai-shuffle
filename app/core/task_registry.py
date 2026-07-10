@@ -69,6 +69,14 @@ _RECENT_COMPLETED_WINDOW_SECONDS = 15.0
 # "completed" is retained only for the short hand-off window.
 _FAILURE_STATUSES = frozenset({"error", "killed"})
 
+# Kill attribution for shutdown-origin reaps (lifecycle batch, item 4a): a
+# background task killed because the SERVER is restarting must say so instead
+# of presenting as a mysterious task failure. Every kill site that reaps while
+# ``startup.is_shutting_down`` stamps this summary + reason onto the terminal
+# record / unpark payload.
+SERVER_SHUTDOWN_SUMMARY = "Server restarted — background task stopped"
+SERVER_SHUTDOWN_REASON = "server_shutdown"
+
 
 # Value vocabulary (documented, not enforced): the registry deliberately does NOT
 # reject unknown values, so a new SDK kind/status can flow through without a code
@@ -82,7 +90,7 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
     Mirrors native Claude Code ``TaskList`` (id/subject/status) plus AI Shuffle
     extras. Used by BOTH the ``TaskList`` tool result and the ``/live`` response.
     """
-    return {
+    wire = {
         "id": record.get("task_id"),
         "subject": record.get("title"),
         "status": record.get("status"),
@@ -95,6 +103,11 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         # store-loaded card can be reconciled back to "running" on a fresh load.
         "toolUseId": record.get("tool_use_id"),
     }
+    # Kill attribution (e.g. "server_shutdown"): additive — only present when a
+    # reap stamped one, so the pinned wire contract is unchanged otherwise.
+    if record.get("reason"):
+        wire["reason"] = record.get("reason")
+    return wire
 
 
 class TaskRegistry:
@@ -189,6 +202,24 @@ class TaskRegistry:
         # window. Self-pruning on read/write; rebuilt on restart. Keyed by
         # task_id so a re-reaped task replaces rather than duplicates its row.
         self._recent_terminal: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # session_id -> {task_id -> set(phase)} one-shot chip latches (see
+        # ``mark_chipped``). Caps a task at MAX TWO "Task Updated" chips for
+        # its whole lifetime: one on first sighting ("start"), one on its
+        # terminal transition ("terminal"). Lives here — NOT in the drain
+        # pump's per-run local set — so the cap holds across pump restarts
+        # (each run used to reset its dedup and re-chip the same task).
+        self._chipped: Dict[str, Dict[str, set]] = {}
+        # Guaranteed terminal notification (lifecycle batch, item 4b): a
+        # callback the chat layer registers ONCE at startup. ``complete_task``
+        # fires it exactly once per task (see ``mark_terminal_notified``) when
+        # the parent's OWN background work transitions to error/killed, so a
+        # kill with no reader (force-eviction reap, ghost reap, pool teardown)
+        # still surfaces a durable terminal chip instead of silence. The
+        # callback is SYNC and must never raise into complete_task; the chat
+        # layer schedules its async surface work internally.
+        self._terminal_notification_callback: Optional[Any] = None
+        # session_id -> set of task_ids whose terminal callback already fired.
+        self._terminal_notified: Dict[str, set] = {}
 
     def _prune_recent_terminal(self, session_id: str, *, now: Optional[float] = None) -> None:
         """Drop expired terminal-retention entries for a session; drop the bucket
@@ -240,6 +271,71 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._sdk_background_tasks.get(session_id, set())
+
+    def is_own_background_task(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` is background work the PARENT itself launched.
+
+        Mirrors the unpark admission set (chip-flood scoping): a task is "own"
+        when it is a recorded SDK-backgrounded shell (``is_sdk_background_task``,
+        keyed on the always-present task_id) OR its registry record's launch
+        ``tool_use_id`` was issued by the parent with run_in_background=true
+        (``was_background_launch``). A GRANDCHILD task — launched BY a sub-agent
+        — has a registry record (every TaskStarted feeds the registry) but its
+        launch tool_use_id belongs to the sub-agent, so it fails both tests and
+        must never surface "Task Updated" chips in the parent chat.
+
+        Defensive: missing ids return ``False``.
+        """
+        if not session_id or not task_id:
+            return False
+        if self.is_sdk_background_task(session_id, task_id):
+            return True
+        record = self._tasks.get(session_id, {}).get(task_id)
+        tool_use_id = record.get("tool_use_id") if record else None
+        return bool(
+            tool_use_id and self.was_background_launch(session_id, tool_use_id)
+        )
+
+    def mark_chipped(self, session_id: str, task_id: str, phase: str) -> bool:
+        """One-shot "Task Updated" chip latch per ``(task_id, phase)``.
+
+        Returns ``True`` only the FIRST time a given phase is latched for a
+        task; every later call returns ``False``. Two phases exist:
+
+        - ``"start"``: the task's first sighting chip (typically its first
+          non-terminal status patch while the parent is parked);
+        - ``"terminal"``: the task's terminal chip (killed/completed/error).
+
+        Together they cap a task at MAX TWO chips for its whole lifetime —
+        intermediate running/paused patches render nothing. Registry-level (not
+        per-pump-run) so the cap survives pump restarts; cleared only with the
+        session. Defensive: missing ids/phase never latch (return ``False``).
+        """
+        if not session_id or not task_id or not phase:
+            return False
+        phases = self._chipped.setdefault(session_id, {}).setdefault(task_id, set())
+        if phase in phases:
+            return False
+        phases.add(phase)
+        return True
+
+    def set_terminal_notification_callback(self, callback: Optional[Any]) -> None:
+        """Register the terminal-notification callback (chat layer, once at
+        startup). ``callback(session_id, task_wire_dict)`` — SYNC, fired from
+        ``complete_task`` exactly once per task on its error/killed transition
+        for the parent's OWN background work. ``None`` deregisters."""
+        self._terminal_notification_callback = callback
+
+    def mark_terminal_notified(self, session_id: str, task_id: str) -> bool:
+        """One-shot latch: True only the FIRST time a task's terminal
+        notification callback fires. Defensive: missing ids never latch."""
+        if not session_id or not task_id:
+            return False
+        seen = self._terminal_notified.setdefault(session_id, set())
+        if task_id in seen:
+            return False
+        seen.add(task_id)
+        return True
 
     def mark_unpark_pending(self, session_id: str) -> None:
         """Latch that an unpark follow-up turn is committed but not yet streaming.
@@ -480,7 +576,15 @@ class TaskRegistry:
             record["title"] = title
         record["updated_at"] = _now_iso()
 
-    def complete_task(self, session_id: str, task_id: str, status: str) -> None:
+    def complete_task(
+        self,
+        session_id: str,
+        task_id: str,
+        status: str,
+        *,
+        summary: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
         """Set a terminal status on a task. No-op if the task is unknown.
 
         A snapshot of the task is also stashed in the retention store so ``/live``
@@ -490,11 +594,27 @@ class TaskRegistry:
         client) doesn't drop the row with no failed indication; clean completions
         get the much shorter ``_RECENT_COMPLETED_WINDOW_SECONDS`` purely to keep
         park-polling alive across the completion → ``unpark_pending`` hand-off gap.
+
+        ``summary``/``reason`` attribute the kill (item 4a): shutdown-origin
+        reaps stamp ``SERVER_SHUTDOWN_SUMMARY``/``SERVER_SHUTDOWN_REASON`` so
+        the terminal record says WHY the task died.
+
+        GUARANTEED TERMINAL NOTIFICATION (item 4b): an error/killed transition
+        of the parent's OWN background work (``is_own_background_task`` — the
+        unpark admission set, so foreground tasks whose failure already
+        returned inline never fire) invokes the registered callback exactly
+        once per task (``mark_terminal_notified``). Fired AFTER the record and
+        retention snapshot are final so the callback sees the attributed wire
+        shape. Fully defensive: a raising callback is swallowed.
         """
         record = self._tasks.get(session_id, {}).get(task_id)
         if record is None:
             return
         record["status"] = status
+        if summary is not None:
+            record["summary"] = summary
+        if reason is not None:
+            record["reason"] = reason
         record["updated_at"] = _now_iso()
         now = _now_epoch()
         self._prune_recent_terminal(session_id, now=now)
@@ -505,6 +625,19 @@ class TaskRegistry:
             else _RECENT_COMPLETED_WINDOW_SECONDS
         )
         bucket[task_id] = {"task": to_wire(record), "recorded_at": now, "ttl": ttl}
+
+        if (
+            status in _FAILURE_STATUSES
+            and self._terminal_notification_callback is not None
+            and self.is_own_background_task(session_id, task_id)
+            and self.mark_terminal_notified(session_id, task_id)
+        ):
+            try:
+                self._terminal_notification_callback(session_id, to_wire(record))
+            except Exception:
+                logger.debug(
+                    "terminal notification callback failed", exc_info=True
+                )
 
     def get_active(self, session_id: str) -> List[Dict[str, Any]]:
         """Running tasks only, newest-first, each as a wire dict.
@@ -659,6 +792,8 @@ class TaskRegistry:
         self._unpark_pending.discard(session_id)
         self._sdk_background_tasks.pop(session_id, None)
         self._unparked.pop(session_id, None)
+        self._chipped.pop(session_id, None)
+        self._terminal_notified.pop(session_id, None)
         self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
@@ -670,6 +805,9 @@ class TaskRegistry:
         self._unpark_pending.clear()
         self._sdk_background_tasks.clear()
         self._unparked.clear()
+        self._chipped.clear()
+        self._terminal_notified.clear()
+        self._terminal_notification_callback = None
         self._recent_terminal.clear()
 
 

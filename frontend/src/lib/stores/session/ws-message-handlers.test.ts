@@ -1740,4 +1740,83 @@ describe('ws-message-handlers', () => {
 			expect(deps.sessionNotifier.handleMessage).not.toHaveBeenCalled();
 		});
 	});
+
+	describe('optimistic wake engagement (stream_start broadcast, item 6b)', () => {
+		// A CLI-owned wake turn is broadcast by the drain pump as an
+		// event_type='stream_start' sync event. An idle-parked client used to
+		// only restart its poller (via the notifier) and wait a full poll cycle
+		// before the composer locked / streaming affordances showed. The handler
+		// now ALSO optimistically flips isStreaming=true for the ACTIVE session;
+		// /live stays the source of truth (the next poll confirms or corrects).
+
+		function idleDeps(overrides?: Partial<ActiveSessionState>) {
+			const state = { ...mockState(), isStreaming: false, ...overrides };
+			return createMockDeps({ getState: vi.fn(() => state) });
+		}
+
+		function appliedState(d: MessageHandlerDeps, base: ActiveSessionState) {
+			// Fold every update() call over the base state to get the net result.
+			let s = base;
+			for (const call of (d.update as ReturnType<typeof vi.fn>).mock.calls) {
+				s = call[0](s);
+			}
+			return s;
+		}
+
+		it('sets isStreaming=true optimistically on a broadcast stream_start for the active session', () => {
+			deps = idleDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_start',
+				session_id: 'session-1',
+				data: { message_id: 'm-wake' },
+			});
+
+			const next = appliedState(deps, { ...mockState(), isStreaming: false });
+			expect(next.isStreaming).toBe(true);
+			expect(next.streamStartTime).not.toBeNull();
+		});
+
+		it('ignores a broadcast stream_start for a different session', () => {
+			deps = idleDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_start',
+				session_id: 'other-session',
+				data: { message_id: 'm-wake' },
+			});
+
+			const next = appliedState(deps, { ...mockState(), isStreaming: false });
+			expect(next.isStreaming).toBe(false);
+		});
+
+		it('leaves an already-streaming session untouched (no state churn)', () => {
+			deps = idleDeps({ isStreaming: true });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_start',
+				session_id: 'session-1',
+				data: { message_id: 'm-wake' },
+			});
+
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('also engages on a direct type=stream_start message for the active session', () => {
+			deps = idleDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'stream_start',
+				session_id: 'session-1',
+			});
+
+			const next = appliedState(deps, { ...mockState(), isStreaming: false });
+			expect(next.isStreaming).toBe(true);
+			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('session-1');
+		});
+	});
 });

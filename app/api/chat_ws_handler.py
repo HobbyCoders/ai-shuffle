@@ -480,6 +480,24 @@ async def _deliver_unpark_impl(
     if not pending:
         return False
 
+    # SHUTDOWN GUARD (lifecycle batch, item 1): while the server is tearing
+    # down, no NEW follow-up turn may start — the pooled SDK clients are being
+    # disconnected underneath it, so the run_query would die mid-spawn (or pin
+    # a subprocess past the pool shutdown). The completions are already latched
+    # (mark_unparked), so nothing re-fires on the next boot; the durable
+    # terminal chip / reap attribution is the surviving surface. Drop the
+    # unpark_pending latch so a still-connected poller isn't held park-polling
+    # for a follow-up that will never stream.
+    from app.core import startup as _startup
+    if getattr(_startup, "is_shutting_down", False):
+        task_registry.clear_unpark_pending(session_id)
+        ctx.info(
+            logger,
+            "Unpark: server shutting down — not starting a follow-up turn "
+            f"({len(pending)} pending dropped)",
+        )
+        return False
+
     # Busy-write guard: if a user query won the race and already owns a live
     # turn, the unpark must yield — overwriting _active_chat_sessions and
     # querying would write into the mid-turn CLI and kill it. The completions
@@ -582,6 +600,160 @@ async def _deliver_unpark_impl(
         task_registry.clear_unpark_pending(session_id)
         ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
         return False
+
+
+def register_terminal_notification_callback() -> None:
+    """Register the chat layer's guaranteed terminal-notification callback.
+
+    Called ONCE from ``startup.start_services``. From then on, every
+    error/killed transition of the parent's OWN background work in
+    ``task_registry.complete_task`` fires ``_on_task_terminal`` exactly once
+    per task — covering the kill paths that previously surfaced NOTHING to the
+    parent (force-eviction reaps, ghost reaps, pool teardown).
+    """
+    from app.core.task_registry import task_registry
+
+    task_registry.set_terminal_notification_callback(_on_task_terminal)
+
+
+def _on_task_terminal(session_id: str, task: Dict[str, Any]) -> None:
+    """SYNC registry callback: schedule the async terminal-surface work.
+
+    ``complete_task`` is synchronous, so this only schedules; it must never
+    raise (the registry also guards, belt-and-braces). No running loop (a
+    sync/threaded caller) → nothing to schedule; the durable retention row
+    (``_recent_terminal``) still covers /live for the window.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    t = loop.create_task(_surface_terminal_notification(session_id, task))
+    t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
+async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) -> None:
+    """Guaranteed terminal surface for an error/killed background task (4b).
+
+    1. LIVE chip: synthesize the same ``task_updated`` system chip the drain
+       pump renders, once per task lifetime (shared ``mark_chipped`` latch, so
+       a pump-rendered chip is never duplicated).
+    2. DURABLE row: persist the chip via ``database.add_session_message`` so
+       the kill survives a reload (the live buffer may already be reaped — the
+       force-eviction case — or be reset by the restart that caused the kill).
+    3. UNPARK: hand off ONE consolidated unpark via ``_deliver_unpark_impl``
+       ONLY when a live pooled client exists and the server is NOT shutting
+       down (DECISION: durable-chip-only during shutdown). ``mark_unparked``
+       dedups against the drain pump's own delivery for the same task.
+    """
+    from app.core import startup as _startup
+    from app.core.task_registry import task_registry
+
+    task_id = task.get("id")
+    status = task.get("status") or "killed"
+    summary = task.get("summary")
+    data: Dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        # SystemMessage.svelte's task_updated branch prefers patch.status.
+        "patch": {"status": status},
+    }
+    if task.get("reason"):
+        data["reason"] = task.get("reason")
+
+    # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
+    if task_registry.mark_chipped(session_id, task_id, "terminal"):
+        task_registry.mark_chipped(session_id, task_id, "start")
+        try:
+            await live_session_store.add_system_message(
+                session_id,
+                content=summary or "",
+                subtype="task_updated",
+                data=data,
+            )
+        except Exception:
+            logger.debug(
+                "terminal-surface live chip failed for %s/%s",
+                session_id, task_id, exc_info=True,
+            )
+
+    # 2) DURABLE row — survives reload / restart (mirrors _row_for_system).
+    try:
+        await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="system",
+            content=summary or "",
+            metadata={"subtype": "task_updated", "system_data": data},
+        )
+    except Exception:
+        logger.debug(
+            "terminal-surface durable row failed for %s/%s",
+            session_id, task_id, exc_info=True,
+        )
+
+    # 3) Consolidated unpark — only with a live client, never during shutdown.
+    if getattr(_startup, "is_shutting_down", False):
+        return
+    try:
+        from app.core.session_pool import get_session_pool
+
+        state = get_session_pool().peek(session_id)
+        if state is None or not state.adapter.is_alive():
+            return  # no live client — the durable chip is the surface
+    except Exception:
+        return
+    if not task_registry.mark_unparked(session_id, task_id):
+        return  # this task's one-unpark token is already spent (pump/CLI path)
+
+    try:
+        session_row = await run_sync(database.get_session, session_id)
+    except Exception:
+        session_row = None
+    if not session_row:
+        return
+
+    from app.core.headless_query_runner import HeadlessChatHandler
+
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    handler.current_session_id = session_id
+    ctx = StreamingContext(
+        session_id=session_id,
+        device_id=handler.device_id,
+        message_id=str(uuid.uuid4()),
+        user_id=handler.user_id,
+    )
+    pending = [{
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        "output_file": None,
+        "uuid": None,
+        "usage": None,
+        "tool_use_id": task.get("toolUseId"),
+    }]
+
+    def _set_query_task(t: "asyncio.Task") -> None:
+        handler.query_task = t
+
+    try:
+        await _deliver_unpark_impl(
+            pending=pending,
+            session_id=session_id,
+            profile_id=session_row.get("profile_id"),
+            project_id=session_row.get("project_id"),
+            worktree_id=session_row.get("worktree_id"),
+            ctx=ctx,
+            final_metadata=None,
+            run_query=handler.run_query,
+            set_query_task=_set_query_task,
+        )
+    except Exception:
+        logger.debug(
+            "terminal-surface unpark handoff failed for %s/%s",
+            session_id, task_id, exc_info=True,
+        )
 
 
 def _drop_drain_pump_self(session_id: str, drain_pumps: "Dict[str, asyncio.Task]") -> None:
@@ -863,9 +1035,18 @@ async def _drain_notifications_impl(
                 # SAME subagent inner group it would have filled in-stream. Without this
                 # the node renders "completed / no activity recorded" because the parent
                 # turn's receive_response() already returned before these arrived.
+                # SCOPING (chip-flood fix): only when parent_tool_use_id resolves
+                # to a launch the PARENT issued (was_background_launch) — a
+                # GRANDCHILD's inner activity carries the SUB-agent's launch id,
+                # which the parent never recorded, and must not bleed into the
+                # parent's subagent nodes.
                 try:
-                    for _sub_ev in _subagent_events_from_message(message):
-                        await dispatch_event(_sub_ev, sub_ectx, sub_state)
+                    _inner_parent_tuid = getattr(message, "parent_tool_use_id", None)
+                    if _inner_parent_tuid and task_registry.was_background_launch(
+                        session_id, _inner_parent_tuid
+                    ):
+                        for _sub_ev in _subagent_events_from_message(message):
+                            await dispatch_event(_sub_ev, sub_ectx, sub_state)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
@@ -880,15 +1061,44 @@ async def _drain_notifications_impl(
                 # add_system_message logs + drops it — must not crash the pump.
                 try:
                     _status_evs = _task_status_events_from_message(message)
-                    for _status_ev in _status_evs:
-                        await dispatch_event(_status_ev, sub_ectx, sub_state)
                     if _status_evs:
-                        # A real TaskUpdatedMessage chip already rendered for this
-                        # task — record it so a following terminal notification for
-                        # the SAME task does not synthesize a duplicate chip below.
                         _tu_tid = getattr(message, "task_id", None)
-                        if _tu_tid:
-                            _chipped_task_ids.add(_tu_tid)
+                        _tu_terminal = _task_update_terminal_status(message) is not None
+                        # SCOPING (chip-flood fix): only the parent's OWN
+                        # background work may chip — a grandchild's status
+                        # patches (launched BY a sub-agent, never tracked by
+                        # the parent) used to flood the parent chat.
+                        _chip_ok = bool(
+                            _tu_tid
+                            and task_registry.is_own_background_task(session_id, _tu_tid)
+                        )
+                        # COALESCING: max TWO chips per task lifetime — first
+                        # sighting + first terminal (registry-level one-shot
+                        # latches, so the cap holds across pump restarts).
+                        # Intermediate running/paused patches render nothing
+                        # after the first sighting.
+                        if _chip_ok:
+                            if _tu_terminal:
+                                _chip_ok = task_registry.mark_chipped(
+                                    session_id, _tu_tid, "terminal"
+                                )
+                                # Spend the start latch too: a late/out-of-order
+                                # non-terminal patch must not chip AFTER the
+                                # terminal card.
+                                task_registry.mark_chipped(session_id, _tu_tid, "start")
+                            else:
+                                _chip_ok = task_registry.mark_chipped(
+                                    session_id, _tu_tid, "start"
+                                )
+                        if _chip_ok:
+                            for _status_ev in _status_evs:
+                                await dispatch_event(_status_ev, sub_ectx, sub_state)
+                            if _tu_terminal:
+                                # A TERMINAL TaskUpdated chip rendered — record it
+                                # so a following terminal notification for the
+                                # SAME task does not synthesize a duplicate chip
+                                # below (this per-run set's original role).
+                                _chipped_task_ids.add(_tu_tid)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: task-status chip re-dispatch failed: {_exc}")
 
@@ -944,6 +1154,31 @@ async def _drain_notifications_impl(
                                     logger,
                                     "Drain pump: CLI-wake stream_start broadcast "
                                     f"failed: {_bexc}",
+                                )
+                            # WAKE-TURN STREAMING STATE (Half 1): the CLI's own
+                            # wake turn is now streaming content into the live
+                            # store — reflect it on the live session so /live
+                            # reports is_streaming=true and clients treat it
+                            # like a real turn (composer locks, pollers
+                            # upshift). set_streaming mutates the EXISTING
+                            # LiveSession in place — NEVER start_streaming here
+                            # (it rebuilds the session and wipes the parked
+                            # message buffer the wake turn appends to). The
+                            # pump's own start gate reads the POOL
+                            # SessionState.is_streaming, a distinct flag this
+                            # never touches. Cleared by the finalize's
+                            # end_streaming below and by every pump exit path
+                            # (leak guard: a stranded True freezes the
+                            # composer with no turn left to ever end it).
+                            try:
+                                await live_session_store.set_streaming(
+                                    session_id, True
+                                )
+                            except Exception as _sexc:
+                                ctx.debug(
+                                    logger,
+                                    "Drain pump: wake set_streaming(True) "
+                                    f"failed: {_sexc}",
                                 )
                             # Belt-and-braces for a park-poller mid-cycle: keep the
                             # unpark_pending latch UP while this wake turn is being
@@ -1049,12 +1284,41 @@ async def _drain_notifications_impl(
                     if _cli_turn_forwarded:
                         _cli_turn_forwarded = False
                         _cli_wake_latched = False
+                        # WAKE-TURN INTERRUPT FINALIZE (Half 2): a user Stop
+                        # during a CLI-owned wake reaches this ResultMessage
+                        # with the _stopped_sessions latch armed (handle_stop
+                        # latches BEFORE interrupt_session) — or the CLI itself
+                        # reports the turn errored. Finalizing such a wake as a
+                        # CLEAN end (the old hardcoded interrupted=False) lied
+                        # to every client, and — since a wake turn has no
+                        # run_query finally to consume the latches — leaked
+                        # _stopped_sessions (suppressing every later queue
+                        # kick) and unpark_pending (stranding the park-poller).
+                        _wake_interrupted = (
+                            session_id in _stopped_sessions
+                            or bool(getattr(message, "is_error", False))
+                            or str(getattr(message, "subtype", "") or "").startswith("error")
+                            or getattr(message, "stop_reason", None)
+                            in ("interrupt", "interrupted")
+                        )
+                        if _wake_interrupted and pending:
+                            # A user Stop ends the whole park/wake episode: the
+                            # held unparks must not auto-start a follow-up turn
+                            # (same intent as the post-loop stopped-guard,
+                            # which would have dropped them anyway).
+                            logger.info(
+                                "Drain pump: wake turn interrupted — dropping "
+                                "%d held unpark(s) [session=%s]",
+                                len(pending), session_id,
+                            )
+                            pending.clear()
+                            batch_deadline = None
                         if not pending:
                             try:
                                 await live_session_store.end_streaming(
                                     session_id=session_id,
                                     metadata={},
-                                    interrupted=False,
+                                    interrupted=_wake_interrupted,
                                 )
                                 # Matching engagement-END signal for the
                                 # stream_start we broadcast when this wake turn's
@@ -1070,7 +1334,7 @@ async def _drain_notifications_impl(
                                         session_id=session_id,
                                         message_id=ctx.message_id,
                                         metadata={},
-                                        interrupted=False,
+                                        interrupted=_wake_interrupted,
                                         source_device_id=None,
                                     )
                                 except Exception as _bexc:
@@ -1081,7 +1345,8 @@ async def _drain_notifications_impl(
                                     )
                                 logger.info(
                                     "Drain pump: CLI-driven turn finalized in "
-                                    "live view [session=%s]",
+                                    "live view (interrupted=%s) [session=%s]",
+                                    _wake_interrupted,
                                     session_id,
                                 )
                             except Exception as _exc:
@@ -1089,6 +1354,15 @@ async def _drain_notifications_impl(
                                     logger,
                                     f"Drain pump: CLI-turn finalize failed: {_exc}",
                                 )
+                        if _wake_interrupted:
+                            # Leak cleanup: no run_query finally exists for a
+                            # CLI-owned wake, so consume the stop latch here —
+                            # a stranded entry suppresses every later queue
+                            # kick — and drop the unpark-pending latch
+                            # (end_streaming above also clears it; this covers
+                            # the finalize paths that skipped it).
+                            _stopped_sessions.discard(session_id)
+                            task_registry.clear_unpark_pending(session_id)
                     continue
 
                 # THE GAP: a killed/stopped (TaskStop) background task can terminate via
@@ -1161,10 +1435,23 @@ async def _drain_notifications_impl(
                         started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
                         decision="deliver-killed",
                     )
+                    # Shutdown-origin attribution (item 4a): a kill landing
+                    # while the server tears down is a restart consequence —
+                    # the unpark payload's summary must say so (the payload is
+                    # what reaches the parent's <task-notification> prompt).
+                    from app.core import startup as _startup_mod
+                    from app.core.task_registry import (
+                        SERVER_SHUTDOWN_SUMMARY as _SD_SUMMARY,
+                    )
+                    _u_summary = (
+                        _SD_SUMMARY
+                        if getattr(_startup_mod, "is_shutting_down", False)
+                        else None
+                    )
                     pending.append({
                         "task_id": _u_task_id,
                         "status": _u_status,
-                        "summary": None,
+                        "summary": _u_summary,
                         "output_file": None,
                         "uuid": _u_uuid,
                         "usage": None,
@@ -1303,7 +1590,16 @@ async def _drain_notifications_impl(
                         # Same parked-state completion chip the deliver path
                         # renders (RC2) — the wake itself is CLI-owned but the
                         # completion card is still the app's to surface.
-                        if task_id and task_id not in _chipped_task_ids:
+                        # mark_chipped("terminal") is the lifetime cap (max one
+                        # terminal chip per task, across pump runs); the per-run
+                        # _chipped_task_ids keeps its original in-run
+                        # TaskUpdated-vs-notification dedup role.
+                        if (
+                            task_id
+                            and task_id not in _chipped_task_ids
+                            and task_registry.mark_chipped(session_id, task_id, "terminal")
+                        ):
+                            task_registry.mark_chipped(session_id, task_id, "start")
                             try:
                                 for _chip_ev in _task_status_event_from_notification(message):
                                     await dispatch_event(_chip_ev, sub_ectx, sub_state)
@@ -1358,8 +1654,15 @@ async def _drain_notifications_impl(
                 # path: suppress-foreground (synchronous sub-agent) and dedup
                 # notifications continue'd out above, so — like in-stream — a
                 # foreground/duplicate completion drops no card. Guard against a
-                # task_updated chip already emitted for this task this run.
-                if task_id and task_id not in _chipped_task_ids:
+                # task_updated chip already emitted for this task this run, AND
+                # against a terminal chip already latched for its lifetime
+                # (mark_chipped — the cross-run cap).
+                if (
+                    task_id
+                    and task_id not in _chipped_task_ids
+                    and task_registry.mark_chipped(session_id, task_id, "terminal")
+                ):
+                    task_registry.mark_chipped(session_id, task_id, "start")
                     try:
                         for _chip_ev in _task_status_event_from_notification(message):
                             await dispatch_event(_chip_ev, sub_ectx, sub_state)
@@ -1425,12 +1728,25 @@ async def _drain_notifications_impl(
         # so the awaiter sees the cancellation.
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
+        # Leak guard (Half 1): a wake turn was mid-forward — drop the live
+        # store's streaming flag or it strands True forever (frozen composer).
+        if _cli_wake_latched:
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
         _drop_drain_pump_self(session_id, _drain_pumps)
         raise
     except Exception as exc:
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
+        # Leak guard (Half 1): same stranded-True hazard as the cancel path.
+        if _cli_wake_latched:
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
         # If we were winding down a force-cancelled turn when the read stream died,
         # evict: a dead read loop makes the client broken by definition — its stale
         # frame will never be consumed, so it must not stay pooled behind the
@@ -1467,6 +1783,17 @@ async def _drain_notifications_impl(
     if _cli_wake_latched and not pending:
         task_registry.clear_unpark_pending(session_id)
 
+    # Leak guard (Half 1): a wake still latched at a normal exit means its
+    # ResultMessage never arrived through this pump — drop the live store's
+    # streaming flag or it strands True forever (frozen composer). When
+    # ``pending`` will be delivered below, the delivery's own end_streaming /
+    # start_streaming supersedes this; clearing first is an idempotent no-op.
+    if _cli_wake_latched:
+        try:
+            await live_session_store.set_streaming(session_id, False)
+        except Exception:
+            pass
+
     if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
@@ -1479,6 +1806,12 @@ async def _drain_notifications_impl(
             # Drop the early latch: no follow-up will stream, so a polling client
             # must not be held in park-poll waiting for one.
             task_registry.clear_unpark_pending(session_id)
+            # And the wake-turn streaming flag: a finalize-with-pending left it
+            # to this delivery, which is now suppressed (idempotent if clear).
+            try:
+                await live_session_store.set_streaming(session_id, False)
+            except Exception:
+                pass
             return
         logger.info(
             "Drain pump: delivering unpark follow-up [pending=%d, session=%s]",

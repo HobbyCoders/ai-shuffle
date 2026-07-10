@@ -24,6 +24,34 @@ def get_session_state(session_id: str) -> Optional[SessionState]:
     return get_session_pool().peek(session_id)
 
 
+def _reap_task_killed(session_id: str, task_id: str) -> None:
+    """Reap a ghost task to "killed", attributing shutdown-origin reaps.
+
+    A reap that runs while the server is tearing down is a consequence of the
+    restart, not a task failure — stamp the wire record accordingly (item 4a)
+    so the UI/parent can say "Server restarted — background task stopped"
+    instead of presenting a mysterious kill. This site cannot otherwise know
+    the reap's origin, so it gates on ``startup.is_shutting_down``.
+    """
+    from app.core import startup
+    from app.core.task_registry import (
+        task_registry,
+        SERVER_SHUTDOWN_SUMMARY,
+        SERVER_SHUTDOWN_REASON,
+    )
+
+    if getattr(startup, "is_shutting_down", False):
+        task_registry.complete_task(
+            session_id,
+            task_id,
+            "killed",
+            summary=SERVER_SHUTDOWN_SUMMARY,
+            reason=SERVER_SHUTDOWN_REASON,
+        )
+    else:
+        task_registry.complete_task(session_id, task_id, "killed")
+
+
 async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session.
 
@@ -135,7 +163,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     # already exited without the registry being told). Reap it rather than
     # mis-routing a shell id to the SDK's agent-task stop (which would error).
     if existing is not None and existing.get("kind") == "shell":
-        task_registry.complete_task(session_id, task_id, "killed")
+        _reap_task_killed(session_id, task_id)
         return {
             "ok": True,
             "kind": "shell",
@@ -152,7 +180,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         # works: mark it killed (drops off the next /live poll) and report
         # success.
         if existing is not None:
-            task_registry.complete_task(session_id, task_id, "killed")
+            _reap_task_killed(session_id, task_id)
             return {
                 "ok": True,
                 "kind": existing.get("kind") or "agent",
