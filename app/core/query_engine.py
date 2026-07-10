@@ -2297,23 +2297,33 @@ async def stream_to_websocket(
         subagent_children: Dict[str, List[Dict[str, Any]]] = {}
         task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
         # Seed cross-turn BACKGROUND sub-agents. Background sub-agents
-        # (run_in_background=true) OUTLIVE the turn that launched them, so in a
+        # (run_in_background=true) OUTLIVE the turn that launched them: in a
         # FOLLOW-UP turn their StreamEvents/AssistantMessages still arrive with
-        # parent_tool_use_id set — but the launching Agent/Task tool_use block was
-        # seen in a PRIOR turn and would be absent from this fresh empty dict. Every
-        # subagent gate below tests `parent_tool_id in task_tool_uses`, so without
-        # this seed those foreign events fall through to the MAIN-agent handlers:
-        # the sub-agent's tool_use gets appended to the parent's live buffer and a
-        # parent text block is finalized early / split mid-word when a sub-agent
-        # block_start interrupts it (which downstream poisons the FE WS delta
-        # buffer). The registry's _background_launches set (only cleared with the
-        # session) is the durable source of truth for which launch tool_use_ids are
-        # backgrounded, so we re-hydrate an entry for each. Seeded entries carry
-        # run_in_background=True so the ToolResult branches skip subagent_done, and
-        # are flagged _cross_turn so their late children are NOT re-persisted as
-        # this turn's subagent metadata (their parent row was persisted in a prior
-        # turn — see the subagent_children handling below).
-        for _bg_tool_id in task_registry.get_background_launches(session_id):
+        # parent_tool_use_id set, but the launching Agent/Task tool_use block was
+        # seen in a PRIOR turn and is absent from this fresh empty dict. Lane
+        # routing itself no longer depends on this seed — every subagent gate now
+        # routes on a non-null parent_tool_use_id alone (parent-null-based), so
+        # foreign events reach the subagent lane whether or not their launch id is
+        # seeded. The seed still has two consumers: (a) the
+        # `tool_use_id in task_tool_uses` launch-completion/ACK branches
+        # (~2920/~3185) — a seeded entry (run_in_background=True) makes a cross-turn
+        # launch ACK skip subagent_done and keep the node RUNNING; and (b) the
+        # SystemMessage `len(task_tool_uses) > 0` suppression heuristic, which treats
+        # system messages as subagent context while any tracked task is still live.
+        # Union the durable _background_launches set (cleared only with the session)
+        # with the parent tool_use ids of all in-flight background work
+        # (get_active_background_work — the same view the pump-start guard uses), to
+        # catch a launch whose tool_use_id both arming heuristics missed (the
+        # run_in_background input flag AND the ACK text-sniff) but which is still a
+        # RUNNING task. Seeded entries carry run_in_background=True and _cross_turn
+        # so late children are NOT re-persisted as this turn's subagent metadata
+        # (their parent row was persisted in a prior turn — see subagent_children).
+        _seed_bg_ids = set(task_registry.get_background_launches(session_id))
+        for _work in task_registry.get_active_background_work(session_id):
+            _work_tool_id = _work.get("toolUseId")
+            if _work_tool_id:
+                _seed_bg_ids.add(_work_tool_id)
+        for _bg_tool_id in _seed_bg_ids:
             task_tool_uses[_bg_tool_id] = {
                 "agent_type": "Agent",
                 "description": "",
@@ -2477,10 +2487,11 @@ async def stream_to_websocket(
                     # are actively running (SDK runs subagents synchronously, so system
                     # messages during active subagent execution are from the subagent context).
                     parent_tool_id = message.data.get("parent_tool_use_id") if message.data else None
-                    is_from_subagent = (
-                        (parent_tool_id and parent_tool_id in task_tool_uses) or
-                        (not parent_tool_id and len(task_tool_uses) > 0)
-                    )
+                    # The main agent's own messages always carry parent_tool_use_id=None,
+                    # so any non-null parent is a subagent event and must never route to
+                    # the main lane — even when the launch id is absent from task_tool_uses.
+                    is_subagent_lane = parent_tool_id is not None
+                    is_from_subagent = is_subagent_lane or len(task_tool_uses) > 0
 
                     # Suppress no-op "status" system messages emitted by the SDK
                     # on every stream_request_start (status="requesting"). These
@@ -2527,10 +2538,11 @@ async def stream_to_websocket(
                 event = message.event
                 event_type = event.get("type") if event else None
                 parent_tool_id = getattr(message, 'parent_tool_use_id', None)
+                is_subagent_lane = parent_tool_id is not None
 
-                # Route subagent StreamEvents — don't mix into main agent stream
-                # The SDK (0.1.30+) sets parent_tool_use_id on subagent events
-                if parent_tool_id and parent_tool_id in task_tool_uses:
+                # Route subagent StreamEvents — don't mix into main agent stream.
+                # The SDK (0.1.30+) sets parent_tool_use_id on subagent events.
+                if is_subagent_lane:
                     # Only forward text deltas as subagent_chunk for real-time display
                     if event_type == "content_block_delta":
                         delta = event.get("delta", {})
@@ -2664,6 +2676,7 @@ async def stream_to_websocket(
 
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
+                is_subagent_lane = parent_tool_id is not None
 
                 # Capture the JSONL transcript uuid for this AssistantMessage.
                 # The uuid is the same for every block inside this message and
@@ -2676,8 +2689,8 @@ async def stream_to_websocket(
 
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        # Check if this text is from a subagent
-                        if parent_tool_id and parent_tool_id in task_tool_uses:
+                        # Check if this text is from a subagent.
+                        if is_subagent_lane:
                             # Text from subagent - send as subagent_chunk
                             logger.debug(f"[WS] Subagent chunk len={len(block.text)} for agent={parent_tool_id}")
                             yield {
@@ -2726,7 +2739,8 @@ async def stream_to_websocket(
                             "name": block.name,
                             "tool_id": tool_id,
                             "input": tool_input,
-                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            # non-null parent = subagent child; persistence skips top-level emission
+                            "parent_tool_id": parent_tool_id,
                             "uuid": asst_uuid,
                         }
                         tool_messages.append(tool_entry)
@@ -2807,8 +2821,11 @@ async def stream_to_websocket(
                                 "prompt": tool_input.get("prompt", ""),
                                 "agent_id": tool_id
                             }
-                        # Check if this tool use is from a subagent
-                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                        # Check if this tool use is from a subagent. A missing live
+                        # subagent node just drops the child card (acceptable degrade).
+                        elif is_subagent_lane:
+                            if parent_tool_id not in task_tool_uses:
+                                logger.debug(f"[WS] Routing event with unknown parent_tool_use_id={parent_tool_id} to subagent lane (not in task_tool_uses)")
                             # Record as child of the parent subagent (not top-level).
                             # For a CROSS-TURN background parent (seeded at turn
                             # start, flagged _cross_turn), the parent's subagent row
@@ -2876,7 +2893,8 @@ async def stream_to_websocket(
                             "name": tool_name,
                             "tool_id": tool_use_id,
                             "output": output,
-                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            # non-null parent = subagent child (see tool_use tag).
+                            "parent_tool_id": parent_tool_id,
                             "uuid": asst_uuid,
                         }
                         tool_messages.append(result_entry)
@@ -2927,8 +2945,8 @@ async def stream_to_websocket(
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
-                        # Check if this tool result is from a subagent
-                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                        # Check if this tool result is from a subagent.
+                        elif is_subagent_lane:
                             # Merge result into the matching child entry under the parent subagent
                             children = subagent_children.get(parent_tool_id, [])
                             for child in children:
@@ -3037,12 +3055,13 @@ async def stream_to_websocket(
                 # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
+                is_subagent_lane = parent_tool_id is not None
                 # JSONL transcript uuid — shared by every block in this UserMessage.
                 user_msg_uuid = getattr(message, "uuid", None)
                 logger.debug(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
-                # Suppress local command output from subagent UserMessages
-                is_subagent_user_msg = parent_tool_id and parent_tool_id in task_tool_uses
+                # Suppress local command output from subagent UserMessages.
+                is_subagent_user_msg = is_subagent_lane
 
                 # Handle string content (rare but possible)
                 if isinstance(message.content, str):
@@ -3136,7 +3155,8 @@ async def stream_to_websocket(
                             "name": tool_name,
                             "tool_id": tool_use_id,
                             "output": output,
-                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            # non-null parent = subagent child (see tool_use tag).
+                            "parent_tool_id": parent_tool_id,
                             "uuid": user_msg_uuid,
                         }
                         tool_messages.append(result_entry)
@@ -3187,8 +3207,8 @@ async def stream_to_websocket(
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
-                        # Check if this tool result is from a subagent
-                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                        # Check if this tool result is from a subagent.
+                        elif is_subagent_lane:
                             # Merge result into the matching child entry under the parent subagent
                             children = subagent_children.get(parent_tool_id, [])
                             for child in children:

@@ -31,7 +31,7 @@ import app.core.query_engine as qe
 from app.core.session_pool import SessionState
 from app.core.task_registry import task_registry
 
-from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
+from claude_agent_sdk import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from claude_agent_sdk.types import StreamEvent
 
 
@@ -233,3 +233,167 @@ class TestCrossTurnBackgroundSubagentRouting:
         assert not any(
             e.get("type") == "tool_use" for e in events
         ), f"sub-agent tool_use LEAKED as a top-level tool_use: {events}"
+
+
+UNKNOWN_PARENT = "toolu_unknown_bg_launch"
+
+
+class TestUnknownParentNeverLeaksToMainLane:
+    """A background sub-agent whose launch tool_use_id was NEVER recorded in the
+    registry (both arming heuristics missed it) still carries a NON-NULL
+    ``parent_tool_use_id`` on its events. The main agent's OWN messages always
+    carry ``parent_tool_use_id is None``, so any non-null parent is definitionally
+    a sub-agent event and must NEVER fall through to the main lane — even when the
+    parent id is absent from this turn's ``task_tool_uses`` map (Fix A).
+    """
+
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    async def test_unknown_parent_stream_delta_not_routed_to_main_lane(self):
+        """A StreamEvent text delta with a non-null parent NOT present in
+        ``task_tool_uses`` must NOT emit a main-lane ``stream_delta`` (which would
+        append to / split the main streaming text). It routes as subagent_chunk."""
+        session_id = "sess-unknown-parent"
+        # NOTE: no mark_background_launch and no start_task — the parent id is
+        # unknown to the registry entirely.
+
+        messages = [
+            _stream_text_delta(None, "parent says hi"),
+            _stream_text_delta(UNKNOWN_PARENT, "SUBAGENT leaked step"),
+        ]
+        state = _fake_state(messages)
+        pool = _StubPool(state)
+
+        with ExitStack() as stack:
+            _chat_patches(stack, pool)
+            events = await _collect(
+                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+
+        # The parent's own (parent=None) text still flows on the main lane.
+        assert any(
+            e.get("type") == "stream_delta"
+            and e.get("delta_type") == "text"
+            and e.get("content") == "parent says hi"
+            for e in events
+        ), f"parent main-lane text delta missing: {events}"
+
+        # The unknown-parent sub-agent text must NOT leak into the main lane.
+        assert not any(
+            e.get("type") == "stream_delta" and "SUBAGENT" in (e.get("content") or "")
+            for e in events
+        ), f"unknown-parent text LEAKED into main-lane stream_delta: {events}"
+
+        # It routes as subagent_chunk instead.
+        assert {
+            "type": "subagent_chunk",
+            "agent_id": UNKNOWN_PARENT,
+            "content": "SUBAGENT leaked step",
+        } in events, f"unknown-parent text not routed as subagent_chunk: {events}"
+
+    async def test_unknown_parent_tool_use_not_emitted_top_level(self):
+        """An AssistantMessage ToolUseBlock with an unknown non-null parent must NOT
+        emit a top-level ``tool_use`` (which calls main-lane add_tool_use and
+        finalizes/splits the in-flight streaming text). It routes as
+        subagent_tool_use."""
+        session_id = "sess-unknown-parent-tool"
+
+        messages = [
+            AssistantMessage(
+                content=[ToolUseBlock(id="toolu_child", name="Bash", input={"cmd": "ls"})],
+                model="claude",
+                parent_tool_use_id=UNKNOWN_PARENT,
+            ),
+        ]
+        state = _fake_state(messages)
+        pool = _StubPool(state)
+
+        with ExitStack() as stack:
+            _chat_patches(stack, pool)
+            events = await _collect(
+                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+
+        assert not any(
+            e.get("type") == "tool_use" for e in events
+        ), f"unknown-parent tool_use LEAKED as a top-level tool_use: {events}"
+
+        assert any(
+            e.get("type") == "subagent_tool_use" and e.get("agent_id") == UNKNOWN_PARENT
+            for e in events
+        ), f"unknown-parent tool_use not routed as subagent_tool_use: {events}"
+
+
+class TestSeedFromActiveBackgroundWork:
+    """Fix B: a new turn seeds ``task_tool_uses`` from BOTH
+    ``get_background_launches`` AND the in-flight work in
+    ``get_active_background_work`` — so an active background agent whose launch id
+    was never recorded in ``_background_launches`` is still recognised this turn."""
+
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    async def test_active_background_work_id_is_seeded(self):
+        """Register a RUNNING background agent (via start_task) whose launch
+        tool_use_id is NOT in ``_background_launches``. A ToolResult for that launch
+        id this turn must be recognised as a backgrounded launch (seeded with
+        run_in_background=True) — so it does NOT emit a main-lane ``tool_result``
+        nor a ``subagent_done``. Without the Fix B seed the id is unknown and the
+        result leaks as a top-level ``tool_result``."""
+        session_id = "sess-active-bg-seed"
+        active_launch_id = "toolu_active_bg"
+
+        # In-flight background agent recorded via the task lifecycle path, but the
+        # launch was NEVER marked in _background_launches (both arming heuristics
+        # missed it). Confirm the precondition.
+        task_registry.start_task(
+            session_id,
+            task_id="task-active-1",
+            kind="agent",
+            title="active bg agent",
+            tool_use_id=active_launch_id,
+        )
+        assert active_launch_id not in task_registry.get_background_launches(session_id)
+        assert any(
+            w.get("toolUseId") == active_launch_id
+            for w in task_registry.get_active_background_work(session_id)
+        )
+
+        # A ToolResult for the launch id arrives this turn (top-level: parent None).
+        messages = [
+            AssistantMessage(
+                content=[
+                    ToolResultBlock(
+                        tool_use_id=active_launch_id,
+                        content="real agent output, not a launch ack",
+                        is_error=False,
+                    )
+                ],
+                model="claude",
+                parent_tool_use_id=None,
+            ),
+        ]
+        state = _fake_state(messages)
+        pool = _StubPool(state)
+
+        with ExitStack() as stack:
+            _chat_patches(stack, pool)
+            events = await _collect(
+                qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+
+        # Seeded as run_in_background=True → recognised as a running launch: no
+        # main-lane tool_result and no subagent_done for the launch id.
+        assert not any(
+            e.get("type") == "tool_result" for e in events
+        ), f"active-bg launch result LEAKED as main-lane tool_result (not seeded): {events}"
+        assert not any(
+            e.get("type") == "subagent_done" for e in events
+        ), f"active-bg launch prematurely completed: {events}"

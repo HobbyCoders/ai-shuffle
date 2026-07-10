@@ -505,10 +505,11 @@ class TaskRegistry:
 
         These outlive the turn that launched them (the set is only cleared with the
         session), so a FOLLOW-UP turn's streaming loop can seed its per-turn
-        ``task_tool_uses`` map with them — otherwise a background sub-agent's
-        StreamEvents (which still carry ``parent_tool_use_id`` in the later turn)
-        fail the ``parent_tool_id in task_tool_uses`` gate and leak into the
-        MAIN-agent text/thinking/tool handlers.
+        ``task_tool_uses`` map with them. Lane routing itself is parent-null-based
+        and does not depend on this seed; the seeded entries let a cross-turn
+        launch-ACK ToolResult (matched via ``tool_use_id in task_tool_uses``) skip
+        subagent_done, and feed the SystemMessage ``len(task_tool_uses) > 0``
+        suppression heuristic.
 
         Returns a copy so callers can't mutate the registry's internal set.
         Defensive: a missing ``session_id`` yields an empty set.
