@@ -390,9 +390,11 @@ async def test_slow_path_drain_impl_unparks_via_ws_collaborators(tmp_path):
         encoding="utf-8",
     )
 
-    # The agent task is "running" from the parent turn, launched in the background
-    # (its launch tool_use_id is the notification's tool_use_id "tu-1").
-    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    # A backgrounded SHELL task is "running" from the parent turn (round 4: the
+    # backgrounded AGENT class is cli-owned — the pump delivers nothing for it;
+    # shells keep the app-delivered slow path this wiring test exercises).
+    task_registry.start_task("sess-1", "task-1", "shell", "bg work")
+    task_registry.mark_sdk_background_task("sess-1", "task-1")
     task_registry.mark_background_launch("sess-1", "tu-1")
 
     client = _FakeClient([_sdk_notif("task-1", uuid="u-1", output_file=str(out))], hang=True)
