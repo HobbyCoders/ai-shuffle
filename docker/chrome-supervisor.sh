@@ -20,15 +20,22 @@
 # Note: tini (PID 1) now reaps orphans regardless, so this is defence in depth.
 #
 # Why slow-retry instead of a permanent "GIVE UP" latch (the previous bug):
-#   The container's headless Chromium intermittently dies with SIGTRAP (rc=133)
-#   at launch, ~0s uptime, no FATAL log line. This is NOT fixable by flags
-#   (dbus, GPU, crashpad, /dev/shm, sandbox, zygote all eliminated); identical
-#   commands fail 100% during "crash windows" (which can last 15+ minutes, e.g.
-#   at container boot) and succeed 100% outside them, with fully working CDP.
-#   A permanent latch left Chrome DISABLED for the container's whole lifetime
-#   once a boot-time crash window burned through the restart budget. Slow-retry
-#   keeps probing at a rate far below anything that could exhaust the pids
-#   cgroup, so Chrome self-heals the moment the crash window passes.
+#   The container's headless Chromium used to die with SIGTRAP (rc=133) at
+#   launch, ~0s uptime, no FATAL log line. Root-caused via live delta-debugging
+#   (2026-07-09): it is the "skip first run" code path itself that
+#   deterministically crashes Chromium 150 under --ozone-platform=headless —
+#   reproduced 10/10 via the --no-first-run flag AND, separately, 10/10 via a
+#   "First Run" sentinel file in the profile dir (both suppress the same
+#   first-run flow), versus 10/10+ clean runs with neither present. It was NOT
+#   an intermittent/flag-independent "crash window" as previously believed.
+#   Fixed in start-chrome.sh by dropping --no-first-run and NOT substituting any
+#   other first-run-suppression mechanism — Chrome just runs its real first-run
+#   flow, which is harmless for a fully offscreen headless tab. This retry
+#   machinery is kept as defense in depth for any other future crash mode: a
+#   permanent latch would leave Chrome DISABLED for the container's whole
+#   lifetime once the restart budget is burned through, whereas slow-retry keeps
+#   probing at a rate far below anything that could exhaust the pids cgroup, so
+#   Chrome self-heals if a transient issue ever recurs.
 #
 # Testability: we only wrap start-chrome in `setpriv` when running as root
 # (uid 0), because that privilege drop is only meaningful/possible then. When
@@ -112,13 +119,16 @@ while true; do
 
     if [ "$CHROME_MAX_RESTARTS" -gt 0 ] && [ "$fails" -ge "$CHROME_MAX_RESTARTS" ]; then
         # Rapid-failure budget spent. DO NOT latch Chrome off permanently (the
-        # old bug). The container's headless Chromium dies with an intermittent
-        # SIGTRAP (rc=133) at ~0s uptime in "crash windows" that can last 15+
-        # minutes and then clear on their own — so we drop to a slow, bounded
-        # retry that self-heals when the window passes, instead of giving up.
+        # old bug). The known deterministic cause of repeated SIGTRAP (rc=133)
+        # crashes — suppressing Chromium 150's first-run flow (via either the
+        # --no-first-run flag or a "First Run" sentinel file) under
+        # --ozone-platform=headless — is already fixed in start-chrome.sh (it no
+        # longer suppresses first-run at all), so this path is now defense in
+        # depth against any other/future crash cause — drop to a slow, bounded
+        # retry that self-heals instead of giving up.
         echo "!!! Chrome crash-looped ${fails} times (rc=$rc). Entering SLOW-RETRY mode to protect the container's PID budget."
-        echo "!!! This is usually the known intermittent-SIGTRAP crash window (rc=133, ~0s uptime, no FATAL line) that can last 15+ minutes."
-        echo "!!! Chrome will keep retrying every ${CHROME_SLOW_RETRY_SECS}s and auto-recover once the window passes (a healthy run resets it)."
+        echo "!!! rc=133 (SIGTRAP) was previously caused by suppressing Chromium 150's first-run flow on headless — fixed in start-chrome.sh; this is now a defense-in-depth path for any other crash cause."
+        echo "!!! Chrome will keep retrying every ${CHROME_SLOW_RETRY_SECS}s and auto-recover if the cause is transient (a healthy run resets it)."
         echo "!!! Diagnose with: docker exec -u appuser -e HOME=/home/appuser <container> chrome-doctor"
         echo "!!! (CHROME_MAX_RESTARTS=0 fast-retries forever; START_CHROME=0 disables Chrome entirely.)"
         slow_mode=1

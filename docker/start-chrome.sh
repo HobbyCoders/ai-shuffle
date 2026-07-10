@@ -109,6 +109,16 @@ MEM_ARGS=(
     --disable-features=Translate,BackForwardCache,DBus,MediaSessionService
 )
 
+# Do NOT suppress the first-run flow at all (neither via --no-first-run nor a
+# "First Run" sentinel file in the profile dir) — live delta-debugging in this
+# container proved BOTH mechanisms deterministically SIGTRAP Chromium 150 under
+# --ozone-platform=headless (rc=133, ~0s uptime): 10/10 crashes with either the
+# flag or the sentinel file present, 10/10+ clean runs with neither. It is the
+# "skip first run" code path itself that crashes, not the specific CLI flag, so
+# swapping the flag for the sentinel (an earlier fix attempt) does NOT help.
+# Letting Chrome go through its real first-run flow is harmless here: this is a
+# fully offscreen headless tab (no visible first-run UI to click through) and
+# the extension force-install policy applies regardless of first-run state.
 # --ozone-platform=headless: full browser (extensions, native messaging)
 #   rendered offscreen — no X server / Xvfb required. (Plain --headless does
 #   NOT load extensions or native messaging, so we must use ozone headless.)
@@ -120,7 +130,6 @@ exec "$CHROME_BIN" \
     --no-sandbox \
     --disable-gpu \
     --disable-dev-shm-usage \
-    --no-first-run \
     --no-default-browser-check \
     --user-data-dir="$PROFILE" \
     --window-size=1440,900 \

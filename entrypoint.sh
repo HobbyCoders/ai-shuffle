@@ -246,8 +246,9 @@ if [ "${START_CHROME:-1}" = "1" ]; then
     # The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
     # docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
     # applies the circuit breaker + exponential backoff, and (crucially) drops
-    # into slow-retry instead of permanently disabling Chrome so it self-heals
-    # when the intermittent-SIGTRAP crash window passes. We launch it here
+    # into slow-retry instead of permanently disabling Chrome, as defense in
+    # depth against crashes (the known deterministic first-run-suppression
+    # SIGTRAP is already fixed in start-chrome.sh). We launch it here
     # backgrounded with the same log redirection and pass the same env defaults
     # through; the supervisor itself does the setpriv drop to appuser.
     CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}" \
