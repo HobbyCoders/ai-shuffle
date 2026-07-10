@@ -1,9 +1,18 @@
 name: CI
 
+# Only run on pushes to main (direct commits/merges) and on pull requests.
+# Without the branches filter, a push to a PR branch fires both the `push`
+# and `pull_request` events, producing two identical CI runs per commit.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# Cancel superseded runs (force-pushes / rapid successive commits) instead of
+# letting stale runs finish and fail/email after a newer commit already ran.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
