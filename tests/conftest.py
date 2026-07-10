@@ -414,6 +414,25 @@ def reset_environment():
 
 
 @pytest.fixture(autouse=True)
+def reset_shutdown_flag():
+    """Clear ``startup.is_shutting_down`` before each test.
+
+    The flag is process-lifetime by design (set in ``shutdown_services`` and
+    never cleared — a real process exits). But every TestClient-based fixture
+    enters the FastAPI lifespan, whose teardown runs ``shutdown_services`` and
+    latches the flag — poisoning every LATER test's unpark-delivery /
+    kill-attribution paths (they would all read "shutting down"). Reset BEFORE
+    each test so leakage from a prior test's lifespan teardown never crosses.
+    """
+    try:
+        import app.core.startup as _startup
+        _startup.is_shutting_down = False
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_worktree_fetch_cache():
     """Clear the cross-device rebind fetch de-dup cache between tests.
 
