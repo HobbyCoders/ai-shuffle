@@ -2,14 +2,15 @@
 	/**
 	 * UsageLimitIndicator — compact glass pill (next to <ContextUsageBar /> in the
 	 * controls dock) showing ONLY the 5-hour ('five_hour') Claude usage window,
-	 * plus a click/tap popover listing ALL current limit windows with a progress
-	 * bar, %, and reset countdown.
+	 * plus a click/tap popover listing that install's current limit windows with a
+	 * progress bar, %, and reset countdown.
 	 *
 	 * The 5-hour window is per Claude ACCOUNT, and each install runs a different
-	 * account. The pill therefore tracks the window of the install that OWNS the
-	 * viewed/composed session (resolved by `usage-target.ts`), not always the
-	 * local install — an offloaded session shows the worker's usage. The popover
-	 * lists every install's windows, one section per account/device.
+	 * account. Both the pill AND the popover track the SINGLE install that OWNS the
+	 * viewed/composed session (resolved by `usage-target.ts`), not always the local
+	 * install — an offloaded session shows the worker's usage. The widget never
+	 * mixes multiple accounts/devices together: the popover shows only the resolved
+	 * install's windows, headed by that install's device/account label when known.
 	 *
 	 * The pill headline is pinned to the 5-hour window and never falls back to
 	 * another window: if `five_hour` isn't known for the resolved install the pill
@@ -48,7 +49,7 @@
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
 	// The interval only runs while the popover is `open` (where live countdowns
 	// matter); when closed we refresh `now` once so the pill is current but avoid
-	// re-running the per-second `sections` recompute for a hidden popover.
+	// re-running the per-second window recompute for a hidden popover.
 	let now: number = $state(Date.now());
 	$effect(() => {
 		now = Date.now();
@@ -101,16 +102,10 @@
 	// snapshot so we never present the previous account's numbers as current.
 	const stale = $derived(resolvedKey != null && ($rateLimit.staleByInstance[resolvedKey] ?? false));
 
-	// ── Popover sections: one per install, deduped by shared account identity ──
-	interface PopoverSection {
-		key: string;
-		isSelf: boolean;
-		deviceLabel: string | null;
-		accountLabel: string | null;
-		staleLine: string | null;
-		items: WindowItem[];
-	}
-
+	// ── Popover header: identifies whose usage this is (the resolved install) ──
+	// The popover shows a SINGLE install's windows — the one that owns the viewed
+	// session. We never list other accounts/devices here (the store keeps their
+	// buckets so the pill can switch instantly, but they are not rendered).
 	function staleLineFor(bucket: UsageBucket): string | null {
 		const offline = bucket.online === false;
 		const old = isBucketStale(bucket, now);
@@ -120,47 +115,15 @@
 		return offline ? `offline · ${asOf}` : asOf;
 	}
 
-	const sections = $derived.by<PopoverSection[]>(() => {
-		const state = $rateLimit;
-		const selfKey = selfBucketKey(state);
-		// Self bucket first, then the rest by device label / key for stability.
-		const keys = Object.keys(state.buckets).sort((a, b) => {
-			if (a === selfKey) return -1;
-			if (b === selfKey) return 1;
-			const da = state.buckets[a].deviceName ?? a;
-			const db = state.buckets[b].deviceName ?? b;
-			return da.localeCompare(db);
-		});
-		const seenIdentity = new Set<string>();
-		const out: PopoverSection[] = [];
-		for (const key of keys) {
-			const bucket = state.buckets[key];
-			const rows = itemsFor(bucket);
-			if (rows.length === 0) continue;
-			// Dedupe installs that share one Claude account (id or email).
-			const identity = bucket.accountId ?? bucket.accountEmail ?? null;
-			if (identity != null) {
-				if (seenIdentity.has(identity)) continue;
-				seenIdentity.add(identity);
-			}
-			out.push({
-				key,
-				isSelf: key === selfKey,
-				deviceLabel: bucket.deviceName ?? null,
-				accountLabel: bucket.accountName ?? bucket.accountEmail ?? null,
-				staleLine: staleLineFor(bucket),
-				items: rows,
-			});
-		}
-		return out;
-	});
+	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
+	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
+	const accountLabel = $derived(resolvedBucket?.accountName ?? resolvedBucket?.accountEmail ?? null);
+	const staleLine = $derived(resolvedBucket ? staleLineFor(resolvedBucket) : null);
 
-	// Show per-section headers only when there's more than one install to
-	// distinguish or we actually know who a section belongs to — a lone unlabeled
-	// bucket keeps the original flat popover.
-	const showSectionHeaders = $derived(
-		sections.length > 1 || sections.some((s) => s.deviceLabel || s.accountLabel)
-	);
+	// Show the header when we know who this belongs to, or when it's not the self
+	// install (so a bare remote bucket still reads "Other device"). An unlabeled
+	// self bucket keeps the original flat popover with no header.
+	const showSectionHeader = $derived(!!(deviceLabel || accountLabel) || !isSelf);
 
 	function severityFor(pct: number): 'neutral' | 'warning' | 'danger' {
 		if (pct > 90) return 'danger';
@@ -227,46 +190,44 @@
 		{#if open}
 			<div class="usage-popover" role="dialog" aria-label="Usage limits">
 				<div class="popover-title">Usage limits</div>
-				{#each sections as section (section.key)}
-					{#if showSectionHeaders}
-						<div class="popover-section">
-							<div class="section-head">
-								{#if section.deviceLabel}
-									<span class="section-device">{section.deviceLabel}</span>
-								{/if}
-								{#if section.accountLabel}
-									<span class="section-account">{section.accountLabel}</span>
-								{/if}
-								{#if !section.deviceLabel && !section.accountLabel}
-									<span class="section-device">{section.isSelf ? 'This device' : 'Other device'}</span>
-								{/if}
-							</div>
-							{#if section.staleLine}
-								<div class="section-stale">{section.staleLine}</div>
+				{#if showSectionHeader}
+					<div class="popover-section">
+						<div class="section-head">
+							{#if deviceLabel}
+								<span class="section-device">{deviceLabel}</span>
+							{/if}
+							{#if accountLabel}
+								<span class="section-account">{accountLabel}</span>
+							{/if}
+							{#if !deviceLabel && !accountLabel}
+								<span class="section-device">{isSelf ? 'This device' : 'Other device'}</span>
 							{/if}
 						</div>
-					{/if}
-					{#each section.items as item (item.type)}
-						{@const rowSeverity = severityFor(item.pct)}
-						<div class="popover-row">
-							<div class="row-head">
-								<span class="row-label">{item.label}</span>
-								<span class="row-pct {rowSeverity}">{item.pct}%</span>
-							</div>
-							<div class="row-bar">
-								<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
-							</div>
-							<div class="row-reset">
-								{#if item.countdown}
-									resets in {item.countdown}
-								{:else if item.hasReset}
-									resets soon
-								{:else}
-									no reset window
-								{/if}
-							</div>
+						{#if staleLine}
+							<div class="section-stale">{staleLine}</div>
+						{/if}
+					</div>
+				{/if}
+				{#each items as item (item.type)}
+					{@const rowSeverity = severityFor(item.pct)}
+					<div class="popover-row">
+						<div class="row-head">
+							<span class="row-label">{item.label}</span>
+							<span class="row-pct {rowSeverity}">{item.pct}%</span>
 						</div>
-					{/each}
+						<div class="row-bar">
+							<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
+						</div>
+						<div class="row-reset">
+							{#if item.countdown}
+								resets in {item.countdown}
+							{:else if item.hasReset}
+								resets soon
+							{:else}
+								no reset window
+							{/if}
+						</div>
+					</div>
 				{/each}
 			</div>
 		{/if}
@@ -399,7 +360,7 @@
 		color: var(--muted-foreground);
 	}
 
-	/* Per-install section header (only shown when >1 install / when named). */
+	/* Resolved-install header — device/account label (shown when named or remote). */
 	.popover-section {
 		display: flex;
 		flex-direction: column;
