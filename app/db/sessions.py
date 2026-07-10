@@ -120,7 +120,6 @@ class SessionSearchResultPaginated(TypedDict):
     match_snippet: Optional[str]
     match_time: Optional[str]
     match_count: int
-    match_count: int
 
 
 class SessionMessageRow(TypedDict):
