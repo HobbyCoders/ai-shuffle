@@ -354,6 +354,7 @@
 	}
 	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, s: Session) {
 		e.stopPropagation();
+		actionsOpenId = null;
 		await toggleFavorite(s);
 	}
 
@@ -387,10 +388,12 @@
 	// also fires when a rail button is pressed.
 	async function handleResume(e: MouseEvent | KeyboardEvent, s: Session) {
 		e.stopPropagation();
+		actionsOpenId = null;
 		await resumeHere(s);
 	}
 	async function handleFork(e: MouseEvent | KeyboardEvent, s: Session) {
 		e.stopPropagation();
+		actionsOpenId = null;
 		await forkAndOpen(s);
 	}
 	// "Resume here" adopts a foreign-instance session to this install and opens
@@ -466,6 +469,7 @@
 		if (deletingSessionId === id) {
 			// Confirmed — the pending auto-reset is now moot; cancel it and delete.
 			disarmDeleteConfirm();
+			actionsOpenId = null;
 			deleteLoading = true;
 			try {
 				if (activeId === id) onNewSession();
@@ -482,6 +486,7 @@
 	}
 	function cancelDelete(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
+		actionsOpenId = null;
 		disarmDeleteConfirm();
 	}
 	// Open a session from its row — but never while that row is showing its
