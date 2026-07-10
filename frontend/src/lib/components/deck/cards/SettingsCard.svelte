@@ -20,6 +20,7 @@
 		startClaudeLogin, completeClaudeLogin,
 		listClaudeAccounts, startAddClaudeAccount, completeAddClaudeAccount,
 		activateClaudeAccount, renameClaudeAccount, deleteClaudeAccount,
+		setClaudeAutoSwitchOnLimit,
 		type ClaudeAccount
 	} from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
@@ -117,6 +118,9 @@
 	let accountsEncryptionReady = $state(true);
 	let accountsLoading = $state(false);
 	let accountsError = $state('');
+	// When on, hitting a Claude usage limit auto-switches to another saved
+	// account and retries. Server-owned (returned by the accounts list); off by default.
+	let claudeAutoSwitchOnLimit = $state(false);
 	// Add-account flow (mirrors the connect flow but never disturbs the active login).
 	let addAccountOAuthUrl: string | null = $state(null);
 	let addAccountState: string | null = $state(null);
@@ -415,6 +419,7 @@
 			claudeAccounts = res.accounts;
 			activeAccountId = res.active_account_id;
 			accountsEncryptionReady = res.encryption_ready;
+			claudeAutoSwitchOnLimit = res.auto_switch_on_limit;
 		} catch (e: any) {
 			// A locked store surfaces as a friendly banner via the flag, not an
 			// error toast; only genuinely unexpected failures set accountsError.
@@ -503,6 +508,23 @@
 			accountsError = e?.detail || 'Failed to switch account';
 		} finally {
 			switchingAccountId = null;
+		}
+	}
+
+	// Optimistically flip the "auto-switch on usage limits" toggle, then persist.
+	// On failure revert to the prior value and surface the reason via the shared
+	// accounts error banner.
+	async function toggleClaudeAutoSwitch() {
+		const previous = claudeAutoSwitchOnLimit;
+		const next = !previous;
+		claudeAutoSwitchOnLimit = next;
+		accountsError = '';
+		try {
+			const res = await setClaudeAutoSwitchOnLimit(next);
+			claudeAutoSwitchOnLimit = res.auto_switch_on_limit;
+		} catch (e: any) {
+			claudeAutoSwitchOnLimit = previous;
+			accountsError = e?.detail || 'Failed to update auto-switch setting';
 		}
 	}
 
@@ -647,6 +669,8 @@
 							onAddAccountNameChange={(v) => addAccountName = v}
 							{addAccountMakeActive}
 							onAddAccountMakeActiveChange={(v) => addAccountMakeActive = v}
+							{claudeAutoSwitchOnLimit}
+							onToggleClaudeAutoSwitch={toggleClaudeAutoSwitch}
 							{addAccountLoading}
 							{addAccountCompleting}
 							{switchingAccountId}

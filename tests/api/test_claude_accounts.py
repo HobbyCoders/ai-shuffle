@@ -19,6 +19,7 @@ class TestUnauthenticated:
         ("get", ROOT),
         ("post", f"{ROOT}/start"),
         ("post", f"{ROOT}/complete"),
+        ("put", f"{ROOT}/auto-switch"),
         ("post", f"{ROOT}/some-id/activate"),
         ("patch", f"{ROOT}/some-id"),
         ("delete", f"{ROOT}/some-id"),
@@ -37,6 +38,25 @@ class TestRegisteredAndAuthed:
         assert "accounts" in body
         assert "active_account_id" in body
         assert "encryption_ready" in body
+
+    def test_list_includes_auto_switch_default_false(self, authenticated_client):
+        resp = authenticated_client.get(ROOT)
+        assert resp.status_code == 200
+        assert resp.json()["auto_switch_on_limit"] is False
+
+    def test_put_auto_switch_round_trips(self, authenticated_client, mock_db):
+        resp = authenticated_client.put(f"{ROOT}/auto-switch", json={"enabled": True})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"success": True, "auto_switch_on_limit": True}
+        # GET reflects the new value.
+        assert authenticated_client.get(ROOT).json()["auto_switch_on_limit"] is True
+
+    def test_put_auto_switch_bad_body(self, authenticated_client, mock_db):
+        # Missing / non-bool 'enabled' → 400.
+        assert authenticated_client.put(f"{ROOT}/auto-switch", json={}).status_code == 400
+        assert authenticated_client.put(
+            f"{ROOT}/auto-switch", json={"enabled": "yes"}
+        ).status_code == 400
 
     def test_complete_409_when_encryption_locked(self, authenticated_client):
         encryption.clear_encryption_key()
@@ -80,7 +100,7 @@ class TestRegisteredAndAuthed:
             has_refresh_token=True,
         )
 
-        with patch("app.api.claude_accounts._schedule_usage_refresh") as sched:
+        with patch("app.api.claude_accounts.schedule_usage_refresh") as sched:
             resp = authenticated_client.post(f"{ROOT}/acct-x/activate")
 
         assert resp.status_code == 200, resp.text
@@ -91,7 +111,7 @@ class TestRegisteredAndAuthed:
         from app.db import database as db
 
         encryption.set_encryption_key("pw", db)
-        with patch("app.api.claude_accounts._schedule_usage_refresh") as sched:
+        with patch("app.api.claude_accounts.schedule_usage_refresh") as sched:
             resp = authenticated_client.post(f"{ROOT}/missing/activate")
 
         assert resp.status_code == 404

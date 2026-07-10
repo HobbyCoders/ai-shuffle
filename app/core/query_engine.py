@@ -702,6 +702,7 @@ async def execute_query(
     session_id: Optional[str] = None,
     api_user_id: Optional[str] = None,
     automation_id: Optional[str] = None,
+    persist_user_message: bool = True,
 ) -> Dict[str, Any]:
     """Execute a non-streaming query.
 
@@ -754,14 +755,17 @@ async def execute_query(
             source_device_id=None
         )
 
-    # Store user message with profile_id for per-query tracking
-    await run_sync(
-        database.add_session_message,
-        session_id=session_id,
-        role="user",
-        content=prompt,
-        profile_id=profile_id
-    )
+    # Store user message with profile_id for per-query tracking. Skipped on a
+    # failover retry (persist_user_message=False): the original entry already
+    # persisted the user turn, so re-persisting would duplicate the message.
+    if persist_user_message:
+        await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="user",
+            content=prompt,
+            profile_id=profile_id
+        )
 
     # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
     # the subprocess we're about to spawn/resume authenticates with a valid token
@@ -1004,6 +1008,16 @@ async def _emit_api_error_notification(
             status = 0
 
         if status == 429:
+            # If auto-switch-on-limit is eligible, the account_failover module
+            # emits its own "switched to X" / "all accounts exhausted" toast that
+            # supersedes this generic one — suppress the duplicate. Best-effort:
+            # any failure here falls through to the generic toast below.
+            try:
+                from app.core import account_failover
+                if await run_sync(account_failover.failover_eligible):
+                    return
+            except Exception:
+                logger.debug("failover eligibility check failed in api_error toast", exc_info=True)
             severity = "warning"
             message = "Rate limited — slow down or wait for the next window."
             action = None  # transient + self-resolving — no "Fix with AI"
@@ -1041,7 +1055,8 @@ async def stream_query(
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
     api_user_id: Optional[str] = None,
-    device_id: Optional[str] = None  # Source device for sync
+    device_id: Optional[str] = None,  # Source device for sync
+    persist_user_message: bool = True,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Execute a streaming query using ClaudeSDKClient.
@@ -1102,31 +1117,35 @@ async def stream_query(
         _is_new_session = True  # Flag available for future analytics/logging
         logger.debug(f"Created new session {session_id} with title: {title}")
 
-    # Store user message and broadcast to other devices
-    user_msg = await run_sync(
-        database.add_session_message,
-        session_id=session_id,
-        role="user",
-        content=prompt,
-        profile_id=profile_id
-    )
+    # Store user message and broadcast to other devices. Skipped on a failover
+    # retry (persist_user_message=False): the original entry already added the
+    # user message to the DB, live store, and broadcast it — re-doing it here
+    # would duplicate the message on every connected device.
+    if persist_user_message:
+        user_msg = await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="user",
+            content=prompt,
+            profile_id=profile_id
+        )
 
-    # Broadcast user message to other devices (include profile_id for display)
-    await sync_engine.broadcast_message_added(
-        session_id=session_id,
-        message={**user_msg, "profile_id": profile_id},
-        source_device_id=device_id
-    )
+        # Broadcast user message to other devices (include profile_id for display)
+        await sync_engine.broadcast_message_added(
+            session_id=session_id,
+            message={**user_msg, "profile_id": profile_id},
+            source_device_id=device_id
+        )
 
-    # Log to sync log for polling fallback
-    await run_sync(
-        database.add_sync_log,
-        session_id=session_id,
-        event_type="message_added",
-        entity_type="message",
-        entity_id=str(user_msg["id"]),
-        data=user_msg
-    )
+        # Log to sync log for polling fallback
+        await run_sync(
+            database.add_sync_log,
+            session_id=session_id,
+            event_type="message_added",
+            entity_type="message",
+            entity_id=str(user_msg["id"]),
+            data=user_msg
+        )
 
     # Keep the Claude OAuth token alive: refresh it now if it's at/near expiry so
     # the subprocess we're about to spawn/resume authenticates with a valid token

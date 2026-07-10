@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -56,6 +57,15 @@ _USED_STAMP_THROTTLE = 60.0  # seconds
 # the incoming account's tokens. This code is synchronous single-threaded, so a
 # plain module flag toggled in a try/finally is sufficient (no lock needed).
 _suppress_sync_back: bool = False
+
+# Serializes switch_account across ALL callers. It is now driven concurrently
+# from the auto-failover path (run in a thread-pool worker via run_sync) and the
+# admin activate route; without serialization an interleaving could clear the
+# _suppress_sync_back guard mid-write and corrupt a credential row via the
+# sync-back hook. The helpers switch_account calls (sync_back_active_account,
+# direct_oauth writes, db writes, usage_limits_monitor.bump_generation) never
+# re-acquire this lock, so a plain non-reentrant Lock is safe.
+_switch_mutex = threading.Lock()
 
 
 def _active_pointer_key() -> str:
@@ -261,75 +271,79 @@ def switch_account(account_id: str) -> Dict[str, Any]:
     maps to an HTTP status.
     """
     global _suppress_sync_back
-    if not encryption.is_encryption_ready():
-        return {"success": False, "error": "encryption_locked"}
+    # Serialize the whole switch across every caller (auto-failover thread-pool
+    # worker + admin activate route). See _switch_mutex's definition for why a
+    # plain non-reentrant Lock is safe here.
+    with _switch_mutex:
+        if not encryption.is_encryption_ready():
+            return {"success": False, "error": "encryption_locked"}
 
-    row = db.get_claude_account(account_id, include_credentials=True)
-    if row is None:
-        return {"success": False, "error": "not_found"}
+        row = db.get_claude_account(account_id, include_credentials=True)
+        if row is None:
+            return {"success": False, "error": "not_found"}
 
-    # 1. Persist the OUTGOING account's rotated refresh token FIRST, before we
-    #    overwrite the file. Otherwise a rotation performed since the last sync
-    #    would be lost. (This runs BEFORE the suppression guard is set.)
-    #    NOTE: this path deliberately bypasses ensure_fresh_credentials's
-    #    asyncio lock. Worst case a concurrent refresh overwrites the file with
-    #    the outgoing account's refreshed token; the next status sync-back
-    #    reconciles it — transient, accepted for v1.
-    #    record_usage=False: the explicit touch below stamps the INCOMING account;
-    #    the outgoing account should not be re-stamped as "used" by the switch.
-    sync_back_active_account(record_usage=False)
+        # 1. Persist the OUTGOING account's rotated refresh token FIRST, before we
+        #    overwrite the file. Otherwise a rotation performed since the last sync
+        #    would be lost. (This runs BEFORE the suppression guard is set.)
+        #    NOTE: this path deliberately bypasses ensure_fresh_credentials's
+        #    asyncio lock. Worst case a concurrent refresh overwrites the file with
+        #    the outgoing account's refreshed token; the next status sync-back
+        #    reconciles it — transient, accepted for v1.
+        #    record_usage=False: the explicit touch below stamps the INCOMING account;
+        #    the outgoing account should not be re-stamped as "used" by the switch.
+        sync_back_active_account(record_usage=False)
 
-    # 2. Decrypt the target account's stored credential.
-    oauth_dict = _row_credentials_to_dict(row)
-    if oauth_dict is None:
-        return {"success": False, "error": "decrypt_failed"}
+        # 2. Decrypt the target account's stored credential.
+        oauth_dict = _row_credentials_to_dict(row)
+        if oauth_dict is None:
+            return {"success": False, "error": "decrypt_failed"}
 
-    # 3. Write it to the on-disk credentials file VERBATIM. The existing
-    #    session_pool credentials-rotation machinery (claude_credentials_mtime →
-    #    credentials_rotated → refresh_subprocess_credentials) picks up the
-    #    file mtime change and propagates it to live SDK subprocesses.
-    #    ACCEPTED v1 LIMITATION: pool._copy_if_newer compares expiry timestamps;
-    #    switching to an account whose token expiry is OLDER than the outgoing
-    #    one could momentarily be treated as "not newer" by that heuristic. This
-    #    is acceptable for v1 (the next status check / refresh reconciles it).
-    #
-    #    The write fires the post-write hook (sync_back_active_account). At this
-    #    point the active pointer STILL names the OUTGOING account, so an
-    #    unsuppressed hook would see file=incoming, pointer=outgoing, fingerprint
-    #    mismatch → write the incoming credentials into the OUTGOING row (silent
-    #    cross-account corruption). Suppress sync-back across the write and the
-    #    pointer update; clear in finally.
-    _suppress_sync_back = True
-    try:
-        if not direct_oauth.write_credentials_dict(oauth_dict):
-            return {"success": False, "error": "write_failed"}
-
-        # 4. Invalidate direct_oauth's validity cache so the next status check
-        #    reads the freshly written credential rather than a stale verdict.
-        direct_oauth.invalidate_credentials_cache()
-
-        # 5. Update the per-install active pointer and usage stamp, and reset our
-        #    mtime cache to the file we just wrote (so the next status sync-back
-        #    treats it as clean).
-        _set_active_account_id(account_id)
+        # 3. Write it to the on-disk credentials file VERBATIM. The existing
+        #    session_pool credentials-rotation machinery (claude_credentials_mtime →
+        #    credentials_rotated → refresh_subprocess_credentials) picks up the
+        #    file mtime change and propagates it to live SDK subprocesses.
+        #    ACCEPTED v1 LIMITATION: pool._copy_if_newer compares expiry timestamps;
+        #    switching to an account whose token expiry is OLDER than the outgoing
+        #    one could momentarily be treated as "not newer" by that heuristic. This
+        #    is acceptable for v1 (the next status check / refresh reconciles it).
+        #
+        #    The write fires the post-write hook (sync_back_active_account). At this
+        #    point the active pointer STILL names the OUTGOING account, so an
+        #    unsuppressed hook would see file=incoming, pointer=outgoing, fingerprint
+        #    mismatch → write the incoming credentials into the OUTGOING row (silent
+        #    cross-account corruption). Suppress sync-back across the write and the
+        #    pointer update; clear in finally.
+        _suppress_sync_back = True
         try:
-            db.touch_claude_account_last_used(account_id)
+            if not direct_oauth.write_credentials_dict(oauth_dict):
+                return {"success": False, "error": "write_failed"}
+
+            # 4. Invalidate direct_oauth's validity cache so the next status check
+            #    reads the freshly written credential rather than a stale verdict.
+            direct_oauth.invalidate_credentials_cache()
+
+            # 5. Update the per-install active pointer and usage stamp, and reset our
+            #    mtime cache to the file we just wrote (so the next status sync-back
+            #    treats it as clean).
+            _set_active_account_id(account_id)
+            try:
+                db.touch_claude_account_last_used(account_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not stamp last_used for account: {e}")
+            _reset_mtime_cache()
+        finally:
+            _suppress_sync_back = False
+
+        # 6. Invalidate any in-flight usage poll (started against the previous
+        #    account) so the limits indicator re-polls the new account cleanly.
+        #    Best-effort + lazy import: never let this break the switch.
+        try:
+            from app.core.usage_limits import usage_limits_monitor
+            usage_limits_monitor.bump_generation()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Could not stamp last_used for account: {e}")
-        _reset_mtime_cache()
-    finally:
-        _suppress_sync_back = False
+            logger.debug(f"Could not bump usage generation on switch: {e}")
 
-    # 6. Invalidate any in-flight usage poll (started against the previous
-    #    account) so the limits indicator re-polls the new account cleanly.
-    #    Best-effort + lazy import: never let this break the switch.
-    try:
-        from app.core.usage_limits import usage_limits_monitor
-        usage_limits_monitor.bump_generation()
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"Could not bump usage generation on switch: {e}")
-
-    return {"success": True, "active_account_id": account_id}
+        return {"success": True, "active_account_id": account_id}
 
 
 async def add_account(

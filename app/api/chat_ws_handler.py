@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi.websockets import WebSocketState
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from app.core import account_failover
 from app.core.config import settings
 from app.core.connectors.manager import connector_manager
 from app.core.live_session_store import live_session_store
@@ -3602,8 +3603,17 @@ class ChatWebSocketHandler:
         worktree_id: Optional[str] = None,
         deferred_delivery: bool = False,
         request_id: Optional[str] = None,
+        is_failover_retry: bool = False,
+        failover_attempted: Optional[set] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket.
+
+        ``is_failover_retry`` marks a successor turn spawned by the account
+        auto-switch-on-limit seam: the ORIGINAL turn already persisted the user
+        message (DB + live store) and the resumed stream seed already replays it,
+        so this retry must NOT re-add the user message. ``failover_attempted``
+        carries the per-turn set of account ids already tried (and 429'd on) so a
+        chain of retries terminates once every account has been attempted.
 
         ``deferred_delivery`` marks a server-initiated turn (a queued "Send later"
         drain or a background sub-agent's unpark follow-up) whose delivery does not
@@ -3692,9 +3702,24 @@ class ChatWebSocketHandler:
             session_id, initial_messages, profile_id=profile_id
         )
 
-        # Add user message to live store
+        # Add user message to live store. On a failover retry this is normally
+        # skipped: the resumed stream seed already contains the original user
+        # message and the DB row was persisted by the original turn, so re-adding
+        # would duplicate it. BUT if the ended live-store snapshot was cleaned up
+        # in the hand-off window (no-devices cleanup / eviction), the seed can
+        # LACK the user message — dropping the add then makes the prompt vanish
+        # from the live view. So on a retry, skip only when the resolved seed
+        # already carries this exact user prompt; default to ADDING otherwise.
         user_message_id = f"user-{uuid.uuid4()}"
-        await live_session_store.add_user_message(session_id, prompt, user_message_id)
+        seed_has_user_prompt = any(
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and isinstance(m.get("content"), str)
+            and m.get("content") == prompt
+            for m in (initial_messages or [])
+        )
+        if not (is_failover_retry and seed_has_user_prompt):
+            await live_session_store.add_user_message(session_id, prompt, user_message_id)
 
         # Heartbeat task to keep WebSocket alive during long operations (tool execution, subagents)
         # The streaming loop blocks when SDK is waiting for tool results, so we send periodic
@@ -3846,6 +3871,67 @@ class ChatWebSocketHandler:
                 # query.
 
             ctx.debug(logger, "Query completed")
+
+            # --- Account auto-switch-on-limit (failover) ---
+            # If this turn ended on a usage-limit 429 and auto-switch is enabled,
+            # rotate to another saved account and re-run the turn on the resumed
+            # session so the user never has to intervene. Mirrors the queued-
+            # message hand-off below: spawn a successor run_query, register it as
+            # the session's active turn under the lock, mark handed_off, return.
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+                and account_failover.is_usage_limit_error(stream_state.final_metadata)
+            ):
+                attempted = failover_attempted if failover_attempted is not None else set()
+                decision = await account_failover.attempt_failover(
+                    session_id, self.api_user_id, attempted
+                )
+                # attempt_failover can take seconds (credential rotation + pool
+                # eviction). Re-check the stop/interrupt flags: if the user
+                # stopped or interrupted during that await, do NOT spawn the
+                # successor — fall through to normal completion.
+                if (
+                    decision.retry
+                    and (session_id in _stopped_sessions
+                         or session_id in _interrupt_pending_sessions)
+                ):
+                    ctx.debug(
+                        logger,
+                        "Failover: session stopped/interrupted during failover "
+                        "await — not spawning successor",
+                    )
+                elif decision.retry:
+                    ctx.debug(
+                        logger,
+                        f"Failover: retrying turn on account "
+                        f"{decision.account_name} (switched={decision.switched})",
+                    )
+                    # End current streaming state so the successor can re-init.
+                    await live_session_store.end_streaming(
+                        session_id=session_id,
+                        metadata=stream_state.final_metadata,
+                        interrupted=False,
+                    )
+                    try:
+                        task = asyncio.create_task(
+                            self.run_query(
+                                prompt, session_id, profile_id, project_id,
+                                overrides, worktree_id,
+                                deferred_delivery=deferred_delivery,
+                                is_failover_retry=True,
+                                failover_attempted=attempted,
+                            )
+                        )
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = task
+                        self.query_task = task
+                        handed_off_to_queued = True
+                        ctx.debug(logger, "Failover: successor turn started (handed off)")
+                        return  # Exit — the successor task continues streaming
+                    except Exception as exc:
+                        ctx.error(logger, f"Failover: failed to start successor turn: {exc}")
+                        # Fall through to normal completion.
 
             # --- Pre-close queue processing ---
             # Before ending the session, check for queued messages.  If any

@@ -11,13 +11,113 @@ from fastapi.responses import StreamingResponse
 from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
 )
-from app.core.query_engine import execute_query, stream_query, interrupt_session, start_background_query
+from app.core.query_engine import stream_query, interrupt_session, start_background_query
 from app.core.auth import auth_service
 from app.api.auth import require_api_key, require_auth
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["Query"])
+
+
+async def _execute_query_with_failover(
+    *, prompt, profile_id, project_id=None, overrides=None,
+    session_id=None, api_user_id=None,
+):
+    """Thin delegate to :func:`account_failover.execute_query_with_failover`.
+
+    The retry-loop logic now lives in ``account_failover`` so every non-streaming
+    caller (automations, connectors, the ScheduleWakeup builtin) shares the same
+    seam. This wrapper preserves the query-route call signature.
+    """
+    from app.core import account_failover
+
+    return await account_failover.execute_query_with_failover(
+        prompt=prompt, profile_id=profile_id, project_id=project_id,
+        overrides=overrides, session_id=session_id, api_user_id=api_user_id,
+    )
+
+
+async def _stream_query_with_failover(
+    *, prompt, profile_id, project_id=None, overrides=None,
+    session_id=None, api_user_id=None, device_id=None,
+):
+    """Async-generator wrapper over ``stream_query`` that transparently retries
+    on a usage-limit 429 via account auto-switch — and makes that retry INVISIBLE
+    to the SSE consumer:
+
+    * only the FIRST ``stream_query`` iteration's ``init`` frame is yielded (the
+      retry's ``init`` is consumed for its ``session_id`` but not forwarded), and
+    * the failed attempt's 429 ``api_error`` frame is held back rather than
+      leaked: if the failover retries it is dropped (the retry supersedes it); if
+      the failover gives up it is flushed just before the terminal ``done`` frame.
+
+    Non-429 ``api_error`` frames pass through immediately.
+    """
+    from app.core.account_failover import is_usage_limit_error, attempt_failover
+
+    attempted: set = set()
+    sid = session_id
+    persist = True
+    first_stream = True
+    while True:
+        done_event = None
+        held_api_error = None  # most-recent 429 api_error, held for the done decision
+        async for event in stream_query(
+            prompt=prompt, profile_id=profile_id, project_id=project_id,
+            overrides=overrides, session_id=sid, api_user_id=api_user_id,
+            device_id=device_id, persist_user_message=persist,
+        ):
+            etype = event.get("type")
+            if etype == "init":
+                sid = event.get("session_id") or sid
+                # Suppress duplicate init frames: forward only the first stream's.
+                if first_stream:
+                    yield event
+                continue
+            if etype == "api_error":
+                try:
+                    is_429 = int(event.get("status")) == 429
+                except (TypeError, ValueError):
+                    is_429 = False
+                if is_429:
+                    held_api_error = event  # hold; decided at the done frame
+                    continue
+                yield event  # non-429 errors pass through immediately
+                continue
+            if etype == "done":
+                done_event = event
+                if is_usage_limit_error(event.get("metadata")):
+                    break  # hold the done frame; decide on a retry below
+                # Not a usage-limit done → flush any held api_error, then done.
+                if held_api_error is not None:
+                    yield held_api_error
+                yield event
+                return
+            yield event
+
+        first_stream = False
+
+        # Reached only when a done frame carried a usage-limit 429.
+        if done_event is None:
+            if held_api_error is not None:
+                yield held_api_error
+            return
+        sid = done_event.get("session_id") or sid
+        decision = await attempt_failover(sid, api_user_id, attempted)
+        if not decision.retry:
+            # Giving up: surface the held api_error then the terminal done.
+            if held_api_error is not None:
+                yield held_api_error
+            yield done_event
+            return
+        # Retrying supersedes the failed attempt → DROP the held 429 api_error.
+        yield {
+            "type": "system",
+            "subtype": "account_switched",
+            "data": {"account_name": decision.account_name},
+        }
+        persist = False
 
 
 def require_claude_auth():
@@ -55,7 +155,7 @@ async def one_shot_query(
         if request.overrides:
             overrides = request.overrides.model_dump(exclude_none=True)
 
-        result = await execute_query(
+        result = await _execute_query_with_failover(
             prompt=request.prompt,
             profile_id=profile_id,
             project_id=project_id,
@@ -108,7 +208,7 @@ async def stream_one_shot_query(
             if request.overrides:
                 overrides = request.overrides.model_dump(exclude_none=True)
 
-            async for event in stream_query(
+            async for event in _stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
                 project_id=project_id,
@@ -163,7 +263,7 @@ async def conversation(
         if request.overrides:
             overrides = request.overrides.model_dump(exclude_none=True)
 
-        result = await execute_query(
+        result = await _execute_query_with_failover(
             prompt=request.prompt,
             profile_id=profile_id,
             project_id=project_id,
@@ -218,7 +318,7 @@ async def stream_conversation(
             if request.overrides:
                 overrides = request.overrides.model_dump(exclude_none=True)
 
-            async for event in stream_query(
+            async for event in _stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
                 project_id=project_id,

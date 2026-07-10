@@ -5,16 +5,17 @@ Admin-gated CRUD + switching for Claude accounts. Mounted under
 display metadata plus a per-install ``is_active`` flag.
 """
 
-import asyncio
 import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.auth import require_admin
+from app.core import account_failover
 from app.core import claude_accounts as accounts
 from app.core import encryption
 from app.core.oauth import direct_oauth
+from app.core.usage_limits import schedule_usage_refresh
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -23,24 +24,6 @@ router = APIRouter(
     prefix="/api/v1/auth/claude/accounts",
     tags=["Claude Accounts"],
 )
-
-
-def _schedule_usage_refresh() -> None:
-    """Fire-and-forget an immediate usage re-poll + broadcast after a switch.
-
-    The active account just changed, so the cached usage snapshot belongs to the
-    old account. Kick off a fresh poll (which broadcasts the new snapshot to all
-    connected clients) without blocking the switch response on the network fetch.
-    Best-effort: never let scheduling failures surface to the caller.
-    """
-    try:
-        from app.core.usage_limits import usage_limits_monitor
-        asyncio.create_task(usage_limits_monitor.refresh_and_broadcast())
-    except RuntimeError:
-        # No running event loop (e.g. sync test context) — skip silently.
-        pass
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"Could not schedule usage refresh: {e}")
 
 
 def _epoch_ms(value) -> int | None:
@@ -97,7 +80,29 @@ async def list_accounts(token: str = Depends(require_admin)):
         "accounts": [_public_account(r, active_id) for r in rows],
         "active_account_id": active_id,
         "encryption_ready": encryption_ready,
+        "auto_switch_on_limit": account_failover.get_auto_switch_enabled(),
     }
+
+
+@router.put("/auto-switch")
+async def set_auto_switch(request: Request, token: str = Depends(require_admin)):
+    """Toggle auto-switch-to-another-account on usage limit for this install.
+
+    Registered ABOVE the parameterized ``/{account_id}`` routes so the literal
+    path wins. Body: ``{"enabled": bool}``.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Body must include a boolean 'enabled' field.",
+        )
+    account_failover.set_auto_switch_enabled(enabled)
+    return {"success": True, "auto_switch_on_limit": enabled}
 
 
 @router.post("/start")
@@ -149,7 +154,7 @@ async def complete_add_account(request: Request, token: str = Depends(require_ad
     active_account_id = accounts.get_active_account_id()
     # If this newly-added account became active, re-poll usage for it.
     if make_active:
-        _schedule_usage_refresh()
+        schedule_usage_refresh()
 
     return {
         "success": True,
@@ -181,7 +186,7 @@ async def activate_account(account_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=f"Could not switch account: {err}")
     # Re-poll usage for the newly-active account and broadcast to all clients.
-    _schedule_usage_refresh()
+    schedule_usage_refresh()
     return {"success": True, "active_account_id": result["active_account_id"]}
 
 

@@ -19,6 +19,7 @@ Security: the OAuth access token is used only as a Bearer header and is NEVER
 logged, printed, or included in the snapshot.
 """
 
+import asyncio
 import logging
 import math
 import time
@@ -513,3 +514,30 @@ class UsageLimitsMonitor:
 
 # Global singleton.
 usage_limits_monitor = UsageLimitsMonitor()
+
+
+# Fire-and-forget usage re-poll tasks are retained here until they complete so
+# the event loop doesn't garbage-collect a still-pending task ("Task was
+# destroyed but it is pending!").
+_pending_refresh_tasks: "set[asyncio.Task]" = set()
+
+
+def schedule_usage_refresh() -> None:
+    """Fire-and-forget an immediate usage re-poll + broadcast (best-effort).
+
+    Used after an account switch (manual activate or auto-failover): the active
+    account just changed, so the cached usage snapshot belongs to the old
+    account. Kick off a fresh poll without blocking the caller on the network
+    fetch. The created task is retained in a module-level set until it finishes
+    (discarded via a done-callback) so it is not GC'd mid-flight. Never raises.
+    """
+    try:
+        task = asyncio.create_task(usage_limits_monitor.refresh_and_broadcast())
+    except RuntimeError:
+        # No running event loop (e.g. sync test context) — skip silently.
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Could not schedule usage refresh: {e}")
+        return
+    _pending_refresh_tasks.add(task)
+    task.add_done_callback(_pending_refresh_tasks.discard)
