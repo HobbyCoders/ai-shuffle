@@ -588,7 +588,7 @@ class AutomationManager:
             # Execute prompt if present
             if has_prompt:
                 from app.core.automation_service import resolve_local_project
-                from app.core.query_engine import execute_query
+                from app.core import account_failover
 
                 # The stored project row may belong to another install; run
                 # against this install's clone of the same repo (link group).
@@ -605,7 +605,7 @@ class AutomationManager:
                         project_id = local_project["id"]
 
                 result = await asyncio.wait_for(
-                    execute_query(
+                    account_failover.execute_query_with_failover(
                         prompt=rendered_prompt,
                         profile_id=automation["profile_id"],
                         project_id=project_id,
@@ -775,13 +775,13 @@ class AutomationManager:
                     continue
                 try:
                     rendered = render_prompt(prompt_text, {**trigger_data, "response": response_text})
-                    from app.core.query_engine import execute_query
+                    from app.core import account_failover
 
                     automation = database.get_automation(automation_id)
                     profile_id = step.get("profile_id") or (automation.get("profile_id") if automation else None)
                     max_turns = step.get("max_turns", 1)
 
-                    result = await execute_query(
+                    result = await account_failover.execute_query_with_failover(
                         prompt=rendered,
                         profile_id=profile_id,
                         overrides={"max_turns": max_turns},

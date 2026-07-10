@@ -88,7 +88,7 @@ class TestOneShotQuery:
         """Set up common mocks for query tests."""
         with patch("app.api.query.require_api_key") as mock_api_key, \
              patch("app.api.query.require_claude_auth") as mock_claude, \
-             patch("app.api.query.execute_query") as mock_execute:
+             patch("app.core.query_engine.execute_query") as mock_execute:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
                 "username": "testuser",
@@ -331,7 +331,7 @@ class TestConversation:
         """Set up mocks for conversation tests."""
         with patch("app.api.query.require_api_key") as mock_api_key, \
              patch("app.api.query.require_claude_auth") as mock_claude, \
-             patch("app.api.query.execute_query") as mock_execute:
+             patch("app.core.query_engine.execute_query") as mock_execute:
             mock_api_key.return_value = {
                 "id": "test-api-user-id",
                 "profile_id": "test-profile"
@@ -882,7 +882,7 @@ class TestApiUserConfigurationPrecedence:
 
         with patch("app.api.query.require_api_key"), \
              patch("app.api.query.require_claude_auth"), \
-             patch("app.api.query.execute_query") as mock_execute:
+             patch("app.core.query_engine.execute_query") as mock_execute:
 
             mock_execute.return_value = {
                 "response": "OK",
@@ -917,7 +917,7 @@ class TestApiUserConfigurationPrecedence:
 
         with patch("app.api.query.require_api_key"), \
              patch("app.api.query.require_claude_auth"), \
-             patch("app.api.query.execute_query") as mock_execute:
+             patch("app.core.query_engine.execute_query") as mock_execute:
 
             mock_execute.return_value = {
                 "response": "OK",

@@ -327,9 +327,9 @@ def create_builtin_tools_server(
         async def _wake() -> None:
             try:
                 await asyncio.sleep(delay)
-                from app.core.query_engine import execute_query
+                from app.core import account_failover
                 logger.info(f"ScheduleWakeup firing for session {session_id} after {delay}s")
-                await execute_query(
+                await account_failover.execute_query_with_failover(
                     prompt=prompt,
                     profile_id=profile_id,
                     project_id=project_id,

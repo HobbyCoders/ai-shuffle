@@ -107,10 +107,22 @@ export interface ClaudeAccountsResponse {
 	active_account_id: string | null;
 	/** False when the encrypted store can't be opened (admin must re-login). */
 	encryption_ready: boolean;
+	/** When true, a chat that hits a Claude usage limit auto-switches to another
+	 *  saved account and retries. Off by default. */
+	auto_switch_on_limit: boolean;
 }
 
 export async function listClaudeAccounts(): Promise<ClaudeAccountsResponse> {
 	return api.get('/auth/claude/accounts');
+}
+
+/** Toggle the "auto-switch on usage limits" behaviour for saved accounts.
+ *  Admin-gated like the other account routes. */
+export async function setClaudeAutoSwitchOnLimit(enabled: boolean): Promise<{
+	success: boolean;
+	auto_switch_on_limit: boolean;
+}> {
+	return api.put('/auth/claude/accounts/auto-switch', { enabled });
 }
 
 /** Begin an OAuth PKCE flow that ADDS a new account without disturbing the

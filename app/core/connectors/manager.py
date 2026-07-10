@@ -409,7 +409,7 @@ class ConnectorManager:
                 typing_task = asyncio.create_task(_keep_typing())
 
             # Execute the query — import lazily to avoid circular imports
-            from app.core.query_engine import execute_query
+            from app.core import account_failover
 
             # Build connector context for the system prompt (memory + capabilities)
             overrides: Dict[str, Any] = {}
@@ -420,7 +420,7 @@ class ConnectorManager:
                 overrides["system_prompt_append"] = context_append
 
             try:
-                result = await execute_query(
+                result = await account_failover.execute_query_with_failover(
                     prompt=message.text,
                     profile_id=profile_id,
                     project_id=project_id,
