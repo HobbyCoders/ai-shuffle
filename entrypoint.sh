@@ -47,6 +47,14 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     chown -R appuser:appuser /app/app /data /workspace
     chown appuser:appuser /app /app/.env.example 2>/dev/null || true
     find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
+
+    # Re-own the bundled Claude Code CLI dir after the UID remap — the
+    # Dockerfile chowns it to build-time appuser (1000) so the
+    # interrupt-preserve byte patch (app/core/cli_interrupt_patch.py) can
+    # write the binary and its marker file, but remapping appuser to PUID
+    # (e.g. 99 on Unraid) orphans that ownership and the patch fails EPERM.
+    find /usr/local/lib/python3*/site-packages/claude_agent_sdk -type d -name _bundled \
+        -exec chown -R appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification"
 fi

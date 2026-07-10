@@ -127,12 +127,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # (PRESERVE_BACKGROUND_ON_INTERRUPT). pip installs claude_agent_sdk as root,
 # leaving the binary root:root -rwxr-xr-x, so the runtime patch fails with
 # "Cannot write ... (read-only): Permission denied" and the feature is inert
-# even with the env var set. We only chown here — the actual byte patch stays
+# even with the env var set. The patch also writes a marker JSON file next to
+# the binary to avoid re-scanning it on every boot, so the whole `_bundled/`
+# directory (not just the `claude` file) must be appuser-owned or those
+# marker writes fail too. We only chown here — the actual byte patch stays
 # a runtime concern (it relocates its anchor per CLI build; see
 # resolve_bundled_cli_path()/apply_patch() in cli_interrupt_patch.py) rather
-# than being baked into the image.
-RUN find /usr/local/lib/python3*/site-packages/claude_agent_sdk/_bundled \
-    -name claude -exec chown appuser:appuser {} +
+# than being baked into the image. NOTE: entrypoint.sh remaps appuser to
+# $PUID/$PGID at container start, which orphans this build-time chown — it
+# must re-apply this same chown after that remap (see entrypoint.sh).
+RUN find /usr/local/lib/python3*/site-packages/claude_agent_sdk \
+    -type d -name _bundled -exec chown -R appuser:appuser {} +
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
