@@ -40,8 +40,9 @@ State model (see docs/lifecycle-states.md):
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -89,6 +90,57 @@ class LifecycleSnapshot:
     drift: List[str] = field(default_factory=list)
 
 
+# --- transition-only drift logging -----------------------------------------
+# Drift is a PERSISTENT condition sampled on every /live poll (per-second while
+# a session is watched), so logging each observation buried live incidents under
+# hundreds of identical lines. Instead we log on TRANSITION: the first poll a
+# ``(session, class)`` drift newly appears, then once an hour while it still
+# stands, and again after it clears and reappears. The emitted record format is
+# byte-identical to the per-poll log it replaced.
+_DRIFT_RELOG_SECONDS = 3600.0
+
+# (session_id, class_token) -> monotonic timestamp of the last emitted line.
+_drift_last_log: Dict[Tuple[str, str], float] = {}
+
+
+def reset_drift_log_state() -> None:
+    """Clear the transition-log memo (test hook / restart hygiene)."""
+    _drift_last_log.clear()
+
+
+def _class_token(entry: str) -> str:
+    """The stable ``class=<name>`` prefix that keys a drift entry."""
+    return entry.split(" ", 1)[0]
+
+
+def _drift_entries_to_log(session_id: str, drift: List[str]) -> List[str]:
+    """Transition gate over a session's current drift entries.
+
+    Returns the subset to actually emit this poll: a class newly appeared for
+    the session, or its last emission is older than the hourly re-log window.
+    Classes absent this poll (the condition cleared) are forgotten so their next
+    appearance counts as a fresh transition. Keyed per ``(session, class)`` —
+    the entry's trailing detail (e.g. changing task ids) does not re-trigger.
+    """
+    now = time.monotonic()
+    current = {_class_token(e): e for e in drift}
+
+    # Forget cleared classes for this session (present-before, absent-now).
+    for key in [
+        k for k in _drift_last_log if k[0] == session_id and k[1] not in current
+    ]:
+        _drift_last_log.pop(key, None)
+
+    to_log: List[str] = []
+    for token, entry in current.items():
+        key = (session_id, token)
+        last = _drift_last_log.get(key)
+        if last is None or (now - last) >= _DRIFT_RELOG_SECONDS:
+            _drift_last_log[key] = now
+            to_log.append(entry)
+    return to_log
+
+
 def _pump_running(session_id: str) -> bool:
     """True iff a live between-turns drain pump exists for the session.
 
@@ -115,8 +167,18 @@ def _detect_drift(snap: LifecycleSnapshot) -> List[str]:
     """
     drift: List[str] = []
 
-    # (1) sync_engine vs live store disagree on streaming.
-    if snap.sync_streaming != snap.live_store_streaming:
+    # (1) sync_engine claims streaming while the live store — the streaming
+    # AUTHORITY (see docs/lifecycle-states.md) — says it is not. This is the
+    # actionable, one-directional disagreement: a stale ``_streaming_sessions``
+    # entry left by a crashed turn (stale git-lock / remote-pill leak), which
+    # reconciler R3 repairs. The OPPOSITE direction (live streaming while the
+    # sync cache lags — its in-memory set is wiped on restart and trails the
+    # authority during CLI-wake / pre-first-event windows) is BENIGN: no
+    # consumer relies on the sync cache for LOCAL streaming truth (the git-ops
+    # liveness guard reads the live authority; the adopt gate is cross-install,
+    # where the sync cache — fed by peer fan-out — is the right source), so it
+    # is deliberately NOT flagged. See ``sync_engine._streaming_sessions``.
+    if snap.sync_streaming and not snap.live_store_streaming:
         drift.append(
             "class=sync-vs-livestore "
             f"sync_streaming={snap.sync_streaming} "
@@ -270,20 +332,21 @@ async def compute(
     )
     snap.drift = _detect_drift(snap)
 
-    if snap.drift:
-        # Stable prefix + one line per class. Plain INFO (mirrors the
-        # _log_unpark_decision verbosity decision): drift fires only while
-        # sources disagree — low-frequency, and exactly the trace a live
-        # incident needs. Never raises into the caller.
-        try:
-            for entry in snap.drift:
-                logger.info(
-                    "lifecycle-drift session=%s state=%s %s",
-                    session_id,
-                    snap.state,
-                    entry,
-                )
-        except Exception:
-            pass
+    # Stable prefix + one line per class, gated to TRANSITIONS (see
+    # _drift_entries_to_log): a persistent drift logs once when it appears and
+    # hourly thereafter, not on every poll. Plain INFO (mirrors the
+    # _log_unpark_decision verbosity decision): exactly the trace a live
+    # incident needs. The gate itself runs even when drift is empty so a
+    # just-cleared condition is forgotten. Never raises into the caller.
+    try:
+        for entry in _drift_entries_to_log(session_id, snap.drift):
+            logger.info(
+                "lifecycle-drift session=%s state=%s %s",
+                session_id,
+                snap.state,
+                entry,
+            )
+    except Exception:
+        pass
 
     return snap

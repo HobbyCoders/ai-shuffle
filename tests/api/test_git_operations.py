@@ -299,6 +299,50 @@ class TestExecuteFinish:
         assert _step_status(op, "cleanup") == "warning"
         mock_worktree_manager.cleanup_worktree.assert_not_called()
 
+    async def test_cleanup_guard_other_session_live_store_streaming_only(
+        self, mock_git_service, mock_github_service, mock_worktree_manager
+    ):
+        """A sibling session actively streaming a LOCAL turn must block worktree
+        cleanup even when the sync engine has no record of it (in-memory
+        ``_streaming_sessions`` is wiped on restart / lags the authority during
+        CLI-wake and pre-first-event windows). ``live_session_store.is_streaming``
+        is the documented streaming authority, so the liveness guard must consult
+        it — otherwise cleanup would delete the worktree out from under a live
+        local turn.
+        """
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        op = _finish_op(session_id="me")
+
+        mock_sync = MagicMock()
+        mock_sync.is_session_streaming.return_value = False  # sync engine is blind
+        mock_reg = MagicMock()
+        mock_reg.has_active_background_work.return_value = False  # no bg work either
+        mock_live = MagicMock()
+        # Only the live store (the authority) knows "other" is streaming.
+        mock_live.is_streaming.side_effect = lambda sid: sid == "other"
+        mock_db = MagicMock()
+        mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
+
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
+             patch("app.core.task_registry.task_registry", mock_reg), \
+             patch("app.core.live_session_store.live_session_store", mock_live), \
+             patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
+            await _execute_finish(
+                op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id="me",
+                status={"ahead": 0},
+            )
+
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == "warning"
+        mock_worktree_manager.cleanup_worktree.assert_not_called()
+
     async def test_cleanup_guard_project_mode_other_streaming_session(
         self, mock_git_service, mock_github_service, mock_worktree_manager
     ):

@@ -96,7 +96,23 @@ class SyncEngine:
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
-        # Track streaming state per session
+        # Streaming NOTIFICATION cache — NOT the streaming authority.
+        #
+        # Populated by ``broadcast_stream_start`` (local turns) and
+        # ``apply_remote_streaming_change`` (peer-install turns fanned out across
+        # the cluster), cleared by the matching stream_end. It drives device/tab
+        # streaming indicators, the connect-time snapshot, and remote-owner
+        # sweeps. It is IN-MEMORY (wiped on restart) and best-effort: it can lag
+        # the live turn during the CLI-wake / pre-first-event windows.
+        #
+        # The streaming AUTHORITY is ``live_session_store.is_streaming`` (see
+        # docs/lifecycle-states.md). Consumers deciding LOCAL session safety must
+        # read the authority (and may add this cache as a hint); the only place
+        # this cache is authoritative is the CROSS-INSTALL adopt gate, where a
+        # remote session's turn is not in this install's live store at all and
+        # the peer fan-out is the sole signal. The lifecycle drift sensor flags a
+        # ``sync-vs-livestore`` disagreement ONLY in the stale direction (this
+        # cache claims streaming while the authority says idle).
         self._streaming_sessions: Set[str] = set()
         # Session locks: session_id -> device_id that owns the lock
         self._session_locks: Dict[str, str] = {}

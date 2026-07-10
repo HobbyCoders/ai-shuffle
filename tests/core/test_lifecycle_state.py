@@ -160,6 +160,81 @@ async def test_drift_sync_vs_livestore(mock_db):
     assert "class=sync-vs-livestore" in _drift_classes(snap)
 
 
+async def test_no_sync_drift_when_live_streams_but_sync_lags(mock_db):
+    """The benign direction — live store (the authority) says streaming, the
+    sync engine's in-memory cache has no record (wiped on restart / lagging
+    during a CLI-wake turn). This is NOT actionable drift: no consumer depends
+    on the sync cache for LOCAL streaming truth (the git-ops guard reads the
+    live authority; the adopt gate is cross-install), and the reconciler's R3
+    only repairs the opposite (stale) direction. It must not be flagged."""
+    sid = "lstate-sync-lag"
+    await live_session_store.start_streaming(sid)
+    # Note: NO broadcast_stream_start — the sync cache is deliberately blind.
+    try:
+        snap = await compute(sid)
+    finally:
+        await live_session_store.end_streaming(sid)
+        live_session_store.reset_all()
+
+    assert snap.live_store_streaming is True
+    assert snap.sync_streaming is False
+    assert snap.state == STATE_STREAMING
+    assert "class=sync-vs-livestore" not in _drift_classes(snap)
+
+
+async def test_drift_logs_once_per_transition(mock_db, caplog):
+    """Drift logs fire on TRANSITION (newly-appears), not per poll: a persistent
+    drift condition sampled repeatedly emits exactly one ``lifecycle-drift``
+    line until it clears or the hourly re-log window elapses."""
+    import logging
+
+    lifecycle_state.reset_drift_log_state()
+    sid = "lstate-drift-transition"
+    await sync_engine.broadcast_stream_start(sid, "m1")  # sync=True, live idle
+    try:
+        with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
+            for _ in range(5):
+                snap = await compute(sid)
+        assert "class=sync-vs-livestore" in _drift_classes(snap)
+        drift_lines = [
+            r for r in caplog.records
+            if r.getMessage().startswith("lifecycle-drift session=" + sid)
+        ]
+        assert len(drift_lines) == 1, (
+            f"expected one transition log, got {len(drift_lines)}: "
+            f"{[r.getMessage() for r in drift_lines]}"
+        )
+    finally:
+        await sync_engine.clear_streaming_state(sid)
+        lifecycle_state.reset_drift_log_state()
+
+
+async def test_drift_relogs_after_clearing(mock_db, caplog):
+    """When a drift condition clears and later reappears, the reappearance is a
+    fresh transition and logs again."""
+    import logging
+
+    lifecycle_state.reset_drift_log_state()
+    sid = "lstate-drift-reappear"
+    try:
+        with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
+            await sync_engine.broadcast_stream_start(sid, "m1")
+            await compute(sid)          # transition 1: appears -> logs
+            await compute(sid)          # still standing -> suppressed
+            await sync_engine.clear_streaming_state(sid)
+            await compute(sid)          # cleared -> forgotten, no drift
+            await sync_engine.broadcast_stream_start(sid, "m2")
+            await compute(sid)          # transition 2: reappears -> logs
+        drift_lines = [
+            r for r in caplog.records
+            if r.getMessage().startswith("lifecycle-drift session=" + sid)
+        ]
+        assert len(drift_lines) == 2, [r.getMessage() for r in drift_lines]
+    finally:
+        await sync_engine.clear_streaming_state(sid)
+        lifecycle_state.reset_drift_log_state()
+
+
 async def test_drift_parked_marker_while_idle(mock_db):
     """end_streaming wrote the durable parked marker, then force-cleanup wiped
     the registry (clear_session) without the marker ever being cleared."""
