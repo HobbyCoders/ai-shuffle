@@ -28,7 +28,6 @@
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
-	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { requestPermissionIfNeeded } from '$lib/services/notifications';
@@ -41,7 +40,6 @@
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
 	let showSpotlight = $state(false);
-	let showAdvancedSearch = $state(false);
 
 	// Tag state
 	let allTags: Tag[] = $state([]);
@@ -335,7 +333,6 @@
 				allowInInput: true,
 				action: () => {
 					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
-					else if (showAdvancedSearch) showAdvancedSearch = false;
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
 					else if (showKnowledgeModal) showKnowledgeModal = false;
@@ -361,12 +358,12 @@
 			}),
 			registerShortcut({
 				id: 'advanced-search',
-				description: 'Advanced search',
+				description: 'Search everything',
 				key: 'f',
 				cmdOrCtrl: true,
 				shift: true,
 				category: 'navigation',
-				action: () => { showAdvancedSearch = !showAdvancedSearch; }
+				action: () => { showSpotlight = !showSpotlight; }
 			})
 		];
 
@@ -498,16 +495,6 @@
 
 	<!-- Keyboard Shortcuts Modal -->
 	<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
-
-	<!-- Advanced Search Modal (Cmd+Shift+F) -->
-	<AdvancedSearch
-		visible={showAdvancedSearch}
-		onClose={() => showAdvancedSearch = false}
-		onSelectSession={(sessionId) => {
-			handleOpenSession(sessionId);
-			showAdvancedSearch = false;
-		}}
-	/>
 
 	<!-- Import Session Modal -->
 	<ImportSessionModal

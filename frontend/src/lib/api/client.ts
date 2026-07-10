@@ -679,7 +679,6 @@ export function getErrorMessage(e: unknown, fallback = 'Unknown error'): string 
 export * from './sessions';
 export * from './tags';
 export * from './analytics';
-export * from './search';
 export * from './templates';
 export * from './notes';
 export * from './hooks';
