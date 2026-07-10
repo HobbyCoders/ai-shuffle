@@ -18,7 +18,6 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
-	import type { Command } from '$lib/api/commands';
 
 	// Layout components
 	import AppLayout from '$lib/components/layout/AppLayout.svelte';
@@ -419,7 +418,13 @@
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectCommand(_command: Command) {
+	function handleSpotlightSelectProfile(_id: string) {
+		handleOpenFeature('profile');
+		showSpotlight = false;
+	}
+
+	function handleSpotlightSelectSubagent(_id: string) {
+		handleOpenFeature('subagent');
 		showSpotlight = false;
 	}
 
@@ -485,7 +490,8 @@
 		currentProjectId={$activeSession?.project}
 		onClose={() => showSpotlight = false}
 		onSelectSession={handleSpotlightSelectSession}
-		onSelectCommand={handleSpotlightSelectCommand}
+		onSelectProfile={handleSpotlightSelectProfile}
+		onSelectSubagent={handleSpotlightSelectSubagent}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
 	/>
