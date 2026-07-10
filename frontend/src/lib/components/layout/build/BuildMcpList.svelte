@@ -311,5 +311,8 @@
 	@media (max-width: 639px) {
 		.bml-search { max-width: none; }
 		.bml-meta { display: none; }
+		/* Widen the action slot from its 28px desktop reserve so the phone-sized
+		   38px ⋮ toggle (and its empty-row placeholder) fit without overflowing. */
+		.bml-actions { width: 38px; }
 	}
 </style>

@@ -322,8 +322,7 @@
 	.bpg-card:hover, .bpg-card:focus-within { --ram-reveal: 1; }
 	.bpg-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
-		background: color-mix(in oklch, var(--card) 70%, transparent);
-		border: 1px solid var(--border); border-radius: 7px;
+		background: transparent; border: 1px solid transparent; border-radius: 7px;
 		color: var(--muted-foreground); cursor: pointer;
 		transition: color 120ms ease, background-color 120ms ease;
 	}

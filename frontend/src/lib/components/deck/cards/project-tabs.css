@@ -482,6 +482,20 @@
 .ptab .set-row:has(.ram) {
 	--ram-reveal: 0;
 }
+/* Inside a RowActionMenu tray the boxed .icon-btn primitive flattens to the
+   app-wide tray treatment (flat icon, no box) so these popups match
+   Sessions/Build; .icon-btn outside trays keeps its box. */
+.ptab .ram .icon-btn {
+	background: transparent;
+	border-color: transparent;
+}
+.ptab .ram .icon-btn:hover {
+	background: var(--hover-overlay);
+}
+.ptab .ram .icon-btn.danger:hover {
+	background: color-mix(in oklch, var(--destructive) 14%, transparent);
+	border-color: transparent;
+}
 .ptab .set-row:has(.ram):hover,
 .ptab .set-row:has(.ram):focus-within {
 	--ram-reveal: 1;

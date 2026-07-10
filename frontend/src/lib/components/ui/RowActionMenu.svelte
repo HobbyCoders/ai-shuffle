@@ -168,6 +168,24 @@
 	/* Roomier touch target on phones (matches the sessions rail's 38px buttons). */
 	@media (max-width: 639px) {
 		.ram-toggle { width: 38px; height: 38px; }
+
+		/* Enlarge EVERY tray button to the sessions rail's 38px touch target so
+		   all consumers render at one size on phones regardless of their smaller
+		   desktop dimensions (26–36px). Icon glyphs keep their px; only the hit
+		   area grows (buttons centre their icon via grid/flex place-items). It's
+		   an idempotent min-size, so SessionsBoard's own 38px buttons here stay
+		   pixel-identical. */
+		.ram-tray > :global(button) {
+			min-width: 38px;
+			min-height: 38px;
+		}
+
+		/* The floating tray is bounded to the row's content height (top/bottom:0
+		   against the stretched .ram). Guard a floor so the 38px buttons never
+		   poke out of a short row's tray — instead the tray grows downward past
+		   the row, the way the taller sessions rows already contain it. Sessions'
+		   own ≥64px rows sit above this floor, so it's a no-op there. */
+		.ram-tray { min-height: 44px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

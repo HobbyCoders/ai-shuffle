@@ -327,5 +327,8 @@
 	@media (max-width: 639px) {
 		.bsl-search { max-width: none; }
 		.bsl-meta { display: none; }
+		/* The 58px desktop reserve (two inline buttons) collapses to the single
+		   38px ⋮ toggle on phones, so tighten the slot to hug the row's edge. */
+		.bsl-actions { width: 38px; }
 	}
 </style>
