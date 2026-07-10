@@ -14,6 +14,7 @@
 	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
 	import './project-tabs.css';
 
@@ -30,6 +31,24 @@
 	let showMcpServerForm = $state(false);
 	let editingMcpServer = $state<McpServerInfo | null>(null);
 	let mcpSelectedScope = $state<'installed' | 'local' | 'project'>('local');
+
+	// Touch/narrow only: which toggle-row has its collapsed ⋮ tray expanded (one
+	// at a time; desktop keeps the always-inline hover rail). Keyed by scope:name
+	// since a name can repeat across scopes.
+	let actionsOpenKey = $state<string | null>(null);
+	function rowKey(server: McpServerInfo): string {
+		return `${server.scope}:${server.name}`;
+	}
+	function toggleRowActions(e: MouseEvent | KeyboardEvent, key: string) {
+		e.stopPropagation();
+		actionsOpenKey = actionsOpenKey === key ? null : key;
+	}
+	function onWindowClick() {
+		if (actionsOpenKey !== null) actionsOpenKey = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') actionsOpenKey = null;
+	}
 
 	// Load MCP servers when project changes
 	$effect(() => {
@@ -138,6 +157,8 @@
 	}
 </script>
 
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
+
 {#snippet serverMeta(server: McpServerInfo)}
 	{#if server.type === 'stdio' && server.command}
 		<p class="mono">{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</p>
@@ -168,9 +189,15 @@
 				onclick={() => handleToggle(server)}
 			><i></i></button>
 			{#if removable}
-				<button type="button" class="icon-btn danger" title="Remove server" onclick={() => handleRemoveServer(server)}>
-					<Trash2 size={15} />
-				</button>
+				<RowActionMenu
+					open={actionsOpenKey === rowKey(server)}
+					onToggle={(e) => toggleRowActions(e, rowKey(server))}
+					label="Server actions"
+				>
+					<button type="button" class="icon-btn danger" title="Remove server" onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; handleRemoveServer(server); }}>
+						<Trash2 size={15} />
+					</button>
+				</RowActionMenu>
 			{/if}
 		</div>
 	</div>

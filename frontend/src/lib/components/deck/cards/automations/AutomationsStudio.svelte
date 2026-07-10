@@ -11,6 +11,7 @@
 	import type { Automation, AutomationApproval, TriggerType } from '$lib/api/automations';
 	import type { Profile } from '$lib/api/client';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import {
 		Search, Plus, Clock, Activity, Globe, Webhook, CalendarClock,
 		Play, Pencil, Trash2, AlertCircle, AlertTriangle, X, Loader2
@@ -60,6 +61,27 @@
 
 	let searchQuery = $state('');
 	let pendingDelete = $state<string | null>(null);
+	// Touch/narrow only: which row has its collapsed ⋮ action tray expanded.
+	// One open at a time; desktop keeps the always-inline hover-revealed rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// The ⋮ toggle expands/collapses a row's action tray. The toggle and every
+	// tray button stop propagation, so any click reaching the window is outside an
+	// open tray — collapse it and disarm any pending delete confirmation.
+	function toggleRowActions(e: MouseEvent | KeyboardEvent, id: string) {
+		e.stopPropagation();
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		if (pendingDelete !== null) pendingDelete = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			pendingDelete = null;
+		}
+	}
 
 	const profileNames = $derived(new Map(profiles.map((p) => [p.id, p.name])));
 	const enabledCount = $derived(automations.filter((a) => a.is_enabled).length);
@@ -128,6 +150,8 @@
 		onDelete(id);
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="as">
 	<div class="as-wrap">
@@ -221,13 +245,17 @@
 									{#if profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
 									<span class="as-stat as-stat--{stat.tone}">{stat.text}</span>
 								</div>
-								<div class="as-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-									<button class="as-act" title="Run now" onclick={() => onTrigger(a.id)} disabled={triggeringId === a.id}>
+								<RowActionMenu
+									open={actionsOpenId === a.id}
+									onToggle={(e) => toggleRowActions(e, a.id)}
+									label="Automation actions"
+								>
+									<button class="as-act" title="Run now" onclick={(e) => { e.stopPropagation(); actionsOpenId = null; onTrigger(a.id); }} disabled={triggeringId === a.id}>
 										{#if triggeringId === a.id}<Loader2 size={15} class="as-spin" />{:else}<Play size={15} strokeWidth={1.7} />{/if}
 									</button>
-									<button class="as-act" title="Edit" onclick={() => onOpenEdit(a)}><Pencil size={15} strokeWidth={1.7} /></button>
-									<button class="as-act as-act--danger" title="Delete" onclick={() => (pendingDelete = a.id)}><Trash2 size={15} strokeWidth={1.7} /></button>
-								</div>
+									<button class="as-act" title="Edit" onclick={(e) => { e.stopPropagation(); onOpenEdit(a); }}><Pencil size={15} strokeWidth={1.7} /></button>
+									<button class="as-act as-act--danger" title="Delete" onclick={(e) => { e.stopPropagation(); actionsOpenId = null; pendingDelete = a.id; }}><Trash2 size={15} strokeWidth={1.7} /></button>
+								</RowActionMenu>
 								<button
 									class="as-toggle"
 									class:on={a.is_enabled}
@@ -352,14 +380,11 @@
 	.as-stat--warn { color: var(--warning, #d97706); }
 	.as-stat--normal { color: var(--foreground); }
 
-	.as-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
-	.as-row:hover .as-actions, .as-row:focus-within .as-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
-		.as-actions { opacity: 1; }
-	}
+	/* Row-hover reveal of the action rail is signalled to RowActionMenu through the
+	   inherited --ram-reveal custom property (0 hidden / 1 shown); the component
+	   owns the button opacity + the touch/narrow ⋮ collapse + slide-out. */
+	.as-row { --ram-reveal: 0; }
+	.as-row:hover, .as-row:focus-within { --ram-reveal: 1; }
 	.as-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.as-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.as-act:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -399,7 +424,6 @@
 		.as-scroll { padding: 14px 16px 20px; }
 		.as-search { max-width: none; }
 		.as-meta { display: none; }
-		.as-actions { opacity: 1; }
 		.as-approval { flex-wrap: wrap; }
 		.as-approval-acts { margin-left: 0; width: 100%; }
 		.as-approval-acts .as-btn { flex: 1; justify-content: center; }

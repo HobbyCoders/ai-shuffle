@@ -6,17 +6,31 @@
 	 */
 	import { Play, Trash2, Loader2, AlertCircle } from 'lucide-svelte';
 	import type { Hook } from '$lib/api/client';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
 	interface Props {
 		hook: Hook;
 		testing?: boolean;
 		saving?: boolean;
+		/** Touch/narrow only: whether this row's ⋮ action tray is expanded. */
+		menuOpen?: boolean;
+		/** Toggle this row's action tray (parent owns one-open-at-a-time state). */
+		onToggleMenu?: (e: MouseEvent | KeyboardEvent) => void;
 		onToggle: () => void;
 		onDelete: () => void;
 		onTest: () => void;
 	}
 
-	let { hook, testing = false, saving = false, onToggle, onDelete, onTest }: Props = $props();
+	let {
+		hook,
+		testing = false,
+		saving = false,
+		menuOpen = false,
+		onToggleMenu = () => {},
+		onToggle,
+		onDelete,
+		onTest
+	}: Props = $props();
 
 	const eventColors: Record<string, string> = {
 		PreToolUse: 'var(--info)',
@@ -59,12 +73,14 @@
 	</div>
 
 	<div class="ctl">
-		<button class="icon-btn" title="Test hook" onclick={onTest} disabled={testing || saving}>
-			{#if testing}<Loader2 size={14} class="animate-spin" />{:else}<Play size={14} />{/if}
-		</button>
-		<button class="icon-btn danger" title="Delete hook" onclick={onDelete} disabled={saving}>
-			<Trash2 size={14} />
-		</button>
+		<RowActionMenu open={menuOpen} onToggle={onToggleMenu} label="Hook actions">
+			<button class="icon-btn" title="Test hook" onclick={(e) => { e.stopPropagation(); onTest(); }} disabled={testing || saving}>
+				{#if testing}<Loader2 size={14} class="animate-spin" />{:else}<Play size={14} />{/if}
+			</button>
+			<button class="icon-btn danger" title="Delete hook" onclick={(e) => { e.stopPropagation(); onDelete(); }} disabled={saving}>
+				<Trash2 size={14} />
+			</button>
+		</RowActionMenu>
 		<button
 			type="button"
 			class="switch"

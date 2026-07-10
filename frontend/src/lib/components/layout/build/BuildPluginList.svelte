@@ -26,6 +26,7 @@
 	} from '$lib/stores/plugins.svelte';
 	import type { AvailablePlugin, PluginInfo, PluginUpdateInfo, AutoUpdateSettings } from '$lib/api/plugins';
 	import PluginDetails from '$lib/components/plugins/PluginDetails.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import {
 		Package, Puzzle, Search, Plus, RefreshCw, ArrowUpCircle, ToggleLeft, ToggleRight,
 		Trash2, Download, Loader2, AlertCircle, X, Database, Settings, Clock
@@ -48,6 +49,28 @@
 
 	// Sources delete confirm
 	let confirmDeleteSource = $state<string | null>(null);
+
+	// Touch/narrow only: which row (installed or source) has its collapsed ⋮ action
+	// tray expanded. One open at a time; desktop keeps the always-inline rail.
+	let actionsOpenId = $state<string | null>(null);
+
+	// RowActionMenu already stops propagation before calling this, so the row's own
+	// click (open details) never also fires.
+	function toggleRowActions(_e: MouseEvent | KeyboardEvent, id: string) {
+		actionsOpenId = actionsOpenId === id ? null : id;
+	}
+	// Any click reaching the window is outside an open tray (tray buttons all stop
+	// propagation) — collapse it and disarm any pending source-removal confirm.
+	function onWindowClick() {
+		if (actionsOpenId !== null) actionsOpenId = null;
+		confirmDeleteSource = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenId = null;
+			confirmDeleteSource = null;
+		}
+	}
 
 	// Updates
 	let updatingAll = $state(false);
@@ -108,6 +131,8 @@
 	function selectTab(id: Tab) {
 		if (id === activeTab) return;
 		activeTab = id;
+		actionsOpenId = null;
+		confirmDeleteSource = null;
 		if (id !== 'details') plugins.clearSelectedPlugin();
 	}
 
@@ -193,6 +218,8 @@
 		} catch { return 'Unknown'; }
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="bpl">
 	<!-- Tabs (underline sub-nav, left-aligned) -->
@@ -288,16 +315,23 @@
 								{#each caps(p) as c}<span class="bpl-tag">{c}</span>{/each}
 							</div>
 							<div class="bpl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-								{#if updateLookup.has(p.id)}
-									<button class="bpl-act bpl-act--update" title="Update" onclick={() => plugins.updatePlugin(p.id)} disabled={$pluginUpdating[p.id]}>
-										{#if $pluginUpdating[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<ArrowUpCircle size={15} strokeWidth={1.7} />{/if}
+								<RowActionMenu
+									open={actionsOpenId === p.id}
+									onToggle={(e) => toggleRowActions(e, p.id)}
+									label="Plugin actions"
+								>
+									{#if updateLookup.has(p.id)}
+										<button class="bpl-act bpl-act--update" title="Update" onclick={() => { actionsOpenId = null; plugins.updatePlugin(p.id); }} disabled={$pluginUpdating[p.id]}>
+											{#if $pluginUpdating[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<ArrowUpCircle size={15} strokeWidth={1.7} />{/if}
+										</button>
+									{/if}
+									<button class="bpl-act bpl-act--danger" title="Uninstall" onclick={() => { actionsOpenId = null; plugins.uninstallPlugin(p.id); }}>
+										<Trash2 size={15} strokeWidth={1.7} />
 									</button>
-								{/if}
-								<button class="bpl-act" title={p.enabled ? 'Disable' : 'Enable'} onclick={() => plugins.togglePlugin(p.id)}>
+								</RowActionMenu>
+								<!-- Enable/disable stays outside the menu — an always-visible control. -->
+								<button class="bpl-act bpl-toggle-act" title={p.enabled ? 'Disable' : 'Enable'} onclick={() => plugins.togglePlugin(p.id)}>
 									{#if p.enabled}<ToggleRight size={16} strokeWidth={1.7} />{:else}<ToggleLeft size={16} strokeWidth={1.7} />{/if}
-								</button>
-								<button class="bpl-act bpl-act--danger" title="Uninstall" onclick={() => plugins.uninstallPlugin(p.id)}>
-									<Trash2 size={15} strokeWidth={1.7} />
 								</button>
 							</div>
 						</div>
@@ -329,7 +363,7 @@
 								<span class="bpl-tag">{p.marketplace}</span>
 								{#each caps(p) as c}<span class="bpl-tag">{c}</span>{/each}
 							</div>
-							<div class="bpl-actions" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+							<div class="bpl-actions bpl-actions--hover" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 								<button class="bpl-act" title="Install" onclick={() => plugins.installPlugin(p.id)} disabled={$pluginInstalling[p.id]}>
 									{#if $pluginInstalling[p.id]}<Loader2 size={15} class="bpl-spin" />{:else}<Download size={15} strokeWidth={1.7} />{/if}
 								</button>
@@ -350,18 +384,24 @@
 							<p class="bpl-desc">{m.url}</p>
 							<p class="bpl-subline"><Clock size={11} strokeWidth={1.7} /> Last synced: {formatDate(m.last_updated)}</p>
 						</div>
-						<div class="bpl-actions bpl-actions--static" role="toolbar" tabindex="-1">
-							<button class="bpl-act" title="Sync from git" onclick={() => plugins.syncMarketplace(m.id)} disabled={$marketplaceSyncing[m.id]}>
-								<RefreshCw size={15} strokeWidth={1.7} class={$marketplaceSyncing[m.id] ? 'bpl-spin' : ''} />
-							</button>
-							{#if confirmDeleteSource === m.id}
-								<button class="bpl-btn bpl-btn--danger bpl-btn--sm" onclick={() => handleRemoveSource(m.id)}>Remove</button>
-								<button class="bpl-btn bpl-btn--sm" onclick={() => (confirmDeleteSource = null)}>Cancel</button>
-							{:else}
-								<button class="bpl-act bpl-act--danger" title="Remove source" onclick={() => handleRemoveSource(m.id)}>
-									<Trash2 size={15} strokeWidth={1.7} />
+						<div class="bpl-actions bpl-actions--static" role="toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+							<RowActionMenu
+								open={actionsOpenId === m.id}
+								onToggle={(e) => toggleRowActions(e, m.id)}
+								label="Source actions"
+							>
+								<button class="bpl-act" title="Sync from git" onclick={() => { actionsOpenId = null; plugins.syncMarketplace(m.id); }} disabled={$marketplaceSyncing[m.id]}>
+									<RefreshCw size={15} strokeWidth={1.7} class={$marketplaceSyncing[m.id] ? 'bpl-spin' : ''} />
 								</button>
-							{/if}
+								{#if confirmDeleteSource === m.id}
+									<button class="bpl-btn bpl-btn--danger bpl-btn--sm" onclick={() => handleRemoveSource(m.id)}>Remove</button>
+									<button class="bpl-btn bpl-btn--sm" onclick={() => (confirmDeleteSource = null)}>Cancel</button>
+								{:else}
+									<button class="bpl-act bpl-act--danger" title="Remove source" onclick={() => handleRemoveSource(m.id)}>
+										<Trash2 size={15} strokeWidth={1.7} />
+									</button>
+								{/if}
+							</RowActionMenu>
 						</div>
 					</div>
 				{/each}
@@ -518,14 +558,19 @@
 	.bpl-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 45%; }
 	.bpl-tag { font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 
-	.bpl-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
-	.bpl-actions--static { opacity: 1; }
-	.bpl-row:hover .bpl-actions, .bpl-row:focus-within .bpl-actions { opacity: 1; }
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
+	.bpl-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+	/* Installed / Sources rows: RowActionMenu owns reveal (via --ram-reveal) + the
+	   touch/narrow ⋮ collapse. Static (source) rows keep their rail always visible on
+	   desktop; the enable/disable toggle on installed rows lives outside the menu. */
+	.bpl-row { --ram-reveal: 0; }
+	.bpl-row:hover, .bpl-row:focus-within { --ram-reveal: 1; }
+	.bpl-row--static { --ram-reveal: 1; }
+	/* Available rows: a single Install button, no menu — simple hover-reveal that
+	   stays visible on touch / mobile-width (1080px = app-wide mobile cutoff). */
+	.bpl-actions--hover { opacity: 0; transition: opacity 120ms ease; }
+	.bpl-row:hover .bpl-actions--hover, .bpl-row:focus-within .bpl-actions--hover { opacity: 1; }
 	@media (hover: none), (max-width: 1080px) {
-		.bpl-actions { opacity: 1; }
+		.bpl-actions--hover { opacity: 1; }
 	}
 	.bpl-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.bpl-act:hover { color: var(--foreground); background: var(--hover-overlay); }
@@ -592,6 +637,5 @@
 	@media (max-width: 639px) {
 		.bpl-search { max-width: none; }
 		.bpl-meta { display: none; }
-		.bpl-actions { opacity: 1; }
 	}
 </style>

@@ -19,6 +19,7 @@
 	import { Search, Bot, Trash2 } from 'lucide-svelte';
 	import { getModelLabel } from '$lib/constants/models';
 	import Banner from '$lib/components/Banner.svelte';
+	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -33,6 +34,25 @@
 	// Delete confirmation
 	let deletingAgent = $state<string | null>(null);
 	let deleteLoading = $state(false);
+
+	// Touch/narrow only: which row has its collapsed ⋮ tray expanded (one at a
+	// time; desktop keeps the always-inline hover rail). Outside click / Escape
+	// collapses it and disarms any pending delete confirmation.
+	let actionsOpenName = $state<string | null>(null);
+	function toggleRowActions(e: MouseEvent | KeyboardEvent, name: string) {
+		e.stopPropagation();
+		actionsOpenName = actionsOpenName === name ? null : name;
+	}
+	function onWindowClick() {
+		if (actionsOpenName !== null) actionsOpenName = null;
+		if (deletingAgent !== null) deletingAgent = null;
+	}
+	function onWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			actionsOpenName = null;
+			deletingAgent = null;
+		}
+	}
 
 	// Load agents when project changes
 	$effect(() => {
@@ -72,6 +92,8 @@
 		}
 	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="ptab">
 	{#if $projectAgentsLoading}
@@ -115,8 +137,8 @@
 								<p>This removes the agent file. This cannot be undone.</p>
 							</div>
 							<div class="ctl">
-								<button class="ed-btn sm" onclick={() => (deletingAgent = null)} disabled={deleteLoading}>Cancel</button>
-								<button class="ed-btn sm danger" onclick={() => handleDelete(agent.name)} disabled={deleteLoading}>
+								<button class="ed-btn sm" onclick={(e) => { e.stopPropagation(); deletingAgent = null; }} disabled={deleteLoading}>Cancel</button>
+								<button class="ed-btn sm danger" onclick={(e) => { e.stopPropagation(); handleDelete(agent.name); }} disabled={deleteLoading}>
 									{deleteLoading ? 'Deleting…' : 'Delete'}
 								</button>
 							</div>
@@ -132,9 +154,15 @@
 								{/if}
 							</div>
 							<div class="ctl">
-								<button class="icon-btn danger" title="Delete agent" onclick={() => (deletingAgent = agent.name)}>
-									<Trash2 size={15} />
-								</button>
+								<RowActionMenu
+									open={actionsOpenName === agent.name}
+									onToggle={(e) => toggleRowActions(e, agent.name)}
+									label="Agent actions"
+								>
+									<button class="icon-btn danger" title="Delete agent" onclick={(e) => { e.stopPropagation(); actionsOpenName = null; deletingAgent = agent.name; }}>
+										<Trash2 size={15} />
+									</button>
+								</RowActionMenu>
 							</div>
 						</div>
 					{/if}

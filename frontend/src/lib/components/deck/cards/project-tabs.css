@@ -471,6 +471,22 @@
 	border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 }
 
+/* ── RowActionMenu rows ──
+   Rows that collapse their per-row actions into a RowActionMenu (Agents delete,
+   MCP remove, Hooks test/delete) reveal the inline rail on hover/focus via the
+   inherited --ram-reveal custom property (the component owns opacity + the
+   touch/narrow ⋮ collapse). Gated on `:has(.ram)` so ONLY rows that actually
+   embed a menu are affected — General/Memory form rows keep their always-visible
+   controls untouched. Any always-visible control (a .switch) sits outside the
+   menu as a sibling and is unaffected. */
+.ptab .set-row:has(.ram) {
+	--ram-reveal: 0;
+}
+.ptab .set-row:has(.ram):hover,
+.ptab .set-row:has(.ram):focus-within {
+	--ram-reveal: 1;
+}
+
 /* ── Control stacked vertically (control + helper below) ── */
 .ptab .ctl-col {
 	flex-direction: column;
@@ -632,6 +648,12 @@
 	}
 	.ptab .set-row .ctl {
 		justify-content: flex-start;
+	}
+	/* Rows with a RowActionMenu keep their control cluster right-aligned when the
+	   row stacks, so the ⋮ sits at the row's right edge and its tray floats left
+	   into the row instead of off the left edge. */
+	.ptab .set-row:has(.ram) .ctl {
+		justify-content: flex-end;
 	}
 	/* Plain inline inputs/selects fill the row instead of shrinking to a
 	   narrow box on the right (fixes the cramped Project ID field). */
