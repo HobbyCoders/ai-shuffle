@@ -294,3 +294,83 @@ describe('SessionsBoard clear-session confirm timer', () => {
 		expect(() => vi.advanceTimersByTime(10000)).not.toThrow();
 	});
 });
+
+/**
+ * Regression: the mobile ⋮ tray (`actionsOpenId`) stayed open after acting on
+ * any of its buttons. Every in-tray handler calls `e.stopPropagation()` so the
+ * window-click closer (`handleFilterWindowClick`) never sees the click, and
+ * none of the handlers cleared `actionsOpenId` themselves. Fixed by clearing
+ * it directly in each handler.
+ *
+ * The tray's open state is asserted via `aria-expanded` on the row's ⋮ toggle
+ * (RowActionMenu wires `open={actionsOpenId === session.id}` straight to it),
+ * not by CSS visibility — jsdom doesn't evaluate the (hover: none)/max-width
+ * media query that actually reveals the tray on real touch/narrow layouts.
+ */
+describe('SessionsBoard action tray open/close state', () => {
+	function toggleFor(title: string): HTMLElement {
+		return rowFor(title).querySelector('[title="Session actions"]') as HTMLElement;
+	}
+	function isTrayOpen(title: string): boolean {
+		return toggleFor(title).getAttribute('aria-expanded') === 'true';
+	}
+	async function openTray(title: string) {
+		await fireEvent.click(toggleFor(title));
+		expect(isTrayOpen(title)).toBe(true);
+	}
+
+	it('closes the tray after clicking Favorite', async () => {
+		renderBoard();
+		await openTray('Local one');
+		const fav = rowFor('Local one').querySelector('[title="Favorite"]') as HTMLElement;
+		await fireEvent.click(fav);
+		expect(isTrayOpen('Local one')).toBe(false);
+	});
+
+	it('closes the tray after clicking Fork', async () => {
+		renderBoard();
+		await openTray('Local one');
+		const fork = rowFor('Local one').querySelector('[title="Fork session"]') as HTMLElement;
+		await fireEvent.click(fork);
+		expect(isTrayOpen('Local one')).toBe(false);
+	});
+
+	it('closes the tray after Resume (on a remote row)', async () => {
+		renderBoard();
+		await openTray('Remote one');
+		const resume = rowFor('Remote one').querySelector('[title^="Resume here"]') as HTMLElement;
+		await fireEvent.click(resume);
+		expect(isTrayOpen('Remote one')).toBe(false);
+	});
+
+	it('keeps the tray open on the first Clear-session click, closes on Confirm', async () => {
+		renderBoard();
+		await openTray('Local one');
+
+		// First click only arms the confirm — the tray must stay open so the
+		// user can see the Confirm/Cancel pair it reveals.
+		const clear = rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement;
+		await fireEvent.click(clear);
+		expect(isTrayOpen('Local one')).toBe(true);
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+
+		// Confirming actually deletes and must close the tray.
+		const confirm = rowFor('Local one').querySelector('[title="Confirm clear"]') as HTMLElement;
+		await fireEvent.click(confirm);
+		expect(mocks.deleteSession).toHaveBeenCalledWith('a');
+		expect(isTrayOpen('Local one')).toBe(false);
+	});
+
+	it('closes the tray after Cancel of an armed delete confirm', async () => {
+		renderBoard();
+		await openTray('Local one');
+		const clear = rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement;
+		await fireEvent.click(clear);
+		expect(isTrayOpen('Local one')).toBe(true);
+
+		const cancel = rowFor('Local one').querySelector('[title="Cancel"]') as HTMLElement;
+		await fireEvent.click(cancel);
+		expect(isTrayOpen('Local one')).toBe(false);
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+});
