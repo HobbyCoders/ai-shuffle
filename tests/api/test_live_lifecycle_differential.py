@@ -27,11 +27,28 @@ Modes covered (the four lifecycle states plus the delta-poll paths):
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from starlette.responses import Response
 
 from app.api.sessions import get_live_session
+from app.core.config import settings
 from app.core.live_session_store import live_session_store
 from app.core.task_registry import task_registry
+
+
+@pytest.fixture(autouse=True)
+def _pin_preserve_background_flag():
+    """Pin the effective ``preserve_background_on_interrupt`` flag to False for
+    every test in this file, independent of ambient env vars or any other
+    (properly torn-down) test's mock state. This suite asserts the FULL /live
+    response body byte-for-byte — including this field — so it must not depend
+    on suite ordering. See tests/conftest.py's forced
+    ``PRESERVE_BACKGROUND_ON_INTERRUPT`` env override for the actual source fix
+    this pin backstops.
+    """
+    with patch.object(settings, "preserve_background_on_interrupt", False), \
+            patch("app.core.cli_interrupt_patch.is_patch_active", return_value=False):
+        yield
 
 
 def _owner_path_patches(session):

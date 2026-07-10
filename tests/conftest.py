@@ -37,6 +37,23 @@ os.environ["TESTING"] = "1"
 # for the live deployment, which must not leak into the test process.
 os.environ["CORS_ORIGINS"] = "*"
 
+# Same rationale as CORS_ORIGINS above: a deployment that has opted into the
+# bundled-CLI interrupt patch exports PRESERVE_BACKGROUND_ON_INTERRUPT=1 in its
+# real process environment, and this test process inherits it. Left alone, the
+# very first ``TestClient(app)``-based fixture (``client``/``authenticated_client``)
+# runs the REAL app lifespan (app/main.py), which sees
+# ``settings.preserve_background_on_interrupt`` as True and calls the REAL
+# ``cli_interrupt_patch.patch_cli_preserve_background`` against the actually
+# installed bundled ``claude`` binary — rewriting ~250MB on disk as a test side
+# effect AND permanently flipping the process-global
+# ``cli_interrupt_patch._PATCH_ACTIVE`` to True for the rest of the run (that
+# module deliberately never un-patches). Any later test asserting the exact
+# effective flag (e.g. tests/api/test_live_lifecycle_differential.py) then sees
+# a leaked True depending on suite ordering. Force the flag off for the whole
+# test process; tests that need it True patch it explicitly and locally
+# (tests/api/test_chat_ws_stop_background.py, tests/core/test_config.py).
+os.environ["PRESERVE_BACKGROUND_ON_INTERRUPT"] = "false"
+
 
 # =============================================================================
 # SAFETY: forbid opening a real Postgres pool during tests
@@ -411,6 +428,28 @@ def reset_environment():
     yield
     os.environ.clear()
     os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def reset_cli_interrupt_patch_active():
+    """Reset ``cli_interrupt_patch._PATCH_ACTIVE`` before each test.
+
+    Defense-in-depth alongside the forced ``PRESERVE_BACKGROUND_ON_INTERRUPT``
+    override above: that override stops the app lifespan from ever calling the
+    REAL patcher during tests, but the flag is still a bare process-global with
+    no built-in reset (see that module's own docstring — it's deliberately
+    permanent for a real deployment). Reset BEFORE each test so any stray path
+    that does flip it for real (e.g. a future test exercising the lifespan
+    patch call directly) can never poison a later test's exact-body assertions.
+    tests/core/test_cli_interrupt_patch.py already resets it itself for its own
+    scope; this is a process-wide backstop.
+    """
+    try:
+        import app.core.cli_interrupt_patch as _cli_patch_mod
+        _cli_patch_mod._PATCH_ACTIVE = False
+    except Exception:
+        pass
+    yield
 
 
 @pytest.fixture(autouse=True)

@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 _pending: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _wakeup: Optional[asyncio.Event] = None
 _consumer: Optional[asyncio.Task] = None
+# Single-drainer lock: the auto-started consumer task and an explicit flush()
+# both drain the same queue. Without serialization they pop the queue
+# concurrently — racing two asyncio.to_thread writers — and, worse, flush() can
+# return while the consumer still holds a popped-but-unwritten snapshot mid
+# to_thread, so a test that flushes then reads the table sees a missing row.
+# Held for the duration of each drain so exactly one drainer runs at a time and
+# flush() cannot return until every in-flight write has landed. Lazily created
+# so it binds to whichever event loop is current (reset() drops it per loop).
+_drain_lock: Optional[asyncio.Lock] = None
 # One-log-per-outage latch: True after the first failed write, reset by the
 # next successful one.
 _outage_logged = False
@@ -95,7 +104,27 @@ async def _consume() -> None:
         await _drain_once()
 
 
+def _get_drain_lock() -> asyncio.Lock:
+    """The single-drainer lock, bound to the current running loop."""
+    global _drain_lock
+    if _drain_lock is None:
+        _drain_lock = asyncio.Lock()
+    return _drain_lock
+
+
 async def _drain_once() -> None:
+    """Write every queued snapshot under the single-drainer lock.
+
+    Both the consumer task and flush() call this; the lock guarantees they
+    never pop the queue concurrently and makes flush() block until any in-flight
+    consumer write has landed (so the table — not just the queue — is settled
+    when flush() returns).
+    """
+    async with _get_drain_lock():
+        await _drain_body()
+
+
+async def _drain_body() -> None:
     """Write every queued snapshot (latest-wins already applied by the dict)."""
     global _outage_logged
     from app.db import database
@@ -134,10 +163,13 @@ def pending_count() -> int:
 
 def reset() -> None:
     """Drop all queued snapshots and stop the consumer (tests/shutdown)."""
-    global _consumer, _wakeup, _outage_logged
+    global _consumer, _wakeup, _outage_logged, _drain_lock
     if _consumer is not None and not _consumer.done():
         _consumer.cancel()
     _consumer = None
     _wakeup = None
+    # Drop the drain lock so the next drain recreates it on the current loop
+    # (an asyncio.Lock is bound to the loop it was created on).
+    _drain_lock = None
     _pending.clear()
     _outage_logged = False
