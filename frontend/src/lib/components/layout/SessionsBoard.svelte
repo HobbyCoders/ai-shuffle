@@ -66,7 +66,15 @@
 	}
 
 	let selectedKey = $state<string | null>(null);
+	// Armed-confirm UI state ONLY: which row is showing its Confirm/Cancel pair.
+	// Freely nulled by Escape / outside-click / Cancel / re-arming another row —
+	// never use it to ask "is a delete request running" (that's deleteInFlightId).
 	let deletingSessionId = $state<string | null>(null);
+	// In-flight delete guard ONLY: the id whose DELETE request is currently
+	// awaiting. Set right before the request and cleared in its `finally`; read by
+	// `openSession` so a stray row click can't open the mid-delete session (which
+	// the top bar would surface as a brand-new empty chat). Nothing else writes it.
+	let deleteInFlightId = $state<string | null>(null);
 	let deleteLoading = $state(false);
 	// Safety auto-reset for the delete confirmation: if the user arms "Clear" but
 	// walks away, drop the confirm state after a while so a stale confirm can't
@@ -467,9 +475,15 @@
 	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
 		if (deletingSessionId === id) {
-			// Confirmed — the pending auto-reset is now moot; cancel it and delete.
+			// Confirmed — drop the armed-confirm UI (and its auto-reset timer) and
+			// hand the id over to the dedicated in-flight guard. The guard must NOT
+			// reuse deletingSessionId: Escape, click-outside, Cancel and arming
+			// another row all null that UI state at will, and while the delete is in
+			// flight the disabled Confirm button retargets clicks to the parent row —
+			// openSession needs a guard nobody else can tear down mid-request.
 			disarmDeleteConfirm();
 			actionsOpenId = null;
+			deleteInFlightId = id;
 			deleteLoading = true;
 			try {
 				if (activeId === id) onNewSession();
@@ -478,7 +492,7 @@
 				toast.push('Failed to delete session', { tone: 'error' });
 			} finally {
 				deleteLoading = false;
-				deletingSessionId = null;
+				deleteInFlightId = null;
 			}
 		} else {
 			armDeleteConfirm(id);
@@ -490,12 +504,14 @@
 		disarmDeleteConfirm();
 	}
 	// Open a session from its row — but never while that row is showing its
-	// delete confirmation (or the delete is in flight). The confirm button is
-	// natively `disabled` during the request, and the browser routes a click on
-	// a disabled button to its parent (the row), which would otherwise open the
-	// just-deleted session as an empty chat.
+	// delete confirmation (deletingSessionId) OR its delete request is in flight
+	// (deleteInFlightId). The confirm button is natively `disabled` during the
+	// request, and the browser routes a click on a disabled button to its parent
+	// (the row), which would otherwise open the just-deleted session as an empty
+	// chat. Two variables because the armed-confirm state can be nulled at any
+	// moment (Escape / Cancel / re-arm) while the request is still running.
 	function openSession(id: string) {
-		if (deletingSessionId === id) return;
+		if (deletingSessionId === id || deleteInFlightId === id) return;
 		onOpenSession(id);
 	}
 
@@ -744,7 +760,7 @@
 	<div
 		class="row"
 		class:active={activeId === session.id}
-		class:deleting={deletingSessionId === session.id}
+		class:deleting={deletingSessionId === session.id || deleteInFlightId === session.id}
 		role="button"
 		tabindex="0"
 		onclick={() => onRowClick(session)}
@@ -842,7 +858,10 @@
 			>
 				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
 			</button>
-			{#if deletingSessionId === session.id}
+			<!-- Confirm/Cancel stay rendered through the in-flight window too (not
+			     just while armed) so the plain Clear button can't reappear — and be
+			     re-armed — mid-request; Confirm is disabled for that whole window. -->
+			{#if deletingSessionId === session.id || deleteInFlightId === session.id}
 				<button class="row-action danger" disabled={deleteLoading} title="Confirm clear" onclick={(e) => handleDelete(e, session.id)}>
 					<BrushCleaning size={13} strokeWidth={2} />
 				</button>

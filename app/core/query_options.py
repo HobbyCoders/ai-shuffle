@@ -135,16 +135,42 @@ def _rebind_worktree_cwd_cross_device(
     project_id = (project or {}).get("id") or (session or {}).get("project_id")
     if not project_id or not branch_name:
         return None, None
-    _stored, local_project = resolve_runnable_local_project(project_id)
-    if local_project is None or local_project.get("id") == project_id:
+
+    # Decide "cross-device relocation vs same-device removal" from the WORKTREE
+    # ROW's home project — the install whose clone physically holds the checkout —
+    # NOT the session's project_id. "Resume here" (adopt) rebinds the SESSION's
+    # project_id onto this install's local clone BEFORE the first send (so search /
+    # commands / fork resolve locally right away). By send time the session already
+    # points at the LOCAL project, so ``resolve_runnable_local_project(session
+    # project)`` returns the same id and the same-device gate below would wrongly
+    # fire — refusing to rebuild a worktree that was created on the OTHER machine
+    # and dead-ending the resume with "working directory no longer exists". The
+    # worktree row's repository still points at its foreign home, so use that as
+    # the authority: it stays foreign until ``recreate_worktree`` actually rebinds
+    # the row, which only happens once we recreate here.
+    home_project_id = project_id
+    if worktree and worktree.get("repository_id"):
+        try:
+            home_repo = database.get_git_repository(worktree["repository_id"])
+            if home_repo and home_repo.get("project_id"):
+                home_project_id = home_repo["project_id"]
+        except Exception:  # noqa: BLE001 — fall back to the session project id
+            logger.debug(
+                "[Options] Could not resolve worktree %s home project; using "
+                "session project %s for the rebind decision",
+                worktree.get("id"), project_id, exc_info=True,
+            )
+
+    _stored, local_project = resolve_runnable_local_project(home_project_id)
+    if local_project is None or local_project.get("id") == home_project_id:
         # Rebind ONLY when we resolved onto a DIFFERENT install's clone (a genuine
         # cross-device relocation). No local clone (None) → let the caller raise.
-        # The session's OWN project being runnable here (same id) means the cwd is
-        # missing for a same-device reason — the worktree folder was removed, not
-        # relocated to another machine — so we must NOT silently recreate it here:
-        # that would resurrect a worktree the user tore down and, for a branch that
-        # only survives on origin, fabricate an empty branch off the default. Raise
-        # the honest "no working directory" error, exactly as before this feature.
+        # The worktree's OWN home project being runnable here (same id) means the
+        # cwd is missing for a same-device reason — the worktree folder was removed,
+        # not relocated to another machine — so we must NOT silently recreate it
+        # here: that would resurrect a worktree the user tore down and, for a branch
+        # that only survives on origin, fabricate an empty branch off the default.
+        # Raise the honest "no working directory" error, exactly as before.
         return None, None
 
     try:

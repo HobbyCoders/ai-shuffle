@@ -374,3 +374,91 @@ describe('SessionsBoard action tray open/close state', () => {
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 	});
 });
+
+/**
+ * Regression: "sometimes clicking Confirm on Clear session opens a new chat."
+ *
+ * A stray click landing on the row while its delete is in flight (the browser
+ * retargets a click on the now-`disabled` Confirm button to its parent row) must
+ * NOT re-open the just-deleted session — which the top bar would surface as a
+ * fresh, empty chat. openSession() therefore guards on a DEDICATED
+ * `deleteInFlightId`, set before the request and cleared only in its `finally`.
+ * The guard used to piggyback on `deletingSessionId` (the armed-confirm UI
+ * state), which Escape, Cancel, outside-click and arming another row all null at
+ * will — each of those torn the guard down mid-request. Every case below holds
+ * the delete promise open, fires one of those guard-killers, then clicks the
+ * deleted row and asserts nothing opens.
+ */
+describe('SessionsBoard clear-session confirm never opens a new chat', () => {
+	// Arm + confirm the clear on "Local one" (id 'a') with the delete held open;
+	// returns the resolver so each test controls when the request "completes".
+	async function confirmWithDeleteHeldOpen() {
+		let resolveDelete!: () => void;
+		mocks.deleteSession.mockImplementationOnce(
+			() => new Promise<void>((res) => { resolveDelete = () => res(); })
+		);
+		const rendered = renderBoard();
+		await fireEvent.click(rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement);
+		await fireEvent.click(rowFor('Local one').querySelector('[title="Confirm clear"]') as HTMLElement);
+		expect(mocks.deleteSession).toHaveBeenCalledWith('a');
+		return { ...rendered, resolveDelete };
+	}
+	async function finish(resolveDelete: () => void) {
+		resolveDelete();
+		await vi.waitFor(() => expect(mocks.deleteSession).toHaveBeenCalledTimes(1));
+	}
+
+	it('keeps the row-open guard live while the delete is in flight', async () => {
+		const { onOpenSession, onNewSession, resolveDelete } = await confirmWithDeleteHeldOpen();
+
+		// Delete still in flight — a click that reaches the row must be swallowed by
+		// the guard, not routed on to open the just-deleted session.
+		await fireEvent.click(rowFor('Local one'));
+		expect(onOpenSession).not.toHaveBeenCalled();
+		expect(onNewSession).not.toHaveBeenCalled();
+
+		await finish(resolveDelete);
+	});
+
+	it('Escape during the in-flight window does not tear the guard down', async () => {
+		const { onOpenSession, resolveDelete } = await confirmWithDeleteHeldOpen();
+
+		// Escape unconditionally disarms the confirm UI (handleFilterWindowKeydown)
+		// — that must not defeat the in-flight guard.
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await fireEvent.click(rowFor('Local one'));
+		expect(onOpenSession).not.toHaveBeenCalled();
+
+		await finish(resolveDelete);
+	});
+
+	it('Cancel clicked during the in-flight window does not tear the guard down', async () => {
+		const { onOpenSession, resolveDelete } = await confirmWithDeleteHeldOpen();
+
+		// On desktop the rail is hover-revealed (not gated on the ⋮ tray state), so
+		// the Cancel button is still clickable while the request runs; it must only
+		// drop the confirm UI, never the in-flight guard.
+		const cancel = rowFor('Local one').querySelector('[title="Cancel"]') as HTMLElement;
+		expect(cancel).toBeTruthy();
+		await fireEvent.click(cancel);
+		await fireEvent.click(rowFor('Local one'));
+		expect(onOpenSession).not.toHaveBeenCalled();
+
+		await finish(resolveDelete);
+	});
+
+	it("arming another row's clear during the in-flight window does not tear the guard down", async () => {
+		const { onOpenSession, resolveDelete } = await confirmWithDeleteHeldOpen();
+
+		// Arming row B calls armDeleteConfirm → disarmDeleteConfirm, which used to
+		// null the shared variable guarding row A's in-flight delete.
+		await fireEvent.click(rowFor('Remote one').querySelector('[title="Clear session"]') as HTMLElement);
+		expect(rowFor('Remote one').querySelector('[title="Confirm clear"]')).toBeTruthy();
+
+		await fireEvent.click(rowFor('Local one'));
+		expect(onOpenSession).not.toHaveBeenCalledWith('a');
+		expect(onOpenSession).not.toHaveBeenCalled();
+
+		await finish(resolveDelete);
+	});
+});

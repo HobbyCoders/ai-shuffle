@@ -365,6 +365,115 @@ def test_row_dir_missing_same_device_raises_no_recreate(mocks):
 
 
 # ---------------------------------------------------------------------------
+# (j2) ADOPTED cross-device — "Resume here" rebinds the SESSION's project_id onto
+#      this install's local clone BEFORE the first send. By send time
+#      session.project_id already equals the LOCAL project, so a session-keyed
+#      rebind gate would see "same id" and dead-end the resume. The worktree row
+#      still references its FOREIGN home repository, which is the correct authority
+#      for the cross-device decision → recreate_worktree must run. This is the
+#      exact "Resume here still not working" bug.
+# ---------------------------------------------------------------------------
+
+def test_row_dir_missing_adopted_uses_worktree_home_project(mocks, monkeypatch):
+    """Adopt already rebound the session to the local clone; the rebind decision
+    must key off the worktree row's FOREIGN home project (via repository_id), not
+    the local session project — otherwise the resume raises instead of recreating."""
+    row = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    row["repository_id"] = "repo-foreign"
+    mocks.get_worktree_by_session.return_value = row
+    # Session was already rebound to the LOCAL project by the adopt endpoint.
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-local"}
+    FakePath.existing = set()  # the /workspace worktree dir is absent on this machine
+
+    # The worktree row's repository resolves to the FOREIGN home project.
+    get_repo = MagicMock(
+        name="get_git_repository",
+        return_value={"id": "repo-foreign", "project_id": "proj-foreign"},
+    )
+    monkeypatch.setattr(qo.database, "get_git_repository", get_repo)
+
+    new_wt = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    new_wt["worktree_path"] = ".worktrees/feat/foo-local"
+    mocks.wm.recreate_worktree.return_value = new_wt
+    mocks.wm.is_worktree_valid.return_value = True
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ) as resolve_mock:
+        working_dir, mode, info, rebound = _resolve_session_worktree_cwd(
+            SESSION_ID, project={"id": "proj-local", "path": "/local/clone"}
+        )
+
+    assert mode == "worktree"
+    assert working_dir == "/abs/.worktrees/feat/foo-local"
+    # The FOREIGN home project id (not the local session project) drove the lookup.
+    resolve_mock.assert_called_once_with("proj-foreign")
+    get_repo.assert_called_once_with("repo-foreign")
+    # recreate_worktree owns the actual rebind + row repointing.
+    mocks.wm.recreate_worktree.assert_called_once_with("wt-x", rebind_session_id=SESSION_ID)
+    assert rebound == {"id": "proj-local", "path": "/local/clone"}
+    assert info["branch"] == "feat/foo"
+
+
+def test_row_dir_missing_home_repo_local_still_raises(mocks, monkeypatch):
+    """With a repository_id whose home project IS runnable here (same id), the cwd
+    is missing for a same-device reason — the folder was removed, not relocated.
+    Preserve the honest error; never resurrect a locally-owned worktree."""
+    row = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    row["repository_id"] = "repo-local"
+    mocks.get_worktree_by_session.return_value = row
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-owned"}
+    FakePath.existing = set()
+
+    monkeypatch.setattr(
+        qo.database,
+        "get_git_repository",
+        MagicMock(return_value={"id": "repo-local", "project_id": "proj-owned"}),
+    )
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-owned"}, {"id": "proj-owned", "path": "/repo"}),
+    ) as resolve_mock:
+        with pytest.raises(WorktreeUnavailableError):
+            _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    resolve_mock.assert_called_once_with("proj-owned")
+    mocks.wm.recreate_worktree.assert_not_called()
+
+
+def test_row_home_repo_lookup_failure_falls_back_to_session_project(mocks, monkeypatch):
+    """If the worktree's home repository can't be resolved (DB hiccup / hard-deleted
+    repo row), fall back to the session project id for the decision rather than
+    crashing the resume."""
+    row = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    row["repository_id"] = "repo-gone"
+    mocks.get_worktree_by_session.return_value = row
+    mocks.get_session.return_value = {"id": SESSION_ID, "project_id": "proj-foreign"}
+    FakePath.existing = set()
+
+    # Home-repo lookup returns None (repo row gone) → fall back to session project.
+    monkeypatch.setattr(
+        qo.database, "get_git_repository", MagicMock(return_value=None)
+    )
+    new_wt = _wt(status="active", wt_id="wt-x", branch="feat/foo")
+    new_wt["worktree_path"] = ".worktrees/feat/foo-local"
+    mocks.wm.recreate_worktree.return_value = new_wt
+    mocks.wm.is_worktree_valid.return_value = True
+
+    with patch(
+        "app.core.project_links.resolve_runnable_local_project",
+        return_value=({"id": "proj-foreign"}, {"id": "proj-local", "path": "/local/clone"}),
+    ) as resolve_mock:
+        working_dir, mode, _, _ = _resolve_session_worktree_cwd(SESSION_ID, project=None)
+
+    assert mode == "worktree"
+    # Fell back to the session project id for the resolve call.
+    resolve_mock.assert_called_once_with("proj-foreign")
+    mocks.wm.recreate_worktree.assert_called_once_with("wt-x", rebind_session_id=SESSION_ID)
+
+
+# ---------------------------------------------------------------------------
 # (k) cross-device rebind — NO worktree row (row hard-deleted; only the session's
 #     worktree_* columns remain). Create a fresh worktree in the local sibling
 #     clone from the branch, reusing/recovering it rather than fabricating one.
