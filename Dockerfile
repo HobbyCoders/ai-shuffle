@@ -121,6 +121,19 @@ RUN groupadd -g 1000 appuser && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ── Make the bundled Claude Code CLI writable by appuser ──
+# app/core/cli_interrupt_patch.py rewrites a byte in this binary at runtime
+# (as appuser) to keep background subagents alive across Stop/interrupt
+# (PRESERVE_BACKGROUND_ON_INTERRUPT). pip installs claude_agent_sdk as root,
+# leaving the binary root:root -rwxr-xr-x, so the runtime patch fails with
+# "Cannot write ... (read-only): Permission denied" and the feature is inert
+# even with the env var set. We only chown here — the actual byte patch stays
+# a runtime concern (it relocates its anchor per CLI build; see
+# resolve_bundled_cli_path()/apply_patch() in cli_interrupt_patch.py) rather
+# than being baked into the image.
+RUN find /usr/local/lib/python3*/site-packages/claude_agent_sdk/_bundled \
+    -name claude -exec chown appuser:appuser {} +
+
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
 
