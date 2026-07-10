@@ -1132,6 +1132,7 @@ from app.db.automations import (  # noqa: F401
 from app.db.queued_messages import (  # noqa: F401
     add_queued_message,
     get_queued_messages,
+    count_queued_messages,
     pop_next_queued_message,
     remove_queued_message,
     clear_queued_messages,
