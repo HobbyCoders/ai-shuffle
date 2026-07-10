@@ -235,9 +235,10 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 53 for the usage_snapshots table (per-install per-account usage).
-    assert db_version == 53
-    assert pg_version == 53
+    # Bumped to 54 for the sse_entry_text() function + idx_sse_fts GIN index
+    # (store-backed full-history FTS over session_store_entries).
+    assert db_version == 54
+    assert pg_version == 54
     assert db_version == pg_version
 
 

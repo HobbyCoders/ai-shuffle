@@ -90,7 +90,11 @@ def _safe_json(value):
 # v53: Add usage_snapshots table (per-install Claude usage-limits snapshot on a
 #      shared DB — the 5-hour window is per-account, so each install persists
 #      its own snapshot and the usage endpoint serves them all)
-SCHEMA_VERSION = 53
+# v54: Add sse_entry_text(entry jsonb) IMMUTABLE function + idx_sse_fts GIN
+#      expression index over session_store_entries so full conversation history
+#      (assistant/tool content lives in the JSONB store, not session_messages,
+#      under postgres_only) is full-text searchable.
+SCHEMA_VERSION = 54
 
 
 def _run_column_migrations(cursor):
@@ -445,6 +449,44 @@ def _run_column_migrations(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_sss_project "
         "ON session_store_summaries(project_key)"
+    )
+
+    # store-backed FTS (v54). Under postgres_only the assistant/tool history is
+    # NOT in session_messages — the full transcript lives in the JSONB
+    # session_store_entries.entry. sse_entry_text() extracts searchable text
+    # from a user/assistant entry (skipping meta/sidechain rows), and the GIN
+    # expression index over its tsvector makes the store searchable. The
+    # function MUST be IMMUTABLE so it can back an expression index. Idempotent
+    # CREATE OR REPLACE / CREATE INDEX IF NOT EXISTS so upgrades from any older
+    # version pick it up on startup without needing the SCHEMA_VERSION bump to
+    # fire the bootstrap path (same defensive pattern as the SessionStore block
+    # above). The function must be created before the index that references it.
+    cursor.execute("""
+        CREATE OR REPLACE FUNCTION sse_entry_text(entry jsonb)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $fn$
+            SELECT CASE
+                WHEN COALESCE(entry->>'type', '') NOT IN ('user', 'assistant') THEN NULL
+                WHEN COALESCE((entry->>'isMeta')::boolean, false) THEN NULL
+                WHEN COALESCE((entry->>'isSidechain')::boolean, false) THEN NULL
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'string'
+                    THEN entry #>> '{message,content}'
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'array'
+                    THEN (
+                        SELECT string_agg(block ->> 'text', ' ')
+                        FROM jsonb_array_elements(entry #> '{message,content}') AS block
+                        WHERE block ->> 'type' = 'text'
+                    )
+                ELSE NULL
+            END
+        $fn$
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_fts "
+        "ON session_store_entries USING gin (to_tsvector('english', sse_entry_text(entry))) "
+        "WHERE subpath IS NULL"
     )
 
     # error_log (v44). Idempotent so upgrades from any older version land the

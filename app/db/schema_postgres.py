@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 53
+SCHEMA_VERSION = 54
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1246,6 +1246,39 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_sse_session_sub "
         "ON session_store_entries (session_id, subpath, id) "
         "WHERE subpath IS NOT NULL"
+    )
+
+    # Store-backed FTS: under postgres_only the assistant/tool history lives in
+    # the JSONB ``entry`` (not session_messages). sse_entry_text() extracts the
+    # searchable text of a user/assistant entry (skipping meta/sidechain rows)
+    # and MUST be IMMUTABLE so it can back the expression GIN index below, which
+    # makes full conversation history searchable (see search_sessions).
+    cursor.execute("""
+        CREATE OR REPLACE FUNCTION sse_entry_text(entry jsonb)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $fn$
+            SELECT CASE
+                WHEN COALESCE(entry->>'type', '') NOT IN ('user', 'assistant') THEN NULL
+                WHEN COALESCE((entry->>'isMeta')::boolean, false) THEN NULL
+                WHEN COALESCE((entry->>'isSidechain')::boolean, false) THEN NULL
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'string'
+                    THEN entry #>> '{message,content}'
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'array'
+                    THEN (
+                        SELECT string_agg(block ->> 'text', ' ')
+                        FROM jsonb_array_elements(entry #> '{message,content}') AS block
+                        WHERE block ->> 'type' = 'text'
+                    )
+                ELSE NULL
+            END
+        $fn$
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_fts "
+        "ON session_store_entries USING gin (to_tsvector('english', sse_entry_text(entry))) "
+        "WHERE subpath IS NULL"
     )
 
     # Summary sidecar written inside append() via fold_session_summary().

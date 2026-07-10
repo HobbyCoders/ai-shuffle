@@ -119,6 +119,8 @@ class SessionSearchResultPaginated(TypedDict):
     match_type: str
     match_snippet: Optional[str]
     match_time: Optional[str]
+    match_count: int
+    match_count: int
 
 
 class SessionMessageRow(TypedDict):
@@ -1288,9 +1290,15 @@ def search_sessions(
     with get_db() as conn:
         cursor = get_cursor(conn)
 
-        # Search titles with ILIKE, content with tsvector FTS.
-        # Use DISTINCT ON (id) to deduplicate sessions that match in both
-        # title and content, keeping the best match (title > content).
+        # Search titles with ILIKE, legacy message content + full store history
+        # with tsvector FTS. Use DISTINCT ON (id) to deduplicate sessions that
+        # match in more than one place, keeping the best match (title > content).
+        # store_matches searches session_store_entries (the JSONB transcript
+        # mirror) via the IMMUTABLE sse_entry_text() + idx_sse_fts GIN index —
+        # under postgres_only the assistant/tool history lives there, not in
+        # session_messages. Joined to sessions on sdk_session_id.
+        # match_count = COUNT(*) OVER (PARTITION BY id) taken BEFORE the final
+        # dedupe, i.e. how many of {title, legacy-content, store-content} hit.
         sql = f"""
         WITH title_matches AS (
             SELECT
@@ -1320,18 +1328,45 @@ def search_sessions(
             AND s.status != 'archived'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
+        store_matches AS (
+            SELECT DISTINCT ON (s.id)
+                s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
+                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.turn_count, s.created_at, s.updated_at,
+                'content' as match_type,
+                ts_headline('english', sse_entry_text(sse.entry), plainto_tsquery('english', {_ph}),
+                    'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
+                sse.created_at as match_time
+            FROM session_store_entries sse
+            INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
+            WHERE sse.subpath IS NULL
+            AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+            AND s.status != 'archived'{inst_sql}
+            ORDER BY s.id, sse.created_at DESC
+        ),
         all_matches AS (
-            SELECT * FROM title_matches
-            UNION ALL
-            SELECT * FROM content_matches
+            SELECT *, COUNT(*) OVER (PARTITION BY id) as match_count
+            FROM (
+                SELECT * FROM title_matches
+                UNION ALL
+                SELECT * FROM content_matches
+                UNION ALL
+                SELECT * FROM store_matches
+            ) unioned
         )
         SELECT DISTINCT ON (id) *
         FROM all_matches
         WHERE 1=1
         """
-        # title ILIKE needs search_term (+ instance_id when isolated), ts_headline
-        # needs fts_query, WHERE @@ needs fts_query (+ instance_id when isolated).
-        params: List[Any] = [search_term, *inst_params, fts_query, fts_query, *inst_params]
+        # Param order follows CTE order: title ILIKE needs search_term (+
+        # instance_id when isolated); content ts_headline + WHERE @@ each need
+        # fts_query (+ instance_id); store ts_headline + WHERE @@ each need
+        # fts_query (+ instance_id).
+        params: List[Any] = [
+            search_term, *inst_params,
+            fts_query, fts_query, *inst_params,
+            fts_query, fts_query, *inst_params,
+        ]
 
         # Add filters
         if project_id:
@@ -1391,7 +1426,13 @@ def search_sessions_paginated(
 
         # Build the base CTE using Postgres tsvector FTS.
         # Uses DISTINCT ON (id) to deduplicate sessions, preferring title
-        # matches over content matches.
+        # matches over content matches. store_matches searches the JSONB
+        # transcript mirror (session_store_entries) via the IMMUTABLE
+        # sse_entry_text() + idx_sse_fts GIN index — under postgres_only the
+        # assistant/tool history lives there, not in session_messages. Joined to
+        # sessions on sdk_session_id. match_count = COUNT(*) OVER (PARTITION BY
+        # id) taken BEFORE the final dedupe, i.e. how many of {title,
+        # legacy-content, store-content} hit.
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -1417,19 +1458,44 @@ def search_sessions_paginated(
             AND s.status != 'archived'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
+        store_matches AS (
+            SELECT DISTINCT ON (s.id)
+                s.*,
+                'content' as match_type,
+                ts_headline('english', sse_entry_text(sse.entry), plainto_tsquery('english', {_ph}),
+                    'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
+                sse.created_at as match_time
+            FROM session_store_entries sse
+            INNER JOIN sessions s ON s.sdk_session_id = sse.session_id
+            WHERE sse.subpath IS NULL
+            AND to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
+            AND s.status != 'archived'{inst_sql}
+            ORDER BY s.id, sse.created_at DESC
+        ),
         all_matches AS (
-            SELECT * FROM title_matches
-            UNION ALL
-            SELECT * FROM content_matches
+            SELECT *, COUNT(*) OVER (PARTITION BY id) as match_count
+            FROM (
+                SELECT * FROM title_matches
+                UNION ALL
+                SELECT * FROM content_matches
+                UNION ALL
+                SELECT * FROM store_matches
+            ) unioned
         ),
         deduped_matches AS (
             SELECT DISTINCT ON (id) *
             FROM all_matches
             WHERE 1=1
         """
-        # title ILIKE needs search_term (+ instance_id when isolated), ts_headline
-        # needs fts_query, WHERE @@ needs fts_query (+ instance_id when isolated).
-        base_params: List[Any] = [search_term, *inst_params, fts_query, fts_query, *inst_params]
+        # Param order follows CTE order: title ILIKE needs search_term (+
+        # instance_id when isolated); content ts_headline + WHERE @@ each need
+        # fts_query (+ instance_id); store ts_headline + WHERE @@ each need
+        # fts_query (+ instance_id).
+        base_params: List[Any] = [
+            search_term, *inst_params,
+            fts_query, fts_query, *inst_params,
+            fts_query, fts_query, *inst_params,
+        ]
 
         # Build filter conditions
         filter_sql = ""

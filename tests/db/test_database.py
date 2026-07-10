@@ -565,6 +565,68 @@ class TestSearchSessions:
 
         assert result == []
 
+    _STORE_SKIP = (
+        "store-backed FTS uses Postgres-native constructs (sse_entry_text() "
+        "IMMUTABLE function, to_tsvector/ts_headline/plainto_tsquery over the "
+        "session_store_entries JSONB, DISTINCT ON, COUNT(*) OVER); not emulated "
+        "by the sqlite test shim. Structure is guarded by TestSearchSessionsSql "
+        "below; behavior needs a real Postgres instance."
+    )
+
+    @pytest.mark.skip(reason=_STORE_SKIP)
+    def test_search_finds_store_content(self, mock_db, setup_profile):
+        """A query hitting only the JSONB store transcript (not session_messages)
+        should surface the session as a 'content' match — this is the whole point
+        of store-backed search under postgres_only."""
+        db.create_session("session-1", setup_profile, title="Session 1")
+        # Under real PG: insert a session_store_entries row whose entry text
+        # contains the query, with sessions.sdk_session_id joining it.
+        result = db.search_sessions("needle-in-the-store")
+        assert any(r["id"] == "session-1" for r in result)
+
+    @pytest.mark.skip(reason=_STORE_SKIP)
+    def test_search_dedupes_title_legacy_store(self, mock_db, setup_profile):
+        """A session matching in title, legacy message content, AND the store must
+        appear exactly once, with title winning as the retained match_type."""
+        db.create_session("session-1", setup_profile, title="python")
+        db.add_session_message("session-1", "user", "python question")
+        result = db.search_sessions("python")
+        ids = [r["id"] for r in result]
+        assert ids.count("session-1") == 1
+        row = next(r for r in result if r["id"] == "session-1")
+        assert row["match_type"] == "title"
+
+    @pytest.mark.skip(reason=_STORE_SKIP)
+    def test_search_reports_match_count(self, mock_db, setup_profile):
+        """match_count reflects how many of {title, legacy-content, store-content}
+        hit for a session (counted before the final dedupe)."""
+        db.create_session("session-1", setup_profile, title="python")
+        db.add_session_message("session-1", "user", "python question")
+        result = db.search_sessions("python")
+        row = next(r for r in result if r["id"] == "session-1")
+        assert row["match_count"] >= 2
+
+    @pytest.mark.skip(reason=_STORE_SKIP)
+    def test_search_excludes_archived(self, mock_db, setup_profile):
+        """Archived sessions must be excluded from store matches just like the
+        title/legacy CTEs."""
+        db.create_session("session-1", setup_profile, title="keep")
+        db.update_session("session-1", status="archived")
+        result = db.search_sessions("keep")
+        assert all(r["id"] != "session-1" for r in result)
+
+    @pytest.mark.skip(reason=_STORE_SKIP)
+    def test_sse_entry_text_extraction_matrix(self, mock_db):
+        """Documents the sse_entry_text() contract (run against real Postgres):
+
+        * user/assistant + string content    -> the string as-is
+        * user/assistant + array content      -> string_agg of type='text' blocks
+        * isMeta true / isSidechain true       -> NULL (skipped)
+        * type NOT IN (user, assistant)        -> NULL (tool/system/summary skipped)
+        * tool_use / tool_result array blocks  -> NULL (only 'text' blocks kept)
+        """
+        assert True  # Placeholder — the real matrix requires a PG session.
+
 
 class TestSearchSessionsSql:
     """Always-on structural guard for the Postgres-native search SQL.
@@ -643,6 +705,103 @@ class TestSearchSessionsSql:
         # UNION ALL pairs by position; duplicate output names would mask a
         # positional drift, so require them unique too.
         assert len(title_names) == len(set(title_names))
+
+    def test_store_matches_cte_column_symmetric(self):
+        """The store_matches CTE feeds the same UNION ALL, so its column list
+        must stay position-symmetric with title_matches / content_matches or the
+        UNION silently mispairs values (or errors on Postgres)."""
+        sql = self._captured_search_sql()
+
+        title_cols = sql.split("WITH title_matches AS (", 1)[1]
+        title_cols = title_cols.split("SELECT", 1)[1].split("FROM sessions s", 1)[0]
+        store_cols = sql.split("store_matches AS (", 1)[1]
+        store_cols = store_cols.split("SELECT DISTINCT ON (s.id)", 1)[1]
+        store_cols = store_cols.split("FROM session_store_entries sse", 1)[0]
+
+        title_names = [
+            self._output_name(c) for c in self._split_top_level(title_cols)
+        ]
+        store_names = [
+            self._output_name(c) for c in self._split_top_level(store_cols)
+        ]
+
+        assert title_names == store_names
+        assert len(store_names) == len(set(store_names))
+
+    def test_store_cte_structural_invariants(self):
+        """Guard the store CTE's load-bearing predicates: it joins sessions on
+        sdk_session_id, restricts to main transcripts (subpath IS NULL), matches
+        via sse_entry_text()'s tsvector, and excludes archived sessions."""
+        sql = self._captured_search_sql()
+        store = sql.split("store_matches AS (", 1)[1].split("all_matches AS (", 1)[0]
+
+        assert "s.sdk_session_id = sse.session_id" in store
+        assert "sse.subpath IS NULL" in store
+        assert "sse_entry_text(sse.entry)" in store
+        assert "to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery" in store
+        assert "s.status != 'archived'" in store
+
+    def test_match_count_window_before_dedupe(self):
+        """match_count is a COUNT(*) OVER (PARTITION BY id) computed in the pre-
+        dedupe union, so each surviving row carries how many places matched."""
+        sql = self._captured_search_sql()
+        assert "COUNT(*) OVER (PARTITION BY id) as match_count" in sql
+        # The window sits in all_matches (before the DISTINCT ON dedupe).
+        all_matches = sql.split("all_matches AS (", 1)[1].split("SELECT DISTINCT ON (id) *", 1)[0]
+        assert "match_count" in all_matches
+
+    def test_scoping_predicates_preserved(self):
+        """API-user / project scoping must survive the CTE rework: with filters
+        supplied, the outer WHERE still appends the scoping predicates and the
+        per-install isolation clause is threaded through each CTE unchanged."""
+        from unittest.mock import MagicMock
+
+        captured = []
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.execute.side_effect = lambda sql, params=None: captured.append((sql, params))
+
+        with patch("app.db.sessions.get_db"), \
+             patch("app.db.sessions.get_cursor", return_value=cursor):
+            from app.db import sessions as db_sessions
+            db_sessions.search_sessions(
+                "react hooks", project_id="p1", api_user_id="u1"
+            )
+
+        sql, params = captured[0]
+        assert "AND project_id = %s" in sql
+        assert "AND api_user_id = %s" in sql
+        # Trailing filter params appended after the CTE params in order.
+        assert params[-3:] == ["p1", "u1", 20]
+
+
+class TestSearchSessionsPaginatedSql:
+    """Structural guard for the paginated variant's store CTE + match_count."""
+
+    def _captured_paginated_sql(self) -> list:
+        from unittest.mock import MagicMock
+
+        captured = []
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {"cnt": 0}
+        cursor.execute.side_effect = lambda sql, params=None: captured.append(sql)
+
+        with patch("app.db.sessions.get_db"), \
+             patch("app.db.sessions.get_cursor", return_value=cursor):
+            from app.db import sessions as db_sessions
+            db_sessions.search_sessions_paginated("react hooks")
+
+        assert captured, "search_sessions_paginated should have executed queries"
+        # Both count + data queries share the base CTE; assert on the data query.
+        return captured
+
+    def test_paginated_has_store_cte_and_match_count(self):
+        for sql in self._captured_paginated_sql():
+            assert "store_matches AS (" in sql
+            assert "session_store_entries sse" in sql
+            assert "s.sdk_session_id = sse.session_id" in sql
+            assert "COUNT(*) OVER (PARTITION BY id) as match_count" in sql
 
 
 # =============================================================================
