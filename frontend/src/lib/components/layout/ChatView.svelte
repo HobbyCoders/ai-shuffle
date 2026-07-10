@@ -10,10 +10,11 @@
 	 *   ContextPillBar hosts the Local/Worktree execution-mode toggle above it)
 	 * - Active: MessageArea + ChatInput at bottom
 	 */
-	import { untrack } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { stopSessionTask } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
+	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
@@ -128,6 +129,29 @@
 	function handleReconnect() {
 		activeSession.reconnect();
 	}
+
+	// Give the "connection lost" banner a 3s grace period so a transient WS
+	// blip (e.g. switching tabs/panels and back) doesn't flash it. The gate
+	// lives for the component's lifetime (not recreated per-effect-run, or
+	// its in-flight timer/shown state would be lost on every dependency
+	// change) — `setConnected` is called reactively below, and `destroy()`
+	// runs once on actual unmount via onDestroy so no timer can leak or fire
+	// after the component is gone.
+	let showConnectionBanner = $state(false);
+	const connectionBannerGrace = createConnectionBannerGrace({
+		onShow: () => { showConnectionBanner = true; },
+		onHide: () => { showConnectionBanner = false; }
+	});
+	onDestroy(() => connectionBannerGrace.destroy());
+
+	$effect(() => {
+		// Only track the WS state as "disconnected" while the banner is
+		// actually eligible to show (an active, remote-controllable session).
+		// Otherwise treat it as connected so the grace timer never arms for a
+		// session that wouldn't show the banner anyway.
+		const eligible = Boolean($activeSession.sessionId) && $activeSession.remoteControllable !== false;
+		connectionBannerGrace.setConnected(!eligible || $activeWsConnected);
+	});
 </script>
 
 <div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
@@ -154,10 +178,12 @@
 		<!-- Active chat: Messages + input -->
 		<div class="chat-column">
 			<div class="message-area-wrapper">
-				{#if $activeSession.sessionId && $activeSession.remoteControllable !== false && !$activeWsConnected}
+				{#if showConnectionBanner}
 					<!-- Live connection lost. The client auto-reconnects with backoff,
 					     but surface it so the user knows why messages may lag — and
-					     give them a manual retry that skips the backoff wait. -->
+					     give them a manual retry that skips the backoff wait. The
+					     banner itself is gated behind a 3s grace period (see
+					     connectionBannerGrace above) so transient blips don't flash it. -->
 					<div class="connection-banner">
 						<Banner
 							severity="warning"
