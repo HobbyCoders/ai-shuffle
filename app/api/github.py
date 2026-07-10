@@ -60,6 +60,7 @@ class CreatePullRequest(BaseModel):
     body: str = Field(default="")
     head: str = Field(..., min_length=1, description="Head branch name")
     base: str = Field(..., min_length=1, description="Base branch name")
+    draft: bool = Field(default=False, description="Open the pull request as a draft")
 
 
 class MergePullRequest(BaseModel):
@@ -269,7 +270,8 @@ async def create_pull_request(
             title=body.title,
             body=body.body,
             head=body.head,
-            base=body.base
+            base=body.base,
+            draft=body.draft
         )
         t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:

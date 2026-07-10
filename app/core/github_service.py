@@ -386,7 +386,8 @@ class GitHubService:
         title: str,
         body: str,
         head: str,
-        base: str
+        base: str,
+        draft: bool = False
     ) -> Tuple[Optional[PullRequest], Optional[str]]:
         """
         Create a pull request.
@@ -397,6 +398,7 @@ class GitHubService:
             body: PR body/description
             head: Head branch name
             base: Base branch name
+            draft: Open the pull request as a draft
 
         Returns:
             Tuple of (PullRequest or None, error message or None).
@@ -405,17 +407,17 @@ class GitHubService:
         try:
             # Pass body via stdin (--body-file -) to avoid Windows command
             # line length limits (~8191 chars) with long PR descriptions.
-            result = self._run_gh(
-                [
-                    'pr', 'create',
-                    '--repo', repo,
-                    '--title', title,
-                    '--body-file', '-',
-                    '--head', head,
-                    '--base', base,
-                ],
-                stdin_data=body,
-            )
+            args = [
+                'pr', 'create',
+                '--repo', repo,
+                '--title', title,
+                '--body-file', '-',
+                '--head', head,
+                '--base', base,
+            ]
+            if draft:
+                args.append('--draft')
+            result = self._run_gh(args, stdin_data=body)
 
             if result.returncode != 0:
                 stderr = result.stderr.strip()

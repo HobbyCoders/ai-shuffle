@@ -12,7 +12,6 @@
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
-import { GIT_ACTION_KEYS, type GitActionKey } from '$lib/utils/git-action-prompts';
 
 // ============================================
 // Types
@@ -23,22 +22,17 @@ type PullStrategy = 'merge' | 'rebase';
 type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export interface GitActionPreferences {
-	// Commit modal
+	// Commit action defaults
 	includeUnstaged: boolean;
 	nextStep: CommitAction;
 
-	// Pull modal
+	// Pull action defaults
 	pullStrategy: PullStrategy;
 	autoStash: boolean;
 
-	// Finish modal
+	// Finish / Ship It defaults
 	mergeMethod: MergeMethod;
 	cleanupAfterMerge: boolean;
-
-	// Custom message overrides per git action. When set (non-empty) a custom
-	// message replaces the structured default entirely (see git-action-prompts).
-	// Absent keys fall back to the built-in default.
-	customMessages: Partial<Record<GitActionKey, string>>;
 }
 
 const DEFAULT_PREFERENCES: GitActionPreferences = {
@@ -48,32 +42,36 @@ const DEFAULT_PREFERENCES: GitActionPreferences = {
 	autoStash: false,
 	mergeMethod: 'squash',
 	cleanupAfterMerge: true,
-	customMessages: {},
 };
 
 /**
- * Sanitize a raw `customMessages` blob from localStorage / server: keep only
- * string values for known action keys, drop everything else.
+ * Merge a partial (localStorage or server) onto the defaults.
+ *
+ * Fills missing KNOWN keys from defaults, but PRESERVES any unknown keys the
+ * blob carries. The `git_action_settings` preference is a single shared server
+ * blob: an older app version must not wipe a newer version's keys just because
+ * it doesn't recognize them (a whitelist rebuild would drop them on every save
+ * and silently downgrade the shared blob). The only key we explicitly strip is
+ * the known-dead `customMessages` from the removed canned-prompt system.
  */
-function sanitizeCustomMessages(raw: unknown): Partial<Record<GitActionKey, string>> {
-	const out: Partial<Record<GitActionKey, string>> = {};
-	if (raw && typeof raw === 'object') {
-		const obj = raw as Record<string, unknown>;
-		for (const key of GIT_ACTION_KEYS) {
-			const value = obj[key];
-			if (typeof value === 'string') out[key] = value;
-		}
-	}
-	return out;
-}
-
-/** Merge a partial (localStorage or server) onto the defaults, sanitizing nested fields. */
 function mergePreferences(parsed: Partial<GitActionPreferences> | null | undefined): GitActionPreferences {
-	return {
-		...DEFAULT_PREFERENCES,
-		...(parsed ?? {}),
-		customMessages: sanitizeCustomMessages(parsed?.customMessages),
+	const p = (parsed ?? {}) as Partial<GitActionPreferences> & Record<string, unknown>;
+	const merged: Record<string, unknown> = {
+		includeUnstaged: p.includeUnstaged ?? DEFAULT_PREFERENCES.includeUnstaged,
+		nextStep: p.nextStep ?? DEFAULT_PREFERENCES.nextStep,
+		pullStrategy: p.pullStrategy ?? DEFAULT_PREFERENCES.pullStrategy,
+		autoStash: p.autoStash ?? DEFAULT_PREFERENCES.autoStash,
+		mergeMethod: p.mergeMethod ?? DEFAULT_PREFERENCES.mergeMethod,
+		cleanupAfterMerge: p.cleanupAfterMerge ?? DEFAULT_PREFERENCES.cleanupAfterMerge,
 	};
+	// Preserve unknown / future keys (forward-compat with newer app versions
+	// sharing the same server blob); drop only the known-dead customMessages.
+	for (const [k, v] of Object.entries(p)) {
+		if (k in merged) continue;
+		if (k === 'customMessages') continue;
+		merged[k] = v;
+	}
+	return merged as unknown as GitActionPreferences;
 }
 
 // ============================================
@@ -252,33 +250,10 @@ function updatePreference<K extends keyof GitActionPreferences>(
 }
 
 /**
- * Set (or clear) a custom message override for a git action.
- * A trimmed-empty value deletes the override so the built-in default is used.
- */
-function setCustomMessage(action: GitActionKey, value: string): void {
-	_update(prefs => {
-		const nextMessages = { ...prefs.customMessages };
-		if (value.trim().length === 0) {
-			delete nextMessages[action];
-		} else {
-			nextMessages[action] = value;
-		}
-		// Canonicalize key order so identical data always serializes identically
-		// (sanitize orders by GIT_ACTION_KEYS; equality checks use JSON.stringify).
-		const updated = { ...prefs, customMessages: sanitizeCustomMessages(nextMessages) };
-		// In-memory state updates synchronously (UI unaffected); the localStorage
-		// write is debounced alongside the server write on this typing hot path.
-		saveToServer(updated);
-		return updated;
-	});
-}
-
-/**
  * Reset all preferences to defaults
  */
 function reset(): void {
-	// Clone so the shared DEFAULT_PREFERENCES.customMessages object is never mutated.
-	const fresh: GitActionPreferences = { ...DEFAULT_PREFERENCES, customMessages: {} };
+	const fresh: GitActionPreferences = { ...DEFAULT_PREFERENCES };
 	_state = fresh;
 	_notifySubscribers();
 	saveToLocalStorage(fresh);
@@ -360,5 +335,4 @@ export const gitActionPreferences = {
 	setAutoStash: (value: boolean) => updatePreference('autoStash', value),
 	setMergeMethod: (value: MergeMethod) => updatePreference('mergeMethod', value),
 	setCleanupAfterMerge: (value: boolean) => updatePreference('cleanupAfterMerge', value),
-	setCustomMessage,
 };
