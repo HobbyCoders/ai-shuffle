@@ -189,6 +189,13 @@ class TaskRegistry:
         # window. Self-pruning on read/write; rebuilt on restart. Keyed by
         # task_id so a re-reaped task replaces rather than duplicates its row.
         self._recent_terminal: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # session_id -> {task_id -> set(phase)} one-shot chip latches (see
+        # ``mark_chipped``). Caps a task at MAX TWO "Task Updated" chips for
+        # its whole lifetime: one on first sighting ("start"), one on its
+        # terminal transition ("terminal"). Lives here — NOT in the drain
+        # pump's per-run local set — so the cap holds across pump restarts
+        # (each run used to reset its dedup and re-chip the same task).
+        self._chipped: Dict[str, Dict[str, set]] = {}
 
     def _prune_recent_terminal(self, session_id: str, *, now: Optional[float] = None) -> None:
         """Drop expired terminal-retention entries for a session; drop the bucket
@@ -240,6 +247,53 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._sdk_background_tasks.get(session_id, set())
+
+    def is_own_background_task(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` is background work the PARENT itself launched.
+
+        Mirrors the unpark admission set (chip-flood scoping): a task is "own"
+        when it is a recorded SDK-backgrounded shell (``is_sdk_background_task``,
+        keyed on the always-present task_id) OR its registry record's launch
+        ``tool_use_id`` was issued by the parent with run_in_background=true
+        (``was_background_launch``). A GRANDCHILD task — launched BY a sub-agent
+        — has a registry record (every TaskStarted feeds the registry) but its
+        launch tool_use_id belongs to the sub-agent, so it fails both tests and
+        must never surface "Task Updated" chips in the parent chat.
+
+        Defensive: missing ids return ``False``.
+        """
+        if not session_id or not task_id:
+            return False
+        if self.is_sdk_background_task(session_id, task_id):
+            return True
+        record = self._tasks.get(session_id, {}).get(task_id)
+        tool_use_id = record.get("tool_use_id") if record else None
+        return bool(
+            tool_use_id and self.was_background_launch(session_id, tool_use_id)
+        )
+
+    def mark_chipped(self, session_id: str, task_id: str, phase: str) -> bool:
+        """One-shot "Task Updated" chip latch per ``(task_id, phase)``.
+
+        Returns ``True`` only the FIRST time a given phase is latched for a
+        task; every later call returns ``False``. Two phases exist:
+
+        - ``"start"``: the task's first sighting chip (typically its first
+          non-terminal status patch while the parent is parked);
+        - ``"terminal"``: the task's terminal chip (killed/completed/error).
+
+        Together they cap a task at MAX TWO chips for its whole lifetime —
+        intermediate running/paused patches render nothing. Registry-level (not
+        per-pump-run) so the cap survives pump restarts; cleared only with the
+        session. Defensive: missing ids/phase never latch (return ``False``).
+        """
+        if not session_id or not task_id or not phase:
+            return False
+        phases = self._chipped.setdefault(session_id, {}).setdefault(task_id, set())
+        if phase in phases:
+            return False
+        phases.add(phase)
+        return True
 
     def mark_unpark_pending(self, session_id: str) -> None:
         """Latch that an unpark follow-up turn is committed but not yet streaming.
@@ -659,6 +713,7 @@ class TaskRegistry:
         self._unpark_pending.discard(session_id)
         self._sdk_background_tasks.pop(session_id, None)
         self._unparked.pop(session_id, None)
+        self._chipped.pop(session_id, None)
         self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
@@ -670,6 +725,7 @@ class TaskRegistry:
         self._unpark_pending.clear()
         self._sdk_background_tasks.clear()
         self._unparked.clear()
+        self._chipped.clear()
         self._recent_terminal.clear()
 
 

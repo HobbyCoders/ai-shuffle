@@ -880,9 +880,18 @@ async def _drain_notifications_impl(
                 # SAME subagent inner group it would have filled in-stream. Without this
                 # the node renders "completed / no activity recorded" because the parent
                 # turn's receive_response() already returned before these arrived.
+                # SCOPING (chip-flood fix): only when parent_tool_use_id resolves
+                # to a launch the PARENT issued (was_background_launch) — a
+                # GRANDCHILD's inner activity carries the SUB-agent's launch id,
+                # which the parent never recorded, and must not bleed into the
+                # parent's subagent nodes.
                 try:
-                    for _sub_ev in _subagent_events_from_message(message):
-                        await dispatch_event(_sub_ev, sub_ectx, sub_state)
+                    _inner_parent_tuid = getattr(message, "parent_tool_use_id", None)
+                    if _inner_parent_tuid and task_registry.was_background_launch(
+                        session_id, _inner_parent_tuid
+                    ):
+                        for _sub_ev in _subagent_events_from_message(message):
+                            await dispatch_event(_sub_ev, sub_ectx, sub_state)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
@@ -897,15 +906,44 @@ async def _drain_notifications_impl(
                 # add_system_message logs + drops it — must not crash the pump.
                 try:
                     _status_evs = _task_status_events_from_message(message)
-                    for _status_ev in _status_evs:
-                        await dispatch_event(_status_ev, sub_ectx, sub_state)
                     if _status_evs:
-                        # A real TaskUpdatedMessage chip already rendered for this
-                        # task — record it so a following terminal notification for
-                        # the SAME task does not synthesize a duplicate chip below.
                         _tu_tid = getattr(message, "task_id", None)
-                        if _tu_tid:
-                            _chipped_task_ids.add(_tu_tid)
+                        _tu_terminal = _task_update_terminal_status(message) is not None
+                        # SCOPING (chip-flood fix): only the parent's OWN
+                        # background work may chip — a grandchild's status
+                        # patches (launched BY a sub-agent, never tracked by
+                        # the parent) used to flood the parent chat.
+                        _chip_ok = bool(
+                            _tu_tid
+                            and task_registry.is_own_background_task(session_id, _tu_tid)
+                        )
+                        # COALESCING: max TWO chips per task lifetime — first
+                        # sighting + first terminal (registry-level one-shot
+                        # latches, so the cap holds across pump restarts).
+                        # Intermediate running/paused patches render nothing
+                        # after the first sighting.
+                        if _chip_ok:
+                            if _tu_terminal:
+                                _chip_ok = task_registry.mark_chipped(
+                                    session_id, _tu_tid, "terminal"
+                                )
+                                # Spend the start latch too: a late/out-of-order
+                                # non-terminal patch must not chip AFTER the
+                                # terminal card.
+                                task_registry.mark_chipped(session_id, _tu_tid, "start")
+                            else:
+                                _chip_ok = task_registry.mark_chipped(
+                                    session_id, _tu_tid, "start"
+                                )
+                        if _chip_ok:
+                            for _status_ev in _status_evs:
+                                await dispatch_event(_status_ev, sub_ectx, sub_state)
+                            if _tu_terminal:
+                                # A TERMINAL TaskUpdated chip rendered — record it
+                                # so a following terminal notification for the
+                                # SAME task does not synthesize a duplicate chip
+                                # below (this per-run set's original role).
+                                _chipped_task_ids.add(_tu_tid)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: task-status chip re-dispatch failed: {_exc}")
 
@@ -1345,7 +1383,16 @@ async def _drain_notifications_impl(
                         # Same parked-state completion chip the deliver path
                         # renders (RC2) — the wake itself is CLI-owned but the
                         # completion card is still the app's to surface.
-                        if task_id and task_id not in _chipped_task_ids:
+                        # mark_chipped("terminal") is the lifetime cap (max one
+                        # terminal chip per task, across pump runs); the per-run
+                        # _chipped_task_ids keeps its original in-run
+                        # TaskUpdated-vs-notification dedup role.
+                        if (
+                            task_id
+                            and task_id not in _chipped_task_ids
+                            and task_registry.mark_chipped(session_id, task_id, "terminal")
+                        ):
+                            task_registry.mark_chipped(session_id, task_id, "start")
                             try:
                                 for _chip_ev in _task_status_event_from_notification(message):
                                     await dispatch_event(_chip_ev, sub_ectx, sub_state)
@@ -1400,8 +1447,15 @@ async def _drain_notifications_impl(
                 # path: suppress-foreground (synchronous sub-agent) and dedup
                 # notifications continue'd out above, so — like in-stream — a
                 # foreground/duplicate completion drops no card. Guard against a
-                # task_updated chip already emitted for this task this run.
-                if task_id and task_id not in _chipped_task_ids:
+                # task_updated chip already emitted for this task this run, AND
+                # against a terminal chip already latched for its lifetime
+                # (mark_chipped — the cross-run cap).
+                if (
+                    task_id
+                    and task_id not in _chipped_task_ids
+                    and task_registry.mark_chipped(session_id, task_id, "terminal")
+                ):
+                    task_registry.mark_chipped(session_id, task_id, "start")
                     try:
                         for _chip_ev in _task_status_event_from_notification(message):
                             await dispatch_event(_chip_ev, sub_ectx, sub_state)
