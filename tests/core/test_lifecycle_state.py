@@ -240,6 +240,40 @@ async def test_monitor_shell_does_not_trip_dead_client_drift(mock_db):
     assert "class=bg-work-dead-client" not in _drift_classes(snap)
 
 
+# =============================================================================
+# Timestamped unpark latch (reconciler age-gate input)
+# =============================================================================
+
+def test_unpark_pending_age_lifecycle():
+    sid = "lstate-latch-age"
+    assert task_registry.unpark_pending_age(sid) is None
+    task_registry.mark_unpark_pending(sid)
+    age = task_registry.unpark_pending_age(sid)
+    assert age is not None and 0.0 <= age < 5.0
+    task_registry.clear_unpark_pending(sid)
+    assert task_registry.unpark_pending_age(sid) is None
+
+
+def test_unpark_pending_age_cleared_with_session():
+    sid = "lstate-latch-clear-session"
+    task_registry.mark_unpark_pending(sid)
+    task_registry.clear_session(sid)
+    assert task_registry.is_unpark_pending(sid) is False
+    assert task_registry.unpark_pending_age(sid) is None
+
+
+def test_unpark_pending_age_re_mark_resets_clock():
+    sid = "lstate-latch-remark"
+    task_registry.mark_unpark_pending(sid)
+    task_registry._unpark_pending_since[sid] -= 100.0  # age it
+    assert task_registry.unpark_pending_age(sid) >= 100.0
+    task_registry.mark_unpark_pending(sid)  # re-latch resets the clock
+    try:
+        assert task_registry.unpark_pending_age(sid) < 5.0
+    finally:
+        task_registry.clear_unpark_pending(sid)
+
+
 async def test_session_row_passthrough_avoids_db_fetch(mock_db, monkeypatch):
     """When the caller passes the already-fetched sessions row (the /live hot
     path), compute must not re-read it."""

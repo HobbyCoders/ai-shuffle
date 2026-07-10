@@ -22,6 +22,7 @@ guard against missing keys so a stray update can never raise.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -163,6 +164,12 @@ class TaskRegistry:
         # stranded the parked UI (the origin socket is gone, so nothing restarts
         # polling and the follow-up streamed unseen until a full reload).
         self._unpark_pending: set = set()
+        # session_id -> monotonic timestamp of when the unpark-pending latch
+        # was last set. Lets the runtime reconciler age-gate its "stale latch"
+        # repair (a latch is legal for the brief commit -> start_streaming
+        # hand-off; one older than the grace window with no pump and nothing
+        # streaming is stranded). Kept in lock-step with ``_unpark_pending``.
+        self._unpark_pending_since: Dict[str, float] = {}
         # session_id -> {task_id, ...} for SDK-managed BACKGROUND tasks that PARK
         # the parent and unpark via a terminal TaskNotificationMessage on the
         # pooled SDK client — i.e. backgrounded shell commands (Bash/PowerShell
@@ -345,16 +352,27 @@ class TaskRegistry:
         if not session_id:
             return
         self._unpark_pending.add(session_id)
+        self._unpark_pending_since[session_id] = time.monotonic()
 
     def clear_unpark_pending(self, session_id: str) -> None:
         """Drop the unpark-pending latch (follow-up started streaming or failed)."""
         if not session_id:
             return
         self._unpark_pending.discard(session_id)
+        self._unpark_pending_since.pop(session_id, None)
 
     def is_unpark_pending(self, session_id: str) -> bool:
         """True iff an unpark follow-up turn is committed but not yet streaming."""
         return session_id in self._unpark_pending
+
+    def unpark_pending_age(self, session_id: str) -> Optional[float]:
+        """Seconds since the unpark-pending latch was set, or ``None`` when the
+        latch is not set. Monotonic-clock based; used by the lifecycle
+        reconciler to age-gate its stale-latch repair."""
+        since = self._unpark_pending_since.get(session_id)
+        if since is None or session_id not in self._unpark_pending:
+            return None
+        return time.monotonic() - since
 
     def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
         """Idempotency latch for the parent "unpark" follow-up turn.
@@ -790,6 +808,7 @@ class TaskRegistry:
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
         self._unpark_pending.discard(session_id)
+        self._unpark_pending_since.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
         self._unparked.pop(session_id, None)
         self._chipped.pop(session_id, None)
@@ -803,6 +822,7 @@ class TaskRegistry:
         self._started_this_turn.clear()
         self._background_launches.clear()
         self._unpark_pending.clear()
+        self._unpark_pending_since.clear()
         self._sdk_background_tasks.clear()
         self._unparked.clear()
         self._chipped.clear()
