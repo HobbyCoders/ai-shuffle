@@ -7,6 +7,7 @@ All domain modules import from here. Do NOT import domain modules from this file
 """
 
 import re
+import time
 import logging
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
@@ -167,17 +168,68 @@ class _PgDictConnection:
 # Connection management
 # =============================================================================
 
+# Bounded backpressure on pool acquisition. Multiple thread pools draw on the
+# single PG pool concurrently (asyncio's default executor, anyio's sync-dep
+# pool, the git pool), so a transient overlap can momentarily take every slot.
+# psycopg2's ThreadedConnectionPool.getconn() raises PoolError *immediately* on
+# exhaustion — no waiting — which turns a sub-second burst into a hard 500 on an
+# unrelated endpoint. Instead of failing outright, wait (with a short capped
+# backoff, bounded in total) for a slot to be returned. These run on worker
+# threads, so a plain time.sleep is correct here — never asyncio.
+_POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
+_POOL_ACQUIRE_BACKOFF_START_SECONDS = 0.01
+_POOL_ACQUIRE_BACKOFF_CAP_SECONDS = 0.1
+
+
 def _get_pg_connection() -> "_PgDictConnection":
     """Acquire a PostgreSQL connection from the pool.
 
-    Returns a wrapper that defaults to RealDictCursor for dict-style
-    row access.
+    Returns a wrapper that defaults to RealDictCursor for dict-style row access.
+    On transient pool exhaustion, waits (short capped backoff, bounded to
+    ~``_POOL_ACQUIRE_MAX_WAIT_SECONDS`` total) for a slot to free rather than
+    raising PoolError immediately. A single warning is logged when a wait
+    actually happens so pool pressure is visible without per-retry log spam.
     """
     if _pg_pool is None:
         raise RuntimeError(
             "PostgreSQL connection pool not initialized. Call init_pool() first."
         )
-    conn = _pg_pool.getconn()
+
+    start = time.monotonic()
+    deadline = start + _POOL_ACQUIRE_MAX_WAIT_SECONDS
+    backoff = _POOL_ACQUIRE_BACKOFF_START_SECONDS
+    waited = False
+    while True:
+        try:
+            conn = _pg_pool.getconn()
+            break
+        except psycopg2.pool.PoolError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Bounded wait expired — surface the exhaustion as before, but
+                # now with visibility into how long we backpressured.
+                stats = pool_stats() or {}
+                logger.warning(
+                    "PG pool acquisition failed after %dms of backpressure — "
+                    "pool exhausted (in_use=%s max=%s)",
+                    round((time.monotonic() - start) * 1000),
+                    stats.get("in_use"),
+                    stats.get("max"),
+                )
+                raise
+            waited = True
+            time.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _POOL_ACQUIRE_BACKOFF_CAP_SECONDS)
+
+    if waited:
+        stats = pool_stats() or {}
+        logger.warning(
+            "PG pool acquisition waited %dms for a free slot (pool pressure; "
+            "in_use=%s max=%s)",
+            round((time.monotonic() - start) * 1000),
+            stats.get("in_use"),
+            stats.get("max"),
+        )
     conn.autocommit = False
     return _PgDictConnection(conn)
 
