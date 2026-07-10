@@ -368,7 +368,27 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
     into a spawn — and so a bare ``fable``/custom native-1M model does not
     silently run at 1M when the user never enabled it.
     """
-    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if has_1m_context(model) else "1"
+    if has_1m_context(model):
+        # 1M explicitly opted in — allow the wide window and DON'T touch
+        # auto-compaction: users who want 1M want the CLI's native (auto)
+        # compaction tuning, not a surprise 200k override.
+        env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0"
+        return
+
+    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
+
+    # Belt-and-suspenders for the auto-compact threshold. The CLI's auto-compact
+    # window is clamped to the model's *maximum* context window; whether that
+    # max correctly drops to 200k under DISABLE_1M has varied across bundled CLI
+    # versions, so a native-1M model can end up auto-compacting off the 1M
+    # window even though ``/context`` reports 200k — the session then blows well
+    # past 200k before compaction fires. Pinning ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
+    # to the effective 200k window forces the CLI's ``source:"env"`` branch, which
+    # caps the trigger at 200k regardless of how the max window was derived (this
+    # is exactly the user's proven manual workaround, now automatic). We never
+    # clobber an existing value — a profile/user-supplied
+    # ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` (exposed as a profile preset) wins.
+    env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")
 
 
 def _build_env_with_ai_tools(

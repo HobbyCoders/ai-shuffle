@@ -20,6 +20,7 @@ import pytest
 from app.core.generation_options import build_generation_options
 
 DISABLE_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
+AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
 
 def _build(profile_config, **kwargs):
@@ -50,3 +51,29 @@ def test_generation_default_model_forces_200k():
     """No configured model → hard fallback (sonnet) → 200k, never a silent 1M."""
     opts = _build({})
     assert opts.env[DISABLE_KEY] == "1"
+
+
+# --- auto-compact window mitigation ---
+
+
+@pytest.mark.parametrize("model", ["fable", "opus", "sonnet", "claude-opus-4-8"])
+def test_generation_disable_path_pins_auto_compact_window(model):
+    """Disabling 1M for generation also pins the 200k auto-compact window."""
+    opts = _build({"model": model})
+    assert opts.env[DISABLE_KEY] == "1"
+    assert opts.env[AUTO_COMPACT_KEY] == "200000"
+
+
+@pytest.mark.parametrize("model", ["fable[1m]", "opus[1m]", "claude-opus-4-8[1m]"])
+def test_generation_1m_leaves_auto_compact_unset(model):
+    """1M opt-in must not override compaction."""
+    opts = _build({"model": model})
+    assert opts.env[DISABLE_KEY] == "0"
+    assert AUTO_COMPACT_KEY not in opts.env
+
+
+def test_generation_preexisting_auto_compact_window_preserved():
+    """A profile-supplied auto-compact window wins over our 200k default."""
+    opts = _build({"model": "fable", "env": {AUTO_COMPACT_KEY: "275000"}})
+    assert opts.env[DISABLE_KEY] == "1"
+    assert opts.env[AUTO_COMPACT_KEY] == "275000"

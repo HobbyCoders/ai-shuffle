@@ -24,13 +24,16 @@ import pytest
 import app.core.query_options as qo
 
 DISABLE_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
+AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
 
-def _env_for_model(model, tmp_path):
+def _env_for_model(model, tmp_path, base_env=None):
     profile = {
         "id": "t",
         "config": {"model": model, "tools_preset": "claude_code", "cwd": str(tmp_path)},
     }
+    if base_env is not None:
+        profile["config"]["env"] = base_env
     with patch.object(qo, "get_security_instructions", return_value=""):
         opts, _ = qo.build_options_from_profile(profile=profile)
     return opts.env
@@ -60,3 +63,33 @@ def test_inherit_empty_model_defaults_to_200k(tmp_path):
     """An unset/inherit model is the safe 200k default, never a silent 1M."""
     env = _env_for_model("", tmp_path)
     assert env[DISABLE_KEY] == "1"
+
+
+# --- auto-compact window mitigation (native-1M-off compacts off the wrong window) ---
+
+
+@pytest.mark.parametrize("model", ["fable", "opus", "sonnet", "claude-opus-4-8", ""])
+def test_disable_path_pins_auto_compact_window(model, tmp_path):
+    """Disabling 1M also pins the auto-compact window to 200k so the CLI's
+    ``source:"env"`` branch caps the trigger regardless of how it derives the
+    model's max window."""
+    env = _env_for_model(model, tmp_path)
+    assert env[DISABLE_KEY] == "1"
+    assert env[AUTO_COMPACT_KEY] == "200000"
+
+
+@pytest.mark.parametrize("model", ["fable[1m]", "opus[1m]", "claude-opus-4-8[1m]"])
+def test_1m_enabled_leaves_auto_compact_unset(model, tmp_path):
+    """1M opt-in must NOT surprise-override compaction — leave the window unset."""
+    env = _env_for_model(model, tmp_path)
+    assert env[DISABLE_KEY] == "0"
+    assert AUTO_COMPACT_KEY not in env
+
+
+def test_preexisting_auto_compact_window_preserved(tmp_path):
+    """A profile/user-supplied window (PR #523 preset) wins over our default."""
+    env = _env_for_model(
+        "fable", tmp_path, base_env={AUTO_COMPACT_KEY: "350000"}
+    )
+    assert env[DISABLE_KEY] == "1"
+    assert env[AUTO_COMPACT_KEY] == "350000"
