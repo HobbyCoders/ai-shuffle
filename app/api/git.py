@@ -44,6 +44,8 @@ from app.api.git_helpers import (  # noqa: F401
     _repo_record_cache,
     _REPO_RECORD_TTL,
     ensure_git_repository_record,
+    peek_repo_record_cache,
+    _CACHE_MISS,
 )
 
 from app.api.git_worktrees import (  # noqa: F401
@@ -170,8 +172,14 @@ async def get_git_status(
         for s in status_data.get("staged", [])
     ]
 
-    # Ensure repository record exists and get additional info (DB-level, not cached)
-    repo = await run_git(ensure_git_repository_record, project_id, working_dir)
+    # Ensure repository record exists and get additional info.
+    # The record is cached (60s TTL); check the cache FIRST so a hit never
+    # submits a GitPool job. /git/status is polled every ~2s per active session,
+    # so submitting on every poll (even a cache hit) needlessly burned a queue
+    # slot on the 4-worker pool. Only a genuine cache miss touches the executor.
+    repo = peek_repo_record_cache(project_id)
+    if repo is _CACHE_MISS:
+        repo = await run_git(ensure_git_repository_record, project_id, working_dir)
 
     return GitStatusResponse(
         is_git_repo=status_data.get("is_git_repo", False),
