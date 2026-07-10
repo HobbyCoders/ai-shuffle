@@ -462,6 +462,13 @@ async def logout(request: Request, response: Response):
     token = get_session_token(request)
     if token:
         auth_service.logout(token)
+        # Purge the rate-limit middleware's short-TTL auth cache so the revoked
+        # session isn't classified against its old tier for up to the TTL.
+        try:
+            from app.middleware.rate_limit import invalidate_auth_cache_for_session
+            invalidate_auth_cache_for_session(token)
+        except Exception:  # noqa: BLE001 - cache purge must never break logout
+            logger.debug("Auth-cache purge on logout failed (ignored)", exc_info=True)
 
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
