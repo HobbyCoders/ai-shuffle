@@ -178,6 +178,31 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         return {"ok": False, "kind": "agent", "detail": str(e)}
 
 
+async def stop_all_background_tasks(session_id: str) -> list[dict]:
+    """Stop EVERY in-flight background task in a session, one at a time.
+
+    Used by the "Stop, and also stop background agents" path: after the main
+    turn is interrupted, iterate the running-tasks view and drive each through
+    the existing per-task ``stop_session_task`` (sub-agents via the SDK client's
+    ``stop_task``, Monitor shells via their tracked subprocess). Reuses that path
+    verbatim — no re-implementation of client stop logic — so ghost-reaping and
+    idempotency behave identically to a single "x" click.
+
+    Snapshots the active list first so mutations during iteration (a task
+    dropping to a terminal state as it is stopped) don't disturb the loop.
+    Returns one result dict per task attempted. Never raises.
+    """
+    from app.core.task_registry import task_registry
+
+    results: list[dict] = []
+    for task in task_registry.get_active(session_id):
+        task_id = task.get("id")
+        if not task_id:
+            continue
+        results.append(await stop_session_task(session_id, task_id))
+    return results
+
+
 def get_active_sessions() -> list:
     """Get list of active session IDs (connected clients)"""
     return get_session_pool().active_session_ids()

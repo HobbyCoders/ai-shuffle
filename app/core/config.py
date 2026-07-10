@@ -277,6 +277,18 @@ class Settings(BaseSettings):
     # breaks a turn on error.
     agent_memory_sync: bool = True
 
+    # Preserve in-flight background sub-agents across a user "Stop"/interrupt.
+    # The bundled Claude CLI's interrupt is query-scoped, not task-scoped: a
+    # single interrupt() stops EVERY in-flight Task child, so a user Stop kills
+    # any running background sub-agents alongside the main turn. When this flag
+    # is ON, boot applies a deploy-time, same-length in-place patch to the
+    # bundled CLI binary (see app.core.cli_interrupt_patch) that neutralizes the
+    # one interrupt call site responsible, so Stop leaves background sub-agents
+    # running. OFF by default: no binary is touched unless explicitly opted in.
+    # Set via PRESERVE_BACKGROUND_ON_INTERRUPT (BaseSettings reads env vars by
+    # field name automatically).
+    preserve_background_on_interrupt: bool = False
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

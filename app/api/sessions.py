@@ -1008,6 +1008,16 @@ async def get_live_session(
     # streams. See task_registry / the session poller.
     unpark_pending = task_registry.is_unpark_pending(session_id)
 
+    # Effective "a plain Stop spares background sub-agents" state. Only true when
+    # the operator opted in AND the deploy-time CLI binary patch actually landed
+    # (the flag alone is intent, not effect). Computed ONCE and attached to every
+    # local response body so the client can label the Stop control accordingly.
+    from app.core.config import settings as _pb_settings
+    from app.core.cli_interrupt_patch import is_patch_active
+    preserve_background_on_interrupt = bool(
+        _pb_settings.preserve_background_on_interrupt and is_patch_active()
+    )
+
     # Cross-install session: owned by another install on the shared DB. History
     # is already in the shared DB, so there is ALWAYS something to show. When the
     # owning install is reachable we relay its live stream (fully controllable);
@@ -1150,6 +1160,7 @@ async def get_live_session(
                         "initial_message_count": since_update_id,
                         "activeTasks": active_tasks,
                         "unpark_pending": unpark_pending,
+                        "preserve_background_on_interrupt": preserve_background_on_interrupt,
                     }
                     if session_meta:
                         body["session_meta"] = session_meta
@@ -1157,6 +1168,7 @@ async def get_live_session(
                 return Response(status_code=304)
             live_data["activeTasks"] = active_tasks
             live_data["unpark_pending"] = unpark_pending
+            live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
@@ -1166,6 +1178,7 @@ async def get_live_session(
             if live_data:
                 live_data["activeTasks"] = active_tasks
                 live_data["unpark_pending"] = unpark_pending
+                live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
@@ -1340,6 +1353,7 @@ async def get_live_session(
             )
             pending_live_full["activeTasks"] = active_tasks
             pending_live_full["unpark_pending"] = unpark_pending
+            pending_live_full["preserve_background_on_interrupt"] = preserve_background_on_interrupt
             if session_meta:
                 pending_live_full["session_meta"] = session_meta
             return pending_live_full
@@ -1402,6 +1416,7 @@ async def get_live_session(
         },
         "activeTasks": active_tasks,
         "unpark_pending": unpark_pending,
+        "preserve_background_on_interrupt": preserve_background_on_interrupt,
     }
     if session_meta:
         result["session_meta"] = session_meta

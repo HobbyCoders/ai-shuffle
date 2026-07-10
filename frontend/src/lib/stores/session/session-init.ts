@@ -591,6 +591,11 @@ export function createSessionInit(deps: SessionInitDeps) {
 			const incomingTasks = data.activeTasks ?? [];
 			const tasksChanged = !sameTasks(_state.activeTasks, incomingTasks);
 
+			// "Keep background agents alive on Stop" flag from /live. Scalar bool, so
+			// a plain inequality drives the change check (older mocks omit it → false).
+			const incomingPreserveBg = data.preserveBackgroundOnInterrupt ?? false;
+			const preserveBgChanged = incomingPreserveBg !== _state.preserveBackgroundOnInterrupt;
+
 			// Build worktree metadata delta from server (corrects stale client state)
 			const metaDelta: Partial<ActiveSessionState> = {};
 			if (data.sessionMeta) {
@@ -820,7 +825,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 					msgsUnchanged &&
 					finalWsContent === s.wsStreamContent &&
 					data.isStreaming === s.isStreaming &&
-					!usageHasUpdate && !streamingChanged && !metaHasUpdate && !tasksChanged
+					!usageHasUpdate && !streamingChanged && !metaHasUpdate && !tasksChanged &&
+					!preserveBgChanged
 				) {
 					return s;
 				}
@@ -834,6 +840,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					// Only swap the array reference when tasks actually changed so a
 					// pure message/usage poll doesn't re-render the ActiveTasks strip.
 					activeTasks: tasksChanged ? incomingTasks : s.activeTasks,
+					preserveBackgroundOnInterrupt: incomingPreserveBg,
 					...usageDelta,
 					...metaDelta,
 				};

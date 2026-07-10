@@ -2,18 +2,25 @@
 	/**
 	 * StopButton — the informed-choice Stop control for a streaming turn.
 	 *
-	 * Plain Stop with no background work: one click interrupts immediately, exactly
-	 * as before (zero friction). But the SDK `interrupt()` is query-scoped and has
-	 * no task filter — the CLI cancels the WHOLE query, including every in-flight
-	 * background Task child (they are async children inside the one query, not
-	 * separate processes). "Stop the foreground but keep the agents" is therefore
-	 * impossible at the SDK layer. A user recently lost 5 running agents to a silent
-	 * Stop. So when running background agents exist, Stop becomes an INFORMED choice:
-	 * confirm that stopping takes them down too, or cancel.
+	 * Behavior depends on the backend-resolved `preserveBackground` flag (from
+	 * /live `preserve_background_on_interrupt`):
 	 *
-	 * We deliberately do NOT offer a "keep agents running / detach" option — that
-	 * trade-off (the foreground turn keeps burning tokens invisibly) was explicitly
-	 * deferred.
+	 * Flag OFF (default — legacy behavior):
+	 *   The SDK `interrupt()` is query-scoped and has no task filter — the CLI
+	 *   cancels the WHOLE query, including every in-flight background Task child.
+	 *   "Stop the foreground but keep the agents" is impossible at that layer, so
+	 *   when running agents exist Stop is an INFORMED choice: a confirm warns that
+	 *   stopping takes them down too. Plain Stop with no background work is one
+	 *   click, immediate, zero friction. Either way the interrupt is a FULL stop —
+	 *   we call `onStop(true)`. The backend ignores `stop_background` when the flag
+	 *   is off, so the semantics are exactly today's.
+	 *
+	 * Flag ON (scoped-interrupt patch verified):
+	 *   Stop matches Claude Code's Esc — it stops only the foreground turn and
+	 *   LEAVES background sub-agents running by DEFAULT. When agents are live the
+	 *   confirm's primary action is the safe default (`onStop(false)`), with an
+	 *   opt-in checkbox to ALSO stop the agents (`onStop(true)`). With no agents
+	 *   running, Stop is immediate and foreground-only (`onStop(false)`).
 	 */
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type { Task } from '$lib/stores/types';
@@ -21,36 +28,66 @@
 	interface Props {
 		/** The session's live background tasks (from /live `activeTasks`). */
 		activeTasks: Task[];
-		/** Fire the real interrupt — identical to today's Stop behavior. */
-		onStop: () => void;
+		/** When true, Stop preserves background agents by default (Claude Code's
+		 *  Esc). When false (default), Stop is a full interrupt as before. */
+		preserveBackground?: boolean;
+		/**
+		 * Fire the interrupt. `stopBackground` tells the backend whether to also
+		 * tear down in-flight background sub-agents (true) or stop only the
+		 * foreground turn (false). Ignored by the backend when the preserve flag
+		 * is off, so the flag-OFF path always passes true.
+		 */
+		onStop: (stopBackground: boolean) => void;
 	}
 
-	let { activeTasks, onStop }: Props = $props();
+	let { activeTasks, preserveBackground = false, onStop }: Props = $props();
 
 	let showConfirm = $state(false);
+	// Opt-in (flag ON only): also stop the background agents on confirm. Reset each
+	// time the confirm opens so a prior tick never leaks into the next Stop.
+	let alsoStopBackground = $state(false);
 
 	// Only RUNNING tasks can be stopped and therefore matter for the informed
 	// choice — terminal (killed/error/completed) rows the registry keeps around for
 	// its retention window must not add friction to Stop.
 	const runningCount = $derived(activeTasks.filter((t) => t.status === 'running').length);
 
-	const confirmMessage = $derived(
-		runningCount === 1
-			? '1 background agent is still running. Stopping will also stop it.'
-			: `${runningCount} background agents are still running. Stopping will also stop them.`
+	const confirmTitle = $derived(
+		preserveBackground ? 'Stop this response?' : 'Stop background agents too?'
 	);
+
+	const confirmMessage = $derived(
+		preserveBackground
+			? runningCount === 1
+				? '1 background agent will keep running.'
+				: `${runningCount} background agents will keep running.`
+			: runningCount === 1
+				? '1 background agent is still running. Stopping will also stop it.'
+				: `${runningCount} background agents are still running. Stopping will also stop them.`
+	);
+
+	const confirmLabel = $derived(preserveBackground ? 'Stop response' : 'Stop everything');
+	const checkboxLabel = $derived(preserveBackground ? 'Also stop background agents' : undefined);
+	// Flag OFF: always destructive (full stop). Flag ON: only destructive once the
+	// user opts into taking the agents down too; the safe default reads as normal.
+	const confirmDanger = $derived(preserveBackground ? alsoStopBackground : true);
 
 	function handleClick() {
 		if (runningCount > 0) {
+			alsoStopBackground = false;
 			showConfirm = true;
 		} else {
-			onStop();
+			// No background work: interrupt immediately. Flag OFF → full stop (the
+			// field is ignored server-side); flag ON → foreground-only.
+			onStop(preserveBackground ? false : true);
 		}
 	}
 
 	function confirmStop() {
 		showConfirm = false;
-		onStop();
+		// Flag OFF: the interrupt is always a full stop. Flag ON: default keeps
+		// agents (false); the opt-in checkbox escalates to a full stop (true).
+		onStop(preserveBackground ? alsoStopBackground : true);
 	}
 
 	function cancelStop() {
@@ -66,11 +103,13 @@
 
 <ConfirmDialog
 	open={showConfirm}
-	title="Stop background agents too?"
+	title={confirmTitle}
 	message={confirmMessage}
-	confirmLabel="Stop everything"
+	{confirmLabel}
 	cancelLabel="Cancel"
-	danger
+	danger={confirmDanger}
+	{checkboxLabel}
+	bind:checkboxChecked={alsoStopBackground}
 	onConfirm={confirmStop}
 	onCancel={cancelStop}
 />

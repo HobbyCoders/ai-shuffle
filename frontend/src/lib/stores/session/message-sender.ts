@@ -443,16 +443,22 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			return true;
 		},
 
-		stopGeneration() {
+		stopGeneration(stopBackground = false) {
 			const _state = getState();
 			if (_state.sessionId) {
-				wsConn.send({ type: 'stop', session_id: _state.sessionId });
+				// stop_background=true also tears down in-flight background sub-agents;
+				// false stops only the foreground turn (Claude Code's Esc). The backend
+				// ignores this field entirely when the preserve-background flag is off,
+				// so a default-false send is exactly today's full stop there.
+				wsConn.send({ type: 'stop', session_id: _state.sessionId, stop_background: stopBackground });
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created
 				// / start handlers send the stop once the id arrives, so the backend
 				// can discard the orphan turn instead of silently dropping the click.
+				// Carry the caller's choice through so the deferred stop matches.
 				internal.stopRequestedBeforeSession = true;
+				internal.stopBackgroundRequested = stopBackground;
 			}
 
 			const current = stopTimeout.get();

@@ -115,6 +115,13 @@ export interface PollAppliedData {
 	 * background work in flight (including while a turn is PARKED).
 	 */
 	activeTasks: Task[];
+	/**
+	 * Whether a user "Stop" should leave background sub-agents running (Claude
+	 * Code's Esc semantics). Effective only when the backend flag is on AND the
+	 * scoped-interrupt patch verified — the backend collapses both into this one
+	 * boolean on the /live payload. Default false → today's full-stop behavior.
+	 */
+	preserveBackgroundOnInterrupt: boolean;
 }
 
 /** Number of consecutive failures before notifying the error callback */
@@ -549,6 +556,7 @@ class SessionPoller {
 					usage: session.usage,
 					sessionMeta,
 					activeTasks: parseActiveTasks(data.activeTasks ?? data.active_tasks),
+					preserveBackgroundOnInterrupt: data.preserve_background_on_interrupt === true,
 				};
 			}
 			return null;
@@ -673,6 +681,10 @@ class SessionPoller {
 		// on a fresh backend; tolerate a missing field gracefully (treat as []).
 		// Only ever contains currently-running tasks.
 		const activeTasks = parseActiveTasks(data.activeTasks ?? data.active_tasks);
+
+		// Backend-resolved "keep background agents alive on Stop" toggle. Rides the
+		// same /live payload as activeTasks; absent/false on older backends.
+		const preserveBackgroundOnInterrupt = data.preserve_background_on_interrupt === true;
 
 		const rawMessages = serverMessages.map((m, i) => convertServerMessage(m, i));
 
@@ -853,6 +865,7 @@ class SessionPoller {
 					usage: session.usage,
 					sessionMeta,
 					activeTasks,
+					preserveBackgroundOnInterrupt,
 				});
 			} else {
 				console.warn(`[Poller] onPollApplied(${sessionId}): session not found in sessionState after apply`);

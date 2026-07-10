@@ -686,3 +686,28 @@ class TestSettingsConfigClass:
 
         assert Settings.model_config.get('env_file') == '.env'
         assert Settings.model_config.get('env_file_encoding') == 'utf-8'
+
+
+class TestPreserveBackgroundOnInterrupt:
+    """The opt-in flag that gates the deploy-time bundled-CLI interrupt patch."""
+
+    def test_default_is_false(self):
+        """No binary is touched unless the operator opts in."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PRESERVE_BACKGROUND_ON_INTERRUPT", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings(_env_file=None)
+
+                    assert settings.preserve_background_on_interrupt is False
+
+    def test_env_var_true_enables(self):
+        """PRESERVE_BACKGROUND_ON_INTERRUPT=true → True (picked up by field name)."""
+        with patch.dict(os.environ, {"PRESERVE_BACKGROUND_ON_INTERRUPT": "true"}, clear=False):
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings()
+
+                    assert settings.preserve_background_on_interrupt is True

@@ -23,6 +23,13 @@
 		cancelLabel?: string;
 		/** Style the confirm action as destructive. */
 		danger?: boolean;
+		/** Optional opt-in checkbox rendered between the message and the actions.
+		 *  When set, a checkbox with this label appears; its state is exposed via
+		 *  the bindable `checkboxChecked` prop so the caller can branch on confirm.
+		 *  Omitted (undefined) → no checkbox, exactly as before. */
+		checkboxLabel?: string;
+		/** Two-way bound checked state for the optional opt-in checkbox. */
+		checkboxChecked?: boolean;
 		onConfirm: () => void;
 		onCancel: () => void;
 	}
@@ -34,6 +41,8 @@
 		confirmLabel = 'Confirm',
 		cancelLabel = 'Cancel',
 		danger = false,
+		checkboxLabel = undefined,
+		checkboxChecked = $bindable(false),
 		onConfirm,
 		onCancel
 	}: Props = $props();
@@ -92,6 +101,13 @@
 			<h2 id="confirm-title" class="text-lg font-semibold text-foreground">{title}</h2>
 			<p class="mt-2 text-sm text-muted-foreground whitespace-pre-line">{message}</p>
 
+			{#if checkboxLabel}
+				<label class="confirm-checkbox mt-4 flex items-center gap-2.5 text-sm text-foreground cursor-pointer select-none">
+					<input type="checkbox" bind:checked={checkboxChecked} />
+					<span>{checkboxLabel}</span>
+				</label>
+			{/if}
+
 			<div class="mt-6 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3">
 				<button
 					onclick={onCancel}
@@ -133,6 +149,19 @@
 		.animate-confirm-in {
 			animation: none;
 		}
+	}
+
+	.confirm-checkbox input[type='checkbox'] {
+		width: 1rem;
+		height: 1rem;
+		flex-shrink: 0;
+		accent-color: var(--destructive);
+		cursor: pointer;
+	}
+
+	.confirm-checkbox input[type='checkbox']:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.confirm-secondary-btn:hover {

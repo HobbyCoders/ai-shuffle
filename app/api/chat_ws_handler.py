@@ -1964,9 +1964,26 @@ class ChatWebSocketHandler:
                         logger.debug(f"Cluster interrupt skipped (offline) for {session_id}: {e}")
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"Cluster relay_interrupt failed for {session_id}: {e}")
+                    # NOTE: the `stop_background` opt-in is NOT propagated to
+                    # remote-owned sessions — the relay protocol carries only the
+                    # bare interrupt. The safe default (keep background agents) is
+                    # preserved on the owning install; the "also stop them" opt-in
+                    # is a known cross-install gap tracked for a follow-up.
                     return
 
-            from app.core.query_engine import interrupt_session
+            from app.core.query_engine import interrupt_session, stop_all_background_tasks
+            from app.core.cli_interrupt_patch import is_patch_active
+
+            # Opt-in: also tear down in-flight background sub-agents. Only meaningful
+            # when the preserve-background patch is BOTH enabled and actually active
+            # — otherwise a plain interrupt already kills them, so the per-task loop
+            # would be redundant. Gating here also makes flag-OFF a true no-op even
+            # though the frontend always sends stop_background=true.
+            stop_background = (
+                bool(data.get("stop_background"))
+                and settings.preserve_background_on_interrupt
+                and is_patch_active()
+            )
 
             # Mark session as user-stopped so the finally block in run_query
             # does NOT auto-fire queued messages.  The queue stays intact —
@@ -2030,6 +2047,14 @@ class ChatWebSocketHandler:
                             pass
                     _t = asyncio.create_task(_safety_cancel(task, session_id))
                     _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+            # "Stop, and also stop background agents": drive each still-running
+            # background task through the per-task stop path. Done LAST — the
+            # foreground safety-cancel above is already armed (non-blocking
+            # create_task), so a hung stop_task here can't delay the force-cancel.
+            # Skipped by default so background sub-agents survive a plain Stop.
+            if stop_background:
+                await stop_all_background_tasks(session_id)
 
     # ------------------------------------------------------------------
     # handle_interrupt_for_query (two-phase: interrupt only, then confirm)

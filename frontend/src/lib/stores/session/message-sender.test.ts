@@ -60,6 +60,7 @@ function makeDeps(initial: ActiveSessionState) {
 		awaitingNewSession: false,
 		pendingRequestId: null,
 		stopRequestedBeforeSession: false,
+		stopBackgroundRequested: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
 		interruptConfirmResolve: null,
