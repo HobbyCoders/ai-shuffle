@@ -571,7 +571,7 @@
 	{#if showShipIt}
 		<div class="split-btn-group">
 			<button
-				class="git-btn split-main ship-it-btn"
+				class="git-btn split-main"
 				onclick={() => onClickShipIt?.()}
 				disabled={actionsBusy}
 				title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
@@ -580,7 +580,7 @@
 				<span class="btn-label">Ship It</span>
 			</button>
 			<button
-				class="git-btn split-chevron ship-it-btn"
+				class="git-btn split-chevron"
 				class:active={shipItOptsOpen}
 				onclick={() => toggleActionDropdown('git-shipit')}
 				disabled={actionsBusy}
@@ -723,17 +723,6 @@
 
 	.init-btn:hover:not(:disabled) {
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
-	}
-
-	/* Ship It button */
-	.ship-it-btn {
-		border-color: var(--secondary-foreground);
-		color: var(--secondary-foreground);
-	}
-
-	.ship-it-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--secondary) 80%, transparent);
-		color: var(--secondary-foreground);
 	}
 
 	.btn-label {
