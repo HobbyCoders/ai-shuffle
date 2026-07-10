@@ -988,43 +988,33 @@ async def get_live_session(
     # Check session exists and user has access
     session = await require_session(request, session_id)
 
-    # Active background tasks (SDK agent tasks + Monitor shell subprocesses) PLUS
-    # any recently-failed task still inside the retention window. ``get_visible``
-    # (not ``get_active``) is the DISPLAY view: it surfaces a task that died —
-    # e.g. reaped to "killed" when its pooled SDK client was destroyed — for a
-    # short window so the taskbar shows the failure instead of the row silently
-    # vanishing. Running-only control-flow predicates still use ``get_active``.
-    # Attached fresh to EVERY local response path (delta or full, streaming or
-    # not) — never routed through the live store's last_update_id delta logic, so
-    # a task finishing/failing is reflected on the very next poll. [] when none.
-    active_tasks = task_registry.get_visible(session_id)
-
-    # "Unpark pending": a background sub-agent completed (so it has already dropped
-    # out of ``active_tasks``) and the parent's unpark follow-up turn is committed
-    # but has NOT yet flipped ``is_streaming`` true. Surfaced on every response body
-    # so a polling client keeps its park-poll alive across that gap instead of
-    # seeing a transient (is_streaming=false, activeTasks=[]) and STOPPING — which
-    # stranded the parked UI until a full reload. Clears the instant the follow-up
-    # streams. See task_registry / the session poller.
-    unpark_pending = task_registry.is_unpark_pending(session_id)
-
-    # Keep-polling ALSO stays up while undrained queued messages await the drain
-    # pump: a follow-up turn is imminent even though nothing is streaming this
-    # instant. Without this, a switch-back that lands in the micro-gap BETWEEN
-    # queue-driven follow-up turns reads a truthful (is_streaming=false,
-    # activeTasks=[], unpark_pending=false) and the client concludes permanent
-    # idle → stops polling and the UI freezes until a manual refresh. Reuse ``unpark_pending`` as the keep-alive
-    # channel so no client contract change is needed; scope it narrowly to the
-    # exact "a queue row still exists" condition. Does NOT touch the drain pump
-    # or task_registry semantics.
-    if not unpark_pending:
-        try:
-            if await run_sync(database.count_queued_messages, session_id) > 0:
-                unpark_pending = True
-        except Exception:
-            logger.debug(
-                "count_queued_messages failed for %s", session_id, exc_info=True
-            )
+    # Derived lifecycle snapshot (Phase 1: derivation before enforcement).
+    # ``compute`` absorbed this endpoint's inline activeTasks / unpark_pending
+    # logic VERBATIM — same reads, same order, same side effects — so the two
+    # destructured values below are byte-identical to what was computed here
+    # before (pinned by tests/api/test_live_lifecycle_differential.py). It also
+    # reads the remaining lifecycle sources (pool, sync engine, drain pump,
+    # parked marker) and logs any cross-source disagreement as
+    # ``lifecycle-drift``; nothing else about this endpoint changes.
+    #
+    # active_tasks: SDK agent tasks + Monitor shell subprocesses PLUS any
+    # recently-failed task still inside the retention window (``get_visible``,
+    # the DISPLAY view — running-only control-flow predicates still use
+    # ``get_active``). Attached fresh to EVERY local response path (delta or
+    # full, streaming or not) — never routed through the live store's
+    # last_update_id delta logic, so a task finishing/failing is reflected on
+    # the very next poll. [] when none.
+    #
+    # unpark_pending: an unpark follow-up turn is committed but has NOT yet
+    # flipped ``is_streaming`` true — OR undrained queued messages exist (the
+    # keep-alive channel, forensic incident 2026-07-09). Surfaced on every
+    # response body so a polling client keeps its park-poll alive across the
+    # gap instead of reading a transient (is_streaming=false, activeTasks=[])
+    # and STOPPING.
+    from app.core.lifecycle_state import compute as compute_lifecycle
+    lifecycle = await compute_lifecycle(session_id, session_row=session)
+    active_tasks = lifecycle.active_tasks
+    unpark_pending = lifecycle.unpark_pending
 
     # Effective "a plain Stop spares background sub-agents" state. Only true when
     # the operator opted in AND the deploy-time CLI binary patch actually landed
