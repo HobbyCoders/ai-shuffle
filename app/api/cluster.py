@@ -503,6 +503,44 @@ async def cluster_upload(
     return await _ws_upload(file=file, path=path, token="cluster")
 
 
+@router.post("/sessions/{session_id}/upload")
+async def cluster_session_upload(
+    session_id: str,
+    file: UploadFile = File(...),
+    path: str = Form(default=""),
+    worktree_id: str = Form(default=""),
+    install_id: str = Depends(cluster.require_cluster_auth),
+):
+    """Receive a chat attachment for a session THIS install owns (peer relay).
+
+    A viewer install can't usefully write the file to its own disk — the
+    session's agent runs here, so the bytes must land in *this* install's
+    project/worktree uploads dir. Reuses the project upload save path and returns
+    the owner-rooted paths so the outgoing message references something the agent
+    can actually read.
+    """
+    from app.api.projects import _perform_project_upload, _read_upload_within_limit
+
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    project = await run_sync(database.get_project, session.get("project_id"))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Enforce the size limit again on the receiving side (defence in depth).
+    content = await _read_upload_within_limit(file)
+    return await run_sync(
+        _perform_project_upload,
+        project,
+        content=content,
+        filename=file.filename or "upload",
+        path=path,
+        session_id=session_id,
+        worktree_id=worktree_id,
+    )
+
+
 # ============================================================================
 # Admin endpoints (normal auth) — power the Devices UI
 # ============================================================================

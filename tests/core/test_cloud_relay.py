@@ -438,3 +438,92 @@ async def test_permission_relays_use_live_relay_timeout(this_install, monkeypatc
     )
 
     assert timeouts == [cloud_relay.LIVE_RELAY_TIMEOUT, cloud_relay.LIVE_RELAY_TIMEOUT]
+
+
+# --- relay_project_upload (chat attachment → owning install) -----------------
+#
+# In cluster mode a session may be owned by a different install (shared DB,
+# separate disks). Attaching a file from a *viewer* install must land the bytes
+# in the OWNER's uploads dir so the agent (which runs there) can read them, and
+# the message must reference the owner-rooted path — not the viewer's local disk.
+
+
+class _FakeUploadClient:
+    """httpx.AsyncClient stand-in whose ``post`` accepts multipart files/data."""
+
+    def __init__(self, *, resp=None, exc=None, recorder=None):
+        self._resp = resp
+        self._exc = exc
+        self._recorder = recorder
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, files=None, data=None, headers=None):
+        if self._recorder is not None:
+            self._recorder.update(url=url, files=files, data=data, headers=headers)
+        if self._exc:
+            raise self._exc
+        return self._resp
+
+
+async def test_relay_project_upload_posts_multipart_and_returns_owner_paths(
+    this_install, monkeypatch
+):
+    _online_worker(monkeypatch)
+    rec: dict = {}
+    owner_resp = {
+        "filename": "shot.png",
+        "path": "uploads/shot.png",
+        "full_path": "/worker/projects/app/uploads/shot.png",
+        "size": 3,
+        "sizeFormatted": "3 B",
+    }
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeUploadClient(resp=_FakeResp(200, owner_resp), recorder=rec),
+    )
+
+    session = {"id": "s1", "instance_id": "install-other"}
+    result = await cloud_relay.relay_project_upload(
+        session, content=b"abc", filename="shot.png", path="", worktree_id="wt1"
+    )
+
+    # Owner-rooted paths are passed straight back to the caller.
+    assert result == owner_resp
+    assert result["full_path"].startswith("/worker/")
+    assert rec["url"] == "https://worker.example.com/api/v1/cluster/sessions/s1/upload"
+    assert rec["files"] == {"file": ("shot.png", b"abc")}
+    assert rec["data"] == {"path": "", "worktree_id": "wt1"}
+    assert rec["headers"] == {"X-Cluster": "secret"}
+
+
+async def test_relay_project_upload_offline_when_owner_unreachable(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeUploadClient(exc=cloud_relay.httpx.ConnectError("boom")),
+    )
+    with pytest.raises(cloud_relay.InstallOffline):
+        await cloud_relay.relay_project_upload(
+            {"id": "s1", "instance_id": "install-other"}, content=b"x", filename="a.png"
+        )
+
+
+async def test_relay_project_upload_reraises_peer_status(this_install, monkeypatch):
+    _online_worker(monkeypatch)
+    monkeypatch.setattr(
+        cloud_relay.httpx,
+        "AsyncClient",
+        lambda *a, **k: _FakeUploadClient(resp=_FakeResp(413, {"detail": "File too large"})),
+    )
+    with pytest.raises(cloud_relay.CloudRelayError) as ei:
+        await cloud_relay.relay_project_upload(
+            {"id": "s1", "instance_id": "install-other"}, content=b"x", filename="a.png"
+        )
+    assert ei.value.status_code == 413

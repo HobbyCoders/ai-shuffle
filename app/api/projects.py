@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
 from app.db import database
+from app.core import cloud_relay
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access, format_file_size, api_error_handler
 
@@ -434,39 +435,46 @@ async def list_project_files(
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
-@router.post("/{project_id}/upload")
-async def upload_file(
-    request: Request,
-    project_id: str,
-    file: UploadFile = File(...),
-    path: str = Form(default=""),
-    session_id: str = Form(default=""),
-    worktree_id: str = Form(default=""),
-    token: str = Depends(require_auth)
-):
-    """Upload a file to a specific path within the project. API users can only access their assigned project.
+async def _read_upload_within_limit(file: UploadFile) -> bytes:
+    """Read an UploadFile fully, rejecting anything over MAX_UPLOAD_SIZE.
 
-    If session_id is provided and the session is linked to a worktree, the file
-    is uploaded to the worktree's working directory instead of the main project path.
-    If worktree_id is provided directly (e.g. before a session exists), it is used
-    as a fallback to resolve the worktree.
+    Reads in 64KB chunks so the limit is enforced without trusting the
+    (spoofable) Content-Length header.
     """
-    # Check Content-Length header for early rejection
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
-        )
+    chunks = []
+    total_size = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
-    check_project_access(request, project_id)
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
 
+def _perform_project_upload(
+    project: dict,
+    *,
+    content: bytes,
+    filename: str,
+    path: str = "",
+    session_id: str = "",
+    worktree_id: str = "",
+) -> dict:
+    """Write already-read upload bytes to the project/worktree uploads dir.
+
+    Resolves the destination the same way whether the upload arrives directly or
+    is relayed from another install: worktree working dir when the session (or
+    ``worktree_id``) resolves one and it exists on disk, else the project path.
+    Runs on the install that OWNS the session, so the returned ``full_path`` is
+    always rooted on a disk the session's agent can read. Synchronous (filesystem
+    + DB) — call via ``run_sync`` from async contexts.
+    """
     # Determine base path: use worktree path if session or worktree_id resolves one
     base_project_path = project["path"]
     worktree = None
@@ -492,7 +500,7 @@ async def upload_file(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitize filename
-    safe_filename = Path(file.filename).name
+    safe_filename = Path(filename).name
     if not safe_filename or safe_filename.startswith('.'):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -511,24 +519,7 @@ async def upload_file(
             file_path = target_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    # Save the file with size limit enforcement
-    async with api_error_handler("save uploaded file"):
-        # Read in chunks to enforce size limit without trusting Content-Length
-        chunks = []
-        total_size = 0
-        while True:
-            chunk = await file.read(64 * 1024)  # 64KB chunks
-            if not chunk:
-                break
-            total_size += len(chunk)
-            if total_size > MAX_UPLOAD_SIZE:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
-                )
-            chunks.append(chunk)
-        content = b"".join(chunks)
-        file_path.write_bytes(content)
+    file_path.write_bytes(content)
 
     # Return relative path for reference (relative to the effective base path)
     base_path = get_project_working_dir_as_path(base_project_path)
@@ -537,7 +528,7 @@ async def upload_file(
     # Use forward slashes for consistent cross-platform path references
     relative_path_str = relative_path.as_posix()
 
-    logger.debug(f"Upload complete: original='{file.filename}' -> saved='{file_path.name}', path='{relative_path_str}'")
+    logger.debug(f"Upload complete: original='{filename}' -> saved='{file_path.name}', path='{relative_path_str}'")
 
     return {
         "filename": file_path.name,
@@ -546,6 +537,94 @@ async def upload_file(
         "size": len(content),
         "sizeFormatted": format_file_size(len(content))
     }
+
+
+@router.post("/{project_id}/upload")
+async def upload_file(
+    request: Request,
+    project_id: str,
+    file: UploadFile = File(...),
+    path: str = Form(default=""),
+    session_id: str = Form(default=""),
+    worktree_id: str = Form(default=""),
+    token: str = Depends(require_auth)
+):
+    """Upload a file to a specific path within the project. API users can only access their assigned project.
+
+    If session_id is provided and the session is linked to a worktree, the file
+    is uploaded to the worktree's working directory instead of the main project path.
+    If worktree_id is provided directly (e.g. before a session exists), it is used
+    as a fallback to resolve the worktree.
+
+    In cluster mode a session may be OWNED by a different install (shared DB,
+    separate disks). Writing the attachment to *this* install's disk would leave
+    the agent — which runs on the owning install — with an unreadable path. So
+    when the session is remote we relay the bytes to the owning install and
+    return the owner-rooted paths it reports.
+    """
+    # Check Content-Length header for early rejection
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
+        )
+
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Read the bytes (enforcing the size limit) before deciding local vs relay so
+    # oversized files are rejected here and never carried over the peer channel.
+    content = await _read_upload_within_limit(file)
+
+    # Cluster mode: relay to the install that owns the session so the file lands
+    # where the agent can read it (and the message references the owner's path).
+    if session_id:
+        session = database.get_session(session_id)
+        if session and cloud_relay.is_remote_session(session):
+            try:
+                return await cloud_relay.relay_project_upload(
+                    session,
+                    content=content,
+                    filename=file.filename or "upload",
+                    path=path,
+                    worktree_id=worktree_id,
+                )
+            except cloud_relay.InstallOffline as e:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "The device that owns this session is offline, so the "
+                        "attachment can't be delivered to where the agent runs. "
+                        "Upload from that device, or use 'Resume here' to take "
+                        "over the session first."
+                    ),
+                ) from e
+            except cloud_relay.CloudRelayError as e:
+                code = (
+                    e.status_code
+                    if e.status_code and 400 <= e.status_code < 500
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                raise HTTPException(
+                    status_code=code,
+                    detail=e.detail or "Failed to relay the upload to the owning device.",
+                ) from e
+
+    async with api_error_handler("save uploaded file"):
+        return _perform_project_upload(
+            project,
+            content=content,
+            filename=file.filename or "upload",
+            path=path,
+            session_id=session_id,
+            worktree_id=worktree_id,
+        )
 
 
 @router.get("/{project_id}/files/download")

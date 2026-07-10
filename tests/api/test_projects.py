@@ -888,6 +888,115 @@ class TestUploadFile:
         assert response.status_code == 404
 
 
+class TestUploadFileClusterRelay:
+    """POST /upload relays to the owning install when the session is remote.
+
+    In cluster mode a session may be owned by a *different* install (shared DB,
+    separate disks). Writing the attachment to this install's disk would leave
+    the agent — which runs on the owning install — with an unreadable path, so
+    the bytes are relayed and the owner-rooted paths are returned instead.
+    """
+
+    def test_remote_session_relays_and_returns_owner_path(
+        self, client, mock_database, sample_project, temp_dir, mock_settings
+    ):
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_session.return_value = {"id": "s1", "instance_id": "worker"}
+
+        # Do NOT create the project dir: a remote upload must never touch this
+        # install's disk.
+        owner_resp = {
+            "filename": "shot.png",
+            "path": "uploads/shot.png",
+            "full_path": "/worker/projects/app/uploads/shot.png",
+            "size": 3,
+            "sizeFormatted": "3 B",
+        }
+        captured = {}
+
+        async def fake_relay(session, *, content, filename, path, worktree_id):
+            captured.update(
+                session=session, content=content, filename=filename,
+                path=path, worktree_id=worktree_id,
+            )
+            return owner_resp
+
+        with patch("app.api.projects.cloud_relay.is_remote_session", return_value=True), \
+             patch("app.api.projects.cloud_relay.relay_project_upload", new=fake_relay):
+            files = {"file": ("shot.png", BytesIO(b"abc"), "image/png")}
+            response = client.post(
+                "/api/v1/projects/test-project/upload",
+                files=files,
+                data={"session_id": "s1"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        # Message references the OWNER's absolute path, not this install's disk.
+        assert data["full_path"] == "/worker/projects/app/uploads/shot.png"
+        assert captured["content"] == b"abc"
+        assert captured["filename"] == "shot.png"
+        # Nothing was written locally.
+        assert not (temp_dir / "test-project" / "uploads").exists()
+
+    def test_remote_session_owner_offline_returns_409(
+        self, client, mock_database, sample_project, temp_dir, mock_settings
+    ):
+        from app.core.cloud_relay import InstallOffline
+
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_session.return_value = {"id": "s1", "instance_id": "worker"}
+
+        async def offline_relay(session, **kwargs):
+            raise InstallOffline("Device 'Worker' is offline")
+
+        with patch("app.api.projects.cloud_relay.is_remote_session", return_value=True), \
+             patch("app.api.projects.cloud_relay.relay_project_upload", new=offline_relay):
+            files = {"file": ("shot.png", BytesIO(b"abc"), "image/png")}
+            response = client.post(
+                "/api/v1/projects/test-project/upload",
+                files=files,
+                data={"session_id": "s1"},
+            )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "offline" in detail.lower()
+        assert "resume here" in detail.lower()
+
+    def test_local_session_not_relayed(
+        self, client, mock_database, sample_project, temp_dir, mock_settings
+    ):
+        """A session owned by THIS install saves locally and never relays."""
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_session.return_value = {"id": "s1", "instance_id": "self"}
+        mock_database.get_worktree_by_session.return_value = None
+
+        project_dir = temp_dir / "test-project"
+        project_dir.mkdir()
+
+        relay_called = {"v": False}
+
+        async def should_not_relay(*a, **k):
+            relay_called["v"] = True
+            return {}
+
+        with patch("app.api.projects.cloud_relay.is_remote_session", return_value=False), \
+             patch("app.api.projects.cloud_relay.relay_project_upload", new=should_not_relay):
+            files = {"file": ("local.txt", BytesIO(b"hi"), "text/plain")}
+            response = client.post(
+                "/api/v1/projects/test-project/upload",
+                files=files,
+                data={"session_id": "s1"},
+            )
+
+        assert response.status_code == 200
+        assert relay_called["v"] is False
+        assert response.json()["filename"] == "local.txt"
+        # File landed on this install's disk as before.
+        assert (project_dir / "uploads" / "local.txt").exists()
+
+
 # =============================================================================
 # Test Download File Endpoint
 # =============================================================================
