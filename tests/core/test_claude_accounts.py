@@ -6,6 +6,7 @@ rules, and the oauth post-write hook — all over the pg_shim SQLite DB.
 """
 
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -298,6 +299,127 @@ class TestSwitch:
         _set_key(db)
         res = svc.switch_account("missing")
         assert res["error"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# switch_account: refresh-on-switch for a stored inactive account whose
+# short-lived access token expired while idle (the multi-account bug).
+# ---------------------------------------------------------------------------
+
+class TestSwitchRefresh:
+    def _seed_active_a(self, svc, oauth_tmp):
+        _write_file(oauth_tmp, _oauth_dict(access="A", refresh="rA"))
+        return svc.seed_from_credentials_file()
+
+    def _add_b(self, svc, db, *, refresh, expires):
+        b_oauth = _oauth_dict(access="B-old", refresh=refresh, expires=expires)
+        db.create_claude_account(
+            account_id="acct-b", name="B",
+            credentials=encryption.encrypt_value(json.dumps(b_oauth)),
+            credential_fingerprint=svc._fingerprint(b_oauth),
+            expires_at=expires, has_refresh_token=bool(refresh),
+        )
+
+    def test_expired_target_with_refresh_token_is_refreshed_and_persisted(
+        self, mock_db, oauth_tmp
+    ):
+        """Switching to a secondary whose access token expired while idle must
+        refresh it (using its own refresh token), activate the FRESH token, and
+        persist the rotation back to the row — not present the stale token."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        self._seed_active_a(svc, oauth_tmp)
+        expired = int(time.time() * 1000) - 60_000
+        self._add_b(svc, db, refresh="rB", expires=expired)
+
+        fresh = _oauth_dict(
+            access="B-NEW", refresh="rB2", expires=int(time.time() * 1000) + 3_600_000
+        )
+        with patch.object(oauth_tmp, "refresh_oauth_dict", return_value=(fresh, None)) as rf:
+            res = svc.switch_account("acct-b")
+
+        assert res["success"], res
+        rf.assert_called_once()
+        # Disk holds the REFRESHED credential (what SDK subprocesses will read).
+        on_disk = json.loads((oauth_tmp.config_dir / ".credentials.json").read_text())
+        assert on_disk["claudeAiOauth"]["accessToken"] == "B-NEW"
+        # The row was updated so the stored secondary no longer goes stale and the
+        # UI reports it valid.
+        row = db.get_claude_account("acct-b", include_credentials=True)
+        stored = json.loads(encryption.decrypt_value(row["credentials"]))
+        assert stored["accessToken"] == "B-NEW"
+        assert stored["refreshToken"] == "rB2"
+        assert row["expires_at"] == fresh["expiresAt"]
+        assert svc.get_active_account_id() == "acct-b"
+
+    def test_expired_target_without_refresh_token_errors_and_keeps_active(
+        self, mock_db, oauth_tmp
+    ):
+        """Expired secondary with NO refresh token (e.g. a credentials.json shared
+        with Claude Desktop that carried an empty refreshToken) → actionable
+        error, no crash, and the current active account is left untouched."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        a_id = self._seed_active_a(svc, oauth_tmp)
+        expired = int(time.time() * 1000) - 60_000
+        self._add_b(svc, db, refresh="", expires=expired)
+
+        with patch.object(oauth_tmp, "refresh_oauth_dict") as rf:
+            res = svc.switch_account("acct-b")
+
+        assert res["success"] is False
+        assert res["error"] == "reauth_required"
+        rf.assert_not_called()  # nothing to refresh with
+        # Active pointer unchanged and the file still holds account A verbatim.
+        assert svc.get_active_account_id() == a_id
+        on_disk = json.loads((oauth_tmp.config_dir / ".credentials.json").read_text())
+        assert on_disk["claudeAiOauth"]["accessToken"] == "A"
+
+    def test_expired_target_refresh_failure_errors_and_keeps_active(
+        self, mock_db, oauth_tmp
+    ):
+        """A stored refresh token that the endpoint rejects (revoked) must abort
+        the switch with ``refresh_failed`` rather than activating a dead token."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        a_id = self._seed_active_a(svc, oauth_tmp)
+        expired = int(time.time() * 1000) - 60_000
+        self._add_b(svc, db, refresh="rB", expires=expired)
+
+        with patch.object(
+            oauth_tmp, "refresh_oauth_dict",
+            return_value=(None, "refresh_failed: 401 invalid_grant"),
+        ) as rf:
+            res = svc.switch_account("acct-b")
+
+        assert res["success"] is False
+        assert res["error"] == "refresh_failed"
+        rf.assert_called_once()
+        assert svc.get_active_account_id() == a_id
+
+    def test_valid_target_is_activated_without_a_refresh_call(self, mock_db, oauth_tmp):
+        """A target whose token is still comfortably valid must NOT trigger a
+        network refresh (no needless OAuth round-trip on every switch)."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+
+        _set_key(db)
+        self._seed_active_a(svc, oauth_tmp)
+        future = int(time.time() * 1000) + 3_600_000
+        self._add_b(svc, db, refresh="rB", expires=future)
+
+        with patch.object(oauth_tmp, "refresh_oauth_dict") as rf:
+            res = svc.switch_account("acct-b")
+
+        assert res["success"], res
+        rf.assert_not_called()
+        assert svc.get_active_account_id() == "acct-b"
 
 
 # ---------------------------------------------------------------------------

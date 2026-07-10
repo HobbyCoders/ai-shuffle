@@ -350,44 +350,52 @@ async def attempt_failover(
         if current_active:
             attempted.add(current_active)
 
-        target = await run_sync(_select_next_account, attempted)
-        if target is None:
-            await _notify(
-                api_user_id, session_id,
-                severity="warning",
-                message=(
-                    "Usage limit reached on all saved accounts — will resume "
-                    "when a window resets."
-                ),
-            )
-            logger.info(
-                "Failover exhausted: no eligible account remaining for session %s "
-                "(attempted=%d)", session_id, len(attempted),
-            )
-            return FailoverDecision(retry=False)
+        # switch_account now refreshes the target's expired/near-expiry token
+        # before activating it (see claude_accounts._ensure_target_fresh). A
+        # target whose refresh token is revoked (or a transient refresh failure)
+        # returns success=False — don't abort the whole failover on that, mark it
+        # attempted and try the NEXT candidate so one dead account can't strand a
+        # user who has other healthy accounts. The last switch error is kept so
+        # the exhausted-path notification can be specific.
+        target_name: Optional[str] = None
+        last_switch_error: Optional[str] = None
+        while True:
+            target = await run_sync(_select_next_account, attempted)
+            if target is None:
+                await _notify(
+                    api_user_id, session_id,
+                    severity="warning",
+                    message=(
+                        "Usage limit reached on all saved accounts — will resume "
+                        "when a window resets."
+                        if last_switch_error is None else
+                        "Usage limit reached — couldn't switch to another account "
+                        "(some may need to be re-added). Manual attention may be needed."
+                    ),
+                )
+                logger.info(
+                    "Failover exhausted: no eligible account remaining for session "
+                    "%s (attempted=%d, last_error=%s)",
+                    session_id, len(attempted), last_switch_error,
+                )
+                return FailoverDecision(retry=False)
 
-        target_id = target["id"]
-        target_name = target.get("name")
+            target_id = target["id"]
+            target_name = target.get("name")
 
-        result = await run_sync(claude_accounts.switch_account, target_id)
-        if not result.get("success"):
+            result = await run_sync(claude_accounts.switch_account, target_id)
+            if result.get("success"):
+                break
+
+            # This candidate couldn't be activated (e.g. expired with a revoked
+            # refresh token). Record it and loop to the next candidate.
+            last_switch_error = result.get("error")
+            attempted.add(target_id)
             logger.warning(
-                "Failover switch to account %s failed (%s) for session %s",
-                target_id, result.get("error"), session_id,
+                "Failover switch to account %s failed (%s) for session %s; "
+                "trying next candidate",
+                target_id, last_switch_error, session_id,
             )
-            # The generic 429 toast was suppressed upstream (failover eligible),
-            # so without this the user would get total silence on a switch that
-            # failed to apply. Surface a warning so they know manual attention
-            # may be needed.
-            await _notify(
-                api_user_id, session_id,
-                severity="warning",
-                message=(
-                    f"Usage limit reached — couldn't switch to {target_name}; "
-                    f"manual attention may be needed."
-                ),
-            )
-            return FailoverDecision(retry=False)
 
         _last_switch_at = time.monotonic()
         attempted.add(target_id)

@@ -17,6 +17,7 @@ from app.core import encryption
 from app.core.oauth import direct_oauth
 from app.core.usage_limits import schedule_usage_refresh
 from app.db import database as db
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,9 @@ async def complete_add_account(request: Request, token: str = Depends(require_ad
 @router.post("/{account_id}/activate")
 async def activate_account(account_id: str, token: str = Depends(require_admin)):
     """Switch the active account to ``account_id`` for this install."""
-    result = accounts.switch_account(account_id)
+    # Run the switch off the event loop: it now performs a (blocking) token
+    # refresh when the target's access token is expired/near-expiry.
+    result = await run_sync(accounts.switch_account, account_id)
     if not result.get("success"):
         err = result.get("error")
         if err == "encryption_locked":
@@ -182,6 +185,18 @@ async def activate_account(account_id: str, token: str = Depends(require_admin))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Could not decrypt the account's credentials. Re-add this account.",
+            )
+        if err == "reauth_required":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This account's session has expired and it has no refresh "
+                       "token. Re-add this account to sign in again.",
+            )
+        if err == "refresh_failed":
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not refresh this account's expired token. Try again, "
+                       "or re-add the account if the problem persists.",
             )
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=f"Could not switch account: {err}")
