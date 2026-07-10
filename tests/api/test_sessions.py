@@ -15,6 +15,7 @@ Tests cover:
 """
 
 import pytest
+import asyncio
 import json
 import tempfile
 import shutil
@@ -2332,4 +2333,105 @@ class TestSessionId:
         import uuid
         ids = [str(uuid.uuid4()) for _ in range(100)]
         assert len(set(ids)) == 100
+
+
+# =============================================================================
+# Test GET /{session_id}/context-usage
+# =============================================================================
+
+class TestGetSessionContextUsage:
+    """Test GET /api/v1/sessions/{session_id}/context-usage endpoint."""
+
+    def _make_state(self, *, is_connected=True, usage_return=None, hang=False):
+        """Build a fake pooled SessionState with a mocked adapter."""
+        state = MagicMock()
+        state.is_connected = is_connected
+        if hang:
+            async def _hang():
+                await asyncio.sleep(2)
+            state.adapter.get_context_usage = _hang
+        else:
+            state.adapter.get_context_usage = AsyncMock(return_value=usage_return)
+        return state
+
+    def _patch_pool(self, state):
+        """Patch the source get_session_pool so peek() returns ``state``.
+
+        The endpoint imports get_session_pool from app.core.session_pool at
+        call time, so patching the source binding (not a frozen from-import)
+        governs it.
+        """
+        mock_pool = MagicMock()
+        mock_pool.peek.return_value = state
+        return patch("app.core.session_pool.get_session_pool", return_value=mock_pool)
+
+    def test_context_usage_unknown_session_404(self, client, mock_database):
+        """Unknown session should 404 before touching the pool."""
+        mock_database.get_session.return_value = None
+        mock_database.get_session_by_sdk_id.return_value = None
+
+        response = client.get("/api/v1/sessions/non-existent/context-usage")
+
+        assert response.status_code == 404
+
+    def test_context_usage_not_pooled(self, client, mock_database, sample_session):
+        """Session exists but pool.peek returns None -> not_connected."""
+        mock_database.get_session.return_value = sample_session
+
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
+
+    def test_context_usage_state_not_connected(self, client, mock_database, sample_session):
+        """State present but is_connected False -> not_connected."""
+        mock_database.get_session.return_value = sample_session
+        state = self._make_state(is_connected=False)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
+
+    def test_context_usage_connected_returns_usage(self, client, mock_database, sample_session):
+        """Connected + adapter returns a dict -> available True, usage passed through."""
+        mock_database.get_session.return_value = sample_session
+        usage = {
+            "categories": [{"name": "system", "tokens": 1200}],
+            "totalTokens": 1200,
+            "maxTokens": 200000,
+            "percentage": 0.6,
+        }
+        state = self._make_state(usage_return=usage)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": True, "usage": usage}
+
+    def test_context_usage_connected_unsupported(self, client, mock_database, sample_session):
+        """Connected + adapter returns None -> unsupported."""
+        mock_database.get_session.return_value = sample_session
+        state = self._make_state(usage_return=None)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "unsupported"}
+
+    def test_context_usage_timeout(self, client, mock_database, sample_session):
+        """Connected + adapter call hangs past the bound -> timeout."""
+        mock_database.get_session.return_value = sample_session
+        state = self._make_state(hang=True)
+
+        with self._patch_pool(state), \
+                patch("app.api.sessions._SDK_CONTEXT_USAGE_TIMEOUT_SECONDS", 0.05):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "timeout"}
 

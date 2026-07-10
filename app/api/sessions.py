@@ -10,6 +10,7 @@ This module was split for maintainability. Sub-modules:
 All public symbols are re-exported here for backward compatibility.
 """
 
+import asyncio
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, status, Request
@@ -1541,6 +1542,59 @@ async def get_sdk_session_info(
             "last_modified": info.last_modified,
             "file_size": info.file_size,
         }
+
+
+# Bound on the live SDK get_context_usage() control call. Mirrors
+# _SDK_INTERRUPT_TIMEOUT_SECONDS: a wedged CLI must not hang the request.
+_SDK_CONTEXT_USAGE_TIMEOUT_SECONDS = 5.0
+
+
+@router.get("/{session_id}/context-usage")
+async def get_session_context_usage(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """Get the live SDK context-window usage breakdown for a session.
+
+    Returns ``{"available": False, "reason": ...}`` when the breakdown cannot
+    be produced (session not connected in the local pool, SDK method
+    unsupported, or the control call times out), or
+    ``{"available": True, "usage": <ContextUsageResponse>}`` with the SDK's
+    breakdown passed through verbatim.
+    """
+    await require_session(request, session_id)
+
+    async with api_error_handler("get context usage"):
+        from app.core.session_pool import get_session_pool
+
+        # peek(): non-spawning, no LRU promotion. Returns None for parked,
+        # never-opened, or remote-install sessions.
+        state = get_session_pool().peek(session_id)
+        if not state or not state.is_connected:
+            return {"available": False, "reason": "not_connected"}
+
+        # Run the SDK control call on a DETACHED task guarded by a SHIELD: on
+        # timeout we must NOT cancel the in-flight control request — cancelling
+        # it mid-flight leaks the entry in the SDK client's
+        # pending_control_responses, which can wedge later control calls.
+        # Shielding lets the wait_for time out while the underlying call keeps
+        # running to completion in the background.
+        usage_task = asyncio.create_task(state.adapter.get_context_usage())
+        usage_task.add_done_callback(
+            lambda t: t.cancelled() or t.exception()
+        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(usage_task),
+                timeout=_SDK_CONTEXT_USAGE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return {"available": False, "reason": "timeout"}
+
+        if result is None:
+            return {"available": False, "reason": "unsupported"}
+        return {"available": True, "usage": result}
 
 
 @router.post("/{session_id}/tasks/{task_id}/stop")

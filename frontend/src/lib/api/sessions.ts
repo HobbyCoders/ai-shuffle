@@ -2,7 +2,7 @@
  * Session API types and functions
  */
 
-import { api, fetchAndDownload } from './client';
+import { api, fetchAndDownload, type RequestOptions } from './client';
 
 // ============================================================================
 // Session Types
@@ -213,6 +213,60 @@ export async function forkSession(sessionId: string, messageIndex?: number): Pro
  */
 export async function adoptSession(sessionId: string): Promise<AdoptSessionResponse> {
 	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, {});
+}
+
+// ============================================================================
+// Context usage (live SDK breakdown)
+// ============================================================================
+
+/**
+ * A single context-window category from the Claude Agent SDK's
+ * ContextUsageResponse (e.g. "System prompt", "MCP tools", "Messages",
+ * "Free space"). Only these fields are relied upon — the SDK may include more.
+ */
+export interface ContextUsageCategory {
+	name: string;
+	tokens: number;
+	color: string;
+	/** True for categories reserved but not yet materialised (e.g. autocompact buffer). */
+	isDeferred?: boolean;
+}
+
+/**
+ * The SDK ContextUsageResponse passed through verbatim by the backend. Extra
+ * fields may be present; only those declared here are consumed by the UI.
+ */
+export interface SdkContextUsage {
+	categories: ContextUsageCategory[];
+	totalTokens: number;
+	maxTokens: number;
+	rawMaxTokens: number;
+	/** 0–100. */
+	percentage: number;
+	model: string;
+	isAutoCompactEnabled: boolean;
+}
+
+/**
+ * Response of `GET /sessions/{id}/context-usage`. Either the live SDK breakdown
+ * is available, or a machine reason it isn't (the caller then falls back to the
+ * poller estimate).
+ */
+export type ContextUsageResponse =
+	| { available: false; reason: 'not_connected' | 'unsupported' | 'timeout' }
+	| { available: true; usage: SdkContextUsage };
+
+/**
+ * Fetch the live per-category context-window breakdown for a session. Cheap and
+ * meant to be called on demand (e.g. when opening the context-usage popover) —
+ * context changes every turn, so nothing should be cached across calls. Pass a
+ * `signal` to abort a stale in-flight request (popover closed / session change).
+ */
+export async function getContextUsage(
+	sessionId: string,
+	options?: RequestOptions
+): Promise<ContextUsageResponse> {
+	return api.get<ContextUsageResponse>(`/sessions/${sessionId}/context-usage`, options);
 }
 
 /** Result of stopping one in-flight background task. */

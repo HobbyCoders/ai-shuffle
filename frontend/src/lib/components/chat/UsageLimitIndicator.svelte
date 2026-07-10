@@ -142,8 +142,7 @@
 	let open = $state(false);
 	let wrapperRef = $state<HTMLDivElement | null>(null);
 
-	function toggle(e: MouseEvent) {
-		e.stopPropagation();
+	function toggle() {
 		open = !open;
 	}
 
