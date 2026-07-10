@@ -332,6 +332,63 @@ class TestAttemptFailover:
         notify.assert_awaited_once()
         assert notify.await_args.kwargs.get("severity") == "warning"
 
+    async def test_switch_failure_tries_next_candidate(self, mock_db):
+        """A candidate that can't be activated (e.g. a revoked refresh token now
+        rejected by switch_account's refresh-on-switch) must not strand the
+        failover — the next healthy candidate is tried and the turn retries."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_account(db, "a")
+        _mk_account(db, "b")
+        _mk_account(db, "c")
+        svc._set_active_account_id("a")
+        # Make "b" LRU-preferred over "c" so it is selected (and fails) first.
+        db.touch_claude_account_last_used("c")
+        af.set_auto_switch_enabled(True)
+
+        pool = MagicMock()
+        pool.remove_broken = AsyncMock()
+
+        def _switch(aid):
+            if aid == "b":
+                return {"success": False, "error": "refresh_failed"}
+            return {"success": True, "active_account_id": aid}
+
+        attempted: set = set()
+        with patch("app.core.claude_accounts.switch_account", side_effect=_switch) as sw, \
+             patch("app.core.session_pool.get_session_pool", return_value=pool), \
+             patch.object(af, "_notify", new=AsyncMock()), \
+             patch.object(af, "schedule_usage_refresh"):
+            decision = await af.attempt_failover("sess-1", None, attempted)
+
+        assert decision.retry is True
+        assert decision.switched is True
+        assert decision.account_id == "c"  # skipped the dead "b"
+        assert [c.args[0] for c in sw.call_args_list] == ["b", "c"]
+        assert attempted == {"a", "b", "c"}
+
+    async def test_all_candidates_dead_exhausts(self, mock_db):
+        """If every candidate fails to activate, failover exhausts cleanly (no
+        retry) after trying them all."""
+        from app.core import claude_accounts as svc
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_account(db, "a")
+        _mk_account(db, "b")
+        svc._set_active_account_id("a")
+        af.set_auto_switch_enabled(True)
+
+        with patch("app.core.claude_accounts.switch_account",
+                   return_value={"success": False, "error": "refresh_failed"}) as sw, \
+             patch.object(af, "_notify", new=AsyncMock()) as notify:
+            decision = await af.attempt_failover("sess-1", None, set())
+
+        assert decision.retry is False
+        sw.assert_called_once_with("b")  # only "b" is a candidate ("a" is active)
+        notify.assert_awaited_once()
+        assert notify.await_args.kwargs.get("severity") == "warning"
+
     async def test_single_account_toggle_on_silent_no_retry(self, mock_db):
         """A single-account install with the toggle ON must return retry=False
         WITHOUT emitting the 'all accounts exhausted' toast — the unified

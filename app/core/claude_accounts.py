@@ -263,6 +263,89 @@ def _row_credentials_to_dict(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+# Match direct_oauth.ensure_fresh_credentials' proactive-refresh buffer: renew a
+# token that is expired OR within this window of expiring so the activated
+# account never presents a token the API will reject.
+_SWITCH_REFRESH_BUFFER_SECONDS = 600
+
+
+def _is_near_expiry(oauth_dict: Dict[str, Any], buffer_seconds: int = _SWITCH_REFRESH_BUFFER_SECONDS) -> bool:
+    """True when the credential is expired or within ``buffer_seconds`` of it.
+
+    A missing/zero ``expiresAt`` is treated as NOT near-expiry (unknown expiry —
+    don't force a refresh we can't reason about; the on-disk ensure_fresh path
+    still guards the active credential).
+    """
+    expires_at = _oauth_expires_at(oauth_dict) or 0
+    if not expires_at:
+        return False
+    now_ms = int(time.time() * 1000)
+    return expires_at <= (now_ms + buffer_seconds * 1000)
+
+
+def _ensure_target_fresh(
+    account_id: str, oauth_dict: Dict[str, Any]
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Renew the target account's short-lived access token before activation.
+
+    Stored inactive accounts are never serviced by the on-disk refresh loop
+    (:func:`direct_oauth.ensure_fresh_credentials` only ever touches the active
+    credential), so a secondary account's access token expires while it sits
+    idle. Activating it verbatim would present an expired token that 401s — the
+    bug this guards. When the target is expired/near-expiry we refresh it here
+    using its OWN stored refresh token and persist the rotation back into its
+    row, so the switch activates a live credential (and future switches skip the
+    refresh until it ages out again).
+
+    Returns ``(fresh_oauth_dict, None)`` — the input unchanged when still valid —
+    or ``(None, error_code)``:
+      * ``"reauth_required"`` — expired with NO usable refresh token (the
+        historical Desktop-shared-empty-refreshToken case): the account must be
+        re-added; there is nothing we can renew.
+      * ``"refresh_failed"`` — a refresh token exists but the renewal call
+        failed (revoked token / network); surfaced so the switch doesn't
+        silently activate a dead credential.
+    """
+    if not _is_near_expiry(oauth_dict):
+        return oauth_dict, None
+
+    if not oauth_dict.get("refreshToken"):
+        logger.warning(
+            "Cannot switch to account %s: access token expired and no refresh "
+            "token stored (needs re-add)", account_id,
+        )
+        return None, "reauth_required"
+
+    new_dict, error = direct_oauth.refresh_oauth_dict(oauth_dict)
+    if error or new_dict is None:
+        logger.warning(
+            "Refresh-on-switch failed for account %s: %s", account_id, error,
+        )
+        return None, "refresh_failed"
+
+    # Persist the rotation into the target row. Best-effort: even if this write
+    # fails we still hold a fresh credential to activate, so don't abort the
+    # switch — the next sync-back reconciles the row.
+    try:
+        fingerprint = _fingerprint(new_dict)
+        encrypted = encryption.encrypt_value(json.dumps(new_dict))
+        db.update_claude_account_credentials(
+            account_id,
+            credentials=encrypted,
+            credential_fingerprint=fingerprint,
+            expires_at=_oauth_expires_at(new_dict),
+            has_refresh_token=bool(new_dict.get("refreshToken")),
+            clear_sync_pending=True,
+        )
+        logger.info("Refreshed stored token for account %s on switch", account_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Refreshed token for account %s but could not persist to row: %s",
+            account_id, e,
+        )
+    return new_dict, None
+
+
 def switch_account(account_id: str) -> Dict[str, Any]:
     """Make ``account_id`` the active account, writing its credentials to disk.
 
@@ -297,6 +380,18 @@ def switch_account(account_id: str) -> Dict[str, Any]:
         oauth_dict = _row_credentials_to_dict(row)
         if oauth_dict is None:
             return {"success": False, "error": "decrypt_failed"}
+
+        # 2a. Renew the target's short-lived access token if it's expired/near
+        #     expiry. Inactive accounts are never serviced by the on-disk refresh
+        #     loop, so a stored secondary's access token expires while it sits
+        #     idle; activating it verbatim would present an expired token that
+        #     401s. Refresh (using its own refresh token) and persist BEFORE we
+        #     touch the file so we only ever activate a live credential. A dead
+        #     credential (no/failed refresh) aborts the switch with an actionable
+        #     error instead of silently swapping in a broken account.
+        oauth_dict, refresh_error = _ensure_target_fresh(account_id, oauth_dict)
+        if oauth_dict is None:
+            return {"success": False, "error": refresh_error}
 
         # 3. Write it to the on-disk credentials file VERBATIM. The existing
         #    session_pool credentials-rotation machinery (claude_credentials_mtime →

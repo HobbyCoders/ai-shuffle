@@ -1224,3 +1224,91 @@ class TestEnsureFreshCredentials:
             refreshed = await oauth.ensure_fresh_credentials()
 
         assert refreshed is False
+
+
+class TestRefreshOAuthDict:
+    """Per-account (file-free) token refresh used by multi-account switching."""
+
+    def test_no_refresh_token_returns_error(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        new, err = oauth.refresh_oauth_dict({"accessToken": "a", "refreshToken": ""})
+        assert new is None
+        assert err == "no_refresh_token"
+
+    def test_successful_refresh_preserves_extra_fields(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        src = {
+            "accessToken": "old",
+            "refreshToken": "r-old",
+            "expiresAt": int(time.time() * 1000),
+            "subscriptionType": "max",
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "access_token": "NEW",
+            "refresh_token": "r-NEW",
+            "expires_in": 3600,
+            "scope": "user:inference",
+        }
+        with patch("httpx.Client") as mock_client:
+            inst = MagicMock()
+            inst.post = MagicMock(return_value=mock_response)
+            inst.__enter__ = MagicMock(return_value=inst)
+            inst.__exit__ = MagicMock(return_value=None)
+            mock_client.return_value = inst
+
+            new, err = oauth.refresh_oauth_dict(src)
+
+        assert err is None
+        assert new["accessToken"] == "NEW"
+        assert new["refreshToken"] == "r-NEW"
+        assert new["expiresAt"] > int(time.time() * 1000)
+        # Non-token fields carried through; the on-disk file was NEVER written.
+        assert new["subscriptionType"] == "max"
+        assert not (temp_dir / ".credentials.json").exists()
+
+    def test_refresh_keeps_old_refresh_token_when_endpoint_omits_it(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"access_token": "NEW", "expires_in": 3600}
+        with patch("httpx.Client") as mock_client:
+            inst = MagicMock()
+            inst.post = MagicMock(return_value=mock_response)
+            inst.__enter__ = MagicMock(return_value=inst)
+            inst.__exit__ = MagicMock(return_value=None)
+            mock_client.return_value = inst
+
+            new, err = oauth.refresh_oauth_dict({"refreshToken": "keep-me"})
+        assert err is None
+        assert new["refreshToken"] == "keep-me"
+
+    def test_non_200_returns_error(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.text = "invalid_grant"
+        with patch("httpx.Client") as mock_client:
+            inst = MagicMock()
+            inst.post = MagicMock(return_value=mock_response)
+            inst.__enter__ = MagicMock(return_value=inst)
+            inst.__exit__ = MagicMock(return_value=None)
+            mock_client.return_value = inst
+
+            new, err = oauth.refresh_oauth_dict({"refreshToken": "r"})
+        assert new is None
+        assert err.startswith("refresh_failed")
+
+    def test_network_error_is_swallowed(self, temp_dir):
+        oauth = DirectOAuth(config_dir=temp_dir)
+        with patch("httpx.Client") as mock_client:
+            inst = MagicMock()
+            inst.post = MagicMock(side_effect=httpx.ConnectError("boom"))
+            inst.__enter__ = MagicMock(return_value=inst)
+            inst.__exit__ = MagicMock(return_value=None)
+            mock_client.return_value = inst
+
+            new, err = oauth.refresh_oauth_dict({"refreshToken": "r"})
+        assert new is None
+        assert err.startswith("refresh_error")

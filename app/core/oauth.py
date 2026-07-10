@@ -530,6 +530,71 @@ class DirectOAuth:
             logger.error(f"Token refresh error: {e}", exc_info=True)
             return None, f"Refresh error: {str(e)}"
 
+    def refresh_oauth_dict(
+        self, oauth_dict: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Refresh a credential object using its OWN ``refreshToken``, WITHOUT
+        touching the on-disk credentials file.
+
+        This is the per-account counterpart of :meth:`refresh_tokens` (which is
+        hardwired to the single on-disk active credential). Multi-account
+        switching needs to renew a *stored, inactive* account's short-lived
+        access token before activating it — reading/writing the shared file for
+        that would clobber the currently active account. So this operates purely
+        on the passed dict and returns a NEW dict; the caller persists it.
+
+        Synchronous (uses ``httpx.Client``) so it can run inside the sync
+        ``switch_account`` path (also invoked off the event loop via
+        ``run_sync`` from auto-failover). Non-token fields present on the input
+        (e.g. ``subscriptionType``) are preserved.
+
+        Returns ``(new_oauth_dict, None)`` on success, or ``(None, error_code)``:
+        ``"no_refresh_token"`` when the credential can't be renewed, otherwise a
+        ``"refresh_failed: ..."`` / ``"refresh_error: ..."`` string. Never raises.
+        """
+        refresh_token = (oauth_dict or {}).get("refreshToken")
+        if not refresh_token:
+            return None, "no_refresh_token"
+
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(OAUTH_TOKEN_URL, json=payload, headers=headers)
+
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(
+                    f"Per-account token refresh failed: {response.status_code} - {error_text}"
+                )
+                return None, f"refresh_failed: {error_text}"
+
+            data = response.json()
+            expires_in = data.get("expires_in", 3600)
+            expires_at = int((time.time() + expires_in) * 1000)
+
+            new_dict: Dict[str, Any] = dict(oauth_dict or {})
+            new_dict["accessToken"] = data["access_token"]
+            # The endpoint may or may not rotate the refresh token.
+            new_dict["refreshToken"] = data.get("refresh_token", refresh_token)
+            new_dict["expiresAt"] = expires_at
+            scopes = data.get("scope", "").split()
+            if scopes:
+                new_dict["scopes"] = scopes
+            return new_dict, None
+
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Per-account token refresh error: {e}", exc_info=True)
+            return None, f"refresh_error: {e}"
+
     def _read_oauth_data(self) -> Optional[Dict[str, Any]]:
         """Read the ``claudeAiOauth`` block from the credentials file, or None."""
         credentials_file = self.config_dir / ".credentials.json"
