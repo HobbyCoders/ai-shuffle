@@ -31,7 +31,65 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from datetime import date, datetime
+
+
+# ---------------------------------------------------------------------------
+# Shared-connection transaction serialization
+# ---------------------------------------------------------------------------
+#
+# Production hands every ``get_db()`` / ``asyncio.to_thread`` caller its OWN
+# pooled psycopg2 connection, so two concurrent writers never share a
+# transaction. The test harness instead funnels every caller through ONE shared
+# ``check_same_thread=False`` SQLite connection (see ``conftest`` /
+# ``route_db_to``). Two ``asyncio.to_thread`` writers can then interleave their
+# implicit ``BEGIN``s on that one connection and either
+#
+#   * raise ``sqlite3.OperationalError: cannot start a transaction within a
+#     transaction`` (both threads auto-BEGIN in the check-then-BEGIN window), or
+#   * clobber each other's uncommitted writes (one thread's ``commit()`` flushes
+#     the other's half-written statement, or the raised error above aborts a
+#     write) — a lost ``UPDATE`` surfaces downstream as, e.g.,
+#     ``parked_task_kind`` reading ``None`` when the test just wrote ``'agent'``.
+#
+# Hold this reentrant lock for the life of each transaction — from the first
+# statement of a ``get_db()`` / ``transaction()`` block through its
+# ``commit()`` / ``rollback()`` — so only one writer touches the shared
+# connection at a time, restoring the per-connection isolation the real pool
+# provides. Reentrant (``RLock``) so a nested ``get_db()`` on the same thread
+# never deadlocks. Safe from deadlock because no app code holds a
+# ``get_db()`` / ``transaction()`` block open across an ``await`` (verified);
+# each block runs to its commit/rollback synchronously inside ONE thread.
+#
+# The acquire depth is tracked PER THREAD (``threading.local``), never on the
+# connection object: ``RLock`` ownership is per-thread, and the whole point of
+# this lock is that several threads share one ShimConnection — per-connection
+# bookkeeping would let thread B's ``commit()`` "release" acquires actually
+# owned by thread A (RuntimeError from the non-owner release, plus A's acquire
+# leaked forever = executor-shutdown deadlock). ``commit``/``rollback``/
+# ``close`` release exactly the acquires the CALLING thread holds; that always
+# matches the real SQLite state because the shared connection has a single
+# transaction, which any ``commit()`` on any wrapper ends.
+_TXN_LOCK = threading.RLock()
+_txn_local = threading.local()  # .depth = acquires held by this thread
+
+
+def _txn_acquire() -> None:
+    """Take the shared transaction lock for the calling thread (one per
+    statement; the depth is repaid in full by ``_txn_release_all``)."""
+    _TXN_LOCK.acquire()
+    _txn_local.depth = getattr(_txn_local, "depth", 0) + 1
+
+
+def _txn_release_all() -> None:
+    """Release every acquire the CALLING thread holds (commit/rollback/close
+    ends the shared connection's single transaction, so the thread's whole
+    claim is repaid at once)."""
+    depth = getattr(_txn_local, "depth", 0)
+    _txn_local.depth = 0
+    for _ in range(depth):
+        _TXN_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +201,19 @@ class ShimCursor:
     ``dict`` keyed by column name, which is how the domain code accesses rows.
     """
 
-    def __init__(self, sqlite_cursor: sqlite3.Cursor):
+    def __init__(self, sqlite_cursor: sqlite3.Cursor, serialize: bool = False):
         self._cur = sqlite_cursor
+        # True for cursors handed out by a ShimConnection (which multiple
+        # threads share — see _TXN_LOCK). False for the standalone schema-build
+        # cursor (single-threaded), which needs no serialization.
+        self._serialize = serialize
 
     def execute(self, sql, params=None):
         tsql = translate_sql(sql)
         if _should_skip(tsql):
             return self
+        if self._serialize:
+            _txn_acquire()
         self._cur.execute(tsql, params if params is not None else ())
         return self
 
@@ -157,6 +221,8 @@ class ShimCursor:
         tsql = translate_sql(sql)
         if _should_skip(tsql):
             return self
+        if self._serialize:
+            _txn_acquire()
         self._cur.executemany(tsql, seq_of_params)
         return self
 
@@ -214,7 +280,7 @@ class ShimConnection:
         object.__setattr__(self, "autocommit", False)
 
     def cursor(self, *args, cursor_factory=None, **kwargs):
-        return ShimCursor(self._conn.cursor())
+        return ShimCursor(self._conn.cursor(), serialize=True)
 
     def execute(self, sql, params=None):
         cur = self.cursor()
@@ -222,10 +288,16 @@ class ShimConnection:
         return cur
 
     def commit(self):
-        return self._commit_or_rollback(self._conn.commit)
+        try:
+            return self._commit_or_rollback(self._conn.commit)
+        finally:
+            _txn_release_all()
 
     def rollback(self):
-        return self._commit_or_rollback(self._conn.rollback)
+        try:
+            return self._commit_or_rollback(self._conn.rollback)
+        finally:
+            _txn_release_all()
 
     @staticmethod
     def _commit_or_rollback(fn):
@@ -252,7 +324,12 @@ class ShimConnection:
             raise
 
     def close(self):
-        return self._conn.close()
+        try:
+            return self._conn.close()
+        finally:
+            # Defensive: never strand this thread's claim if a transaction
+            # was left open when the connection went away.
+            _txn_release_all()
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, "_conn"), name)
