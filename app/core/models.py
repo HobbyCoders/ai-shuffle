@@ -372,6 +372,7 @@ class SessionSearchResult(Session):
     match_type: str  # 'title' or 'content'
     match_snippet: Optional[str] = None  # Snippet showing where the match was found
     match_time: Optional[datetime] = None  # When the matching content was created
+    match_count: int = 1  # How many places matched (title/legacy/store); 1 for back-compat
 
 
 class PaginatedSessions(BaseModel):
