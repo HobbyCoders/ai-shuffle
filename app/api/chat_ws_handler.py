@@ -1283,12 +1283,41 @@ async def _drain_notifications_impl(
                     if _cli_turn_forwarded:
                         _cli_turn_forwarded = False
                         _cli_wake_latched = False
+                        # WAKE-TURN INTERRUPT FINALIZE (Half 2): a user Stop
+                        # during a CLI-owned wake reaches this ResultMessage
+                        # with the _stopped_sessions latch armed (handle_stop
+                        # latches BEFORE interrupt_session) — or the CLI itself
+                        # reports the turn errored. Finalizing such a wake as a
+                        # CLEAN end (the old hardcoded interrupted=False) lied
+                        # to every client, and — since a wake turn has no
+                        # run_query finally to consume the latches — leaked
+                        # _stopped_sessions (suppressing every later queue
+                        # kick) and unpark_pending (stranding the park-poller).
+                        _wake_interrupted = (
+                            session_id in _stopped_sessions
+                            or bool(getattr(message, "is_error", False))
+                            or str(getattr(message, "subtype", "") or "").startswith("error")
+                            or getattr(message, "stop_reason", None)
+                            in ("interrupt", "interrupted")
+                        )
+                        if _wake_interrupted and pending:
+                            # A user Stop ends the whole park/wake episode: the
+                            # held unparks must not auto-start a follow-up turn
+                            # (same intent as the post-loop stopped-guard,
+                            # which would have dropped them anyway).
+                            logger.info(
+                                "Drain pump: wake turn interrupted — dropping "
+                                "%d held unpark(s) [session=%s]",
+                                len(pending), session_id,
+                            )
+                            pending.clear()
+                            batch_deadline = None
                         if not pending:
                             try:
                                 await live_session_store.end_streaming(
                                     session_id=session_id,
                                     metadata={},
-                                    interrupted=False,
+                                    interrupted=_wake_interrupted,
                                 )
                                 # Matching engagement-END signal for the
                                 # stream_start we broadcast when this wake turn's
@@ -1304,7 +1333,7 @@ async def _drain_notifications_impl(
                                         session_id=session_id,
                                         message_id=ctx.message_id,
                                         metadata={},
-                                        interrupted=False,
+                                        interrupted=_wake_interrupted,
                                         source_device_id=None,
                                     )
                                 except Exception as _bexc:
@@ -1315,7 +1344,8 @@ async def _drain_notifications_impl(
                                     )
                                 logger.info(
                                     "Drain pump: CLI-driven turn finalized in "
-                                    "live view [session=%s]",
+                                    "live view (interrupted=%s) [session=%s]",
+                                    _wake_interrupted,
                                     session_id,
                                 )
                             except Exception as _exc:
@@ -1323,6 +1353,15 @@ async def _drain_notifications_impl(
                                     logger,
                                     f"Drain pump: CLI-turn finalize failed: {_exc}",
                                 )
+                        if _wake_interrupted:
+                            # Leak cleanup: no run_query finally exists for a
+                            # CLI-owned wake, so consume the stop latch here —
+                            # a stranded entry suppresses every later queue
+                            # kick — and drop the unpark-pending latch
+                            # (end_streaming above also clears it; this covers
+                            # the finalize paths that skipped it).
+                            _stopped_sessions.discard(session_id)
+                            task_registry.clear_unpark_pending(session_id)
                     continue
 
                 # THE GAP: a killed/stopped (TaskStop) background task can terminate via

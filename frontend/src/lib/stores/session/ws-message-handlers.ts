@@ -2,8 +2,12 @@
  * WebSocket Message Handlers — Notification-only dispatch for incoming WS messages.
  *
  * Architecture (polling-only):
- * - Handlers NEVER write session message state (_update with messages/isStreaming).
+ * - Handlers NEVER write session message state (_update with messages).
  * - Session state is written SOLELY by the session-poller via onPollApplied.
+ *   Deliberate exception: 'start' and 'stream_start' optimistically flip
+ *   isStreaming=true for the ACTIVE session (immediate engagement for
+ *   server-side wake turns); /live remains the source of truth and the next
+ *   poll confirms or corrects.
  * - WS handlers trigger polls (pollNow/startStreaming) when events arrive.
  * - WS handlers DO manage non-message state: permissions, questions, streaming
  *   sessions map, git state, and fire side-effect callbacks (notifications, etc).
@@ -370,6 +374,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		// Handle sync events from other devices / server-originated broadcasts
 		if (eventType) {
+			// OPTIMISTIC WAKE ENGAGEMENT (lifecycle batch, item 6b): a broadcast
+			// stream_start for the session IN VIEW means a turn is starting NOW —
+			// including a server-side CLI-owned wake turn forwarded by the drain
+			// pump while this client sits idle-parked. The notifier (above)
+			// already restarts the poller, but the UI stayed "idle" until the
+			// next poll landed. Flip isStreaming immediately; /live remains the
+			// source of truth (the poll confirms or corrects within a cycle).
+			if (
+				eventType === 'stream_start' &&
+				eventSessionId &&
+				eventSessionId === state.sessionId &&
+				!state.isStreaming
+			) {
+				update(s => (s.isStreaming ? s : { ...s, isStreaming: true, streamStartTime: Date.now() }));
+			}
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
 			// Scope to the active session: a late/cross-session event (e.g. a
@@ -776,7 +795,23 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				break;
 			}
-			case 'stream_start':
+			case 'stream_start': {
+				// Session guard: reject events not targeting the active session
+				const ssSessionId = data.session_id as string | undefined;
+				const ssState = getState();
+				if (!ssSessionId || ssSessionId !== ssState.sessionId) break;
+				// OPTIMISTIC WAKE ENGAGEMENT (item 6b): a stream_start for the
+				// active session means a turn is starting NOW — engage
+				// immediately instead of waiting a poll cycle. /live stays the
+				// source of truth (the next poll confirms or corrects).
+				if (!ssState.isStreaming) {
+					update(s => (s.isStreaming ? s : { ...s, isStreaming: true, streamStartTime: Date.now() }));
+				}
+				if (!sessionPoller.isPolling(ssSessionId)) {
+					sessionPoller.startStreaming(ssSessionId);
+				}
+				break;
+			}
 			case 'stream_block_start':
 			case 'system': {
 				// Session guard: reject events not targeting the active session
