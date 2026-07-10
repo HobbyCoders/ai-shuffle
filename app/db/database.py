@@ -94,7 +94,12 @@ def _safe_json(value):
 #      expression index over session_store_entries so full conversation history
 #      (assistant/tool content lives in the JSONB store, not session_messages,
 #      under postgres_only) is full-text searchable.
-SCHEMA_VERSION = 54
+# v55: Add background_tasks table (durable per-task lifecycle snapshots,
+#      WRITE-ONLY in Phase 1 of the lifecycle unification: task_registry
+#      mirrors start/update/complete/unpark transitions through
+#      app.core.task_persistence; no reader depends on it yet — boot reconcile
+#      marks this install's stale non-terminal rows killed)
+SCHEMA_VERSION = 55
 
 
 def _run_column_migrations(cursor):
@@ -665,6 +670,37 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("usage_snapshots")
 
+    # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
+    # in Phase 1 (no reader flips): task_registry mirrors its transitions here
+    # via app.core.task_persistence so a restart/crash leaves a durable trail,
+    # and boot reconcile marks this install's stale non-terminal rows killed.
+    # Idempotent so upgrades from any older version land the table without
+    # needing the SCHEMA_VERSION bump to fire the bootstrap path (same
+    # defensive pattern as the usage_snapshots block above).
+    if not table_exists(cursor, "background_tasks"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS background_tasks (
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                instance_id TEXT,
+                kind TEXT,
+                is_sdk_background BOOLEAN DEFAULT FALSE,
+                tool_use_id TEXT,
+                title TEXT,
+                status TEXT,
+                unparked BOOLEAN DEFAULT FALSE,
+                terminal_notified BOOLEAN DEFAULT FALSE,
+                started_at TIMESTAMP WITH TIME ZONE,
+                updated_at TIMESTAMP WITH TIME ZONE,
+                PRIMARY KEY (task_id, session_id)
+            )
+        """)
+        migrations_applied.append("background_tasks")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status "
+        "ON background_tasks(instance_id, status)"
+    )
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -1169,6 +1205,11 @@ from app.db.automations import (  # noqa: F401
     claim_automation_fire,
     prune_automation_fires,
     record_automation_run_success,
+)
+
+from app.db.background_tasks import (  # noqa: F401
+    upsert_background_task,
+    mark_stale_background_tasks_killed,
 )
 
 from app.db.queued_messages import (  # noqa: F401

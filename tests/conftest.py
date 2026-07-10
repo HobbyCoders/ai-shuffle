@@ -538,6 +538,13 @@ def reset_global_stores():
     except Exception:
         pass
     try:
+        # Durable task-snapshot writer (Phase 1): drop queued snapshots and the
+        # consumer task so nothing leaks across per-test event loops.
+        from app.core import task_persistence
+        task_persistence.reset()
+    except Exception:
+        pass
+    try:
         from app.core.permission_handler import permission_handler
         permission_handler.reset_all()
     except Exception:

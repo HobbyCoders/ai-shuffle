@@ -109,6 +109,30 @@ def _clear_stale_parked_markers() -> int:
     return len(rows)
 
 
+def _mark_stale_background_task_rows() -> int:
+    """Mark this install's non-terminal durable task rows killed (v55).
+
+    ``background_tasks`` mirrors the in-memory registry (WRITE-ONLY in Phase
+    1 — no reader depends on it), so any own-instance row still non-terminal
+    at boot was stranded by the previous process: background work never
+    survives a restart. Mirrors ``_clear_stale_parked_markers``'s scoping.
+    Returns the number of rows marked.
+    """
+    from app.db.background_tasks import mark_stale_background_tasks_killed
+
+    count = mark_stale_background_tasks_killed()
+    if count:
+        record_error(
+            "backend",
+            f"Boot reconcile: {count} durable background-task row(s) were "
+            "still non-terminal when the server stopped; marked them killed "
+            "— background work does not survive a restart.",
+            level="WARNING",
+            context={"reconcile": "background_tasks", "rows": count},
+        )
+    return count
+
+
 def _reset_orphaned_session_statuses() -> int:
     """Reset own-instance sessions stuck in a live-looking ``status``.
 
@@ -253,6 +277,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "parked_markers_cleared": 0,
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
+        "background_task_rows_killed": 0,
     }
 
     try:
@@ -266,6 +291,19 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             f"Boot reconcile failed while clearing stale parked markers: {exc}",
             detail=traceback.format_exc(),
             context={"reconcile": "parked_task_kind"},
+        )
+
+    try:
+        counts["background_task_rows_killed"] = await asyncio.to_thread(
+            _mark_stale_background_task_rows
+        )
+    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+        logger.exception("Boot reconcile: marking stale background-task rows failed")
+        record_error(
+            "backend",
+            f"Boot reconcile failed while marking stale background-task rows: {exc}",
+            detail=traceback.format_exc(),
+            context={"reconcile": "background_tasks"},
         )
 
     try:

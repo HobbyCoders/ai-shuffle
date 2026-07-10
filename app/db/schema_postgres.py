@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 54
+SCHEMA_VERSION = 55
 
 
 def create_postgres_schema(cursor) -> None:
@@ -761,6 +761,36 @@ def create_postgres_schema(cursor) -> None:
             account_name TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36d. Background tasks (v55). Durable per-task lifecycle snapshots —
+    #      WRITE-ONLY in Phase 1 of the lifecycle unification: task_registry
+    #      mirrors start/update/complete/unpark transitions here through
+    #      app.core.task_persistence (coalescing async writer, kill switch
+    #      settings.durable_task_state). No reader depends on these rows yet;
+    #      boot reconcile marks this install's stale non-terminal rows killed.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS background_tasks (
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            instance_id TEXT,
+            kind TEXT,
+            is_sdk_background BOOLEAN DEFAULT FALSE,
+            tool_use_id TEXT,
+            title TEXT,
+            status TEXT,
+            unparked BOOLEAN DEFAULT FALSE,
+            terminal_notified BOOLEAN DEFAULT FALSE,
+            started_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE,
+            PRIMARY KEY (task_id, session_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status
+        ON background_tasks(instance_id, status)
     """)
 
     # ------------------------------------------------------------------

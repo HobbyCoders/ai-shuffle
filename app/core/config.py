@@ -10,6 +10,7 @@ Set LOCAL_MODE=true environment variable to force local mode.
 
 from pathlib import Path
 from typing import Optional
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 # Import platform detection (lazy to avoid circular imports)
@@ -288,6 +289,20 @@ class Settings(BaseSettings):
     # Set via PRESERVE_BACKGROUND_ON_INTERRUPT (BaseSettings reads env vars by
     # field name automatically).
     preserve_background_on_interrupt: bool = False
+
+    # Durable background-task state (Phase 1, WRITE-ONLY). When on,
+    # task_registry mirrors every task transition into the background_tasks
+    # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget
+    # async writer that can never slow or break the registry hot path. No
+    # reader depends on the rows yet (Phase-1 discipline: derivation before
+    # enforcement); boot reconcile marks stale non-terminal rows killed. Kill
+    # switch: AI_SHUFFLE_DURABLE_TASKS=false disables all writes instantly.
+    durable_task_state: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_SHUFFLE_DURABLE_TASKS", "DURABLE_TASK_STATE", "durable_task_state"
+        ),
+    )
 
     class Config:
         env_file = ".env"

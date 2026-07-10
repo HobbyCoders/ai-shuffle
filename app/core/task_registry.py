@@ -417,6 +417,7 @@ class TaskRegistry:
         if task_id in seen:
             return False
         seen.add(task_id)
+        self._persist_task_state(session_id, task_id)
         return True
 
     def was_unparked(self, session_id: str, task_id: str) -> bool:
@@ -561,6 +562,7 @@ class TaskRegistry:
                     if not retained:
                         self._recent_terminal.pop(session_id, None)
             existing["updated_at"] = now
+            self._persist_task_state(session_id, task_id)
             return
         bucket[task_id] = {
             "task_id": task_id,
@@ -572,6 +574,7 @@ class TaskRegistry:
             "started_at": now,
             "updated_at": now,
         }
+        self._persist_task_state(session_id, task_id)
 
     def update_task(
         self,
@@ -593,6 +596,7 @@ class TaskRegistry:
         if title is not None:
             record["title"] = title
         record["updated_at"] = _now_iso()
+        self._persist_task_state(session_id, task_id)
 
     def complete_task(
         self,
@@ -656,6 +660,49 @@ class TaskRegistry:
                 logger.debug(
                     "terminal notification callback failed", exc_info=True
                 )
+
+        # Durable mirror AFTER the guaranteed-notification block (the #514
+        # callback point) so the snapshot carries the final terminal_notified
+        # latch state alongside the terminal status.
+        self._persist_task_state(session_id, task_id)
+
+    def _persist_task_state(self, session_id: str, task_id: str) -> None:
+        """Mirror one task's current state into the durable queue (Phase 1).
+
+        Fire-and-forget and fully defensive — the registry hot path (called
+        inside streaming loops) must never gain latency or a failure mode from
+        persistence. A missing record is a no-op (nothing to mirror). The
+        snapshot is COALESCED downstream (latest per (session, task) wins);
+        see ``app.core.task_persistence``. WRITE-ONLY: nothing reads the rows
+        back into the registry.
+        """
+        try:
+            record = self._tasks.get(session_id, {}).get(task_id)
+            if record is None:
+                return
+            from app.core.task_persistence import enqueue_task_snapshot
+
+            enqueue_task_snapshot(
+                session_id,
+                task_id,
+                {
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "kind": record.get("kind"),
+                    "is_sdk_background": task_id
+                    in self._sdk_background_tasks.get(session_id, set()),
+                    "tool_use_id": record.get("tool_use_id"),
+                    "title": record.get("title"),
+                    "status": record.get("status"),
+                    "unparked": task_id in self._unparked.get(session_id, set()),
+                    "terminal_notified": task_id
+                    in self._terminal_notified.get(session_id, set()),
+                    "started_at": record.get("started_at"),
+                    "updated_at": record.get("updated_at"),
+                },
+            )
+        except Exception:
+            logger.debug("task persistence snapshot failed", exc_info=True)
 
     def get_active(self, session_id: str) -> List[Dict[str, Any]]:
         """Running tasks only, newest-first, each as a wire dict.

@@ -113,6 +113,7 @@ async def test_idle_sessions_untouched_and_nothing_reconciled(mock_db, test_db):
         "parked_markers_cleared": 0,
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
+        "background_task_rows_killed": 0,
     }
     assert _session_row(test_db, session_id)["status"] == "active"
     assert _error_log_rows(test_db, session_id) == []
@@ -207,6 +208,7 @@ async def test_reconcile_db_failure_does_not_raise(mock_db, monkeypatch):
         "parked_markers_cleared": 0,
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
+        "background_task_rows_killed": 0,
     }
 
 
@@ -235,10 +237,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 54 for the sse_entry_text() function + idx_sse_fts GIN index
-    # (store-backed full-history FTS over session_store_entries).
-    assert db_version == 54
-    assert pg_version == 54
+    # Bumped to 55 for the background_tasks table (durable WRITE-ONLY
+    # background-task lifecycle snapshots; v54 was the sse_entry_text() FTS
+    # function + idx_sse_fts GIN index).
+    assert db_version == 55
+    assert pg_version == 55
     assert db_version == pg_version
 
 
