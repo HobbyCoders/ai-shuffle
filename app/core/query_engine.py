@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from claude_agent_sdk import query, ClaudeAgentOptions
 from app.core.provider.claude_adapter import ClaudeAgentAdapter
 from claude_agent_sdk import (
-    AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-    ResultMessage, SystemMessage,
+    AssistantMessage, UserMessage, TextBlock, ThinkingBlock, ToolUseBlock,
+    ToolResultBlock, ResultMessage, SystemMessage,
 )
 # SDK 0.1.65+ surfaces server-side tool calls (advisor, web_search, web_fetch)
 # as discrete content blocks instead of dropping them silently. Guard the
@@ -429,6 +429,140 @@ def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
     return events
 
 
+def _cli_turn_events_from_message(
+    session_id: str,
+    message: Any,
+    tool_id_to_name: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Convert a TOP-LEVEL message of a CLI-driven (autonomous) turn into the
+    SAME main-lane events the in-stream loop yields.
+
+    THE AT-REST WAKE CLASS (round 4 of the duplicate-notification fix): when a
+    top-level backgrounded Task/Agent comes to rest while the parent is PARKED
+    (between turns), the CLI itself starts a follow-up turn — it injects a
+    ``[SYSTEM NOTIFICATION - NOT USER INPUT] … <task-notification>`` user-lane
+    string and the model answers it. Those messages arrive on the pooled client
+    with only the between-turns drain pump reading them; without this converter
+    the assistant's answer reached ONLY the durable SDK transcript mirror (so it
+    appeared after a page refresh) but never the live store — an actively-watched
+    session showed nothing until reload. The pump dispatches these events through
+    ``dispatch_event`` (the identical handler chain a normal turn uses), so the
+    live store appends + ``update_id`` bumps and park-pollers render the CLI's
+    own wake turn live.
+
+    Parity rules (mirrors ``stream_to_websocket`` + the reload parser):
+    - The injected user-lane STRING (and any top-level user TextBlock) yields NO
+      event — in-stream these steering messages are never rendered, and the
+      reload path (``jsonl_parser._is_task_notification``) hides them too.
+    - Assistant ``TextBlock`` → ``chunk`` (same event the non-partial in-stream
+      path yields); ``ThinkingBlock`` → a ``thinking_block`` marker the pump
+      routes to ``live_session_store.append_thinking``/``finalize_thinking``
+      (there is no dispatchable thinking event type).
+    - ``ToolUseBlock`` named Task/Agent → ``subagent_start`` (same shape as
+      in-stream) so a sub-agent launched BY the CLI-driven turn gets its node;
+      any other tool → ``tool_use``. Launch classification side-effects mirror
+      in-stream: a ``run_in_background`` input arms ``mark_background_launch``,
+      and a Task/Agent ToolResult that reads like the async launch-ACK arms it
+      too (``_looks_like_subagent_launch_ack``) — otherwise a wake for an agent
+      chained from a CLI-driven turn would be misclassified as foreground.
+    - User ``ToolResultBlock`` → ``tool_result`` (names resolved through the
+      shared ``tool_id_to_name`` map the caller threads across messages).
+
+    Returns ``[]`` for sub-agent inner messages (``parent_tool_use_id`` set —
+    those belong to ``_subagent_events_from_message``) and for any non
+    Assistant/User message type.
+    """
+    if getattr(message, "parent_tool_use_id", None):
+        return []
+
+    events: List[Dict[str, Any]] = []
+
+    if isinstance(message, AssistantMessage):
+        for block in message.content or []:
+            if isinstance(block, TextBlock):
+                if block.text and block.text.strip():
+                    events.append({"type": "chunk", "content": block.text})
+            elif isinstance(block, ThinkingBlock):
+                if block.thinking:
+                    events.append({
+                        "type": "thinking_block",
+                        "content": block.thinking,
+                    })
+            elif isinstance(block, ToolUseBlock):
+                tool_id = getattr(block, "id", None)
+                tool_input = block.input or {}
+                if tool_id:
+                    tool_id_to_name[tool_id] = block.name
+                    # Mirror the in-stream launch classification: an explicit
+                    # run_in_background flag arms the background-launch gate for
+                    # this launch's eventual terminal notification.
+                    if tool_input.get("run_in_background") or tool_input.get("runInBackground"):
+                        task_registry.mark_background_launch(session_id, tool_id)
+                        logger.info(
+                            "task-launch-classification session=%s tool_id=%s "
+                            "classification=background-flag (cli-driven turn)",
+                            session_id, tool_id,
+                        )
+                if block.name in ("Task", "Agent"):
+                    agent_type = (
+                        tool_input.get("subagent_type")
+                        or tool_input.get("description")
+                        or "Agent"
+                    )
+                    events.append({
+                        "type": "subagent_start",
+                        "tool_id": tool_id,
+                        "agent_type": agent_type,
+                        "description": tool_input.get("description", ""),
+                        "prompt": tool_input.get("prompt", ""),
+                        "agent_id": tool_id,
+                    })
+                else:
+                    events.append({
+                        "type": "tool_use",
+                        "name": block.name,
+                        "id": tool_id,
+                        "input": tool_input,
+                    })
+        return events
+
+    if isinstance(message, UserMessage):
+        content = message.content
+        if isinstance(content, str):
+            # The CLI's injected user-lane steering text (the [SYSTEM
+            # NOTIFICATION] wrapper around <task-notification>) — never rendered.
+            return []
+        for block in content or []:
+            if isinstance(block, ToolResultBlock):
+                tool_use_id = getattr(block, "tool_use_id", None)
+                tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                output = truncate_large_payload(block.content) if block.content else ""
+                # Async Task/Agent launches (CLI 2.1.195+) omit run_in_background
+                # and reveal backgroundness only in the launch-ACK ToolResult —
+                # mirror the in-stream ACK sniff so the gate arms.
+                if (
+                    tool_use_id
+                    and tool_name in ("Task", "Agent")
+                    and _looks_like_subagent_launch_ack(output)
+                ):
+                    task_registry.mark_background_launch(session_id, tool_use_id)
+                    logger.info(
+                        "task-launch-classification session=%s tool_id=%s "
+                        "classification=background-ack (cli-driven turn)",
+                        session_id, tool_use_id,
+                    )
+                events.append({
+                    "type": "tool_result",
+                    "name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "output": output,
+                    "is_error": bool(getattr(block, "is_error", False)),
+                })
+        return events
+
+    return []
+
+
 def _task_status_events_from_message(message: Any) -> List[Dict[str, Any]]:
     """Convert a drained task-status SystemMessage into the SAME ``system`` event
     the in-stream loop yields for it.
@@ -528,61 +662,6 @@ def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
     except Exception:
         # Simple slice fallback if the shared helper is unavailable/changed.
         return content[:max_chars] + "\n…[truncated]"
-
-
-def _latch_cli_task_notifications(session_id: str, text: str) -> None:
-    """Spend the one-unpark token for every ``<task-notification>`` the CLI just
-    injected in-stream (the duplicate-completion straddle fix).
-
-    When a background sub-agent comes to rest MID-turn the CLI enqueues its OWN
-    ``<task-notification>`` user-lane steering message into the model's context —
-    it flows through as a plain-text ``UserMessage`` (AI Shuffle deliberately does
-    not yield it as an event). The model therefore already acknowledged the
-    completion THIS turn. The typed ``TaskNotificationMessage`` can still reach the
-    between-turns drain pump AFTER the parent ``ResultMessage``, so the pump would
-    re-deliver the same completion as a follow-up turn. Spending ``mark_unparked``
-    the moment we observe the CLI's user-lane message makes the pump's existing
-    per-task dedup suppress that straddle duplicate — no store scans, no table
-    dependency, no ``end_streaming`` timing hazard.
-
-    ``text`` may contain MULTIPLE ``<task-notification>`` blocks; every one is
-    handled. ``mark_unparked`` is idempotent (set-add), so re-latching a task —
-    including when the app's OWN synthetic unpark prompt flows back through as a
-    ``UserMessage`` on a follow-up turn — is a harmless no-op.
-    """
-    if not session_id or not text or "<task-notification>" not in text:
-        return
-    from app.core.jsonl_parser import _extract_task_notification_field
-
-    # Split on the opening tag so each fragment holds at most one notification.
-    for fragment in text.split("<task-notification>")[1:]:
-        block = "<task-notification>" + fragment
-        task_id = _extract_task_notification_field(block, "task-id")
-        tool_use_id = _extract_task_notification_field(block, "tool-use-id")
-        resolved = task_id
-        if not resolved and tool_use_id:
-            # No <task-id> on this block — resolve via the parent launch
-            # tool_use_id the registry records on each task record.
-            for rec in task_registry.get_all(session_id):
-                if rec.get("toolUseId") == tool_use_id:
-                    resolved = rec.get("id")
-                    break
-        if not resolved:
-            logger.info(
-                "unpark-decision path=in-stream-text session=%s task_id=None "
-                "tool_use_id=%s decision=cli-delivered-userlane-skip-no-task-id",
-                session_id,
-                tool_use_id,
-            )
-            continue
-        task_registry.mark_unparked(session_id, resolved)
-        logger.info(
-            "unpark-decision path=in-stream-text session=%s task_id=%s "
-            "tool_use_id=%s decision=cli-delivered-userlane",
-            session_id,
-            resolved,
-            tool_use_id,
-        )
 
 
 def _task_notification_frame(message: Any) -> Dict[str, Any]:
@@ -2950,11 +3029,15 @@ async def stream_to_websocket(
                 if isinstance(message.content, str):
                     content = message.content
                     logger.debug(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
-                    # Straddle latch: if the CLI injected a <task-notification>
-                    # user-lane steering message in-stream, spend mark_unparked now
-                    # so the between-turns drain pump won't re-deliver it.
-                    if content and "<task-notification>" in content:
-                        _latch_cli_task_notifications(session_id, content)
+                    # NOTE: a CLI-injected <task-notification> user-lane steering
+                    # message can flow through here mid-turn. No latch is needed:
+                    # the drain pump never delivers an app unpark for the
+                    # backgrounded Task/Agent class at all (cli-owned-wake — see
+                    # _drain_notifications_impl), so there is no duplicate to
+                    # suppress at this source. PR #498's in-stream text latch was
+                    # removed as proven-dead: at-rest injections never pass
+                    # through stream_to_websocket (they are consumed by the pump
+                    # between turns).
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -2979,13 +3062,11 @@ async def stream_to_websocket(
                     # Handle TextBlock - may contain local command output
                     if isinstance(block, TextBlock):
                         text = block.text
-                        # Straddle latch: the CLI injects a background sub-agent's
-                        # <task-notification> as a mid-turn user-lane steering
-                        # message. Spend mark_unparked the moment it is observed so
-                        # the drain pump's per-task dedup suppresses the straddle
-                        # duplicate (see _latch_cli_task_notifications).
-                        if text and "<task-notification>" in text:
-                            _latch_cli_task_notifications(session_id, text)
+                        # NOTE: no straddle latch needed for a CLI-injected
+                        # <task-notification> observed here — the pump never
+                        # app-delivers the backgrounded Task/Agent class
+                        # (cli-owned-wake), so nothing can duplicate. See the
+                        # string-content branch above.
                         # Check for local command output (e.g., /context, /compact)
                         if "<local-command-stdout>" in text:
                             match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)

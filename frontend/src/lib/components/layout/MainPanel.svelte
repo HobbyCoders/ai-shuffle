@@ -14,12 +14,32 @@
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
-	import { getPullRequests } from '$lib/api/github';
+	import { getPullRequests, createPullRequest } from '$lib/api/github';
+	import {
+		generateCommitMessage,
+		generatePRDescription,
+		startFinishOperation,
+		startShipOperation,
+		type GitOperation
+	} from '$lib/api/git';
+	import type {
+		CommitNextStep,
+		CommitOptions,
+		PushOptions,
+		PullOptions,
+		CreatePROptions,
+		FinishOptions,
+		ShipItOptions,
+		OperationOrigin
+	} from '$lib/stores/derived/git-action-options';
+	import { computeOperationSideEffects } from '$lib/stores/derived/git-action-options';
+	import { isApiError } from '$lib/api/client';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
 	import { Download } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
-	import { buildGitActionPrompt, type GitActionKey, type GitPromptContext } from '$lib/utils/git-action-prompts';
+	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
+	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
 	import SessionsBoard from './SessionsBoard.svelte';
 	import BuildPage from './BuildPage.svelte';
@@ -394,72 +414,305 @@
 	});
 
 	// =========================================================================
-	// Git action prompts (send to chat instead of running git directly)
+	// Git action handlers — execute real git / GitHub operations
 	// =========================================================================
 	// The mutating git buttons (Commit / Push / Pull / Create PR / Finish /
-	// Ship It) no longer call the git API. Instead, clicking a button sends a
-	// pre-written prompt to the active chat so the AI agent performs the
-	// operation with its own git/gh tools. The prompt wording is configured in
-	// Settings → Git Actions. Read-only git state machinery below is unchanged.
+	// Ship It) run the operation directly against the git/GitHub API. Multi-step
+	// chains (Commit's optional push/PR, and the server-driven Finish / Ship It)
+	// report progress through the gitOperations store, which drives
+	// GitProgressPopover and pauses the git poller while an op is in flight.
+	//
+	// Every handler accepts an options bag so the (upcoming) chevron dropdowns
+	// can override the saved defaults; a plain click uses the gitActionPreferences
+	// defaults. Guarding: no action fires while the session is streaming, while
+	// another operation is running, or without an active project.
 
-	// Upstream tracking state (drives prompt wording + quick-action guards).
+	// Upstream tracking state (drives quick-action guards / next-step fallbacks).
 	const currentBranchForPrompt = $derived($branchStore.find(b => b.current));
 	const needsPull = $derived((currentBranchForPrompt?.behind ?? 0) > 0);
 	const isOnDefaultBranch = $derived(
 		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
 	);
 
-	/**
-	 * Assemble the prompt context from the current derived git/GitHub state and
-	 * the saved git-action preferences. Reading these stores inside the builder
-	 * wrappers (which are called from the template) keeps the prompts reactive.
-	 */
-	function gitPromptContext(): GitPromptContext {
-		return {
-			branch: $gitStatus?.current_branch ?? null,
-			defaultBranch: $githubRepoInfo?.default_branch ?? 'main',
-			needsPull,
-			isOnDefaultBranch,
-			branchPRNumber: branchPR?.number ?? null,
-			prefs: gitActionPreferences.current,
-		};
+	// Git-action option-bag types are shared with GitHeaderActions /
+	// GitActionOptionsDropdown via $lib/stores/derived/git-action-options.
+
+	/** Whether git action buttons may fire (guards double-taps + in-flight ops). */
+	function gitActionsBlocked(): boolean {
+		return gitControlsStreaming.current || gitOperationRunning.current || !activeProject;
 	}
 
-	// Delegate to the pure builder (which applies custom-message overrides +
-	// placeholder substitution, falling back to the structured default).
-	function gitPrompt(action: GitActionKey): string {
-		return buildGitActionPrompt(action, gitPromptContext());
+	function errText(e: unknown): string {
+		if (isApiError(e)) return e.detail || 'Something went wrong';
+		const obj = e as { detail?: string; message?: string };
+		return obj?.detail || obj?.message || 'Something went wrong';
+	}
+
+	/** A push rejection that means "your branch is behind — pull first". */
+	function isNonFastForward(detail: string): boolean {
+		const d = detail.toLowerCase();
+		return d.includes('fast-forward') || d.includes('non-fast') ||
+			d.includes('fetch first') || d.includes('rejected') || d.includes('behind');
+	}
+
+	function openPRUrl(url: string) {
+		window.open(url, '_blank', 'noopener');
 	}
 
 	/**
-	 * Send a canned git-action prompt to the active chat session.
-	 *
-	 * Git actions (Commit / Push / Pull / Create PR / Finish / Ship It) are
-	 * disabled in the header while streaming. Guard here too as defense in depth:
-	 * sendMessage() *interrupts* a live stream (its mustInterrupt path), so a click
-	 * that slips through the disabled window — a fast double-tap during the
-	 * send→stream transition, or a stale disabled frame — must not fire a new query
-	 * and abort the active generation. Ship It is the costliest to trigger by
-	 * accident (commit → push → PR → merge → cleanup), so this matters most there.
+	 * Push the current branch, then generate a title/description (unless
+	 * overridden) and open a PR into the repo's default branch. Shared by
+	 * handleCreatePR and Commit's "next step = PR" path. Assumes the caller has
+	 * already pushed if it drives its own push step.
 	 */
-	async function sendGitPrompt(prompt: string) {
-		if (gitControlsStreaming.current) return;
-		const text = prompt.trim();
-		if (!text) return;
+	async function runCreatePR(opts: CreatePROptions): Promise<{ url: string; number: number }> {
+		const projectId = activeProject!;
+		const worktreeId = activeWorktreeId ?? undefined;
+		const base = opts.base ?? $githubRepoInfo?.default_branch ?? 'main';
+		const head = $gitStatus?.current_branch;
+		if (!head) throw new Error('No current branch to open a pull request from');
+		let title = opts.title?.trim();
+		let body = opts.body;
+		if (!title) {
+			const gen = await generatePRDescription(projectId, { base_branch: base }, worktreeId);
+			title = gen.title;
+			body = body ?? gen.body;
+		}
+		const pr = await createPullRequest(projectId, { title, body: body ?? '', head, base });
+		return { url: pr.url, number: pr.number };
+	}
+
+	async function handleCommit(opts: CommitOptions = {}) {
+		if (gitActionsBlocked()) return;
+		const projectId = activeProject!;
+		const prefs = gitActionPreferences.current;
+		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
+		const userMessage = opts.message?.trim();
+
+		// Guard the next step against invalid combos (mirrors the old logic):
+		// never push while behind, and downgrade PR→push on the default branch.
+		let nextStep: CommitNextStep = opts.nextStep ?? prefs.nextStep;
+		if (needsPull) nextStep = 'commit';
+		else if (nextStep === 'pr' && isOnDefaultBranch) nextStep = 'push';
+
+		const steps: { id: string; label: string }[] = [];
+		if (!userMessage) steps.push({ id: 'message', label: 'Generate commit message' });
+		steps.push({ id: 'commit', label: 'Commit changes' });
+		if (nextStep === 'push' || nextStep === 'pr') steps.push({ id: 'push', label: 'Push to remote' });
+		if (nextStep === 'pr') steps.push({ id: 'pr', label: 'Open pull request' });
+
+		gitOperations.begin('Commit', steps);
 		try {
-			await activeSession.sendMessage(text);
-		} catch (err) {
-			console.error('[MainPanel] Failed to send git action prompt', err);
+			let message = userMessage;
+			if (!message) {
+				gitOperations.setStep('message', 'running');
+				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, activeWorktreeId ?? undefined);
+				message = gen.message;
+				gitOperations.setStep('message', 'done');
+			}
+
+			gitOperations.setStep('commit', 'running');
+			await git.commitChanges(message, includeUnstaged);
+			gitOperations.setStep('commit', 'done');
+
+			if (nextStep === 'push' || nextStep === 'pr') {
+				gitOperations.setStep('push', 'running');
+				await git.pushCommits(undefined, true, false);
+				gitOperations.setStep('push', 'done');
+			}
+
+			let prInfo: { url: string; number: number } | null = null;
+			if (nextStep === 'pr') {
+				gitOperations.setStep('pr', 'running');
+				prInfo = await runCreatePR({});
+				gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
+				checkPullRequests(projectId, $gitStatus?.current_branch ?? null);
+			}
+
+			gitOperations.succeed();
+			if (prInfo) {
+				const url = prInfo.url;
+				toast.push(`Opened pull request #${prInfo.number}`, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+			} else {
+				toast.push('Committed changes', { tone: 'success' });
+			}
+		} catch (e) {
+			gitOperations.failCurrent(errText(e));
 		}
 	}
 
-	// --- Quick-action handlers: main button click sends the prompt immediately ---
-	function handleQuickCommit() { sendGitPrompt(gitPrompt('commit')); }
-	function handlePush() { sendGitPrompt(gitPrompt('push')); }
-	function handleQuickPull() { sendGitPrompt(gitPrompt('pull')); }
-	function handleQuickCreatePR() { sendGitPrompt(gitPrompt('createPR')); }
-	function handleQuickFinish() { sendGitPrompt(gitPrompt('finish')); }
-	function handleShipIt() { sendGitPrompt(gitPrompt('shipIt')); }
+	async function handlePush(opts: PushOptions = {}) {
+		if (gitActionsBlocked()) return;
+		const force = opts.force ?? false;
+		gitOperations.begin(force ? 'Force push' : 'Push', []);
+		try {
+			await git.pushCommits(undefined, true, force);
+			gitOperations.succeed();
+			toast.push('Pushed to remote', { tone: 'success' });
+		} catch (e) {
+			gitOperations.clear();
+			const detail = errText(e);
+			if (!force && isNonFastForward(detail)) {
+				toast.push(detail, { tone: 'error', action: { label: 'Pull first', onClick: () => handlePull() } });
+			} else {
+				toast.push(detail, { tone: 'error' });
+			}
+		}
+	}
+
+	async function handlePull(opts: PullOptions = {}) {
+		if (gitActionsBlocked()) return;
+		const prefs = gitActionPreferences.current;
+		const strategy = opts.strategy ?? prefs.pullStrategy;
+		const autoStash = opts.autoStash ?? prefs.autoStash;
+		gitOperations.begin('Pull', []);
+		try {
+			const res = await git.pull(strategy, autoStash);
+			gitOperations.clear();
+			if (res.has_conflicts) {
+				const files = res.conflicts.length ? res.conflicts.join(', ') : 'some files';
+				toast.push(`Pull hit conflicts in ${files}. Resolve them, then commit to finish the merge.`, { tone: 'error' });
+			} else {
+				toast.push(res.message || 'Pulled latest changes', { tone: 'success' });
+			}
+		} catch (e) {
+			gitOperations.clear();
+			// Dirty working tree without auto-stash → 409. Offer a stash retry
+			// (mirrors the branch-checkout 409 → "Stash & switch" pattern).
+			const dirty = !autoStash && isApiError(e) && e.status === 409;
+			const detail = errText(e);
+			if (dirty) {
+				toast.push(detail, { tone: 'error', action: { label: 'Stash & pull', onClick: () => handlePull({ strategy, autoStash: true }) } });
+			} else {
+				toast.push(detail, { tone: 'error' });
+			}
+		}
+	}
+
+	async function handleCreatePR(opts: CreatePROptions = {}) {
+		if (gitActionsBlocked()) return;
+		const projectId = activeProject!;
+		gitOperations.begin('Create PR', [
+			{ id: 'push', label: 'Push to remote' },
+			{ id: 'pr', label: 'Open pull request' }
+		]);
+		try {
+			gitOperations.setStep('push', 'running');
+			await git.pushCommits(undefined, true, false);
+			gitOperations.setStep('push', 'done');
+
+			gitOperations.setStep('pr', 'running');
+			const prInfo = await runCreatePR(opts);
+			gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
+
+			checkPullRequests(projectId, $gitStatus?.current_branch ?? null);
+			gitOperations.succeed();
+			const url = prInfo.url;
+			toast.push(`Opened pull request #${prInfo.number}`, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+		} catch (e) {
+			gitOperations.failCurrent(errText(e));
+		}
+	}
+
+	async function handleFinish(opts: FinishOptions = {}) {
+		if (gitActionsBlocked()) return;
+		const projectId = activeProject!;
+		// Capture the origin at START so completion side-effects apply to the
+		// session/project the operation was launched from — never a switched-to one.
+		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
+		const prefs = gitActionPreferences.current;
+		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
+		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
+		try {
+			const op = await gitOperations.runServer(
+				projectId,
+				'Finish',
+				() =>
+					startFinishOperation(projectId, {
+						worktree_id: activeWorktreeId ?? undefined,
+						session_id: activeSessionId ?? undefined,
+						merge_method: mergeMethod,
+						cleanup
+					}),
+				{ sessionId: origin.sessionId, kind: 'finish' }
+			);
+			onOperationDone(op, origin);
+		} catch {
+			// runServer already pinned the failure in the progress popover.
+		}
+	}
+
+	async function handleShipIt(opts: ShipItOptions = {}) {
+		if (gitActionsBlocked()) return;
+		const projectId = activeProject!;
+		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
+		const prefs = gitActionPreferences.current;
+		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
+		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
+		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
+		const base = opts.base ?? $githubRepoInfo?.default_branch ?? undefined;
+		try {
+			const op = await gitOperations.runServer(
+				projectId,
+				'Ship It',
+				() =>
+					startShipOperation(projectId, {
+						worktree_id: activeWorktreeId ?? undefined,
+						session_id: activeSessionId ?? undefined,
+						merge_method: mergeMethod,
+						cleanup,
+						include_unstaged: includeUnstaged,
+						base_branch: base,
+						draft: opts.draft ?? false
+					}),
+				{ sessionId: origin.sessionId, kind: 'ship' }
+			);
+			onOperationDone(op, origin);
+		} catch {
+			// runServer already pinned the failure in the progress popover.
+		}
+	}
+
+	/**
+	 * Shared success handling for the server-driven Finish / Ship It operations.
+	 * A terminal error is left pinned in the popover (no toast). On success:
+	 * surface the PR link, refresh git/PR state, and — when the backend cleaned
+	 * up the worktree — flag it deleted so git polling stops for the gone folder.
+	 *
+	 * Session-scoped effects (markWorktreeDeleted, git refresh) are gated on the
+	 * user STILL viewing the originating session/project (`origin`, captured at
+	 * start), so an op that resolves after a session switch can't mutate the
+	 * wrong session's state. The success toast is always safe to show.
+	 */
+	function onOperationDone(op: GitOperation, origin: OperationOrigin) {
+		const effects = computeOperationSideEffects(
+			{
+				status: op.status,
+				worktreeDeleted: op.result?.worktree_deleted,
+				prUrl: op.result?.pr_url,
+				prNumber: op.result?.pr_number
+			},
+			origin,
+			{ sessionId: activeSessionId, projectId: activeProject }
+		);
+		if (!effects) return;
+
+		if (effects.markWorktreeDeleted) {
+			// Flips activeWorktreeId → null so the header reloads project-mode git
+			// state and the git store stops polling the removed worktree folder.
+			activeSession.markWorktreeDeleted();
+		}
+		if (effects.refreshGit) {
+			git.forceRefresh();
+			checkPullRequests(origin.projectId!, $gitStatus?.current_branch ?? null);
+		}
+		if (effects.toast.prUrl) {
+			const url = effects.toast.prUrl;
+			toast.push(effects.toast.label, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+		} else {
+			toast.push('Operation complete', { tone: 'success' });
+		}
+	}
 
 	// Download the raw Claude session history (.jsonl) for the active chat.
 	let downloadingJsonl = $state(false);
@@ -502,24 +755,28 @@
 				{/snippet}
 				{#snippet actions()}
 					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated && !activeTab?.worktreeDeleted}
-						<GitHeaderActions
-							projectId={activeTab.project}
-							isStreaming={$gitControlsStreaming}
-							isGitRepo={$gitStatus?.is_git_repo !== false}
-							showBranchSelector={false}
-							projectName={headerProjectName}
-							worktreeBranch={activeWorktreeBranch}
-							openPR={branchPR}
-							onClickCommit={handleQuickCommit}
-							onClickCreatePR={handleQuickCreatePR}
-							onClickFinish={handleQuickFinish}
-							onClickNewBranch={() => showCreateBranchModal = true}
-							onClickPush={handlePush}
-							onClickPull={handleQuickPull}
-							onClickInitRepo={() => showInitRepoModal = true}
-							onClickShipIt={handleShipIt}
-							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
-						/>
+						<div class="git-actions-host">
+							<GitHeaderActions
+								projectId={activeTab.project}
+								isStreaming={$gitControlsStreaming}
+								operationInProgress={$gitOperationRunning}
+								isGitRepo={$gitStatus?.is_git_repo !== false}
+								showBranchSelector={false}
+								projectName={headerProjectName}
+								worktreeBranch={activeWorktreeBranch}
+								openPR={branchPR}
+								onClickCommit={handleCommit}
+								onClickCreatePR={handleCreatePR}
+								onClickFinish={handleFinish}
+								onClickNewBranch={() => showCreateBranchModal = true}
+								onClickPush={handlePush}
+								onClickPull={handlePull}
+								onClickInitRepo={() => showInitRepoModal = true}
+								onClickShipIt={handleShipIt}
+								onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
+							/>
+							<GitProgressPopover />
+						</div>
 					{/if}
 				{/snippet}
 			</PageHeader>
@@ -632,6 +889,13 @@
 		min-width: 0;
 		overflow: hidden;
 		background: var(--background);
+	}
+
+	/* Anchor for the git progress popover so it drops under the header actions. */
+	.git-actions-host {
+		position: relative;
+		display: flex;
+		align-items: center;
 	}
 
 	/* Download chat history button — matches PageHeader's .header-btn styling */

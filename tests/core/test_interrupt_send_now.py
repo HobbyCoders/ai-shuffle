@@ -812,10 +812,14 @@ async def test_pump_holds_pending_unpark_until_stale_flag_clears(monkeypatch):
     )
     monkeypatch.setattr(cwh.database, "get_queued_messages", lambda sid: [])
 
-    # Real registry wiring so the notification passes the background-launch gate
-    # and the mark_unparked dedup.
+    # Real registry wiring so the notification passes the background gate and
+    # the mark_unparked dedup. A backgrounded SHELL: the class the pump still
+    # app-delivers for (round 4 made backgrounded Task/Agent completions
+    # cli-owned — the CLI injects its own wake turn once the killed turn
+    # resolves, so the app delivers nothing for them, held or not).
     task_registry.reset_all()
-    task_registry.start_task(session_id, "task-1", "agent", "bg work")
+    task_registry.start_task(session_id, "task-1", "shell", "bg work")
+    task_registry.mark_sdk_background_task(session_id, "task-1")
     task_registry.mark_background_launch(session_id, "tu-1")
 
     notif = TaskNotificationMessage(

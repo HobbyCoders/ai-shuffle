@@ -1008,6 +1008,24 @@ async def get_live_session(
     # streams. See task_registry / the session poller.
     unpark_pending = task_registry.is_unpark_pending(session_id)
 
+    # Keep-polling ALSO stays up while undrained queued messages await the drain
+    # pump: a follow-up turn is imminent even though nothing is streaming this
+    # instant. Without this, a switch-back that lands in the micro-gap BETWEEN
+    # queue-driven follow-up turns reads a truthful (is_streaming=false,
+    # activeTasks=[], unpark_pending=false) and the client concludes permanent
+    # idle → stops polling and the UI freezes until a manual refresh. Reuse ``unpark_pending`` as the keep-alive
+    # channel so no client contract change is needed; scope it narrowly to the
+    # exact "a queue row still exists" condition. Does NOT touch the drain pump
+    # or task_registry semantics.
+    if not unpark_pending:
+        try:
+            if await run_sync(database.count_queued_messages, session_id) > 0:
+                unpark_pending = True
+        except Exception:
+            logger.debug(
+                "count_queued_messages failed for %s", session_id, exc_info=True
+            )
+
     # Effective "a plain Stop spares background sub-agents" state. Only true when
     # the operator opted in AND the deploy-time CLI binary patch actually landed
     # (the flag alone is intent, not effect). Computed ONCE and attached to every

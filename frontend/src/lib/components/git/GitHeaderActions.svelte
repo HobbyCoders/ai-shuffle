@@ -2,12 +2,12 @@
 	/**
 	 * GitHeaderActions - Git controls for the PageHeader
 	 *
-	 * Branch selector dropdown (checkout branches), action buttons, and diff stats.
-	 * Mutating actions (Commit / Push / Pull / Create PR / Finish / Ship It) send a
-	 * pre-written prompt to the chat so the AI agent performs the git task. The prompt
-	 * text is configured in Settings → Git Actions; the buttons send it immediately.
-	 * Branch selector, diff review, and Init Repo remain direct git actions.
-	 * Branch selector is locked during streaming.
+	 * Branch selector dropdown (checkout branches), split action buttons, and diff
+	 * stats. Each mutating action (Commit / Push / Pull / Create PR / Finish /
+	 * Ship It) is a split button: the main area runs the action immediately with
+	 * saved defaults, and the chevron opens a compact GitActionOptionsDropdown for
+	 * per-invocation overrides. Branch selector, diff review, and Init Repo remain
+	 * direct git actions. Branch selector is locked during streaming.
 	 */
 	import { onDestroy } from 'svelte';
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
@@ -16,10 +16,23 @@
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
+	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
+	import type {
+		CommitOptions,
+		PushOptions,
+		PullOptions,
+		CreatePROptions,
+		FinishOptions,
+		ShipItOptions
+	} from '$lib/stores/derived/git-action-options';
 
 	interface Props {
 		projectId: string;
 		isStreaming?: boolean;
+		/** True while a git operation (commit/push/PR/finish/ship) is in flight.
+		 *  Disables the mutating action buttons + branch switch so the user can't
+		 *  fire a second action while work is running. */
+		operationInProgress?: boolean;
 		isGitRepo?: boolean;
 		/** Show the branch checkout selector. Disabled when the branch pill is
 		 *  hosted elsewhere (e.g. the context pill bar above the chat input). */
@@ -31,21 +44,29 @@
 		worktreeBranch?: string | null;
 		/** When set, shows the "Finish" button instead of Commit/Create PR */
 		openPR?: { number: number; title: string; url: string } | null;
-		/** Quick actions: main button click sends the canned prompt to chat immediately */
-		onClickCommit: () => void;
-		onClickCreatePR: () => void;
-		onClickFinish: () => void;
-		onClickPush: () => void;
-		onClickPull: () => void;
+		/** Mutating actions. A bare main-button click passes no options (falling
+		 *  back to the gitActionPreferences defaults); the option popover passes an
+		 *  explicit bag. Pass the MainPanel handlers directly so both paths flow
+		 *  through one function. */
+		onClickCommit: (opts?: CommitOptions) => void;
+		onClickCreatePR: (opts?: CreatePROptions) => void;
+		onClickFinish: (opts?: FinishOptions) => void;
+		onClickPush: (opts?: PushOptions) => void;
+		onClickPull: (opts?: PullOptions) => void;
 		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
-		/** Ship It: one-shot commit → push → PR → merge → cleanup prompt */
-		onClickShipIt?: () => void;
+		/** Ship It: one-shot commit → push → PR → merge → cleanup pipeline */
+		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, operationInProgress = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+
+	// Mutating git buttons are blocked while streaming OR while another git
+	// operation is in flight — the user must never fire a second action while
+	// work is running.
+	const actionsBusy = $derived(isStreaming || operationInProgress);
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -55,6 +76,15 @@
 	const showDropdown = $derived($openHeaderDropdown === 'branch');
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 	let checkingOut = $state(false);
+
+	// Which git-action option popover is open (single-open, shared store — opening
+	// any one closes the branch selector and every sibling git-action popover).
+	const commitOptsOpen = $derived($openHeaderDropdown === 'git-commit');
+	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
+	const pullOptsOpen = $derived($openHeaderDropdown === 'git-pull');
+	const prOptsOpen = $derived($openHeaderDropdown === 'git-pr');
+	const finishOptsOpen = $derived($openHeaderDropdown === 'git-finish');
+	const shipItOptsOpen = $derived($openHeaderDropdown === 'git-shipit');
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
 	const currentBranch = $derived($gitStatus?.current_branch ?? worktreeBranch ?? null);
@@ -113,8 +143,13 @@
 		$branchStore.filter(b => !b.remote)
 	);
 
-	// Remote branches that don't have a local counterpart
-	const remoteBranches = $derived(() => {
+	// Local branch names offered as PR base targets in the Create PR popover.
+	const baseBranchNames = $derived(localBranches.map(b => b.name));
+
+	// Remote branches that don't have a local counterpart. `$derived.by` memoizes
+	// the computed array (recomputed only when its deps change) rather than a
+	// `$derived(() => ...)` whose value is a closure re-run on every call site.
+	const remoteBranches = $derived.by(() => {
 		const localNames = new Set(localBranches.map(b => b.name));
 		return $branchStore
 			.filter(b => b.remote)
@@ -137,14 +172,15 @@
 	);
 	const filteredRemoteBranches = $derived(
 		branchSearch
-			? remoteBranches().filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
-			: remoteBranches()
+			? remoteBranches.filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
+			: remoteBranches
 	);
-	const showSearch = $derived(localBranches.length + remoteBranches().length > 5);
+	const showSearch = $derived(localBranches.length + remoteBranches.length > 5);
 
 	// Can the user interact with the branch selector?
-	// In worktree mode, branch is always locked (read-only display)
-	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
+	// In worktree mode, branch is always locked (read-only display). Also locked
+	// while an action is in flight so a checkout can't race a running operation.
+	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut || operationInProgress);
 
 	function toggleDropdown() {
 		if (branchLocked) return;
@@ -180,6 +216,17 @@
 		onClickNewBranch();
 	}
 
+	// Chevron handler for a git-action split button: toggle its option popover.
+	// The shared store guarantees single-open, so this also closes any other
+	// popover (or the branch selector). Never fires when actions are busy.
+	type GitActionDropdownId = 'git-commit' | 'git-push' | 'git-pull' | 'git-pr' | 'git-finish' | 'git-shipit';
+	function toggleActionDropdown(id: GitActionDropdownId) {
+		if (actionsBusy) return;
+		if ($openHeaderDropdown === id) closeDropdown(id);
+		else openDropdown(id);
+	}
+	const closeActionDropdown = (id: GitActionDropdownId) => closeDropdown(id);
+
 	// Close the branch dropdown on outside click
 	function handleClickOutside(e: MouseEvent) {
 		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
@@ -193,8 +240,10 @@
 		}
 	}
 
-	// Clear our shared-store flag on unmount so the dropdown doesn't re-open on remount.
-	onDestroy(() => closeDropdown('branch'));
+	// Clear our shared-store flag on unmount so no dropdown re-opens on remount.
+	onDestroy(() => {
+		openHeaderDropdown.update((cur) => (cur === 'branch' || (cur ?? '').startsWith('git-') ? null : cur));
+	});
 </script>
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
@@ -297,72 +346,213 @@
 
 	{/if}
 
-	<!-- Pull button (when behind upstream, including diverged state) -->
+	<!-- Pull split button (when behind upstream, including diverged state) -->
 	{#if needsPull}
-		<button
-			class="git-btn pull-btn"
-			class:diverged={isDiverged}
-			onclick={onClickPull}
-			disabled={isStreaming}
-			title={isStreaming
-				? 'Cannot pull during streaming'
-				: isDiverged
-					? `Quick sync — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream`
-					: `Quick pull ${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} with saved settings`}
-		>
-			<ArrowDownToLine size={14} strokeWidth={1.5} />
-			<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
-			<span class="count-badge">{commitsBehindUpstream}</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main pull-btn"
+				class:diverged={isDiverged}
+				onclick={() => onClickPull()}
+				disabled={actionsBusy}
+				title={isStreaming
+					? 'Cannot pull during streaming'
+					: isDiverged
+						? `Quick sync — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream`
+						: `Quick pull ${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} with saved settings`}
+			>
+				<ArrowDownToLine size={14} strokeWidth={1.5} />
+				<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
+				<span class="count-badge">{commitsBehindUpstream}</span>
+			</button>
+			<button
+				class="git-btn split-chevron pull-btn"
+				class:diverged={isDiverged}
+				class:active={pullOptsOpen}
+				onclick={() => toggleActionDropdown('git-pull')}
+				disabled={actionsBusy}
+				aria-label="Pull options"
+				aria-haspopup="dialog"
+				aria-expanded={pullOptsOpen}
+				title="Pull options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if pullOptsOpen}
+				<GitActionOptionsDropdown
+					action="pull"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-pull')}
+					onPull={onClickPull}
+				/>
+			{/if}
+		</div>
 	{/if}
 
-	<!-- Push button (when commits ahead of upstream, not behind) -->
+	<!-- Push split button (when commits ahead of upstream, not behind) -->
 	{#if canPush}
-		<button
-			class="git-btn push-btn"
-			onclick={onClickPush}
-			disabled={isStreaming}
-			title={isStreaming
-				? 'Cannot push during streaming'
-				: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
-		>
-			<ArrowUpFromLine size={14} strokeWidth={1.5} />
-			<span class="btn-label">Push</span>
-			<span class="count-badge">{commitsAheadUpstream}</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main push-btn"
+				onclick={() => onClickPush()}
+				disabled={actionsBusy}
+				title={isStreaming
+					? 'Cannot push during streaming'
+					: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
+			>
+				<ArrowUpFromLine size={14} strokeWidth={1.5} />
+				<span class="btn-label">Push</span>
+				<span class="count-badge">{commitsAheadUpstream}</span>
+			</button>
+			<button
+				class="git-btn split-chevron push-btn"
+				class:active={pushOptsOpen}
+				onclick={() => toggleActionDropdown('git-push')}
+				disabled={actionsBusy}
+				aria-label="Push options"
+				aria-haspopup="dialog"
+				aria-expanded={pushOptsOpen}
+				title="Push options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if pushOptsOpen}
+				<GitActionOptionsDropdown
+					action="push"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-push')}
+					onPush={onClickPush}
+				/>
+			{/if}
+		</div>
 	{/if}
 
-	<!-- Commit / Create PR / Finish button -->
+	<!-- Commit / Create PR / Finish split button -->
 	{#if hasChanges}
-		<button
-			class="git-btn"
-			onclick={onClickCommit}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot commit during streaming' : 'Send a commit request to the chat'}
-		>
-			<GitCommitHorizontal size={14} strokeWidth={1.5} />
-			<span class="btn-label">Commit</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={() => onClickCommit()}
+				disabled={actionsBusy}
+				title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}
+			>
+				<GitCommitHorizontal size={14} strokeWidth={1.5} />
+				<span class="btn-label">Commit</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				class:active={commitOptsOpen}
+				onclick={() => toggleActionDropdown('git-commit')}
+				disabled={actionsBusy}
+				aria-label="Commit options"
+				aria-haspopup="dialog"
+				aria-expanded={commitOptsOpen}
+				title="Commit options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if commitOptsOpen}
+				<GitActionOptionsDropdown
+					action="commit"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-commit')}
+					onCommit={onClickCommit}
+				/>
+			{/if}
+		</div>
 	{:else if openPR}
-		<button
-			class="git-btn"
-			onclick={onClickFinish}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot finish during streaming' : `Send a request to merge PR #${openPR.number}`}
-		>
-			<CheckCircle2 size={14} strokeWidth={1.5} />
-			<span class="btn-label">Finish</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={() => onClickFinish()}
+				disabled={actionsBusy}
+				title={isStreaming ? 'Cannot finish during streaming' : `Quick merge PR #${openPR.number} with saved settings`}
+			>
+				<CheckCircle2 size={14} strokeWidth={1.5} />
+				<span class="btn-label">Finish</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				class:active={finishOptsOpen}
+				onclick={() => toggleActionDropdown('git-finish')}
+				disabled={actionsBusy}
+				aria-label="Merge options"
+				aria-haspopup="dialog"
+				aria-expanded={finishOptsOpen}
+				title="Merge options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if finishOptsOpen}
+				<GitActionOptionsDropdown
+					action="finish"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-finish')}
+					onFinish={onClickFinish}
+				/>
+			{/if}
+		</div>
 	{:else if canCreatePR}
-		<button
-			class="git-btn"
-			onclick={onClickCreatePR}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot create PR during streaming' : `Send a request to open a PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
-		>
-			<GitPullRequest size={14} strokeWidth={1.5} />
-			<span class="btn-label">Create PR</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={() => onClickCreatePR()}
+				disabled={actionsBusy}
+				title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
+			>
+				<GitPullRequest size={14} strokeWidth={1.5} />
+				<span class="btn-label">Create PR</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				class:active={prOptsOpen}
+				onclick={() => toggleActionDropdown('git-pr')}
+				disabled={actionsBusy}
+				aria-label="Pull request options"
+				aria-haspopup="dialog"
+				aria-expanded={prOptsOpen}
+				title="Pull request options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if prOptsOpen}
+				<GitActionOptionsDropdown
+					action="pr"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-pr')}
+					onCreatePR={onClickCreatePR}
+				/>
+			{/if}
+		</div>
 	{:else}
 		<button
 			class="git-btn"
@@ -374,20 +564,48 @@
 		</button>
 	{/if}
 
-	<!-- Ship It: one-click pipeline (commit → push → PR → merge → cleanup) -->
+	<!-- Ship It split button: one-click pipeline (commit → push → PR → merge → cleanup) -->
 	<!-- Shows only when there's something to ship: uncommitted changes OR real
 	     content over the base branch. Hidden for branches that are "ahead" by
 	     commit count but carry a 0/0 net diff (already-merged / cleaned-up). -->
 	{#if showShipIt}
-		<button
-			class="git-btn ship-it-btn"
-			onclick={onClickShipIt}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
-		>
-			<Rocket size={13} strokeWidth={1.5} />
-			<span class="btn-label">Ship It</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main ship-it-btn"
+				onclick={() => onClickShipIt?.()}
+				disabled={actionsBusy}
+				title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
+			>
+				<Rocket size={13} strokeWidth={1.5} />
+				<span class="btn-label">Ship It</span>
+			</button>
+			<button
+				class="git-btn split-chevron ship-it-btn"
+				class:active={shipItOptsOpen}
+				onclick={() => toggleActionDropdown('git-shipit')}
+				disabled={actionsBusy}
+				aria-label="Ship It options"
+				aria-haspopup="dialog"
+				aria-expanded={shipItOptsOpen}
+				title="Ship It options"
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+			{#if shipItOptsOpen}
+				<GitActionOptionsDropdown
+					action="shipit"
+					{currentBranch}
+					{defaultBranch}
+					baseBranches={baseBranchNames}
+					{openPR}
+					{hasChanges}
+					{isWorktreeMode}
+					busy={actionsBusy}
+					onClose={() => closeActionDropdown('git-shipit')}
+					onShipIt={onClickShipIt}
+				/>
+			{/if}
+		</div>
 	{/if}
 
 	<!-- Diff stats (clickable to open review panel) -->
@@ -435,6 +653,32 @@
 
 	.branch-selector {
 		position: relative;
+	}
+
+	/* Split button: main action + chevron, sharing a seam. The group is the
+	   positioning anchor for its GitActionOptionsDropdown popover. */
+	.split-btn-group {
+		position: relative;
+		display: inline-flex;
+		align-items: stretch;
+	}
+
+	.split-btn-group .split-main {
+		border-top-right-radius: 0;
+		border-bottom-right-radius: 0;
+	}
+
+	.split-btn-group .split-chevron {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+		border-left: none;
+		padding: 0 5px;
+		gap: 0;
+	}
+
+	.split-chevron.active {
+		background: var(--hover-overlay);
+		color: var(--foreground);
 	}
 
 	.git-btn {
@@ -754,6 +998,7 @@
 
 		/* Don't let rail items shrink — they should keep their size and scroll. */
 		.git-btn,
+		.split-btn-group,
 		.diff-stats {
 			flex-shrink: 0;
 		}
@@ -762,6 +1007,11 @@
 			height: 36px;
 			padding: 0 12px;
 			font-size: 0.75rem;
+		}
+
+		/* Keep the chevron compact even at the larger mobile touch size. */
+		.split-btn-group .split-chevron {
+			padding: 0 8px;
 		}
 
 		.branch-name {

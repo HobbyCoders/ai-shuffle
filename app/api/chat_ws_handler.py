@@ -381,15 +381,18 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
     safe to call for every streamed event. Registry completion is recorded
     upstream in ``_record_task_message`` regardless, so indicators never strand.
 
-    Admission MUST mirror the drain pump's own gate (``_drain_notifications_impl``):
-    the pump delivers any task passing ``was_background_launch`` /
-    ``is_sdk_background_task`` and dedups ONLY on ``mark_unparked``. So the latch
-    arms for the SAME set the pump would deliver, regardless of whether the task
-    started this turn — a background sub-agent launched in an EARLIER turn that
-    comes to rest IN-STREAM during a LATER turn is a genuine first delivery by the
-    CLI, and NOT arming it there let the pump re-deliver the identical
-    ``<task-notification>`` as a spurious follow-up turn (the duplicate-completion
-    bug). ``started_this_turn`` therefore affects only the diagnostic label, never
+    Admission mirrors the drain pump's background gate
+    (``was_background_launch`` / ``is_sdk_background_task``), so the latch arms
+    for every genuinely-backgrounded task regardless of whether it started this
+    turn — a background sub-agent launched in an EARLIER turn that comes to rest
+    IN-STREAM during a LATER turn is a genuine first delivery by the CLI.
+    Round 4 note: the pump now APP-DELIVERS only the classes the CLI does not
+    reliably self-wake (backgrounded shells; killed/stopped TaskUpdated-alone
+    terminals) — a top-level backgrounded Task/Agent completion is CLI-owned
+    (``decision=cli-owned-wake``) and never delivered by the app at all. For
+    that class this latch is belt-and-suspenders bookkeeping; for shells it is
+    still the live dedup that stops a mid-turn CLI delivery from re-firing via
+    the pump. ``started_this_turn`` affects only the diagnostic label, never
     whether the latch is armed. Arming is safe for a truly replayed orphan too:
     ``mark_unparked`` is idempotent (already-latched → no-op). A FOREGROUND task
     (no recorded background launch) fails the gate and needs no latch — the pump
@@ -612,8 +615,22 @@ async def _drain_notifications_impl(
     still-alive SDK client with nothing reading it. This pump uses
     ``client.receive_messages()`` (which does NOT stop at a ``ResultMessage``) to
     read the pooled client BETWEEN turns and: feed EVERY message into
-    ``task_registry`` (this alone unfreezes the indicator) and, on the FIRST
-    terminal notification, dedupe + deliver ONE unpark follow-up turn.
+    ``task_registry`` (this alone unfreezes the indicator) and route the wake by
+    LAUNCH CLASS (round 4 of the duplicate-notification fix):
+
+    - Top-level backgrounded Task/Agent (``was_background_launch`` on the
+      notification's tool_use_id, registry kind != "shell"): CLI-OWNED — the CLI
+      autonomously injects its own ``<task-notification>`` user-lane turn that
+      the model answers, so the app delivers NOTHING (``decision=cli-owned-wake``;
+      the app's synthesized unpark here was the duplicate). The pump instead
+      attaches-and-streams: it forwards that CLI-driven turn's top-level
+      assistant/tool events through ``dispatch_event`` into the live store
+      (``_cli_turn_events_from_message``) and finalizes at its ResultMessage, so
+      park-pollers render the CLI's wake live.
+    - Backgrounded SHELLS (``is_sdk_background_task`` / local_bash) and
+      killed/stopped TaskUpdatedMessage-alone terminals: classes the CLI does
+      NOT reliably self-wake — dedupe + deliver ONE app unpark follow-up turn,
+      exactly as before.
 
     SINGLE-READER INVARIANT: this is reader R2; it runs only when no turn owns the
     client (``is_streaming`` False) and is cancelled by ``stop_drain_pump`` at the
@@ -625,6 +642,7 @@ async def _drain_notifications_impl(
     from app.core.session_pool import get_session_pool
     from app.core.task_registry import task_registry
     from app.core.query_engine import (
+        _cli_turn_events_from_message,
         _record_task_message,
         _subagent_events_from_message,
         _task_status_events_from_message,
@@ -649,6 +667,14 @@ async def _drain_notifications_impl(
     )
 
     pending: List[Dict[str, Any]] = []
+    # CLI-OWNED WAKE (round 4): tool_id→name map threaded across a CLI-driven
+    # turn's messages (resolves tool_result names), whether any of that turn's
+    # content was forwarded to the live pipeline since the last ResultMessage,
+    # and whether this pump armed unpark_pending for an in-flight CLI wake (so
+    # the exit paths can drop the latch if the wake turn can no longer arrive).
+    _cli_tool_names: Dict[str, str] = {}
+    _cli_turn_forwarded = False
+    _cli_wake_latched = False
     try:
         state = get_session_pool().peek(session_id)  # peek = no LRU promote
         if (
@@ -865,6 +891,41 @@ async def _drain_notifications_impl(
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: task-status chip re-dispatch failed: {_exc}")
 
+                # ATTACH-AND-STREAM (CLI-owned wake, round 4): a top-level
+                # backgrounded Task/Agent coming to rest while the parent is
+                # parked makes the CLI start its OWN follow-up turn on the pooled
+                # client — an injected user-lane string plus the model's answer.
+                # This pump is the only reader, and it used to drop all top-level
+                # user/assistant content, so that answer reached only the durable
+                # SDK transcript mirror (visible after refresh) but never the live
+                # store — the actively-watched UI showed nothing. Forward the
+                # CLI-driven turn's top-level events through the SAME dispatch
+                # pipeline a normal turn uses (live-store append + update_id bump
+                # + broadcasts) so park-pollers render it live. NOT while winding
+                # down a force-cancelled turn: the killed turn's residual output
+                # must stay dropped (the user stopped it).
+                if not _stale_flag_set():
+                    try:
+                        _cli_evs = _cli_turn_events_from_message(
+                            session_id, message, _cli_tool_names
+                        )
+                        for _cli_ev in _cli_evs:
+                            if _cli_ev.get("type") == "thinking_block":
+                                # No dispatchable thinking event type exists —
+                                # append + finalize directly (complete blocks).
+                                await live_session_store.append_thinking(
+                                    session_id, _cli_ev.get("content") or ""
+                                )
+                                await live_session_store.finalize_thinking(session_id)
+                            else:
+                                await dispatch_event(_cli_ev, sub_ectx, sub_state)
+                        if _cli_evs:
+                            _cli_turn_forwarded = True
+                    except Exception as _exc:
+                        ctx.debug(
+                            logger, f"Drain pump: CLI-turn forward failed: {_exc}"
+                        )
+
                 # STALE-TURN TERMINAL FRAME: the killed turn's own ResultMessage is
                 # buffered on the pooled client's read loop. Consuming it here is what
                 # lets us clear stale_turn_undrained — the CLI is now genuinely idle, so
@@ -927,6 +988,40 @@ async def _drain_notifications_impl(
                         # No pending unpark, no deliverable queue (or Stop/interrupt
                         # latched / stop-origin) — keep looping on normal unpark duty.
                         continue
+                    # CLI-DRIVEN TURN CAME TO REST: this ResultMessage closes a
+                    # turn the CLI started on its own (content was forwarded
+                    # above). Finalize the live view exactly like a normal turn
+                    # end: end_streaming marks the forwarded messages
+                    # non-streaming, filters the hidden <task-notification>
+                    # user rows, flags a full refresh + bumps update_id, and
+                    # clears the unpark_pending latch we armed at the wake (its
+                    # job — keeping the park-poller alive through the CLI turn —
+                    # is done; activeTasks keeps the poller up if other
+                    # background work remains). Skipped when an app unpark
+                    # delivery is pending: _deliver_unpark_impl runs its own
+                    # end_streaming + re-latch, and an early clear here would
+                    # reopen the #473 poller-strand gap mid-window.
+                    if _cli_turn_forwarded:
+                        _cli_turn_forwarded = False
+                        _cli_wake_latched = False
+                        if not pending:
+                            try:
+                                await live_session_store.end_streaming(
+                                    session_id=session_id,
+                                    metadata={},
+                                    interrupted=False,
+                                )
+                                logger.info(
+                                    "Drain pump: CLI-driven turn finalized in "
+                                    "live view [session=%s]",
+                                    session_id,
+                                )
+                            except Exception as _exc:
+                                ctx.debug(
+                                    logger,
+                                    f"Drain pump: CLI-turn finalize failed: {_exc}",
+                                )
+                    continue
 
                 # THE GAP: a killed/stopped (TaskStop) background task can terminate via
                 # a TaskUpdatedMessage ALONE — no following TaskNotificationMessage. The
@@ -1080,8 +1175,11 @@ async def _drain_notifications_impl(
                 # notification, so also accept a task recorded in _sdk_background_tasks
                 # (keyed by the always-present task_id). This is the path that wakes a
                 # session parked on a backgrounded Bash/PowerShell command.
+                _bg_launch = task_registry.was_background_launch(
+                    session_id, frame.get("tool_use_id")
+                )
                 if not (
-                    task_registry.was_background_launch(session_id, frame.get("tool_use_id"))
+                    _bg_launch
                     or task_registry.is_sdk_background_task(session_id, frame.get("task_id"))
                 ):
                     _log_unpark_decision(
@@ -1098,14 +1196,63 @@ async def _drain_notifications_impl(
                 task_id = frame.get("task_id")
                 output_file = frame.get("output_file")
                 signature = frame.get("uuid") or f"{output_file}:{status}"
-                # Straddle dedup: a sub-agent that came to rest MID-turn had its
-                # <task-notification> injected in-stream by the CLI as a user-lane
-                # steering message; query_engine._latch_cli_task_notifications
-                # already spent mark_unparked at the source. So the typed
-                # notification reaching the pump AFTER the parent ResultMessage is
-                # suppressed here by the EXISTING per-task dedup below (no store
-                # scans, no table reads, no end_streaming timing hazard).
-                #
+
+                # CLI-OWNED WAKE (round 4 of the duplicate-notification fix): a
+                # top-level backgrounded Task/Agent that comes to rest while the
+                # parent is AT REST is a class the CLI ALWAYS wakes itself — it
+                # injects its own "[SYSTEM NOTIFICATION …] <task-notification>"
+                # user-lane turn that the model answers (verified live 2026-07-09,
+                # ses-f0b1e4e8a896). The app's synthesized unpark for the same
+                # completion was the SECOND, duplicate wake turn. The typed
+                # message reaches this pump BEFORE the CLI's injection enters the
+                # stream (+6ms…+5.8s observed), which is why every latch design
+                # keyed on observing the injection text failed (rounds 1–3: the
+                # token was spent here first). So the gate keys on the LAUNCH
+                # CLASS instead, never on message text: was_background_launch on
+                # the completion's tool_use_id identifies the top-level
+                # backgrounded launch, and the registry record's kind carves out
+                # backgrounded SHELLS (their launch tool_use_ids share the same
+                # set, but the CLI does NOT reliably self-deliver shell
+                # completions — they keep the app unpark below, as do
+                # killed/stopped TaskUpdated-alone terminals). Spend
+                # mark_unparked as dedup bookkeeping, keep the completion chip,
+                # arm unpark_pending so the park-poller stays alive until the
+                # CLI's own turn streams through the forward path above, and
+                # deliver NOTHING.
+                _rec = task_registry.get_task(session_id, task_id)
+                if _bg_launch and (_rec or {}).get("kind") != "shell":
+                    _first = task_registry.mark_unparked(session_id, task_id)
+                    _log_unpark_decision(
+                        path="pump",
+                        session_id=session_id,
+                        task_id=task_id,
+                        status=status,
+                        signature=signature,
+                        started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
+                        decision="cli-owned-wake" if _first else "dedup",
+                    )
+                    if _first:
+                        # Same parked-state completion chip the deliver path
+                        # renders (RC2) — the wake itself is CLI-owned but the
+                        # completion card is still the app's to surface.
+                        if task_id and task_id not in _chipped_task_ids:
+                            try:
+                                for _chip_ev in _task_status_event_from_notification(message):
+                                    await dispatch_event(_chip_ev, sub_ectx, sub_state)
+                                _chipped_task_ids.add(task_id)
+                            except Exception as _exc:
+                                ctx.debug(logger, f"Drain pump: notification chip synth failed: {_exc}")
+                        # Keep the park-poller alive across the gap until the
+                        # CLI's injection turn arrives (complete_task already
+                        # emptied activeTasks, so /live would otherwise read as
+                        # idle and the poller would stop before the CLI turn's
+                        # content lands). Released by the CLI turn's
+                        # ResultMessage (end_streaming above), a new turn's
+                        # start_streaming, or the pump exit paths.
+                        task_registry.mark_unpark_pending(session_id)
+                        _cli_wake_latched = True
+                    continue
+
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
                 # for its whole life. The newer CLI re-emits a terminal notification
                 # with a FRESH uuid each time the agent comes to rest, which used to
@@ -1204,15 +1351,17 @@ async def _drain_notifications_impl(
         # Stopped by stop_drain_pump (a new turn is starting) — exit without
         # firing. Drop our early latch (if any): no follow-up will stream for the
         # pending we collected, and the new turn's own start_streaming would only
-        # clear it if that turn actually starts. Re-raise so the awaiter sees the
-        # cancellation.
-        if pending:
+        # clear it if that turn actually starts. A CLI-owned-wake latch is dropped
+        # for the same reason — this pump can no longer forward the CLI's turn,
+        # and the new turn's start_streaming re-covers poller liveness. Re-raise
+        # so the awaiter sees the cancellation.
+        if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
         _drop_drain_pump_self(session_id, _drain_pumps)
         raise
     except Exception as exc:
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
-        if pending:
+        if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
         # If we were winding down a force-cancelled turn when the read stream died,
         # evict: a dead read loop makes the client broken by definition — its stale
@@ -1240,6 +1389,15 @@ async def _drain_notifications_impl(
     # follow-up's start-of-turn stop_drain_pump() does not cancel/await the very
     # pump that is spawning it (self-deadlock).
     _drop_drain_pump_self(session_id, _drain_pumps)
+
+    # A normal (non-cancel) loop exit with a CLI wake still latched and nothing
+    # to deliver means the pooled read stream ended (StopAsyncIteration /
+    # wedge-evict) before the CLI's injection turn arrived — it can no longer be
+    # forwarded by this pump, so drop the latch or a park-poller would spin
+    # forever on a wake that will never stream. The durable SDK transcript
+    # mirror still has the turn (it surfaces on reload).
+    if _cli_wake_latched and not pending:
+        task_registry.clear_unpark_pending(session_id)
 
     if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.

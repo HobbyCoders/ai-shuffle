@@ -450,6 +450,13 @@ class TestPydanticModels:
         )
         assert pr.body == ""
 
+    def test_create_pull_request_default_draft_false(self):
+        """Test CreatePullRequest defaults draft to False."""
+        from app.api.github import CreatePullRequest
+
+        pr = CreatePullRequest(title="Test PR", head="feature-branch", base="main")
+        assert pr.draft is False
+
     def test_create_pull_request_empty_title_fails(self):
         """Test CreatePullRequest with empty title fails."""
         from app.api.github import CreatePullRequest
@@ -890,7 +897,8 @@ class TestCreatePullRequestEndpoint:
                             title="New Feature",
                             body="Description",
                             head="feature-branch",
-                            base="main"
+                            base="main",
+                            draft=False
                         )
 
     @pytest.mark.asyncio
@@ -1327,3 +1335,42 @@ class TestEdgeCases:
                         assert result["status"] == "ok"
                         # Should use default "merge" method
                         mock_github.merge_pull.assert_called_once_with("owner/repo", 42, method="merge")
+
+
+# =============================================================================
+# github_service.create_pull draft pass-through
+# =============================================================================
+
+class TestCreatePullDraftPassThrough:
+    """The service must forward --draft to gh only when draft=True."""
+
+    def _completed(self, returncode=1, stdout="", stderr="boom"):
+        from subprocess import CompletedProcess
+        return CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_draft_true_adds_flag(self):
+        from app.core.github_service import github_service
+
+        with patch.object(github_service, "_run_gh", return_value=self._completed()) as mock_run:
+            github_service.create_pull("o/r", "t", "b", "head", "main", draft=True)
+
+        args = mock_run.call_args.args[0]
+        assert "--draft" in args
+
+    def test_draft_false_omits_flag(self):
+        from app.core.github_service import github_service
+
+        with patch.object(github_service, "_run_gh", return_value=self._completed()) as mock_run:
+            github_service.create_pull("o/r", "t", "b", "head", "main", draft=False)
+
+        args = mock_run.call_args.args[0]
+        assert "--draft" not in args
+
+    def test_draft_defaults_false(self):
+        from app.core.github_service import github_service
+
+        with patch.object(github_service, "_run_gh", return_value=self._completed()) as mock_run:
+            github_service.create_pull("o/r", "t", "b", "head", "main")
+
+        args = mock_run.call_args.args[0]
+        assert "--draft" not in args

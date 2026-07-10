@@ -40,6 +40,31 @@ const STREAMING_POLL_INTERVAL_MS = 150;
 const PARK_POLL_INTERVAL_MS = 1500;
 
 /**
+ * Bounded "switch-back safety" park-poll budget.
+ *
+ * A fresh loadSession() that lands in a between-follow-up-turns micro-gap of a
+ * queue/unpark-driven session gets a TRUTHFUL idle poll: `/live` returns
+ * (is_streaming=false, activeTasks=[], unpark_pending=false) because nothing is
+ * streaming THIS instant, even though the server is about to start the next
+ * turn. A fresh load has no timer, so the plain idle branch (mode 3) would
+ * `stop()` a poller that never started — and the WS parked-watcher can't rescue
+ * it because server-initiated follow-up turns don't reliably re-broadcast
+ * stream_start to a re-attached socket. The UI then freezes (idle input, no
+ * task strip, no new messages) until a manual refresh (forensic incident
+ * 2026-07-09: ses-6ed0038f173f froze 19:13-19:17 EDT while streaming
+ * continuously server-side).
+ *
+ * So instead of concluding permanent idle on a fresh load, we arm this many
+ * park-rate cycles (~8 * 1500ms ≈ 12s). If any of them observes streaming /
+ * active tasks / unpark_pending, the normal lifecycle takes over; if all come
+ * back idle, we stop for real (preserving genuinely-idle behavior). The server
+ * layer (queued-message keep-alive in /live) is the primary fix; this is the
+ * client-side belt-and-suspenders for the exact instant a queue row hasn't
+ * landed yet.
+ */
+const SWITCHBACK_PARK_POLL_MAX_CYCLES = 8;
+
+/**
  * Hard timeout for a single `/live` poll fetch.
  *
  * Every poll self-serializes through the `_inFlight` guard (no overlapping
@@ -231,6 +256,15 @@ class SessionPoller {
 
 	/** Per-session error-backoff deadlines (epoch ms); _poll skips until passed */
 	private _backoffUntil: Map<string, number> = new Map();
+
+	/**
+	 * Remaining bounded "switch-back safety" park-poll cycles per session.
+	 * Armed by a fresh loadSession() that lands on a truthful-idle poll so a
+	 * queue/unpark follow-up turn about to start isn't mistaken for permanent
+	 * idle. Decrements each still-idle interval tick; cleared the instant a real
+	 * streaming/park/unpark state is observed. See SWITCHBACK_PARK_POLL_MAX_CYCLES.
+	 */
+	private _boundedParkPollsLeft: Map<string, number> = new Map();
 
 	/**
 	 * Streaming generation counter per session. Incremented each time
@@ -435,6 +469,7 @@ class SessionPoller {
 		this._inFlight.delete(sessionId);
 		this._errorCounts.delete(sessionId);
 		this._backoffUntil.delete(sessionId);
+		this._boundedParkPollsLeft.delete(sessionId);
 		// NOTE: Do NOT delete _streamingGeneration here. The generation counter
 		// must persist across stop→startStreaming cycles so that in-flight polls
 		// from the old generation are correctly detected as stale. Deleting it
@@ -462,6 +497,7 @@ class SessionPoller {
 		this._inFlight.clear();
 		this._errorCounts.clear();
 		this._backoffUntil.clear();
+		this._boundedParkPollsLeft.clear();
 		this._streamingGeneration.clear();
 
 		for (const timer of this._pendingPollNow.values()) {
@@ -901,6 +937,13 @@ class SessionPoller {
 		const hasTimer = this._timers.has(sessionId);
 		const interrupting = this._isInterrupting?.(sessionId) ?? false;
 
+		// A real streaming / interrupting / park / unpark state supersedes the
+		// bounded switch-back safety poll: the normal lifecycle takes over below,
+		// so clear the budget (it re-arms on the next fresh load if needed).
+		if (isStreaming || interrupting || hasActiveTasks || unparkPending) {
+			this._boundedParkPollsLeft.delete(sessionId);
+		}
+
 		if (isStreaming) {
 			// Upshift (or keep): ensure the fast streaming-rate timer is running.
 			// Only manage the timer if one already exists for this session, so a
@@ -944,12 +987,59 @@ class SessionPoller {
 			if ((hasTimer || fromLoadSession) && (streamingJustEnded || wasStreamingTimer)) {
 				if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
 			}
-		} else {
-			// Idle: fully stop. Covers both the streaming→ended transition with no
-			// tasks, and a park poll whose last task just finished.
-			if (hasTimer) this.stop(sessionId);
-			if (streamingJustEnded || hasTimer) {
+		} else if (fromLoadSession) {
+			// Fresh load landed on a TRUTHFUL idle poll (is_streaming=false,
+			// activeTasks=[], unpark_pending=false). This is ambiguous: it's either a
+			// genuinely-finished session OR a switch-back that landed in the micro-gap
+			// between a queue/unpark-driven session's follow-up turns (incident
+			// 2026-07-09: ses-6ed0038f173f). A fresh load has NO timer, so the plain
+			// idle stop below would leave a poller that never started — and the WS
+			// parked-watcher can't rescue it (server-initiated follow-ups don't
+			// reliably re-broadcast stream_start to a re-attached socket). So instead
+			// of concluding permanent idle, arm a BOUNDED park poll: a handful of
+			// cycles (SWITCHBACK_PARK_POLL_MAX_CYCLES) at the park rate. If any of them
+			// sees streaming / tasks / unpark_pending, the branches above take over; if
+			// all come back idle, the interval-tick path below stops for real. Reset
+			// the budget on every fresh load so repeated switch-backs each get a full
+			// window; _ensureTimer is idempotent so this never stacks timers.
+			this._boundedParkPollsLeft.set(sessionId, SWITCHBACK_PARK_POLL_MAX_CYCLES);
+			this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);
+			// Fire the stream-end side effects only if this load actually caught a
+			// streaming→ended transition (preserves prior behavior; a plain idle load
+			// has streamingJustEnded=false so nothing fires spuriously).
+			if (streamingJustEnded) {
 				if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
+			}
+		} else {
+			// Idle interval tick (not a fresh load). If a bounded switch-back park
+			// poll is armed, spend one cycle: keep polling until the budget is
+			// exhausted, then stop for real. Otherwise this is genuine idle — fully
+			// stop. Covers the streaming→ended transition with no tasks and a park
+			// poll whose last task just finished.
+			const boundedLeft = this._boundedParkPollsLeft.get(sessionId) ?? 0;
+			if (boundedLeft > 0) {
+				const remaining = boundedLeft - 1;
+				if (remaining > 0) {
+					this._boundedParkPollsLeft.set(sessionId, remaining);
+					if (hasTimer) this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);
+				} else {
+					// Budget exhausted, still idle: this session really is done. Stop
+					// the safety timer. Do NOT fire onStreamEnd off `hasTimer` here —
+					// the timer was armed by the switch-back safety poll, not a real
+					// stream, so keying on it would spuriously refresh the session list
+					// on every switch-back into an idle session. Only a genuine
+					// streaming→ended transition (streamingJustEnded) warrants it.
+					this._boundedParkPollsLeft.delete(sessionId);
+					if (hasTimer) this.stop(sessionId);
+					if (streamingJustEnded) {
+						if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
+					}
+				}
+			} else {
+				if (hasTimer) this.stop(sessionId);
+				if (streamingJustEnded || hasTimer) {
+					if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
+				}
 			}
 		}
 	}

@@ -30,7 +30,7 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe, Code2, GitBranch } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe, Code2 } from 'lucide-svelte';
 	import AIToolsSettings from './settings/AIToolsSettings.svelte';
 
 	// Sub-components
@@ -39,7 +39,6 @@
 	import ConnectionsSection from './settings/ConnectionsSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
-	import GitActionsSection from './settings/GitActionsSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
 	import BrowserSection from './settings/BrowserSection.svelte';
 	import ApiTab from './settings/ApiTab.svelte';
@@ -55,7 +54,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'git-actions' | 'connections' | 'ai' | 'connectors' | 'browser' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -69,7 +68,6 @@
 	const settingsTabs: RailItem[] = $derived([
 		{ id: 'account', label: 'Account', icon: User },
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
-		{ id: 'git-actions', label: 'Git Actions', icon: GitBranch },
 		{ id: 'connections', label: 'Connections', icon: KeyRound },
 		{ id: 'ai', label: 'AI Models', icon: Boxes },
 		...($isAdmin
@@ -618,13 +616,6 @@
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<ChatBehaviorSection {chatPrefs} />
 						<HotkeysSection />
-					</div>
-				{/if}
-
-				<!-- GIT ACTIONS -->
-				{#if activeTab === 'git-actions'}
-					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<GitActionsSection />
 					</div>
 				{/if}
 

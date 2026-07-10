@@ -40,6 +40,7 @@ from app.api.git_helpers import (  # noqa: F401
     _coalescer,
     get_project_path,
     get_working_dir,
+    stage_and_commit,
     _repo_record_cache,
     _REPO_RECORD_TTL,
     ensure_git_repository_record,
@@ -101,6 +102,10 @@ from app.api.schemas.git import (  # noqa: E402
     InitRepoResponse,
     CloneRepoRequest,
     CloneRepoResponse,
+    GenerateCommitMessageRequest,
+    GenerateCommitMessageResponse,
+    GeneratePRDescriptionRequest,
+    GeneratePRDescriptionResponse,
     FileChangeInfo,
     ChangedFilesResponse,
     FileDiffRequest,
@@ -1054,35 +1059,22 @@ async def create_commit(
             detail="Project is not a git repository"
         )
 
-    # Stage files if requested
-    t_stage_start = time.perf_counter()
-    if body.include_unstaged:
-        success = await run_git(git_service.stage_files, working_dir, ["."])
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to stage files"
-            )
-    else:
-        # Check if there are staged changes
-        status_data = await run_git(git_service.get_status, working_dir)
-        if not status_data["staged"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No staged changes to commit"
-            )
-    t_stage_ms = (time.perf_counter() - t_stage_start) * 1000
-
-    # Create commit — on failure, sha_or_error contains the error message
+    # Stage (optionally) and commit via the shared helper so this endpoint and
+    # the Ship-It flow enforce identical staging / "no staged changes" rules.
     t_commit_start = time.perf_counter()
-    success, sha_or_error = await run_git(git_service.commit, working_dir, body.message)
+    success, sha_or_error, reason = await stage_and_commit(
+        working_dir, body.message, body.include_unstaged
+    )
     t_commit_ms = (time.perf_counter() - t_commit_start) * 1000
 
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to create commit: {sha_or_error or 'unknown error'}"
-        )
+        if reason == "stage_failed":
+            detail = "Failed to stage files"
+        elif reason == "no_staged":
+            detail = "No staged changes to commit"
+        else:
+            detail = f"Failed to create commit: {sha_or_error or 'unknown error'}"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
     commit_sha = sha_or_error
 
@@ -1095,8 +1087,8 @@ async def create_commit(
     t_total_ms = (time.perf_counter() - t_start) * 1000
     logger.info(
         f"[ship-it-timing] commit project={project_id} "
-        f"total={t_total_ms:.0f}ms stage={t_stage_ms:.0f}ms "
-        f"commit={t_commit_ms:.0f}ms refresh={t_refresh_ms:.0f}ms"
+        f"total={t_total_ms:.0f}ms stage_commit={t_commit_ms:.0f}ms "
+        f"refresh={t_refresh_ms:.0f}ms"
     )
 
     return CommitResponse(
