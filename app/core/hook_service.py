@@ -340,10 +340,15 @@ def create_stop_hook_handler(
 
         logger.debug(f"Stop hook fired for {working_dir}")
 
-        # Build the input dict for plugin scripts
+        # Build the input dict for plugin scripts.
+        # NOTE: HookContext only carries `signal` at runtime — session_id comes
+        # from hook_input (every *HookInput TypedDict carries session_id: str).
+        # context.get(...) is a defensive fallback only. Since **hook_input is
+        # spread after "session_id" here, hook_input's value already wins when
+        # present; the explicit .get(...) covers the case where it's missing.
         script_input = {
             "hook_event_name": "Stop",
-            "session_id": context.get("session_id"),
+            "session_id": hook_input.get("session_id") or context.get("session_id"),
             "cwd": working_dir,
             **hook_input
         }
@@ -458,9 +463,14 @@ def create_plugin_hook_handler(
                 tool_input["file_path"] = tool_input["file_path"].replace("\\", "/")
             normalized_input["tool_input"] = tool_input
 
+        # NOTE: HookContext only carries `signal` at runtime — session_id comes
+        # from hook_input (every *HookInput TypedDict carries session_id: str).
+        # context.get(...) is a defensive fallback only. Since **normalized_input
+        # is spread after "session_id" here, hook_input's value already wins when
+        # present; the explicit .get(...) covers the case where it's missing.
         script_input = {
             "hook_event_name": event_name,
-            "session_id": context.get("session_id"),
+            "session_id": normalized_input.get("session_id") or context.get("session_id"),
             "cwd": working_dir,
             **normalized_input
         }
@@ -732,11 +742,15 @@ def create_db_pretooluse_hook_handler(
             return SyncHookJSONOutput()
 
         # Build the CLI hook contract passed to each hook on stdin as JSON.
+        # NOTE: the SDK's HookContext TypedDict only carries `signal` — it never
+        # has session_id. The real session id arrives via hook_input (every
+        # *HookInput TypedDict carries session_id: str). context.get(...) is kept
+        # only as a defensive fallback since context is a plain dict at runtime.
         script_input = {
             "hook_event_name": "PreToolUse",
             "tool_name": tool_name,
             "tool_input": hook_input.get("tool_input", {}),
-            "session_id": context.get("session_id"),
+            "session_id": hook_input.get("session_id") or context.get("session_id"),
             "cwd": working_dir,
         }
 

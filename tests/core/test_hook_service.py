@@ -196,6 +196,32 @@ class TestStopHookHandler:
         assert result.get("decision") == "block"
         assert result.get("continue_") == True
 
+    @pytest.mark.asyncio
+    async def test_script_input_session_id_from_hook_input_not_context(self, tmp_path):
+        """
+        Regression guard: script_input passed to plugin Stop scripts must carry
+        the real session_id from hook_input even when context (HookContext,
+        which in production only has `signal`) doesn't have one.
+        """
+        captured = {}
+
+        async def mock_execute(hook_def, script_input, working_dir, stderr_callback=None):
+            captured.update(script_input)
+            return None
+
+        with patch('app.core.hook_service.execute_plugin_hook', mock_execute):
+            handler = create_stop_hook_handler(
+                str(tmp_path),
+                plugin_stop_hooks=[{"command": "echo test", "plugin_path": "/test"}]
+            )
+            await handler(
+                {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "sess-abc"},
+                None,
+                {"signal": None},  # production-shaped HookContext: no session_id key
+            )
+
+        assert captured.get("session_id") == "sess-abc"
+
 
 class TestExecutePluginHook:
     """Tests for plugin hook execution."""
@@ -355,6 +381,33 @@ class TestCreatePluginHookHandler:
         assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert result["hookSpecificOutput"]["permissionDecisionReason"] == "blocked by policy"
+
+    @pytest.mark.asyncio
+    async def test_script_input_session_id_from_hook_input_not_context(self, tmp_path):
+        """
+        Regression guard: script_input passed to plugin PreToolUse scripts must
+        carry the real session_id from hook_input even when context (HookContext,
+        which in production only has `signal`) doesn't have one.
+        """
+        captured = {}
+
+        async def mock_execute(hook_def, script_input, working_dir, stderr_callback=None):
+            captured.update(script_input)
+            return None
+
+        with patch("app.core.hook_service.execute_plugin_hook", mock_execute):
+            handler = create_plugin_hook_handler(
+                event_name="PreToolUse",
+                hook_defs=[{"command": "echo test", "plugin_path": str(tmp_path), "timeout": 5}],
+                working_dir=str(tmp_path),
+            )
+            await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "sess-abc"},
+                None,
+                {"signal": None},  # production-shaped HookContext: no session_id key
+            )
+
+        assert captured.get("session_id") == "sess-abc"
 
     @pytest.mark.asyncio
     async def test_other_event_uses_sync_hook_json_output(self, tmp_path):
@@ -574,6 +627,34 @@ class TestDbPreToolUseHooks:
             )
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert result["hookSpecificOutput"]["permissionDecisionReason"] == "Bash|rm -rf /"
+
+    @pytest.mark.asyncio
+    async def test_stdin_session_id_sourced_from_hook_input_not_context(self, tmp_path):
+        """
+        The SDK's HookContext TypedDict only carries `signal` — it never has
+        session_id. The real session id arrives via the first handler argument
+        (hook_input["session_id"]). If the handler builds script_input from
+        context.get("session_id") only, DB bash hooks (e.g. the Unraid host-op
+        guard) receive session_id: null on stdin and fail closed.
+
+        Regression guard: pass a hook_input WITH session_id and a context
+        WITHOUT it (mirroring production HookContext shape), and assert the
+        hook command observes the real session id on stdin.
+        """
+        cmd = (
+            "python3 -c \"import sys,json; d=json.load(sys.stdin); "
+            "print(json.dumps({'decision':'block','reason':'sid='+str(d.get('session_id'))}))\""
+        )
+        hook = _db_bash_hook(cmd)
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}, "session_id": "sess-abc"},
+                None,
+                {"signal": None},  # production-shaped HookContext: no session_id key
+            )
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "sid=sess-abc"
 
     @pytest.mark.asyncio
     async def test_webhook_type_skipped_not_blocking(self, tmp_path):
