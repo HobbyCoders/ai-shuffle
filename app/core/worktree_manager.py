@@ -42,6 +42,23 @@ class WorktreeError(Exception):
     pass
 
 
+def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
+    """
+    Branch name to store when importing an external worktree (issue #568).
+
+    A detached-HEAD worktree has no branch — git's porcelain output carries only
+    the HEAD SHA, and list_worktrees fills ``branch`` with None (not a missing
+    key), so a plain ``.get("branch", "unknown")`` still yields None and the
+    insert violates the ``branch_name NOT NULL`` schema constraint. Derive a
+    sentinel from the short SHA instead so the worktree imports cleanly.
+    """
+    branch = git_wt.get("branch")
+    if branch:
+        return branch
+    head = (git_wt.get("head") or "").strip()
+    return f"detached-{head[:12]}" if head else "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Cross-device rebind fetch de-duplication (PR #493 follow-up #1)
 #
@@ -460,7 +477,7 @@ class WorktreeManager:
                         # regardless of where the worktree lives on disk (e.g.
                         # nested under .claude/worktrees/, not workspace_dir).
                         stored_path = os.path.abspath(git_path)
-                        branch_name = git_wt.get("branch", "unknown")
+                        branch_name = _external_worktree_branch_name(git_wt)
                         worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
                         database.create_worktree(
                             worktree_id=worktree_id,
@@ -1622,7 +1639,7 @@ class WorktreeManager:
                     # re-imports and false ORPHANED markings. Mirrors the import
                     # logic in sync_worktrees_for_project().
                     stored_path = os.path.abspath(git_path)
-                    branch_name = git_wt.get("branch", "unknown")
+                    branch_name = _external_worktree_branch_name(git_wt)
 
                     # Create database record for this external worktree
                     worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
