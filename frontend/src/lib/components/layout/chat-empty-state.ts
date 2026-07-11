@@ -3,9 +3,11 @@
  * session has zero messages — extracted from MainPanel / ChatView so the logic
  * can be unit-tested without the Svelte runtime.
  *
- * Background (see PR #558): the sessions-board "Clear session" broom wipes a
- * session's transcript IN PLACE — the row survives, the sdk_session_id is
- * nulled, and typing continues the SAME session id with fresh context. But an
+ * Background (see PR #558): clearing a session's conversation from the chat view
+ * wipes its transcript IN PLACE — the session survives, the sdk_session_id is
+ * nulled, and typing continues the SAME session id with fresh context. (The
+ * sessions board's row action now DELETES a session outright rather than clearing
+ * it in place, so this empty-but-bound state comes from the chat-view clear.) But an
  * open, titled session with zero messages previously rendered exactly like a
  * brand-new chat: header "New Chat" + the "Let's build" hero. Users read that as
  * "clearing deleted/replaced my session" — a top, twice-reported complaint.

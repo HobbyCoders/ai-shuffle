@@ -12,8 +12,7 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock } from 'lucide-svelte';
-	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock, Trash2 } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -486,27 +485,23 @@
 			deleteInFlightId = id;
 			deleteLoading = true;
 			try {
-				// "Clear session" clears the conversation IN PLACE — the session row
-				// survives (never deleted) and we never navigate to New Chat. The
-				// backend wipes the transcript so a reload stays empty; if the cleared
-				// session is the one open on screen, empty its live message store too
-				// so the chat blanks instantly without a reload. Staying put is the
-				// whole point: previously this called onNewSession()+deleteSession(),
-				// which yanked the user to the blank New Chat hero and destroyed the row.
-				await appData.clearSession(id);
-				if (activeId === id) activeSession.clearMessages();
-			} catch (err) {
-				// The backend refuses to clear a session mid-stream (409): wiping it
-				// under an in-flight turn would corrupt the transcript. Surface the
-				// stop-first guidance rather than a generic failure.
-				const httpStatus = (err as { status?: number } | null)?.status;
-				if (httpStatus === 409) {
-					toast.push('Stop the current response before clearing this session', {
-						tone: 'error'
-					});
-				} else {
-					toast.push('Failed to clear session', { tone: 'error' });
-				}
+				// "Delete session" removes the session for good — deleteSession splices
+				// the row out of the board optimistically (rolling back on error) and
+				// the backend hard-deletes the transcript + artifacts. Crucially we stay
+				// ON the sessions board: we never call onNewSession()/onOpenSession(), so
+				// nothing navigates the user away. If the deleted session happens to be
+				// the one open in the chat tab, reset THAT tab to a fresh New Chat via
+				// activeSession.newChat() (state-only; unlike handleNewSession() it does
+				// NOT flip the view) so the background chat isn't left pointing at a
+				// now-gone session — the board itself remains on screen throughout.
+				// (In-place clear of a conversation still lives on the chat view.)
+				await appData.deleteSession(id);
+				if (activeId === id) activeSession.newChat();
+			} catch {
+				// DELETE has no streaming 409 guard (the backend hard-deletes
+				// regardless), so any failure is a plain error — deleteSession has
+				// already rolled the optimistic splice back and resynced the list.
+				toast.push('Failed to delete session', { tone: 'error' });
 			} finally {
 				deleteLoading = false;
 				deleteInFlightId = null;
@@ -859,9 +854,9 @@
 		>
 			<!-- Cancel is a LEADING icon that only exists while armed. Because the
 			     rail is right-anchored, growing it on the LEFT leaves every
-			     following icon (Fork / Star / broom) at its exact resting x — so
-			     the broom the user just clicked stays put and a second click lands
-			     on Confirm, never a shifted neighbour. -->
+			     following icon (Fork / Star / delete) at its exact resting x — so
+			     the trash icon the user just clicked stays put and a second click
+			     lands on Confirm, never a shifted neighbour. -->
 			{#if isArmed}
 				<button class="row-action cancel" title="Cancel" onclick={cancelDelete}>
 					<X size={13} strokeWidth={2} />
@@ -894,19 +889,20 @@
 			>
 				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
 			</button>
-			<!-- ONE broom that stays mounted through arm → in-flight, keeping its
-			     slot (rightmost) fixed: it only swaps clear→danger styling and its
+			<!-- ONE trash icon that stays mounted through arm → in-flight, keeping its
+			     slot (rightmost) fixed: it only swaps resting→danger styling and its
 			     handler intent (arm, then confirm). Disabled only while the request
-			     is actually in flight so the plain Clear can't be re-armed mid-wipe. -->
+			     is actually in flight so the resting Delete can't be re-armed mid-delete. -->
 			<button
 				class="row-action broom"
 				class:clear={!isArmed}
 				class:danger={isArmed}
 				disabled={deleteLoading}
-				title={isArmed ? 'Confirm clear' : 'Clear session'}
+				title={isArmed ? 'Confirm delete' : 'Delete session'}
+				aria-label={isArmed ? 'Confirm delete' : 'Delete session'}
 				onclick={(e) => handleDelete(e, session.id)}
 			>
-				<BrushCleaning size={13} strokeWidth={isArmed ? 2 : 1.6} />
+				<Trash2 size={13} strokeWidth={isArmed ? 2 : 1.6} />
 			</button>
 		</RowActionMenu>
 	</div>
