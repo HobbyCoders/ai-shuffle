@@ -69,6 +69,63 @@ class TestCompactionBoundary:
         session = store_with_history.get_session("s1")
         assert session.needs_full_refresh is True
 
+    async def test_compact_boundary_stamps_transcript_uuid_from_data(self, store_with_history):
+        """The live-store copy of a compact_boundary card must carry the
+        transcript uuid from the event data.
+
+        Bug: add_system_message minted the LiveMessage with a random
+        `system-<hex>` id and NEVER set `uuid`, even though the SDK forwards the
+        transcript uuid at data["uuid"]. The durable/JSONL copy of the SAME
+        boundary keys both its id and uuid on that transcript uuid, so the
+        frontend poller's union-merge (present == id OR jsonlUuid) treated the
+        uuid-less live copy as "missing" every poll and re-spliced it → a single
+        compact_boundary rendered as multiple "Context Compacted" cards. Stamping
+        the uuid makes the live copy dedupe against its durable twin.
+        """
+        await store_with_history.add_system_message(
+            "s1",
+            content="Context compacted",
+            subtype="compact_boundary",
+            data={
+                "uuid": "boundary-uuid-123",
+                "compactMetadata": {"trigger": "auto", "preTokens": 12345},
+            },
+        )
+        session = store_with_history.get_session("s1")
+        boundaries = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(boundaries) == 1
+        assert boundaries[0].uuid == "boundary-uuid-123"
+        # And it serializes so the frontend receives it as `uuid` (→ jsonlUuid).
+        assert boundaries[0].to_dict()["uuid"] == "boundary-uuid-123"
+
+    async def test_system_message_stamps_uuid_generally(self, store_with_history):
+        """uuid stamping applies to all system subtypes, not just boundaries —
+        distinct transcript events carry distinct uuids, so this only ever helps
+        the frontend match a live card to its durable twin."""
+        await store_with_history.add_system_message(
+            "s1",
+            content="hook fired",
+            subtype="hook_event",
+            data={"uuid": "hook-uuid-9", "hook_event_name": "PostToolUse"},
+        )
+        session = store_with_history.get_session("s1")
+        msg = [m for m in session.messages if m.system_subtype == "hook_event"][-1]
+        assert msg.uuid == "hook-uuid-9"
+
+    async def test_system_message_without_uuid_stays_none(self, store_with_history):
+        """No uuid in data (synthesized events, e.g. task_updated) → uuid stays
+        None; the frontend's content-identity fallback covers boundaries."""
+        await store_with_history.add_system_message(
+            "s1",
+            content="ctx",
+            subtype="context_output",
+            data={"content": "ctx"},
+        )
+        session = store_with_history.get_session("s1")
+        msg = [m for m in session.messages if m.system_subtype == "context_output"][-1]
+        assert msg.uuid is None
+        assert "uuid" not in msg.to_dict()
+
     async def test_normal_system_message_does_not_set_full_refresh(self, store_with_history):
         """Non-compaction system messages should NOT flag needs_full_refresh."""
         await store_with_history.add_system_message(

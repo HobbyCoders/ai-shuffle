@@ -190,6 +190,38 @@ const CONSECUTIVE_ERROR_THRESHOLD = 3;
  * `isStreaming`: belt-and-suspenders — once the turn has ended a spliced-back
  * message must not keep rendering the streaming dots, so clear the flag.
  */
+
+/**
+ * Content-identity key for a compaction-boundary system card, mirroring the
+ * backend `_boundary_token` (app/core/live_session_store.py). Returns null for
+ * non-boundary or unidentifiable cards.
+ *
+ * Belt-and-suspenders dedup: the backend now stamps the transcript uuid onto
+ * live boundary cards so they match their durable twin by jsonlUuid. But a
+ * uuid-LESS boundary can still reach the client — minted by an OLDER backend
+ * (pre-fix, still serving over a reconnect), or a mid-stream race. Keying such
+ * a card by (subtype + identifying token) lets union-merge recognise it as
+ * already present in the base, so ONE compact_boundary never renders as
+ * multiple "Context Compacted" cards. The metadata arrives camelCase from the
+ * live store (compactMetadata.preTokens) and snake_case from the durable parser
+ * (compact_metadata.pre_tokens) — accept both, exactly like the backend.
+ */
+function boundaryIdentityKey(m: ChatMessage): string | null {
+	const subtype = m.systemSubtype;
+	if (subtype !== 'compact_boundary' && subtype !== 'microcompact_boundary') return null;
+	const data = (m.systemData ?? {}) as Record<string, unknown>;
+	const asRec = (v: unknown): Record<string, unknown> =>
+		v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+	if (subtype === 'compact_boundary') {
+		const meta = asRec(data.compact_metadata ?? data.compactMetadata);
+		const token = meta.pre_tokens ?? meta.preTokens;
+		return token != null ? `compact_boundary:${String(token)}` : null;
+	}
+	const meta = asRec(data.microcompactMetadata ?? data.microcompact_metadata);
+	const token = meta.tokensSaved ?? meta.tokens_saved;
+	return token != null ? `microcompact_boundary:${String(token)}` : null;
+}
+
 function unionMergeMissingIntoBase(
 	base: ChatMessage[],
 	existingMessages: ChatMessage[],
@@ -200,20 +232,31 @@ function unionMergeMissingIntoBase(
 	const baseUuids = new Set(
 		base.map(m => m.jsonlUuid).filter((u): u is string => !!u)
 	);
-	const inBase = (m: ChatMessage): boolean =>
-		(!!m.id && baseIds.has(m.id)) || (!!m.jsonlUuid && baseUuids.has(m.jsonlUuid));
+	const baseBoundaryKeys = new Set(
+		base.map(boundaryIdentityKey).filter((k): k is string => !!k)
+	);
+	const inBase = (m: ChatMessage): boolean => {
+		if (!!m.id && baseIds.has(m.id)) return true;
+		if (!!m.jsonlUuid && baseUuids.has(m.jsonlUuid)) return true;
+		const bk = boundaryIdentityKey(m);
+		return bk !== null && baseBoundaryKeys.has(bk);
+	};
 
 	const missingEntries: Array<{ msg: ChatMessage; anchorId: string | null }> = [];
 	let lastPlacedId: string | null = null;
 	for (const m of existingMessages) {
 		if (inBase(m)) {
 			// Present: subsequent missing cards anchor to this neighbor's base id
-			// (id-match wins; else the base msg sharing its uuid).
-			lastPlacedId = (m.id && baseIds.has(m.id))
-				? m.id
-				: (m.jsonlUuid
-					? base.find(s => s.jsonlUuid === m.jsonlUuid)?.id ?? m.id
-					: m.id);
+			// (id-match wins; else the base msg sharing its uuid; else the base
+			// boundary card sharing its content-identity key).
+			let anchor: string | undefined;
+			if (m.id && baseIds.has(m.id)) anchor = m.id;
+			else if (m.jsonlUuid) anchor = base.find(s => s.jsonlUuid === m.jsonlUuid)?.id;
+			if (!anchor) {
+				const bk = boundaryIdentityKey(m);
+				if (bk) anchor = base.find(s => boundaryIdentityKey(s) === bk)?.id;
+			}
+			lastPlacedId = anchor ?? m.id ?? null;
 			continue;
 		}
 		if (!shouldPreserve(m)) continue; // skip WITHOUT advancing the anchor

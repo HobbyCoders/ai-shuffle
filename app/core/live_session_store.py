@@ -1118,6 +1118,21 @@ class LiveSessionStore:
             # appear individually. LiveMessage IDs are uuid-suffixed so no two
             # rows share the same ID even when hook_event_name is identical.
 
+            # Stamp the transcript uuid from the event payload so the live-store
+            # copy of this system card matches its durable/JSONL twin on the
+            # frontend poller's union-merge (which keys presence on id OR
+            # jsonlUuid — see session-poller.ts unionMergeMissingIntoBase). The
+            # SDK forwards the full raw system event as `data`, so the transcript
+            # uuid lives at data["uuid"] (see message_parser SystemMessage /
+            # HookEventMessage, both `data=data`). Without this the uuid-less
+            # live boundary matches neither the DB row's id (== transcript uuid,
+            # jsonl_parser) nor its uuid, so it's re-spliced as "missing" every
+            # poll — and a reconnect re-seed mints ANOTHER uuid-less copy —
+            # rendering ONE compact_boundary as several "Context Compacted"
+            # cards. Applied to all system subtypes: distinct transcript events
+            # carry distinct uuids, so this can only ever collapse a true twin.
+            transcript_uuid = data.get("uuid") if isinstance(data, dict) else None
+
             msg = LiveMessage(
                 id=f"system-{uuid.uuid4().hex[:12]}",
                 role="system",
@@ -1126,6 +1141,7 @@ class LiveSessionStore:
                 streaming=False,
                 system_subtype=subtype,
                 system_data=data,
+                uuid=transcript_uuid,
             )
             session.messages.append(msg)
             self._increment_update_id(session)

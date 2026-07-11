@@ -510,6 +510,63 @@ describe('session-poller · compaction full-replace safety net', () => {
 		expect(ids.indexOf('text-1')).toBeLessThan(ids.indexOf('user-2'));
 	});
 
+	it('dedupes a uuid-LESS live compact_boundary against its durable twin (content-identity fallback)', async () => {
+		// THE 3-CARD BUG. An OLD backend (pre-uuid-stamp fix, still serving over a
+		// reconnect) or a mid-stream race hands the client a compact_boundary card
+		// with NO transcript uuid (id 'system-<hex>'). The durable/JSONL twin of the
+		// SAME boundary keys BOTH its id and uuid on the transcript uuid. Union-merge
+		// matches presence by id OR jsonlUuid, so the uuid-less live copy matches
+		// neither → it's re-spliced as "missing" every poll, and a reconnect re-seed
+		// mints yet ANOTHER → THREE "Context Compacted" cards. The content-identity
+		// fallback (subtype + pre_tokens, mirroring the backend _boundary_token)
+		// recognises the live copy as already present, so exactly ONE survives.
+		sessionStateManager.initSession(SID);
+		sessionStateManager.applyServerState(
+			SID,
+			[
+				{ id: 'user-1', role: 'user', type: 'text', content: 'first', streaming: false },
+				// uuid-LESS live boundary — camelCase metadata (live store shape).
+				{
+					id: 'system-abc123', role: 'system', type: 'system', content: 'Context compacted',
+					systemSubtype: 'compact_boundary',
+					systemData: { compactMetadata: { trigger: 'auto', preTokens: 55000 } },
+					streaming: false,
+				},
+			],
+			true,
+			5,
+			{ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 }
+		);
+
+		fetchMock.mockResolvedValue(
+			makeLiveResponse({
+				lastUpdateId: 9,
+				isStreaming: true,
+				fullRefreshReason: 'compaction',
+				messages: [
+					{ id: 'user-1', role: 'user', type: 'text', content: 'first', streaming: false },
+					// Durable twin — transcript uuid + snake_case metadata (parser shape).
+					{
+						id: 'bnd-uuid', role: 'system', type: 'system', content: 'Context compacted',
+						systemSubtype: 'compact_boundary',
+						systemData: { compact_metadata: { trigger: 'auto', pre_tokens: 55000 } },
+						uuid: 'bnd-uuid', streaming: false,
+					},
+					{ id: 'text-2', role: 'assistant', type: 'text', content: 'partial', streaming: true },
+				],
+			})
+		);
+
+		sessionPoller.startStreaming(SID);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const msgs = sessionStateManager.getSession(SID)!.messages;
+		const boundaries = msgs.filter(m => m.systemSubtype === 'compact_boundary');
+		// Pre-fix: length 2 (uuid-less live copy resurrected as "missing").
+		expect(boundaries.length).toBe(1);
+	});
+
 	it('does NOT resurrect removed messages on an ENDED full-replace (rewind)', async () => {
 		seedMixedRoleHistory();
 
