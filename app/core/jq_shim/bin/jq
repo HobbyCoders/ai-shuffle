@@ -1495,5 +1495,30 @@ if __name__ == "__main__":
     sys.exit(main())
 PYTHON_JQ_SHIM_EOF
 
-# Execute Python with the script from fd 3
+# Execute Python with the script from fd 3.
+# On Windows (Git Bash / MSYS with a native Python), /dev/fd/3 is unreadable
+# by the native interpreter and `python3` is typically a Microsoft Store stub,
+# so extract the embedded script to a temp file and run it with a real Python.
+# JQ_SHIM_PYTHON is exported by the app (see _get_jq_shim_env) and points at
+# the backend's own interpreter.
+case "${OSTYPE:-}" in
+    msys*|cygwin*)
+        PY="${JQ_SHIM_PYTHON:-}"
+        if [ -z "$PY" ]; then
+            for cand in python3 python; do
+                p=$(command -v "$cand" 2>/dev/null) || continue
+                case "$p" in *WindowsApps*) continue ;; esac
+                PY="$p"
+                break
+            done
+        fi
+        [ -n "$PY" ] || { echo "jq shim: no usable python found (set JQ_SHIM_PYTHON)" >&2; exit 127; }
+        tmp=$(mktemp "${TMPDIR:-/tmp}/jq-shim-XXXXXX.py") || exit 127
+        trap 'rm -f "$tmp"' EXIT
+        cat <&3 > "$tmp"
+        script_path=$(cygpath -w "$tmp" 2>/dev/null || printf '%s' "$tmp")
+        "$PY" "$script_path" "$@"
+        exit $?
+        ;;
+esac
 exec python3 /dev/fd/3 "$@"

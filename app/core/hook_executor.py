@@ -7,9 +7,14 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
+import shutil
+import sys
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
@@ -20,6 +25,97 @@ logger = logging.getLogger(__name__)
 
 # Track active hook tasks to prevent silent loss on shutdown
 _active_hook_tasks: set = set()
+
+_IS_WINDOWS = sys.platform == "win32"
+
+# bash.exe launchers that are NOT Git Bash: System32\bash.exe and the
+# WindowsApps stub both launch WSL, which may not be installed and does not
+# share filesystem/PATH semantics with the hook's working directory.
+_NON_GIT_BASH_MARKERS = ("system32", "windowsapps")
+
+
+@lru_cache(maxsize=1)
+def _resolve_windows_bash() -> Optional[str]:
+    """
+    Locate a Git Bash executable for running hook commands on Windows.
+
+    Hook commands are written in bash syntax; running them through cmd.exe
+    mangles quoting so a blocking guard's JSON output never parses and the
+    guard silently fails open (issue #572). Discovery order: explicit env
+    override, bash on PATH (skipping WSL launchers), the bash bundled next
+    to git.exe, then common Git for Windows install locations.
+    """
+    for env_var in ("AI_SHUFFLE_HOOK_BASH", "CLAUDE_CODE_GIT_BASH_PATH"):
+        override = (os.environ.get(env_var) or "").strip()
+        if override and Path(override).is_file():
+            return override
+
+    found = shutil.which("bash")
+    if found and not any(marker in found.lower() for marker in _NON_GIT_BASH_MARKERS):
+        return found
+
+    # Derive from git.exe: <install>\cmd\git.exe → <install>\bin\bash.exe
+    git_exe = shutil.which("git")
+    if git_exe:
+        candidate = Path(git_exe).parent.parent / "bin" / "bash.exe"
+        if candidate.is_file():
+            return str(candidate)
+
+    # Build with Path components, not a backslashed string — backslashes are
+    # not separators on POSIX, where these tests also run.
+    for base, rel in (
+        (os.environ.get("ProgramFiles"), ("Git", "bin", "bash.exe")),
+        (os.environ.get("ProgramFiles(x86)"), ("Git", "bin", "bash.exe")),
+        (os.environ.get("LOCALAPPDATA"), ("Programs", "Git", "bin", "bash.exe")),
+    ):
+        if base:
+            candidate = Path(base).joinpath(*rel)
+            if candidate.is_file():
+                return str(candidate)
+
+    return None
+
+
+async def spawn_hook_shell(
+    command: str,
+    *,
+    stdin: Optional[int] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> asyncio.subprocess.Process:
+    """
+    Spawn a bash-type hook command and return the process (stdout/stderr piped).
+
+    On POSIX, create_subprocess_shell already runs a bourne shell. On Windows
+    it runs cmd.exe, which breaks bash quoting — so prefer Git Bash there and
+    fall back to cmd.exe (loudly) only when no bash exists (issue #572).
+    """
+    if _IS_WINDOWS:
+        bash = _resolve_windows_bash()
+        if bash:
+            return await asyncio.create_subprocess_exec(
+                bash,
+                "-c",
+                command,
+                stdin=stdin,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+        logger.warning(
+            "No bash executable found for hook command; falling back to cmd.exe — "
+            "bash-syntax hooks (including blocking guards) may silently misbehave. "
+            "Install Git for Windows or set AI_SHUFFLE_HOOK_BASH."
+        )
+    return await asyncio.create_subprocess_shell(
+        command,
+        stdin=stdin,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+    )
 
 
 async def execute_bash_hook(
@@ -66,11 +162,9 @@ async def execute_bash_hook(
                 env[env_key] = str(value) if value is not None else ""
 
         # Execute the command
-        process = await asyncio.create_subprocess_shell(
+        process = await spawn_hook_shell(
             command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**dict(__import__("os").environ), **env}  # Merge with current env
+            env={**dict(os.environ), **env},  # Merge with current env
         )
 
         try:

@@ -70,12 +70,17 @@ class TestJQShimExecution:
 
     def test_shim_via_subprocess(self, shim_env):
         """Should be able to run jq via subprocess with shim in PATH."""
-        # Use bash to run jq (simulating how hooks work)
+        # Use bash to run jq (simulating how hooks work — on Windows, hook
+        # commands route through Git Bash since issue #572)
         if sys.platform == "win32":
-            # On Windows, use cmd
-            cmd = ["cmd", "/c", "echo {\"a\": 1} | jq .a"]
+            from app.core.hook_executor import _resolve_windows_bash
+
+            bash = _resolve_windows_bash()
+            if bash is None:
+                pytest.skip("No Git Bash installed on this machine")
         else:
-            cmd = ["bash", "-c", 'echo \'{"a": 1}\' | jq .a']
+            bash = "bash"
+        cmd = [bash, "-c", 'echo \'{"a": 1}\' | jq .a']
 
         result = subprocess.run(
             cmd,
@@ -103,7 +108,7 @@ cat | jq '{result: .tool_name}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -124,7 +129,7 @@ cat | jq '{path: .tool_input.file_path}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -145,7 +150,7 @@ cat | jq '{tool: .tool_name, path: .tool_input.file_path}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -167,7 +172,7 @@ cat | jq '{value: (.missing_field // "default_value")}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -189,7 +194,7 @@ cat | jq --arg timestamp "$ts" '{ts: $timestamp, tool: .tool_name}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -211,7 +216,7 @@ cat | jq '{decision: "block", reason: "testing"}'
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }
@@ -242,7 +247,7 @@ cat | jq '{
         script.chmod(0o755)
 
         hook_def = {
-            "command": f"bash {script}",
+            "command": f"bash '{script}'",
             "timeout": 5,
             "plugin_path": str(tmp_path)
         }

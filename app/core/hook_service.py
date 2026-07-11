@@ -34,7 +34,7 @@ from claude_agent_sdk.types import (
 )
 
 from app.db import database
-from app.core.hook_executor import execute_hook
+from app.core.hook_executor import execute_hook, spawn_hook_shell
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,11 @@ def _get_jq_shim_env(env: dict) -> dict:
     current_path = env.get("PATH", "")
     env["PATH"] = str(shim_dir) + os.pathsep + current_path
 
+    # Point the shim at a real interpreter. On Windows `python3` resolves to
+    # the Microsoft Store stub and Git Bash can't feed /dev/fd/3 to a native
+    # Python, so the bash shim uses JQ_SHIM_PYTHON when set (issue #572).
+    env.setdefault("JQ_SHIM_PYTHON", sys.executable)
+
     return env
 
 
@@ -199,15 +204,13 @@ async def execute_plugin_hook(
     try:
         logger.debug(f"Executing plugin hook: {command}")
 
-        # Run the command
+        # Run the command (through bash on Windows — issue #572)
         process = await asyncio.wait_for(
-            asyncio.create_subprocess_shell(
+            spawn_hook_shell(
                 command,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
                 cwd=working_dir,
-                env=env
+                env=env,
             ),
             timeout=timeout
         )
@@ -594,11 +597,11 @@ async def _execute_db_bash_hook(
     stdin_data = json.dumps(script_input)
 
     try:
-        process = await asyncio.create_subprocess_shell(
+        # Spawn through bash on Windows: cmd.exe mangles bash quoting, the JSON
+        # decision never parses, and a blocking guard fails OPEN (issue #572).
+        process = await spawn_hook_shell(
             command,
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             cwd=working_dir,
             env=env,
         )
@@ -638,6 +641,7 @@ def _map_db_pretooluse_decision(
     returncode: Optional[int],
     stdout_str: Optional[str],
     stderr_str: Optional[str],
+    hook_id: Optional[str] = None,
 ) -> Optional[PreToolUseHookSpecificOutput]:
     """
     Map a DB bash hook's result to a PreToolUse permission decision.
@@ -660,6 +664,14 @@ def _map_db_pretooluse_decision(
         try:
             parsed = json.loads(stdout_str.strip())
         except json.JSONDecodeError:
+            # A hook that emitted output but no parseable JSON gets NO say in
+            # the decision — if it was meant to block, it just failed OPEN.
+            # Make that loud instead of a silent debug-level fallthrough.
+            logger.warning(
+                f"DB PreToolUse hook {hook_id or '<unknown>'} produced unparseable "
+                f"stdout ({stdout_str.strip()[:120]!r}); treating as no-opinion — "
+                f"a blocking decision written here FAILS OPEN"
+            )
             parsed = None
 
     if isinstance(parsed, dict):
@@ -798,7 +810,9 @@ def create_db_pretooluse_hook_handler(
                 # timeout/error → no opinion for this hook; try the next one.
                 continue
 
-            decision = _map_db_pretooluse_decision(returncode, stdout_str, stderr_str)
+            decision = _map_db_pretooluse_decision(
+                returncode, stdout_str, stderr_str, hook_id=hook.get("id")
+            )
             if decision is not None:
                 logger.debug(
                     f"DB PreToolUse hook {hook.get('id')} decided "

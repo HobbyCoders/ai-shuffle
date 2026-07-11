@@ -235,7 +235,7 @@ class TestExecutePluginHook:
         script.chmod(0o755)
 
         result = await execute_plugin_hook(
-            {"command": f"bash {script}", "timeout": 5, "plugin_path": str(tmp_path)},
+            {"command": f"bash '{script}'", "timeout": 5, "plugin_path": str(tmp_path)},
             {"hook_event_name": "Test"},
             str(tmp_path)
         )
@@ -251,7 +251,7 @@ class TestExecutePluginHook:
         script.chmod(0o755)
 
         result = await execute_plugin_hook(
-            {"command": f"bash {script}", "timeout": 5, "plugin_path": str(tmp_path)},
+            {"command": f"bash '{script}'", "timeout": 5, "plugin_path": str(tmp_path)},
             {"hook_event_name": "Test"},
             str(tmp_path)
         )
@@ -281,7 +281,7 @@ class TestExecutePluginHook:
             callback_called.append((plugin_name, stderr, severity))
 
         await execute_plugin_hook(
-            {"command": f"bash {script}", "timeout": 5, "plugin_path": str(tmp_path)},
+            {"command": f"bash '{script}'", "timeout": 5, "plugin_path": str(tmp_path)},
             {"hook_event_name": "Test"},
             str(tmp_path),
             stderr_callback=stderr_callback
