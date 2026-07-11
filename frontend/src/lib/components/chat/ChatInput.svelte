@@ -15,6 +15,8 @@
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { toast } from '$lib/stores/toast';
+	import { evaluateSubmitGuards } from './submit-guards';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -241,19 +243,18 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || isUploading) return;
-
-		// Block sending while a worktree is being auto-created. The send button is
-		// already disabled during creation, but the Enter key path reaches here
-		// directly — without this guard a second send would fall through to the
-		// plain query path (no worktree_id) and run in the main checkout.
-		if ($activeSession.isCreatingWorktree) return;
-
-		// Require profile and project to be selected
-		if (!$activeSession.profile) {
-			return;
-		}
-		if (!$activeSession.project) {
+		// Surface WHY a send is blocked instead of silently swallowing the click,
+		// which read as a dead app. The guards keep the message in the composer and
+		// (except for an empty composer) name the missing piece with a toast.
+		const block = evaluateSubmitGuards({
+			hasPrompt: !!finalPrompt.trim(),
+			isUploading,
+			isCreatingWorktree: $activeSession.isCreatingWorktree,
+			hasProfile: !!$activeSession.profile,
+			hasProject: !!$activeSession.project
+		});
+		if (block) {
+			if (block.notice) toast.push(block.notice.message, { tone: block.notice.tone });
 			return;
 		}
 
