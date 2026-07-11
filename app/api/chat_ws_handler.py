@@ -4108,13 +4108,33 @@ class ChatWebSocketHandler:
         )
         stream_state = MutableStreamState()
 
-        # Unregister this device from SyncEngine while streaming
+        # Unregister this device from SyncEngine while streaming.
         # This prevents duplicate events (we get direct events via send_json)
         # If the device disconnects and reconnects, it will re-register and get sync events.
         # Pass self.websocket so we only unregister OUR connection — if user already
         # reconnected (new ws registered for same device_id), we must not nuke it.
-        await sync_engine.unregister_device(self.device_id, session_id, self.websocket)
-        ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
+        #
+        # EXCEPTION — server-initiated wake turns (``deferred_delivery=True``): a
+        # follow-up turn started by the drain pump / unpark path is NOT owned by
+        # the client that is watching the session. Its only delivery channel is the
+        # sync_engine broadcast (dispatch_event → broadcast_event, source_device_id
+        # =None) to REGISTERED devices — direct ``send_json`` goes to this handler's
+        # (often dead or headless-None) origin socket. Unregistering here can empty
+        # ``sync_engine._connections[session_id]`` (broadcast_event silently no-ops
+        # on an empty map), so every stream_start/chunk/end of the wake turn goes
+        # nowhere live and the turn only surfaces on a full reload. KEEP the device
+        # registered for deferred turns so the turn streams to it via broadcast.
+        # A duplicate direct+broadcast edge on a still-alive origin socket is
+        # harmless: the FE applies the direct ``chunk`` (type=…) as content but
+        # treats the broadcast ``stream_chunk`` (event_type=…) only as a poller/
+        # notifier trigger (disjoint code paths — see ws-message-handlers.ts), so
+        # text is never double-appended. Mirrors how the CLI-owned wake pump path
+        # already forwards to registered devices via sync_engine.
+        if not deferred_delivery:
+            await sync_engine.unregister_device(self.device_id, session_id, self.websocket)
+            ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
+        else:
+            ctx.debug(logger, "Deferred-delivery wake turn — keeping device registered so it streams via sync_engine broadcast")
 
         # Initialize LiveSessionStore for server-authoritative state
         # Uses MessageResolver: checks ended live store first (for interrupt transitions),
@@ -4709,7 +4729,15 @@ class ChatWebSocketHandler:
                 #
                 # If the user disconnected and reconnected during streaming, their NEW websocket
                 # is already registered via load_session. We must NOT replace it with this old one.
-                if self.websocket is not None and self.websocket.client_state == WebSocketState.CONNECTED:
+                #
+                # Skipped for deferred-delivery wake turns: they never unregistered
+                # above (the device stayed registered so the turn could stream via
+                # broadcast), so re-registering here would be wrong — register_device
+                # CLOSES the existing connection for the device before re-adding,
+                # which would tear down the very live socket we kept for delivery.
+                if deferred_delivery:
+                    ctx.debug(logger, "Deferred-delivery wake turn — skipping re-register (device was never unregistered)")
+                elif self.websocket is not None and self.websocket.client_state == WebSocketState.CONNECTED:
                     # Check if a different websocket is already registered for this device
                     # (This happens when user refreshes the page during streaming)
                     current_connection = sync_engine._connections.get(session_id, {}).get(self.device_id)
