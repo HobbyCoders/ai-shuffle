@@ -62,7 +62,9 @@ def _log_unpark_decision(
     deduped. These fire once per terminal-task decision (NOT per message/delta), so
     they are low-frequency and safe to keep at INFO. ``path`` is "in-stream" or
     "pump"; ``decision`` is a short verb ("cli-delivered-in-turn"/
-    "cli-delivered-cross-turn"/"suppress-foreground"/"deliver"/"dedup"/…).
+    "cli-delivered-cross-turn"/"suppress-foreground"/"deliver"/
+    "deliver-subagent" (the deliver path, admitted via the subagent-lane
+    background marker)/"dedup"/…).
     """
     try:
         from app.core.task_registry import task_registry
@@ -419,6 +421,18 @@ def _latch_terminal_notification(event: dict, session_id: str) -> None:
     if not (
         task_registry.was_background_launch(session_id, event.get("tool_use_id"))
         or task_registry.is_sdk_background_task(session_id, task_id)
+        # Subagent-lane background task (grandchild): same admission as the
+        # pump's gate, so an in-stream terminal frame the CLI already delivered
+        # spends the one-unpark token and the pump can't re-deliver it. Armed
+        # ONLY for run_in_background subagent-lane launches — foreground
+        # synchronous work never enters this set.
+        or task_registry.is_subagent_background_task(session_id, task_id)
+        # ...and its launch-tool_use_id twin (mirror of the parent-lane pair
+        # above): a flag-less builtin's (Monitor's) TaskStarted may not map the
+        # task-id marker, but the terminal frame carries the launch tool_use_id.
+        or task_registry.was_subagent_background_launch(
+            session_id, event.get("tool_use_id")
+        )
     ):
         _log_unpark_decision(
             path="in-stream",
@@ -816,6 +830,7 @@ async def _drain_notifications_impl(
     from app.core.task_registry import task_registry
     from app.core.query_engine import (
         _cli_turn_events_from_message,
+        _record_subagent_lane_launches,
         _record_task_message,
         _subagent_events_from_message,
         _task_status_events_from_message,
@@ -1027,7 +1042,12 @@ async def _drain_notifications_impl(
 
                 # Feed EVERY message into the registry — this is what unfreezes the
                 # indicator (start/update/complete_task) for the terminal
-                # notification even before we deliver the unpark.
+                # notification even before we deliver the unpark. The subagent-lane
+                # launch recorder runs FIRST so a grandchild run_in_background
+                # tool_use arriving between turns (a still-running backgrounded
+                # sub-agent's inner activity — this pump is its only reader) is
+                # marked before its TaskStarted is processed.
+                _record_subagent_lane_launches(session_id, message)
                 _record_task_message(session_id, message)
 
                 # Re-dispatch a SLOW background sub-agent's inner activity (assistant
@@ -1530,12 +1550,35 @@ async def _drain_notifications_impl(
                 # notification, so also accept a task recorded in _sdk_background_tasks
                 # (keyed by the always-present task_id). This is the path that wakes a
                 # session parked on a backgrounded Bash/PowerShell command.
+                # Third alternative: a background task launched FROM a sub-agent
+                # sidechain (run_in_background semantics, parent_tool_id set).
+                # The #470 gate keeps these out of BOTH sets above — correctly,
+                # for pinning/chips — but that made this gate drop their wake
+                # (decision=suppress-foreground) and strand a sub-agent parked
+                # awaiting the task (2026-07-10 incident, tasks bqbeiwvv6 /
+                # b20nqkc3y). The dedicated marker admits them here ONLY; they
+                # then ride the existing deliver machinery below unchanged.
                 _bg_launch = task_registry.was_background_launch(
+                    session_id, frame.get("tool_use_id")
+                )
+                # Subagent-lane pair mirrors the parent-lane pair (launch
+                # tool_use_id OR task_id): the task-id marker is mapped at
+                # TaskStarted, but a flag-less builtin's (Monitor's)
+                # TaskStarted may not carry a usable tool_use_id to map — its
+                # terminal notification demonstrably DOES carry the launch
+                # tool_use_id (live 2026-07-10 b5qiqqf1h transcript:
+                # <tool-use-id>toolu_01JuRn…</tool-use-id>), so accept that
+                # directly too. Both sets are armed ONLY for subagent-lane
+                # background launches; neither admits foreground work.
+                _subagent_bg = task_registry.is_subagent_background_task(
+                    session_id, frame.get("task_id")
+                ) or task_registry.was_subagent_background_launch(
                     session_id, frame.get("tool_use_id")
                 )
                 if not (
                     _bg_launch
                     or task_registry.is_sdk_background_task(session_id, frame.get("task_id"))
+                    or _subagent_bg
                 ):
                     _log_unpark_decision(
                         path="pump",
@@ -1641,7 +1684,10 @@ async def _drain_notifications_impl(
                     status=status,
                     signature=signature,
                     started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
-                    decision="deliver",
+                    # "deliver-subagent": same deliver path, but admission came
+                    # via the subagent-lane marker (distinct label for live
+                    # diagnosis of the grandchild-wake class).
+                    decision="deliver-subagent" if _subagent_bg else "deliver",
                 )
                 # RC2 (parked "Task Updated" chip): a normal background completion
                 # arrives between turns ONLY as this TaskNotificationMessage (no

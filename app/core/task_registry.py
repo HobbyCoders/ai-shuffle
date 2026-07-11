@@ -195,6 +195,26 @@ class TaskRegistry:
         # TaskStartedMessage; cleared with the session (status is checked live, so
         # a completed task in the set is simply ignored — no per-completion prune).
         self._sdk_background_tasks: Dict[str, set] = {}
+        # session_id -> set of SUBAGENT-lane launch tool_use_ids: tool_use
+        # blocks a SUB-AGENT sidechain (parent_tool_use_id set) issued with
+        # run_in_background=true. Kept SEPARATE from ``_background_launches``
+        # on purpose — that set means "the PARENT's own backgrounded work" and
+        # feeds pool pinning + chip scoping (``is_own_background_task``), which
+        # a grandchild must never do. This set exists ONLY so the unpark drain
+        # pump can recognize the grandchild's terminal notification as a real
+        # wake (2026-07-10 incident: a Monitor-pattern task launched from a
+        # subagent sidechain completed between turns, both unpark predicates
+        # missed it — decision=suppress-foreground — and the subagent parked
+        # awaiting it was stranded forever; the #470 top-level-only gate on
+        # ``mark_background_launch`` is what kept both predicates false).
+        self._subagent_background_launches: Dict[str, set] = {}
+        # session_id -> {task_id, ...} for background tasks whose launch was
+        # recorded in ``_subagent_background_launches`` (armed at the SDK
+        # TaskStarted, mirroring ``_sdk_background_tasks``). Consumed ONLY by
+        # the unpark gates (drain pump + in-stream latch) — never by pool
+        # pinning (the launching sub-agent's own kind=="agent" running record
+        # already pins) or chip eligibility. Cleared with the session.
+        self._subagent_background_tasks: Dict[str, set] = {}
         # session_id -> set of task_ids that have ALREADY driven an unpark
         # follow-up turn. Unlike ``_notified`` (keyed on (task_id, signature) and
         # therefore RE-ARMED by a fresh per-rest uuid), this is keyed on the
@@ -288,6 +308,51 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._sdk_background_tasks.get(session_id, set())
+
+    def mark_subagent_background_launch(self, session_id: str, tool_use_id: str) -> None:
+        """Record that a SUB-AGENT sidechain launched ``tool_use_id`` with
+        run_in_background=true.
+
+        The subagent-lane sibling of ``mark_background_launch``: the #470 gate
+        deliberately keeps grandchild launches out of ``_background_launches``
+        (they must not pin the pool or chip as the parent's own work), but that
+        also made the drain pump drop the grandchild's terminal notification as
+        ``suppress-foreground`` — stranding a sub-agent parked awaiting it
+        (2026-07-10 incident). Recording the launch here lets
+        ``_record_task_message`` arm the task_id-keyed marker below, which the
+        unpark gates alone consume. Defensive: missing ids are a no-op.
+        """
+        if not session_id or not tool_use_id:
+            return
+        self._subagent_background_launches.setdefault(session_id, set()).add(tool_use_id)
+
+    def was_subagent_background_launch(self, session_id: str, tool_use_id: str) -> bool:
+        """True iff a sub-agent sidechain launched ``tool_use_id`` backgrounded."""
+        if not session_id or not tool_use_id:
+            return False
+        return tool_use_id in self._subagent_background_launches.get(session_id, set())
+
+    def mark_subagent_background_task(self, session_id: str, task_id: str) -> None:
+        """Record that ``task_id`` is a background task launched FROM a sub-agent
+        sidechain (its TaskStarted's tool_use_id was in
+        ``_subagent_background_launches``).
+
+        Consumed ONLY by the unpark gates (drain pump foreground gate + the
+        in-stream latch) so the grandchild's terminal notification wakes the
+        parent instead of being suppressed. Deliberately NOT part of
+        ``is_own_background_task`` / ``get_active_background_work``: no pool
+        pinning (the launching sub-agent's own kind=="agent" record pins) and
+        no chip-scoping change. Defensive: missing ids are a no-op.
+        """
+        if not session_id or not task_id:
+            return
+        self._subagent_background_tasks.setdefault(session_id, set()).add(task_id)
+
+    def is_subagent_background_task(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` is a recorded subagent-lane background task."""
+        if not session_id or not task_id:
+            return False
+        return task_id in self._subagent_background_tasks.get(session_id, set())
 
     def is_own_background_task(self, session_id: str, task_id: str) -> bool:
         """True iff ``task_id`` is background work the PARENT itself launched.
@@ -868,6 +933,8 @@ class TaskRegistry:
         self._unpark_pending.discard(session_id)
         self._unpark_pending_since.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
+        self._subagent_background_launches.pop(session_id, None)
+        self._subagent_background_tasks.pop(session_id, None)
         self._unparked.pop(session_id, None)
         self._chipped.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
@@ -882,6 +949,8 @@ class TaskRegistry:
         self._unpark_pending.clear()
         self._unpark_pending_since.clear()
         self._sdk_background_tasks.clear()
+        self._subagent_background_launches.clear()
+        self._subagent_background_tasks.clear()
         self._unparked.clear()
         self._chipped.clear()
         self._terminal_notified.clear()

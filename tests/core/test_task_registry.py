@@ -354,6 +354,91 @@ class TestSdkBackgroundWork:
 
 
 # =============================================================================
+# Subagent-lane background markers: _subagent_background_launches/_tasks
+# =============================================================================
+
+class TestSubagentBackgroundMarkers:
+    """A background task launched FROM a sub-agent sidechain (run_in_background,
+    parent_tool_id set) gets a DEDICATED marker pair so the unpark gates can
+    deliver its terminal notification (2026-07-10 stranded-subagent incident) —
+    WITHOUT joining ``_background_launches``/``_sdk_background_tasks``, which
+    feed pool pinning and chip scoping the grandchild must never touch.
+    """
+
+    # --- launch marker ----------------------------------------------------------
+    def test_launch_marker_false_when_unmarked(self, reg):
+        assert reg.was_subagent_background_launch("s1", "tu-gc") is False
+
+    def test_mark_then_was_subagent_background_launch_true(self, reg):
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        assert reg.was_subagent_background_launch("s1", "tu-gc") is True
+        # The parent's own launch gate is untouched.
+        assert reg.was_background_launch("s1", "tu-gc") is False
+
+    # --- task marker ------------------------------------------------------------
+    def test_task_marker_false_when_unmarked(self, reg):
+        reg.start_task("s1", "gc1", "shell", "monitor loop")
+        assert reg.is_subagent_background_task("s1", "gc1") is False
+
+    def test_mark_then_is_subagent_background_task_true(self, reg):
+        reg.start_task("s1", "gc1", "shell", "monitor loop")
+        reg.mark_subagent_background_task("s1", "gc1")
+        assert reg.is_subagent_background_task("s1", "gc1") is True
+
+    def test_markers_isolated_per_session(self, reg):
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        reg.mark_subagent_background_task("s1", "gc1")
+        assert reg.was_subagent_background_launch("s2", "tu-gc") is False
+        assert reg.is_subagent_background_task("s2", "gc1") is False
+
+    def test_blank_ids_never_record(self, reg):
+        reg.mark_subagent_background_launch("", "tu-gc")
+        reg.mark_subagent_background_launch("s1", "")
+        reg.mark_subagent_background_task("", "gc1")
+        reg.mark_subagent_background_task("s1", "")
+        assert reg.was_subagent_background_launch("s1", "") is False
+        assert reg.is_subagent_background_task("s1", "") is False
+        # No state stranded — real ids still record.
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        reg.mark_subagent_background_task("s1", "gc1")
+        assert reg.was_subagent_background_launch("s1", "tu-gc") is True
+        assert reg.is_subagent_background_task("s1", "gc1") is True
+
+    # --- blast-radius pins: NO pool pinning, NO chip eligibility -----------------
+    def test_marked_task_does_not_pin_pool(self, reg):
+        # A subagent-lane backgrounded shell must NOT widen the pool busy signal
+        # (the launching sub-agent's own kind=="agent" record is what pins).
+        reg.start_task("s1", "gc1", "shell", "monitor loop")
+        reg.mark_subagent_background_task("s1", "gc1")
+        assert reg.has_active_background_work("s1") is False
+        assert reg.get_active_background_work("s1") == []
+
+    def test_marked_task_is_not_own_background_task(self, reg):
+        # Chip scoping unchanged: a grandchild never chips as the parent's own.
+        reg.start_task("s1", "gc1", "shell", "monitor loop", tool_use_id="tu-gc")
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        reg.mark_subagent_background_task("s1", "gc1")
+        assert reg.is_own_background_task("s1", "gc1") is False
+
+    # --- lifecycle clears --------------------------------------------------------
+    def test_cleared_by_clear_session(self, reg):
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        reg.mark_subagent_background_task("s1", "gc1")
+        reg.mark_subagent_background_task("s2", "gc9")
+        reg.clear_session("s1")
+        assert reg.was_subagent_background_launch("s1", "tu-gc") is False
+        assert reg.is_subagent_background_task("s1", "gc1") is False
+        assert reg.is_subagent_background_task("s2", "gc9") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.mark_subagent_background_launch("s1", "tu-gc")
+        reg.mark_subagent_background_task("s1", "gc1")
+        reg.reset_all()
+        assert reg.was_subagent_background_launch("s1", "tu-gc") is False
+        assert reg.is_subagent_background_task("s1", "gc1") is False
+
+
+# =============================================================================
 # to_wire shape
 # =============================================================================
 

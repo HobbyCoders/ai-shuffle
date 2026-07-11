@@ -1430,6 +1430,309 @@ def test_latch_records_backgrounded_shell_via_fallback():
 
 
 # ---------------------------------------------------------------------------
+# 10b. SUBAGENT-LANE BACKGROUND TASK UNPARK (2026-07-10 stranded-subagent
+#      incident, session 54ef8401 tasks bqbeiwvv6/b20nqkc3y). A background task
+#      launched FROM a sub-agent sidechain (run_in_background, parent_tool_id
+#      set) completes BETWEEN turns: the #470 top-level-only gate keeps it out
+#      of was_background_launch AND is_sdk_background_task, so the pump dropped
+#      the wake as suppress-foreground and a sub-agent parked awaiting the task
+#      (the Monitor pattern) was stranded forever. The dedicated
+#      mark/is_subagent_background_task marker admits it at the pump gate; it
+#      then rides the EXISTING deliver machinery (one unpark, task_id dedup).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_delivers_subagent_lane_background_task():
+    """Regression: a subagent-lane run_in_background task whose terminal
+    notification reaches the pump between turns MUST deliver exactly one unpark
+    (decision=deliver-subagent) instead of suppress-foreground."""
+    task_registry.start_task("sess-1", "gc-1", "shell", "monitor DONE-2")
+    task_registry.mark_subagent_background_task("sess-1", "gc-1")
+    # THE INCIDENT SHAPE: both legacy gates miss it (the grandchild's launch
+    # tool_use_id was never recorded by the parent, and it is not an SDK
+    # background task of the parent's own).
+    assert task_registry.was_background_launch("sess-1", "tu-gc") is False
+    assert task_registry.is_sdk_background_task("sess-1", "gc-1") is False
+
+    client = _FakeClient([_notif("gc-1", uuid="u-1", tool_use_id="tu-gc",
+                                 summary="DONE-2")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "gc-1"
+    assert pending[0]["status"] == "completed"
+    assert task_registry.was_unparked("sess-1", "gc-1") is True
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_subagent_lane_duplicate_frame_dedups():
+    """A second terminal frame for the same subagent-lane task (fresh per-rest
+    uuid) must dedup on the one-unpark-per-task latch — ONE delivery, one
+    pending entry."""
+    task_registry.start_task("sess-1", "gc-1", "shell", "monitor DONE-2")
+    task_registry.mark_subagent_background_task("sess-1", "gc-1")
+
+    client = _FakeClient(
+        [
+            _notif("gc-1", uuid="u-1", tool_use_id="tu-gc"),
+            _notif("gc-1", uuid="u-2", tool_use_id="tu-gc"),
+        ],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert [p["task_id"] for p in pending] == ["gc-1"]
+
+
+@pytest.mark.asyncio
+async def test_pump_arms_and_delivers_subagent_lane_launch_arriving_between_turns():
+    """End-to-end incident shape THROUGH the pump: the still-running backgrounded
+    sub-agent's inner Bash run_in_background tool_use arrives between turns (this
+    pump is its only reader), then the task's TaskStarted, then its terminal
+    notification. The pump-side recorder (_record_subagent_lane_launches) must
+    arm the subagent-lane markers and the gate must deliver — while the parent's
+    own gates (pinning/chips) stay unarmed."""
+    # The parent sub-agent itself is a recorded top-level background launch.
+    task_registry.mark_background_launch("sess-1", "tu-parent")
+
+    inner_launch = AssistantMessage(
+        content=[ToolUseBlock(
+            id="tu-gc", name="Bash",
+            input={"command": "python monitor.py", "run_in_background": True},
+        )],
+        model="claude",
+        parent_tool_use_id="tu-parent",
+    )
+    started = TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="gc-1",
+        description="monitor loop",
+        uuid="s-1",
+        session_id="sess-1",
+        tool_use_id="tu-gc",
+        task_type="local_bash",
+    )
+    notif = _notif("gc-1", uuid="u-1", tool_use_id="tu-gc", summary="DONE-2")
+
+    client = _FakeClient([inner_launch, started, notif], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # The pump-side recorder armed the dedicated markers...
+    assert task_registry.was_subagent_background_launch("sess-1", "tu-gc") is True
+    assert task_registry.is_subagent_background_task("sess-1", "gc-1") is True
+    # ...WITHOUT touching the parent's own gates (no pin, no chip scope).
+    assert task_registry.was_background_launch("sess-1", "tu-gc") is False
+    assert task_registry.is_sdk_background_task("sess-1", "gc-1") is False
+    assert task_registry.is_own_background_task("sess-1", "gc-1") is False
+    # ...and the wake delivered.
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert pending[0]["task_id"] == "gc-1"
+
+
+def test_latch_arms_subagent_lane_background_task():
+    """In-stream latch: a subagent-lane background task delivered by the CLI
+    mid-turn spends the one-unpark token exactly like genuine background tasks,
+    so the pump later finds it spent (no duplicate wake)."""
+    task_registry.reset_all()
+    task_registry.mark_started_this_turn("sess-1", "gc-1")
+    task_registry.mark_subagent_background_task("sess-1", "gc-1")
+    # Neither legacy gate admits it — the new marker must carry the latch.
+    cwh._latch_terminal_notification(
+        _terminal_event("gc-1", tool_use_id="tu-gc"), "sess-1"
+    )
+
+    assert task_registry.was_unparked("sess-1", "gc-1") is True
+    assert task_registry.mark_unparked("sess-1", "gc-1") is False
+    task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# 10c. SIDECHAIN MONITOR BUILTIN (2026-07-10 SECOND stranded-subagent incident,
+#      session 07df5136 task b5qiqqf1h, live E2E on this very branch). The
+#      CLI-native `Monitor` tool ALWAYS spawns a background task but carries NO
+#      run_in_background flag in its input ({command, description, timeout_ms,
+#      persistent}), so every flag sniff missed it: a sub-agent that armed a
+#      Monitor and ended its turn got `decision=suppress-foreground` for the
+#      terminal notification (21:21:31 log line) and stranded forever —
+#      queue-op evidence shows the CLI enqueued the <task-notification> into
+#      the parked parent's queue and NEVER self-dequeued a subagent-owned one.
+#      Fix: sidechain Monitor tool_uses arm mark_subagent_background_launch BY
+#      TOOL NAME (both recorders), and both unpark gates also accept the launch
+#      tool_use_id directly (mirror of the parent-lane launch/task-id pair).
+#      TOP-LEVEL Monitors are untouched: their wakes are CLI-owned (enqueue +
+#      self-dequeue) and must KEEP being suppressed here.
+# ---------------------------------------------------------------------------
+
+_MONITOR_INPUT = {
+    "command": 'i=0; until [ $i -ge 90 ]; do sleep 1; i=$((i+1)); done; echo "90s-elapsed"',
+    "description": "90s until-loop repro timer",
+    "timeout_ms": 120000,
+    "persistent": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_pump_arms_and_delivers_sidechain_monitor_builtin_between_turns():
+    """THE live incident shape end-to-end through the pump: the backgrounded
+    sub-agent's sidechain Monitor tool_use (NO run_in_background flag) arrives
+    between turns, then its TaskStarted, then its terminal notification. The
+    pump-side recorder must arm the subagent-lane markers BY TOOL NAME and the
+    gate must deliver (deliver-subagent) — currently suppress-foreground."""
+    # The parent sub-agent itself is a recorded top-level background launch.
+    task_registry.mark_background_launch("sess-1", "tu-parent")
+
+    monitor_launch = AssistantMessage(
+        content=[ToolUseBlock(id="tu-mon", name="Monitor", input=dict(_MONITOR_INPUT))],
+        model="claude",
+        parent_tool_use_id="tu-parent",
+    )
+    started = TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="mon-1",
+        description="90s until-loop repro timer",
+        uuid="s-1",
+        session_id="sess-1",
+        tool_use_id="tu-mon",
+        task_type="local_bash",
+    )
+    notif = _notif("mon-1", uuid="u-1", tool_use_id="tu-mon", summary="90s-elapsed")
+
+    client = _FakeClient([monitor_launch, started, notif], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # The pump-side recorder armed the dedicated markers by tool name...
+    assert task_registry.was_subagent_background_launch("sess-1", "tu-mon") is True
+    assert task_registry.is_subagent_background_task("sess-1", "mon-1") is True
+    # ...WITHOUT touching the parent's own gates (no pin, no chip scope; #470).
+    assert task_registry.was_background_launch("sess-1", "tu-mon") is False
+    assert task_registry.is_sdk_background_task("sess-1", "mon-1") is False
+    assert task_registry.is_own_background_task("sess-1", "mon-1") is False
+    # ...and the wake delivered.
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert pending[0]["task_id"] == "mon-1"
+    assert pending[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pump_delivers_subagent_lane_task_via_launch_tool_use_id_fallback():
+    """Belt-and-braces mirror of the parent-lane gate pair (launch tool_use_id
+    OR task_id): if the Monitor's TaskStarted arrives WITHOUT a usable
+    tool_use_id, the task-id marker never arms — but the terminal notification
+    demonstrably carries the launch tool_use_id (live transcript:
+    <tool-use-id>toolu_01JuRn…</tool-use-id> inside the b5qiqqf1h terminal
+    <task-notification>), so the pump gate must also accept
+    was_subagent_background_launch keyed on the frame's tool_use_id."""
+    task_registry.start_task("sess-1", "mon-1", "shell", "90s until-loop repro timer")
+    task_registry.mark_subagent_background_launch("sess-1", "tu-mon")
+    # The task-id marker is NOT armed — the tool_use_id fallback must carry it.
+    assert task_registry.is_subagent_background_task("sess-1", "mon-1") is False
+
+    client = _FakeClient([_notif("mon-1", uuid="u-1", tool_use_id="tu-mon")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert pending[0]["task_id"] == "mon-1"
+
+
+@pytest.mark.asyncio
+async def test_pump_keeps_suppressing_top_level_monitor_builtin():
+    """Top-level Monitor UNCHANGED by the sidechain fix: its wake is CLI-owned
+    (the CLI enqueues + self-dequeues its own <task-notification> and injects
+    the wake turn itself), so the pump must keep suppressing the app-side wake.
+    No marker may arm for a top-level Monitor tool_use, and its terminal
+    notification stays decision=suppress-foreground (no app delivery)."""
+    monitor_launch = AssistantMessage(
+        content=[ToolUseBlock(id="tu-mon-top", name="Monitor", input=dict(_MONITOR_INPUT))],
+        model="claude",
+        parent_tool_use_id=None,
+    )
+    started = TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="mon-top-1",
+        description="90s until-loop repro timer",
+        uuid="s-1",
+        session_id="sess-1",
+        tool_use_id="tu-mon-top",
+        task_type="local_bash",
+    )
+    notif = _notif("mon-top-1", uuid="u-1", tool_use_id="tu-mon-top")
+
+    # hang=False: suppression `continue`s rather than breaking, so the stream
+    # must end for the pump to terminate.
+    client = _FakeClient([monitor_launch, started, notif], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Indicator cleared (registry completed via _record_task_message)...
+    assert task_registry.get_active("sess-1") == []
+    # ...but no marker armed and NO app wake — the CLI owns this one.
+    assert task_registry.was_background_launch("sess-1", "tu-mon-top") is False
+    assert task_registry.was_subagent_background_launch("sess-1", "tu-mon-top") is False
+    assert task_registry.is_subagent_background_task("sess-1", "mon-top-1") is False
+    handler._deliver_unpark.assert_not_awaited()
+
+
+def test_latch_arms_subagent_lane_launch_via_tool_use_id_fallback():
+    """In-stream latch: same tool_use_id fallback as the pump gate — a
+    subagent-lane launch whose TaskStarted never mapped a task-id marker must
+    still spend the one-unpark token when its terminal frame is delivered
+    in-stream, so the pump later finds it spent (no duplicate wake)."""
+    task_registry.reset_all()
+    task_registry.mark_started_this_turn("sess-1", "mon-1")
+    task_registry.mark_subagent_background_launch("sess-1", "tu-mon")
+    # No task-id marker — the launch tool_use_id fallback must carry the latch.
+    assert task_registry.is_subagent_background_task("sess-1", "mon-1") is False
+    cwh._latch_terminal_notification(
+        _terminal_event("mon-1", tool_use_id="tu-mon"), "sess-1"
+    )
+
+    assert task_registry.was_unparked("sess-1", "mon-1") is True
+    assert task_registry.mark_unparked("sess-1", "mon-1") is False
+    task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
 # 8. Park-poll strand: unpark_pending must be latched the MOMENT a completion
 #    is consumed — not at deliver time, after the consolidation window.
 # ---------------------------------------------------------------------------

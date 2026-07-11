@@ -302,6 +302,14 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
                 tuid = getattr(message, "tool_use_id", None)
                 if tuid and task_registry.was_background_launch(session_id, tuid):
                     task_registry.mark_sdk_background_task(session_id, message.task_id)
+                elif tuid and task_registry.was_subagent_background_launch(session_id, tuid):
+                    # SUBAGENT-lane backgrounded shell (a grandchild): arm the
+                    # dedicated unpark marker ONLY — no pool pin (the launching
+                    # sub-agent's own kind=="agent" record pins), no chip change.
+                    # Without this the grandchild's terminal notification failed
+                    # both pump gates → suppress-foreground → a sub-agent parked
+                    # awaiting it stranded forever (2026-07-10 incident).
+                    task_registry.mark_subagent_background_task(session_id, message.task_id)
             else:
                 # Belt-and-braces for genuine BACKGROUND sub-agents. The CLI
                 # (2.1.195+) launches Agent/Task subagents ASYNC without
@@ -318,6 +326,10 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
                 tuid = getattr(message, "tool_use_id", None)
                 if tuid and task_registry.was_background_launch(session_id, tuid):
                     task_registry.mark_sdk_background_task(session_id, message.task_id)
+                elif tuid and task_registry.was_subagent_background_launch(session_id, tuid):
+                    # Subagent-lane backgrounded grandchild agent — same
+                    # unpark-only marker as the shell branch above.
+                    task_registry.mark_subagent_background_task(session_id, message.task_id)
             # Scope the in-stream unpark stash to THIS turn: record that this
             # background task's TaskStartedMessage arrived during the turn now
             # streaming. Only a task in this set may fire an in-stream unpark when
@@ -357,6 +369,68 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
                 task_registry.complete_task(session_id, message.task_id, mapped)
     except Exception:
         logger.debug("task_registry update for SDK task message failed", exc_info=True)
+
+
+# CLI-NATIVE tools that ALWAYS spawn a background task despite carrying NO
+# run_in_background/runInBackground flag in their input. The builtin `Monitor`
+# tool's input is {command, description, timeout_ms, persistent} — the flag
+# sniffs can never classify it, so a Monitor armed from a sub-agent sidechain
+# was invisible to every launch gate. Live 2026-07-10 (this branch's debug
+# instance, session 07df5136 task b5qiqqf1h): the sidechain Monitor's terminal
+# notification hit the pump unarmed → decision=suppress-foreground → the
+# Monitor-parked sub-agent stranded forever. Queue-op evidence shows the CLI
+# enqueued the <task-notification> into the parked parent's queue and never
+# self-dequeued a SUBAGENT-owned one — unlike TOP-LEVEL Monitors, whose wakes
+# the CLI owns end-to-end (enqueue + self-dequeue) and which therefore must
+# keep being suppressed by the app. So this name sniff applies to SIDECHAIN
+# tool_uses only (both recorders below already gate on parent_tool_use_id).
+_IMPLICIT_BACKGROUND_TOOL_NAMES = ("Monitor",)
+
+
+def _record_subagent_lane_launches(session_id: Optional[str], message: Any) -> None:
+    """Record SUBAGENT-lane run_in_background launches that arrive BETWEEN turns.
+
+    In-stream, the ToolUseBlock branch of ``stream_to_websocket`` records these
+    (``mark_subagent_background_launch``); but a backgrounded sub-agent keeps
+    running after the parent parks, and its inner tool_use blocks then arrive on
+    the pooled client with only the drain pump reading them. The pump calls this
+    per message (right before ``_record_task_message``, so the launch mark is
+    always recorded before the task's TaskStarted is processed). Sidechain
+    messages only (``parent_tool_use_id`` set) — a top-level between-turns
+    launch belongs to ``_cli_turn_events_from_message``. Side-effect-only and
+    fully defensive, like ``_record_task_message``.
+    """
+    if not session_id or not getattr(message, "parent_tool_use_id", None):
+        return
+    try:
+        if not isinstance(message, AssistantMessage):
+            return
+        content = message.content or []
+        if isinstance(content, str):
+            return
+        for block in content:
+            if not isinstance(block, ToolUseBlock):
+                continue
+            tool_id = getattr(block, "id", None)
+            tool_input = block.input or {}
+            _flagged = bool(
+                tool_input.get("run_in_background")
+                or tool_input.get("runInBackground")
+            )
+            # Flag-less always-background builtins (Monitor): the 2026-07-10
+            # b5qiqqf1h miss — see _IMPLICIT_BACKGROUND_TOOL_NAMES.
+            _implicit = getattr(block, "name", None) in _IMPLICIT_BACKGROUND_TOOL_NAMES
+            if tool_id and (_flagged or _implicit):
+                task_registry.mark_subagent_background_launch(session_id, tool_id)
+                logger.info(
+                    "task-launch-classification session=%s tool_id=%s "
+                    "classification=%s (pump)",
+                    session_id, tool_id,
+                    "background-flag-subagent-lane" if _flagged
+                    else "background-builtin-subagent-lane",
+                )
+    except Exception:
+        logger.debug("subagent-lane launch recording failed", exc_info=True)
 
 
 # Phrases that identify a backgrounded sub-agent's launch-ACK ToolResult — the
@@ -2782,6 +2856,52 @@ async def stream_to_websocket(
                                 "classification=foreground",
                                 session_id, tool_id,
                             )
+                        elif (
+                            tool_id
+                            and tool_entry["parent_tool_id"]
+                            and (
+                                tool_input.get("run_in_background")
+                                or tool_input.get("runInBackground")
+                            )
+                        ):
+                            # SUBAGENT-lane backgrounded launch (a grandchild).
+                            # Recorded in a DEDICATED set — never
+                            # mark_background_launch, which would pin the pool /
+                            # chip it as the parent's own work — so the drain
+                            # pump can still deliver its terminal notification
+                            # instead of suppress-foreground'ing it and
+                            # stranding a sub-agent parked awaiting the task
+                            # (2026-07-10 incident; the #470 top-level-only
+                            # gate above is what kept it invisible).
+                            task_registry.mark_subagent_background_launch(session_id, tool_id)
+                            logger.info(
+                                "task-launch-classification session=%s tool_id=%s "
+                                "classification=background-flag-subagent-lane",
+                                session_id, tool_id,
+                            )
+                        elif (
+                            tool_id
+                            and tool_entry["parent_tool_id"]
+                            and block.name in _IMPLICIT_BACKGROUND_TOOL_NAMES
+                        ):
+                            # SUBAGENT-lane FLAG-LESS background builtin
+                            # (Monitor): always spawns a background task but
+                            # carries no run_in_background flag, so the branch
+                            # above can never classify it (live 2026-07-10,
+                            # session 07df5136 task b5qiqqf1h → pump
+                            # decision=suppress-foreground, stranded sub-agent).
+                            # Same dedicated set as above — never
+                            # mark_background_launch (no pool pin, no chip
+                            # scope; #470 preserved). TOP-LEVEL Monitors fall
+                            # through unclassified on purpose: their wakes are
+                            # CLI-owned (queue enqueue + self-dequeue) and the
+                            # app must keep suppressing them.
+                            task_registry.mark_subagent_background_launch(session_id, tool_id)
+                            logger.info(
+                                "task-launch-classification session=%s tool_id=%s "
+                                "classification=background-builtin-subagent-lane",
+                                session_id, tool_id,
+                            )
 
                         # Check if this is a subagent invocation (SDK ≤0.1.30 "Task", SDK ≥0.1.48 "Agent")
                         if block.name in ("Task", "Agent"):
@@ -2927,6 +3047,25 @@ async def stream_to_websocket(
                                 logger.info(
                                     "task-launch-classification session=%s tool_id=%s "
                                     "classification=background-ack",
+                                    session_id, tool_use_id,
+                                )
+                            elif (
+                                tool_use_id
+                                and result_entry.get("parent_tool_id")
+                                and not task_info.get("run_in_background")
+                                and _looks_like_subagent_launch_ack(output)
+                            ):
+                                # Subagent-lane mirror of the ACK arm above: a
+                                # grandchild Agent launched async records the
+                                # DEDICATED subagent-lane mark (never the parent
+                                # gate — no pin/chip), so its completion can
+                                # still unpark instead of stranding the waiting
+                                # sub-agent.
+                                task_info["run_in_background"] = True
+                                task_registry.mark_subagent_background_launch(session_id, tool_use_id)
+                                logger.info(
+                                    "task-launch-classification session=%s tool_id=%s "
+                                    "classification=background-ack-subagent-lane",
                                     session_id, tool_use_id,
                                 )
                             # A backgrounded sub-agent's FIRST ToolResult is only the
@@ -3187,6 +3326,22 @@ async def stream_to_websocket(
                                 logger.info(
                                     "task-launch-classification session=%s tool_id=%s "
                                     "classification=background-ack",
+                                    session_id, tool_use_id,
+                                )
+                            elif (
+                                tool_use_id
+                                and result_entry.get("parent_tool_id")
+                                and not task_info.get("run_in_background")
+                                and _looks_like_subagent_launch_ack(output)
+                            ):
+                                # Subagent-lane mirror of the ACK arm above (see
+                                # the AssistantMessage-lane sibling): dedicated
+                                # mark only — no pin/chip via the parent gate.
+                                task_info["run_in_background"] = True
+                                task_registry.mark_subagent_background_launch(session_id, tool_use_id)
+                                logger.info(
+                                    "task-launch-classification session=%s tool_id=%s "
+                                    "classification=background-ack-subagent-lane",
                                     session_id, tool_use_id,
                                 )
                             # Backgrounded sub-agent: this ToolResult is only the launch

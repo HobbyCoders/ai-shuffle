@@ -405,6 +405,32 @@ class TestRecordTaskStartedKind:
         )
         assert task_registry.is_sdk_background_task("sess-1", "t-agent") is False
 
+    # --- Subagent-lane background tasks (2026-07-10 stranded-subagent incident):
+    #     a launch recorded via mark_subagent_background_launch arms the DEDICATED
+    #     task marker — never mark_sdk_background_task (no pool pin, no chip
+    #     scope), and never for an unrecorded launch (the #470 foreground
+    #     semantics stay pinned).
+    def test_shell_started_with_subagent_lane_launch_arms_subagent_marker(self):
+        task_registry.mark_subagent_background_launch("sess-1", "tu-1")
+        _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
+        assert task_registry.is_subagent_background_task("sess-1", "t-bash") is True
+        # The parent's own gates stay unarmed: no pool pin, no chip eligibility.
+        assert task_registry.is_sdk_background_task("sess-1", "t-bash") is False
+        assert task_registry.has_active_background_work("sess-1") is False
+        assert task_registry.is_own_background_task("sess-1", "t-bash") is False
+
+    def test_agent_started_with_subagent_lane_launch_arms_subagent_marker(self):
+        task_registry.mark_subagent_background_launch("sess-1", "tu-1")
+        _record_task_message(
+            "sess-1", _started("t-agent", task_type="local_agent", tool_use_id="tu-1")
+        )
+        assert task_registry.is_subagent_background_task("sess-1", "t-agent") is True
+        assert task_registry.is_sdk_background_task("sess-1", "t-agent") is False
+
+    def test_unrecorded_launch_does_not_arm_subagent_marker(self):
+        _record_task_message("sess-1", _started("t-bash", task_type="local_bash"))
+        assert task_registry.is_subagent_background_task("sess-1", "t-bash") is False
+
 
 # ---------------------------------------------------------------------------
 # RC1: arm the unpark gate from the launch ACK (tests A, B, D).
@@ -546,6 +572,27 @@ def _tool_result_user_msg(tool_use_id, text, *, parent_tool_use_id=None):
     )
 
 
+# The CLI-native builtin `Monitor` tool's REAL input shape (live 2026-07-10,
+# session 07df5136 / sidechain agent-a529395258548df1c, tool_use
+# toolu_01JuRn7NoPKiYAPB36ikmrxk → task b5qiqqf1h): command / description /
+# timeout_ms / persistent — NO run_in_background flag, ever, despite ALWAYS
+# spawning a background task.
+_MONITOR_INPUT = {
+    "command": 'i=0; until [ $i -ge 90 ]; do sleep 1; i=$((i+1)); done; echo "90s-elapsed"',
+    "description": "90s until-loop repro timer",
+    "timeout_ms": 120000,
+    "persistent": False,
+}
+
+
+def _monitor_launch_msg(tool_id, *, parent_tool_use_id=None):
+    return AssistantMessage(
+        content=[ToolUseBlock(id=tool_id, name="Monitor", input=dict(_MONITOR_INPUT))],
+        model="claude",
+        parent_tool_use_id=parent_tool_use_id,
+    )
+
+
 class TestLaunchAckArmsBackgroundGate:
     def setup_method(self):
         task_registry.reset_all()
@@ -619,3 +666,138 @@ class TestLaunchAckArmsBackgroundGate:
         assert task_registry.was_background_launch(session_id, parent_id) is True
         # The nested grandchild is NOT armed on the parent gate.
         assert task_registry.was_background_launch(session_id, grandchild_id) is False
+
+    @pytest.mark.asyncio
+    async def test_nested_grandchild_ack_arms_subagent_lane_gate(self):
+        """The SAME nested-ACK sequence as test D, asserted on the NEW gate: the
+        grandchild's async-launch ACK records the DEDICATED subagent-lane mark
+        (2026-07-10 incident fix) while the parent gate stays clear (test D)."""
+        session_id = "sess-ack-d2"
+        parent_id = "toolu_parent"
+        grandchild_id = "toolu_grandchild"
+        messages = [
+            _agent_launch_msg(parent_id, run_in_background=True),
+            _tool_result_user_msg(parent_id, _ACK_TEXT),
+            _agent_launch_msg(grandchild_id, parent_tool_use_id=parent_id),
+            _tool_result_user_msg(grandchild_id, _ACK_TEXT, parent_tool_use_id=parent_id),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_subagent_background_launch(session_id, grandchild_id) is True
+        assert task_registry.was_background_launch(session_id, grandchild_id) is False
+
+    @pytest.mark.asyncio
+    async def test_nested_grandchild_background_flag_arms_subagent_lane_gate(self):
+        """2026-07-10 incident (in-stream half): a grandchild Bash tool_use with an
+        explicit run_in_background flag (parent_tool_use_id set) records the
+        DEDICATED subagent-lane launch mark — never the parent gate."""
+        session_id = "sess-ack-e"
+        parent_id = "toolu_parent"
+        grandchild_id = "toolu_gc_bash"
+        gc_launch = AssistantMessage(
+            content=[ToolUseBlock(
+                id=grandchild_id, name="Bash",
+                input={"command": "python monitor.py", "run_in_background": True},
+            )],
+            model="claude",
+            parent_tool_use_id=parent_id,
+        )
+        messages = [
+            _agent_launch_msg(parent_id, run_in_background=True),
+            _tool_result_user_msg(parent_id, _ACK_TEXT),
+            gc_launch,
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_subagent_background_launch(session_id, grandchild_id) is True
+        # Parent gate untouched — no pin, no chip scope for the grandchild.
+        assert task_registry.was_background_launch(session_id, grandchild_id) is False
+
+    @pytest.mark.asyncio
+    async def test_nested_monitor_builtin_arms_subagent_lane_gate(self):
+        """2026-07-10 Monitor-builtin gap (in-stream half): the CLI-native
+        `Monitor` tool ALWAYS spawns a background task but carries NO
+        run_in_background flag in its input, so the flag sniffs never
+        classified it. Live repro (session 07df5136, task b5qiqqf1h): the
+        sidechain Monitor's terminal notification hit the pump gate unarmed →
+        decision=suppress-foreground → the Monitor-parked sub-agent stranded
+        forever (the CLI enqueued the <task-notification> into the parked
+        parent's queue and never self-dequeued a subagent-owned one). A
+        sidechain Monitor tool_use must arm the DEDICATED subagent-lane mark
+        by TOOL NAME — never the parent gate."""
+        session_id = "sess-ack-mon"
+        parent_id = "toolu_parent"
+        monitor_id = "toolu_monitor"
+        messages = [
+            _agent_launch_msg(parent_id, run_in_background=True),
+            _tool_result_user_msg(parent_id, _ACK_TEXT),
+            _monitor_launch_msg(monitor_id, parent_tool_use_id=parent_id),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_subagent_background_launch(session_id, monitor_id) is True
+        # Parent gate untouched — no pin, no chip scope (#470 preserved).
+        assert task_registry.was_background_launch(session_id, monitor_id) is False
+
+    @pytest.mark.asyncio
+    async def test_top_level_monitor_builtin_arms_nothing(self):
+        """Top-level Monitor behavior must be COMPLETELY unchanged by the
+        sidechain fix: a top-level Monitor's wake is CLI-OWNED (the CLI
+        enqueues its own <task-notification> into its queue and self-dequeues
+        it, injecting the wake turn itself), so the app keeps suppressing its
+        completion — NEITHER launch gate may arm."""
+        session_id = "sess-ack-mon-top"
+        monitor_id = "toolu_monitor_top"
+        messages = [_monitor_launch_msg(monitor_id)]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            await _drain(_qe.stream_to_websocket("prompt", session_id, "claude-code"))
+
+        assert task_registry.was_background_launch(session_id, monitor_id) is False
+        assert task_registry.was_subagent_background_launch(session_id, monitor_id) is False
+
+
+class TestRecordSubagentLaneLaunchesMonitor:
+    """Pump-side half of the 2026-07-10 Monitor-builtin gap: in the live repro
+    the sub-agent armed its Monitor BETWEEN turns (parent turn ended 21:19:51,
+    the Monitor tool_use streamed ~21:19:58 with only the drain pump reading),
+    so ``_record_subagent_lane_launches`` — not the in-stream branch — is the
+    recorder that must sniff the flag-less builtin by tool name."""
+
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    def test_sidechain_monitor_marks_subagent_launch(self):
+        msg = _monitor_launch_msg("tu-mon", parent_tool_use_id="tu-parent")
+        _qe._record_subagent_lane_launches("sess-rec-mon", msg)
+        assert task_registry.was_subagent_background_launch("sess-rec-mon", "tu-mon") is True
+        assert task_registry.was_background_launch("sess-rec-mon", "tu-mon") is False
+
+    def test_top_level_monitor_is_ignored_by_recorder(self):
+        # A top-level between-turns launch belongs to _cli_turn_events_from_message
+        # (which must keep NOT arming for Monitor — its wake is CLI-owned).
+        msg = _monitor_launch_msg("tu-mon-top")
+        _qe._record_subagent_lane_launches("sess-rec-mon", msg)
+        assert task_registry.was_subagent_background_launch("sess-rec-mon", "tu-mon-top") is False
+        assert task_registry.was_background_launch("sess-rec-mon", "tu-mon-top") is False
