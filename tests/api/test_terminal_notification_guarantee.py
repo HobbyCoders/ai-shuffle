@@ -498,3 +498,91 @@ async def test_pump_killed_payload_carries_server_shutdown_summary():
     assert len(pending) == 1
     assert pending[0]["task_id"] == "t-killed"
     assert pending[0]["summary"] == SERVER_SHUTDOWN_SUMMARY
+
+
+# ===========================================================================
+# Kill-notification husk: both synthesized payloads must be enriched from the
+# registry record instead of arriving with empty tool_use_id / summary.
+# ===========================================================================
+
+
+async def test_surface_unpark_payload_enriched_from_registry_record():
+    """Site 2 (#522 exactly-once surface): the consolidated unpark payload for a
+    killed task carries the launch ``tool_use_id`` and a non-empty human-readable
+    summary derived from the registry record — not a contentless husk."""
+    _make_db_session()
+    cwh.register_terminal_notification_callback()
+    _own_task("t-enrich", "tu-enrich")
+
+    state = MagicMock()
+    state.adapter.is_alive = MagicMock(return_value=True)
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=state)
+
+    deliver = AsyncMock(return_value=True)
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
+         patch.object(cwh, "_deliver_unpark_impl", new=deliver):
+        task_registry.complete_task(SESSION, "t-enrich", "killed")
+        await _drain_terminal_surface()
+
+    deliver.assert_awaited_once()
+    pending = deliver.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["tool_use_id"] == "tu-enrich"
+    assert pending[0]["summary"], "expected a non-empty summary from the record"
+    assert "bg work" in pending[0]["summary"]
+
+
+async def test_pump_killed_payload_enriched_from_registry_record():
+    """Site 1 (pump ``deliver-killed``): a TaskUpdated-alone killed terminal, NOT
+    during shutdown, still yields a payload with the launch ``tool_use_id`` and a
+    human-readable summary derived from the registry record."""
+
+    class _FakeClient:
+        def __init__(self, messages):
+            self._messages = list(messages)
+
+        async def receive_messages(self):
+            for m in self._messages:
+                yield m
+
+    def _fake_state(client):
+        state = MagicMock()
+        state.is_streaming = False
+        state.stale_turn_undrained = False
+        state.client = client
+        state.adapter.is_alive = MagicMock(return_value=True)
+        return state
+
+    _own_task("t-killed2", "tu-killed2")
+    # NOT shutting down (fixture default) → summary derives from the record.
+
+    handler = cwh.ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="dev-1", user_id="admin",
+        api_user_id=None,
+    )
+    handler.send_json = AsyncMock(return_value=True)
+    handler._deliver_unpark = AsyncMock(return_value=True)
+
+    killed = TaskUpdatedMessage(
+        subtype="task_updated",
+        data={"task_id": "t-killed2", "patch": {"status": "killed"}},
+        task_id="t-killed2",
+        patch={"status": "killed", "end_time": 1},
+        status="killed",
+        session_id=SESSION,
+        uuid="uu-killed2",
+    )
+    client = _FakeClient([killed])
+    pool = MagicMock()
+    pool.peek = MagicMock(return_value=_fake_state(client))
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await handler._drain_notifications(SESSION, "claude-code", None, None)
+
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "t-killed2"
+    assert pending[0]["tool_use_id"] == "tu-killed2"
+    assert pending[0]["summary"], "expected a non-empty summary from the record"
+    assert "bg work" in pending[0]["summary"]

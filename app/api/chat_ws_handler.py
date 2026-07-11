@@ -343,6 +343,27 @@ def _build_task_notification_prompt(pending: list) -> str:
     return "\n".join(blocks)
 
 
+def _kill_summary_from_record(
+    record: Optional[Dict[str, Any]], status: str
+) -> Optional[str]:
+    """Human-readable fallback summary for a killed/errored background task.
+
+    A killed task's synthesized notification often carries no summary of its own,
+    but the registry wire record still knows the ``kind`` and ``title`` (for
+    Monitor shells the ``title`` is the command). Derive a
+    ``"<kind> <status>: <title>"`` line so the parent's ``<task-notification>``
+    says WHAT was stopped instead of arriving contentless. Returns ``None`` when
+    the record has nothing to describe.
+    """
+    if not record:
+        return None
+    title = record.get("subject")
+    if not title:
+        return None
+    kind = record.get("kind") or "task"
+    return f"{kind} {status}: {title}"
+
+
 # ======================================================================
 # Shared background-agent park→wake ("unpark") machinery
 # ======================================================================
@@ -741,7 +762,11 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     pending = [{
         "task_id": task_id,
         "status": status,
-        "summary": summary,
+        # ENRICH (kill-notification husk): fall back to a derived
+        # "<kind> <status>: <title>" line so a summary-less killed task is not
+        # a contentless husk the parent cannot act on. output_file/usage stay
+        # None — a killed shell genuinely has no such data.
+        "summary": summary or _kill_summary_from_record(task, status),
         "output_file": None,
         "uuid": None,
         "usage": None,
@@ -1420,7 +1445,8 @@ async def _drain_notifications_impl(
                     # a live record (complete_task keeps it, only flipping status); a
                     # phantom self-rest has none. Gate on a record so only real tracked
                     # tasks unpark.
-                    if task_registry.get_task(session_id, _u_task_id) is None:
+                    _u_record = task_registry.get_task(session_id, _u_task_id)
+                    if _u_record is None:
                         _log_unpark_decision(
                             path="pump",
                             session_id=session_id,
@@ -1468,6 +1494,17 @@ async def _drain_notifications_impl(
                         if getattr(_startup_mod, "is_shutting_down", False)
                         else None
                     )
+                    # ENRICH (kill-notification husk): a killed task still has a
+                    # registry record carrying kind/title and the launch
+                    # tool_use_id. Fall back to the record's own summary, then a
+                    # derived "<kind> <status>: <title>" line, so the parent's
+                    # notification is actionable rather than a contentless husk.
+                    # output_file/usage stay None — a killed shell has no such data.
+                    _u_summary = (
+                        _u_summary
+                        or _u_record.get("summary")
+                        or _kill_summary_from_record(_u_record, _u_status)
+                    )
                     pending.append({
                         "task_id": _u_task_id,
                         "status": _u_status,
@@ -1475,7 +1512,7 @@ async def _drain_notifications_impl(
                         "output_file": None,
                         "uuid": _u_uuid,
                         "usage": None,
-                        "tool_use_id": None,
+                        "tool_use_id": _u_record.get("toolUseId"),
                     })
                     # Latch unpark-pending the MOMENT the completion is consumed —
                     # see the notification path below for why this cannot wait until
