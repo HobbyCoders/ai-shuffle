@@ -48,6 +48,13 @@
 	// Module-level so it persists across component instances.
 	// Capped at 100 entries to prevent unbounded growth over long sessions.
 	const SCROLL_CACHE_MAX = 100;
+	// How many trailing messages are kept OUT of content-visibility virtualization.
+	// The actively-growing tail (the streaming message + its immediate predecessors)
+	// must never be virtualized/re-estimated, or the browser re-guesses their
+	// intrinsic size against the 80px placeholder as the stream grows and
+	// scrollHeight jitters — the "scroll jumps around while streaming" bug. Far-up
+	// off-screen messages keep content-visibility for the paint/layout perf win.
+	const LIVE_TAIL = 8;
 	const scrollPositionCache = new Map<string, number>();
 	// Persist auto-scroll state across component mount/destroy cycles
 	const autoScrollCache = new Map<string, boolean>();
@@ -963,7 +970,7 @@
 	ontouchmove={handleTouchMove}
 	role="log"
 	aria-label="Conversation messages"
-	class="flex-1 overflow-y-auto overscroll-contain"
+	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if $activeSession.messages.length === 0}
 		<!-- Empty State -->
@@ -1003,9 +1010,11 @@
 	{:else}
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-			{#each displayItems as item (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
-				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen messages -->
-				<div class="msg-virtualized">
+			{#each displayItems as item, i (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
+				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen
+				     messages. The last LIVE_TAIL items opt OUT (.msg-live) so the growing
+				     streaming region near the viewport bottom is never re-estimated. -->
+				<div class="msg-virtualized" class:msg-live={i >= displayItems.length - LIVE_TAIL}>
 				{#if item.kind === 'tool_group'}
 					<!-- Grouped tool calls (2+ consecutive regular tools from the same turn) -->
 					<ToolUseGroup tools={item.tools} />
@@ -1149,12 +1158,31 @@
 <MediaLightbox />
 
 <style>
+	/* Keep the browser's scroll anchoring active so a resize of off-screen
+	   content ABOVE the viewport (e.g. a virtualized message being re-estimated
+	   while the tail streams) adjusts scrollTop to hold the visible content
+	   still, instead of letting earlier content shift under the reader. This is
+	   the default, but we assert it so nothing downstream defeats it. */
+	.msg-scroll {
+		overflow-anchor: auto;
+	}
+
 	/* Browser-native virtualization: skip paint/layout for off-screen messages.
 	   `auto` in contain-intrinsic-size remembers the last rendered height so
 	   the scrollbar stays stable when scrolling back through history. */
 	.msg-virtualized {
 		content-visibility: auto;
 		contain-intrinsic-size: auto 80px;
+	}
+
+	/* The trailing live region (streaming message + immediate predecessors) opts
+	   out of content-visibility entirely: it is always on/near screen and
+	   actively growing, so virtualizing it re-estimates its height every delta
+	   and jitters scrollHeight. Rendering it in full also makes it a valid
+	   scroll-anchor target for the pinned-to-bottom path. */
+	.msg-virtualized.msg-live {
+		content-visibility: visible;
+		contain-intrinsic-size: auto;
 	}
 
 </style>

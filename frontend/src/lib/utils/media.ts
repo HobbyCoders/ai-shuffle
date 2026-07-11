@@ -107,14 +107,14 @@ export function mediaHtml(kind: MediaKind, url: string, label = '', filename?: s
 
 	if (kind === 'image') {
 		return `<div class="generated-media-container relative my-4 inline-block">
-			<img src="${u}" alt="${alt}" class="media-zoomable max-w-full max-h-[500px] rounded-lg shadow-lg border border-border cursor-zoom-in" />
+			<img src="${u}" alt="${alt}" class="media-zoomable max-w-full max-h-[500px] [aspect-ratio:auto_3/2] rounded-lg shadow-lg border border-border cursor-zoom-in" />
 			${overlayButtons(url, name)}
 		</div>`;
 	}
 
 	if (kind === 'video') {
 		return `<div class="generated-media-container relative my-4 inline-block">
-			<video src="${u}" controls playsinline preload="metadata" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
+			<video src="${u}" controls playsinline preload="metadata" class="max-w-full max-h-[500px] [aspect-ratio:auto_3/2] rounded-lg shadow-lg border border-border">
 				Your browser does not support the video tag.
 			</video>
 			${overlayButtons(url, name)}
