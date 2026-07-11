@@ -501,6 +501,7 @@ def update_session(
     last_input_tokens: Optional[int] = None,
     cache_creation_tokens: Optional[int] = None,
     cache_read_tokens: Optional[int] = None,
+    launched_model: Optional[str] = None,
 ) -> Optional[SessionRow]:
     """Update a session with usage stats
 
@@ -509,6 +510,9 @@ def update_session(
         last_input_tokens / cache_creation_tokens / cache_read_tokens: absolute
             per-turn context-window values for the latest turn. These overwrite
             (not increment) so the context bar reflects the most recent turn.
+        launched_model: Effective model the session was launched (or switched)
+            with, persisted at spawn/link time so the host-op guard can read it
+            without waiting for turn-end message commits.
     """
     _ph = ph()
     updates = [f"updated_at = {_ph}"]
@@ -548,6 +552,9 @@ def update_session(
     if cache_read_tokens is not None:
         updates.append(f"cache_read_tokens = {_ph}")
         values.append(cache_read_tokens)
+    if launched_model is not None:
+        updates.append(f"launched_model = {_ph}")
+        values.append(launched_model)
 
     values.append(session_id)
 

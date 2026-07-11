@@ -133,5 +133,60 @@ async def test_resumed_session_skips_redundant_early_link(engine_mocks):
     assert not _early_link_calls(engine_mocks)
 
 
+@pytest.mark.asyncio
+async def test_resume_repersists_launched_model_on_model_switch(engine_mocks):
+    """A fresh-subprocess RESUME that relaunches with a DIFFERENT effective
+    model must re-persist sessions.launched_model at init — even though the
+    sdk_session_id link itself stays resume-gated.
+
+    The Unraid host-op guard reads sessions.launched_model with precedence
+    over the transcript's msg_model. When a pooled client is evicted/dead (or
+    requires_reconnect) the resume spawns a fresh subprocess with whatever
+    model options carry now; if that model differs from the last launch and we
+    skip the write on the resume path, the guard keeps reading a STALE model —
+    a transient Fable->non-Fable FAIL-OPEN in the Fable-only guard.
+    """
+    # Resume path: the session already carries an sdk_session_id.
+    engine_mocks.get_session.return_value = {
+        "id": APP_SESSION_ID,
+        "sdk_session_id": SDK_SESSION_ID,
+    }
+
+    resumed_options = MagicMock()
+    resumed_options.cwd = None
+    # The fresh subprocess relaunches with a different effective model.
+    resumed_options.model = "claude-opus-4-1"
+
+    async def quick_query(prompt, options):
+        yield _init_message()
+
+    with patch.object(qe, "query", quick_query), patch.object(
+        qe, "build_options_from_profile", return_value=(resumed_options, {})
+    ), patch.object(
+        qe, "_persist_turn_results", MagicMock(side_effect=lambda **kw: _noop_coro())
+    ):
+        await qe.execute_query(
+            prompt="again",
+            profile_id="principal-engineer",
+            session_id=APP_SESSION_ID,
+        )
+
+    model_writes = [
+        c
+        for c in engine_mocks.update_session.call_args_list
+        if c.kwargs.get("launched_model") == "claude-opus-4-1"
+    ]
+    assert model_writes, (
+        "resume-path init never re-persisted launched_model — the host-op "
+        "guard reads a stale model (Fable->non-Fable FAIL-OPEN)"
+    )
+    # The sdk_session_id link stays resume-gated: the model re-persist must NOT
+    # drag a redundant sdk_session_id re-link along with it.
+    for c in model_writes:
+        assert "sdk_session_id" not in c.kwargs, (
+            "resume must not re-link sdk_session_id on the model re-persist"
+        )
+
+
 async def _noop_coro():
     return None

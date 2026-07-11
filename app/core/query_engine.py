@@ -902,12 +902,25 @@ async def execute_query(
                     # sessions.sdk_session_id, and store entries flow in live —
                     # without this, a running (or mid-turn-crashed) automation
                     # session reads back as "no work" (blank history).
-                    if resume_id is None and not sdk_link_persisted:
+                    if not sdk_link_persisted:
                         try:
+                            # launched_model is persisted on EVERY spawn/init,
+                            # including fresh-subprocess resumes — the host-op
+                            # guard reads sessions.launched_model with precedence
+                            # over transcript msg_model, so a resume that relaunches
+                            # with a different effective model must re-persist or the
+                            # guard shadows newer truth with a stale value.
+                            # The sdk_session_id link stays resume-gated: a resume
+                            # keeps the sdk_session_id it was launched with.
+                            update_kwargs = {
+                                "launched_model": getattr(options, "model", None),
+                            }
+                            if resume_id is None:
+                                update_kwargs["sdk_session_id"] = sdk_session_id
                             await run_sync(
                                 database.update_session,
                                 session_id,
-                                sdk_session_id=sdk_session_id,
+                                **update_kwargs,
                             )
                             sdk_link_persisted = True
                         except Exception as link_err:
@@ -1448,12 +1461,21 @@ async def stream_query(
                     # Link it onto the sessions row immediately (decoupled from
                     # end-of-turn persistence) so a mid-turn crash can't leave
                     # sdk_session_id NULL and orphan the session.
-                    if resume_id is None and session_id and not sdk_link_persisted:
+                    if session_id and not sdk_link_persisted:
                         try:
+                            # launched_model persists on EVERY spawn/init,
+                            # including fresh-subprocess resumes (see execute_query
+                            # for the host-op-guard rationale). sdk_session_id
+                            # linking stays resume-gated.
+                            update_kwargs = {
+                                "launched_model": getattr(options, "model", None),
+                            }
+                            if resume_id is None:
+                                update_kwargs["sdk_session_id"] = sdk_session_id
                             await run_sync(
                                 database.update_session,
                                 session_id,
-                                sdk_session_id=sdk_session_id,
+                                **update_kwargs,
                             )
                             sdk_link_persisted = True
                         except Exception as link_err:
@@ -1962,6 +1984,13 @@ async def stream_to_websocket(
                         try:
                             await state.client.set_model(new_model)
                             logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
+                            # Persist the switched model so launched_model never
+                            # goes stale on a mid-life model switch — the host-op
+                            # guard reads this column directly.
+                            try:
+                                await run_sync(database.update_session, session_id, launched_model=new_model)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
 
@@ -2524,12 +2553,21 @@ async def stream_to_websocket(
                     # history in postgres_only mode). The session store entries are
                     # already keyed by this id, so writing it here alone is enough
                     # to recover the full transcript on reload.
-                    if resume_id is None and not sdk_link_persisted:
+                    if not sdk_link_persisted:
                         try:
+                            # launched_model persists on EVERY spawn/init,
+                            # including fresh-subprocess resumes (see execute_query
+                            # for the host-op-guard rationale). sdk_session_id
+                            # linking stays resume-gated.
+                            update_kwargs = {
+                                "launched_model": getattr(options, "model", None),
+                            }
+                            if resume_id is None:
+                                update_kwargs["sdk_session_id"] = sdk_session_id
                             await run_sync(
                                 database.update_session,
                                 session_id,
-                                sdk_session_id=sdk_session_id,
+                                **update_kwargs,
                             )
                             sdk_link_persisted = True
                         except Exception as link_err:
