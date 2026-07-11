@@ -10,6 +10,7 @@ from app.core.hook_service import (
     build_hooks_config,
     create_stop_hook_handler,
     create_plugin_hook_handler,
+    create_db_pretooluse_hook_handler,
     execute_plugin_hook,
     _fix_python_command_for_windows,
 )
@@ -296,8 +297,8 @@ class TestCreatePluginHookHandler:
             )
 
         assert result is not None
-        assert result.get("hookEventName") == "PostToolUse"
-        assert result.get("updatedToolOutput") == "REWRITTEN"
+        assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert result["hookSpecificOutput"]["updatedToolOutput"] == "REWRITTEN"
 
     @pytest.mark.asyncio
     async def test_posttooluse_no_updated_output_returns_default(self, tmp_path):
@@ -322,7 +323,7 @@ class TestCreatePluginHookHandler:
 
         # Should fall through to the SyncHookJSONOutput default
         assert result is not None
-        assert result.get("updatedToolOutput") is None
+        assert result.get("hookSpecificOutput") is None
 
     @pytest.mark.asyncio
     async def test_pretooluse_permission_decision_forwarded(self, tmp_path):
@@ -347,9 +348,13 @@ class TestCreatePluginHookHandler:
             )
 
         assert result is not None
-        assert result.get("hookEventName") == "PreToolUse"
-        assert result.get("permissionDecision") == "deny"
-        assert result.get("permissionDecisionReason") == "blocked by policy"
+        # Lab-confirmed regression guard: the permission decision MUST be nested
+        # under hookSpecificOutput (SyncHookJSONOutput contract). A bare top-level
+        # permissionDecision is silently ignored by the CLI schema (fail-open).
+        assert result.get("permissionDecision") is None
+        assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "blocked by policy"
 
     @pytest.mark.asyncio
     async def test_other_event_uses_sync_hook_json_output(self, tmp_path):
@@ -375,3 +380,228 @@ class TestCreatePluginHookHandler:
         assert result is not None
         assert result.get("decision") == "block"
         assert result.get("reason") == "stop loop"
+
+
+# =============================================================================
+# Test DB-backed PreToolUse hooks (block-capable)
+# =============================================================================
+
+def _db_bash_hook(command, tool_matcher="Bash", enabled=True, timeout=5000, hook_type="bash", name="test-hook"):
+    """Helper to build a DB hook row dict as returned by the database layer."""
+    return {
+        "id": "hook-1",
+        "name": name,
+        "event": "PreToolUse",
+        "hook_type": hook_type,
+        "command": command,
+        "timeout": timeout,
+        "enabled": enabled,
+        "tool_matcher": tool_matcher,
+        "project_id": "test-project",
+    }
+
+
+class TestDbPreToolUseHooks:
+    """Tests for DB-backed PreToolUse hooks executing and blocking tools."""
+
+    @pytest.mark.asyncio
+    async def test_registered_and_fires_for_matching_tool(self, tmp_path):
+        """(a) A DB PreToolUse hook fires for a tool matching its tool_matcher."""
+        hook = _db_bash_hook('echo \'{"decision": "block", "reason": "denied by policy"}\'')
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}},
+                None,
+                {"session_id": "s1"},
+            )
+        mock.assert_awaited()
+        assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.asyncio
+    async def test_block_decision_propagates_as_deny_with_reason(self, tmp_path):
+        """(b) decision:block maps to permissionDecision=deny with the reason passed through."""
+        hook = _db_bash_hook('echo \'{"decision": "block", "reason": "no shell allowed"}\'')
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "no shell allowed"
+
+    @pytest.mark.asyncio
+    async def test_permission_decision_shape(self, tmp_path):
+        """hookSpecificOutput.permissionDecision shape is honored."""
+        payload = '{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "nope"}}'
+        hook = _db_bash_hook(f"echo '{payload}'")
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "nope"
+
+    @pytest.mark.asyncio
+    async def test_approve_decision_allows(self, tmp_path):
+        """decision:approve maps to permissionDecision=allow."""
+        hook = _db_bash_hook('echo \'{"decision": "approve"}\'')
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    @pytest.mark.asyncio
+    async def test_non_matching_tool_matcher_not_invoked(self, tmp_path):
+        """(c) A hook whose tool_matcher doesn't match the tool is never executed."""
+        sentinel = tmp_path / "ran.txt"
+        hook = _db_bash_hook(f"touch {sentinel}", tool_matcher="Edit")
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert not sentinel.exists(), "hook command ran despite non-matching tool_matcher"
+        # No opinion -> default output, no permissionDecision
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_disabled_hook_not_invoked(self, tmp_path):
+        """(d) A disabled hook is skipped even if returned by the query."""
+        sentinel = tmp_path / "ran.txt"
+        hook = _db_bash_hook(f"touch {sentinel}", enabled=False)
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert not sentinel.exists()
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_no_opinion(self, tmp_path):
+        """(e) A hook that times out is treated as no-opinion (does not block)."""
+        hook = _db_bash_hook("sleep 10", timeout=100)  # 100ms timeout
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_crash_is_no_opinion(self, tmp_path):
+        """(e) A hook that errors with no parseable output and exit 1 is no-opinion."""
+        hook = _db_bash_hook("exit 1")
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_exit_code_2_is_deny(self, tmp_path):
+        """(f) Exit code 2 with no parseable stdout denies, using stderr as reason."""
+        hook = _db_bash_hook('echo "blocked: dangerous command" >&2; exit 2')
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "blocked: dangerous command" in (result["hookSpecificOutput"].get("permissionDecisionReason") or "")
+
+    @pytest.mark.asyncio
+    async def test_exit_0_no_output_is_no_opinion(self, tmp_path):
+        """Exit 0 with no output proceeds to normal permission flow (no opinion)."""
+        hook = _db_bash_hook("true")
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_stdin_receives_hook_contract_json(self, tmp_path):
+        """The hook command receives tool_name/tool_input/session_id/cwd as JSON on stdin."""
+        # Reflect stdin back: deny if the payload contains the expected tool_name.
+        cmd = (
+            "python3 -c \"import sys,json; d=json.load(sys.stdin); "
+            "print(json.dumps({'decision':'block','reason':d['tool_name']+'|'+d['tool_input'].get('command','')}))\""
+        )
+        hook = _db_bash_hook(cmd)
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+                None,
+                {"session_id": "sess-42"},
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "Bash|rm -rf /"
+
+    @pytest.mark.asyncio
+    async def test_webhook_type_skipped_not_blocking(self, tmp_path):
+        """(5) A non-bash (webhook) PreToolUse hook is skipped for blocking, no-opinion."""
+        hook = _db_bash_hook("", hook_type="webhook")
+        hook["url"] = "http://example.invalid/hook"
+        with patch("app.core.hook_service.get_database_hooks_for_event", new_callable=AsyncMock) as mock:
+            mock.return_value = [hook]
+            handler = create_db_pretooluse_hook_handler(str(tmp_path), "test-project")
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}},
+                None,
+                {"session_id": "s1"},
+            )
+        assert result.get("hookSpecificOutput") is None
+
+    def test_build_config_registers_db_pretooluse_when_present(self, tmp_path):
+        """build_hooks_config registers a PreToolUse handler when DB hooks exist."""
+        with patch("app.core.hook_service._project_has_db_pretooluse_hooks", return_value=True):
+            result = build_hooks_config(str(tmp_path), "test-project")
+        assert "PreToolUse" in result
+        assert len(result["PreToolUse"]) >= 1
+        # Stop handler still registered (unchanged behavior)
+        assert "Stop" in result
+
+    def test_build_config_no_db_pretooluse_when_absent(self, tmp_path):
+        """build_hooks_config does not register a DB PreToolUse handler when none exist."""
+        with patch("app.core.hook_service._project_has_db_pretooluse_hooks", return_value=False):
+            result = build_hooks_config(str(tmp_path), "test-project")
+        assert "PreToolUse" not in result
+        assert "Stop" in result

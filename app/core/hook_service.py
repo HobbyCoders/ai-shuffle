@@ -495,7 +495,10 @@ def create_plugin_hook_handler(
                             output["permissionDecision"] = decision
                         if reason:
                             output["permissionDecisionReason"] = reason
-                        return output  # type: ignore[return-value]
+                        # The permission decision MUST be nested under
+                        # hookSpecificOutput. A bare top-level dict is silently
+                        # ignored by the CLI schema (lab-confirmed fail-open).
+                        return SyncHookJSONOutput(hookSpecificOutput=output)
 
                 elif event_name == "PostToolUse":
                     # Use PostToolUseHookSpecificOutput.
@@ -511,7 +514,9 @@ def create_plugin_hook_handler(
                             output_post["updatedToolOutput"] = updated_output
                         if additional_context:
                             output_post["additionalContext"] = additional_context
-                        return output_post  # type: ignore[return-value]
+                        # Nest under hookSpecificOutput (same contract as
+                        # PreToolUse); a bare top-level dict is ignored by the CLI.
+                        return SyncHookJSONOutput(hookSpecificOutput=output_post)
 
                 else:
                     # All other events: Stop, SessionStart/End, UserPromptSubmit,
@@ -533,6 +538,286 @@ def create_plugin_hook_handler(
         return SyncHookJSONOutput()
 
     return handler
+
+
+# =============================================================================
+# Database PreToolUse Hook Handler (block-capable)
+# =============================================================================
+
+async def _execute_db_bash_hook(
+    hook: Dict[str, Any],
+    script_input: Dict[str, Any],
+    working_dir: str,
+) -> tuple[str, Optional[int], Optional[str], Optional[str]]:
+    """
+    Execute a DB `bash` hook command, passing the CLI hook contract on stdin as JSON.
+
+    Mirrors the CLI/plugin contract: the command receives a JSON object on stdin
+    (hook_event_name, tool_name, tool_input, session_id, cwd). Env vars from the
+    legacy `execute_bash_hook` path are also supplied for backward compatibility.
+
+    Returns a tuple (status, returncode, stdout, stderr):
+        status == "ok"      → process ran to completion; returncode/stdout/stderr set
+        status == "timeout" → process exceeded its timeout (killed)
+        status == "error"   → process could not be spawned or crashed while reading
+    On timeout/error the returncode/stdout/stderr are None. Callers MUST treat
+    both as "no opinion" (do not block) — a broken/slow user hook must never
+    hard-fail a tool call.
+    """
+    command = hook.get("command") or ""
+    if not command:
+        return ("error", None, None, None)
+
+    # `timeout` is stored in milliseconds in the project_hooks table.
+    timeout_ms = hook.get("timeout") or 30000
+    timeout_seconds = timeout_ms / 1000
+
+    command = _fix_python_command_for_windows(command)
+
+    # Env vars mirror the legacy execute_bash_hook contract (HOOK_* keys) so
+    # existing bash hooks that read env still work; stdin JSON is the primary path.
+    env = os.environ.copy()
+    env["HOOK_EVENT"] = "PreToolUse"
+    env["HOOK_TOOL_NAME"] = str(script_input.get("tool_name", "") or "")
+    env["HOOK_DATA"] = json.dumps(script_input)
+
+    stdin_data = json.dumps(script_input)
+
+    try:
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=working_dir,
+            env=env,
+        )
+    except Exception as e:
+        logger.warning(f"DB PreToolUse hook failed to spawn ({command[:80]}): {e}")
+        return ("error", None, None, None)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(stdin_data.encode()),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"DB PreToolUse hook timed out after {timeout_ms}ms ({command[:80]}); "
+            f"treating as no-opinion (tool not blocked)"
+        )
+        try:
+            process.kill()
+            await process.wait()
+        except Exception:
+            pass
+        return ("timeout", None, None, None)
+    except Exception as e:
+        logger.warning(f"DB PreToolUse hook crashed while reading output: {e}")
+        return ("error", None, None, None)
+
+    return (
+        "ok",
+        process.returncode,
+        stdout.decode("utf-8", errors="replace") if stdout else "",
+        stderr.decode("utf-8", errors="replace") if stderr else "",
+    )
+
+
+def _map_db_pretooluse_decision(
+    returncode: Optional[int],
+    stdout_str: Optional[str],
+    stderr_str: Optional[str],
+) -> Optional[PreToolUseHookSpecificOutput]:
+    """
+    Map a DB bash hook's result to a PreToolUse permission decision.
+
+    Semantics (matching the bundled CLI's hook contract):
+      - Parseable JSON stdout:
+          * hookSpecificOutput.permissionDecision (or top-level permissionDecision)
+            in {allow, deny, ask}  → mapped directly, with permissionDecisionReason.
+          * root "decision": "block"           → deny (reason passthrough)
+          * root "decision": "approve"/"allow" → allow (reason passthrough)
+      - No parseable decision:
+          * exit code 2  → deny; stderr is surfaced as the block reason.
+          * exit code 0  → no opinion (proceed to normal permission flow).
+          * other codes  → no opinion (a failed hook must not block).
+
+    Returns a PreToolUseHookSpecificOutput dict, or None for "no opinion".
+    """
+    parsed: Any = None
+    if stdout_str and stdout_str.strip():
+        try:
+            parsed = json.loads(stdout_str.strip())
+        except json.JSONDecodeError:
+            parsed = None
+
+    if isinstance(parsed, dict):
+        # Shape 1: permissionDecision (nested under hookSpecificOutput or top-level)
+        perm = None
+        reason = None
+        hso = parsed.get("hookSpecificOutput")
+        if isinstance(hso, dict):
+            perm = hso.get("permissionDecision")
+            reason = hso.get("permissionDecisionReason")
+        if perm is None:
+            perm = parsed.get("permissionDecision")
+            reason = reason or parsed.get("permissionDecisionReason")
+        if perm in ("allow", "deny", "ask"):
+            output: PreToolUseHookSpecificOutput = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": perm,
+            }
+            if reason:
+                output["permissionDecisionReason"] = reason
+            return output
+
+        # Shape 2: root-level decision (block/approve)
+        decision = parsed.get("decision")
+        decision_reason = parsed.get("reason") or reason
+        if decision == "block":
+            output = {"hookEventName": "PreToolUse", "permissionDecision": "deny"}
+            if decision_reason:
+                output["permissionDecisionReason"] = decision_reason
+            return output
+        if decision in ("approve", "allow"):
+            output = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+            if decision_reason:
+                output["permissionDecisionReason"] = decision_reason
+            return output
+
+    # No parseable decision — fall back to exit-code semantics.
+    if returncode == 2:
+        output = {"hookEventName": "PreToolUse", "permissionDecision": "deny"}
+        reason = (stderr_str or "").strip()
+        if reason:
+            output["permissionDecisionReason"] = reason
+        return output
+
+    # exit 0 (no output) or any other non-blocking failure → no opinion.
+    return None
+
+
+def create_db_pretooluse_hook_handler(
+    working_dir: str,
+    project_id: Optional[str] = None,
+    stderr_callback: StderrCallback = None,
+) -> Callable[[HookInput, Optional[str], HookContext], Awaitable[SyncHookJSONOutput]]:
+    """
+    Create a PreToolUse handler that executes DB-backed (project_hooks) hooks and
+    can block tool calls.
+
+    DB hooks are re-queried at fire time (via get_database_hooks_for_event, which
+    also returns app-level rows with project_id IS NULL) so hooks created mid-session
+    take effect. Only `bash` hooks can block; `webhook`/`message` PreToolUse hooks
+    are logged as unsupported-for-blocking and skipped.
+
+    The first bash hook that returns a decision wins; otherwise the handler returns
+    a default (no-opinion) SyncHookJSONOutput and the tool proceeds to the normal
+    permission flow.
+    """
+
+    async def handler(
+        hook_input: HookInput,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> SyncHookJSONOutput:
+        if hook_input.get("hook_event_name") != "PreToolUse":
+            return SyncHookJSONOutput()
+
+        tool_name = hook_input.get("tool_name", "") or ""
+
+        db_hooks = await get_database_hooks_for_event(project_id, "PreToolUse")
+        if not db_hooks:
+            return SyncHookJSONOutput()
+
+        # Build the CLI hook contract passed to each hook on stdin as JSON.
+        script_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": hook_input.get("tool_input", {}),
+            "session_id": context.get("session_id"),
+            "cwd": working_dir,
+        }
+
+        for hook in db_hooks:
+            # The query filters enabled=TRUE, but double-check defensively.
+            if not hook.get("enabled", True):
+                continue
+
+            # tool_matcher: exact tool name or regex. Mirror the DB dispatcher
+            # (execute_hooks_for_event) which uses re.fullmatch — an exact name
+            # fullmatches itself, and patterns like "Bash|Edit" work as expected.
+            tool_matcher = hook.get("tool_matcher")
+            if tool_matcher and tool_name:
+                try:
+                    if not re.fullmatch(tool_matcher, tool_name):
+                        continue
+                except re.error:
+                    # Invalid regex → fall back to exact-string comparison.
+                    if tool_matcher != tool_name:
+                        continue
+
+            hook_type = hook.get("hook_type")
+            if hook_type != "bash":
+                # Only bash hooks can produce a blocking decision. webhook/message
+                # PreToolUse hooks cannot block a tool; skip them here.
+                logger.warning(
+                    f"DB PreToolUse hook {hook.get('id')} (type={hook_type}) cannot block a "
+                    f"tool call; skipping for blocking evaluation"
+                )
+                continue
+
+            status, returncode, stdout_str, stderr_str = await _execute_db_bash_hook(
+                hook, script_input, working_dir
+            )
+
+            # Persist triggered status (best-effort; never let this block a tool).
+            hook_id = hook.get("id")
+            if hook_id:
+                try:
+                    database.update_hook_triggered(hook_id, status == "ok")
+                except Exception as e:
+                    logger.debug(f"Failed to update hook triggered status: {e}")
+
+            if status != "ok":
+                # timeout/error → no opinion for this hook; try the next one.
+                continue
+
+            decision = _map_db_pretooluse_decision(returncode, stdout_str, stderr_str)
+            if decision is not None:
+                logger.debug(
+                    f"DB PreToolUse hook {hook.get('id')} decided "
+                    f"{decision.get('permissionDecision')} for tool={tool_name}"
+                )
+                # The permission decision MUST be nested under hookSpecificOutput
+                # (SyncHookJSONOutput contract). Returning the bare
+                # PreToolUseHookSpecificOutput at the top level is silently
+                # dropped by the CLI schema — the hook fires, computes deny, and
+                # the tool runs anyway (lab-confirmed fail-open).
+                return SyncHookJSONOutput(hookSpecificOutput=decision)
+
+        return SyncHookJSONOutput()
+
+    return handler
+
+
+def _project_has_db_pretooluse_hooks(project_id: Optional[str]) -> bool:
+    """
+    Return True if the project (or app-level) has any enabled DB PreToolUse hooks.
+
+    Used at build time to avoid registering (and querying the DB per tool call)
+    when no DB PreToolUse hooks exist. Best-effort: any DB error is treated as
+    "none" so hook-config construction never fails.
+    """
+    if not project_id:
+        return False
+    try:
+        hooks = database.get_hooks_for_project_and_event(project_id, "PreToolUse")
+        return bool(hooks)
+    except Exception as e:
+        logger.debug(f"Could not check for DB PreToolUse hooks: {e}")
+        return False
 
 
 def build_hooks_config(
@@ -580,6 +865,19 @@ def build_hooks_config(
             handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
             hooks_config[event_name] = [HookMatcher(hooks=[handler])]
             logger.debug(f"[HookService] Registered {event_name} handler with {len(hook_defs)} hook(s)")
+
+    # Register a DB-backed PreToolUse handler when the project has enabled
+    # PreToolUse hooks (this also covers app-level hooks via project_id IS NULL).
+    # Registered as an additional matcher so it coexists with any plugin
+    # PreToolUse handler above. Only bash hooks can block; see the handler.
+    if _project_has_db_pretooluse_hooks(project_id):
+        db_pretooluse_handler = create_db_pretooluse_hook_handler(
+            working_dir, project_id, stderr_callback
+        )
+        hooks_config.setdefault("PreToolUse", []).append(
+            HookMatcher(hooks=[db_pretooluse_handler])
+        )
+        logger.debug(f"[HookService] Registered DB PreToolUse handler for project {project_id}")
 
     # ALWAYS register the Stop hook handler for database hooks support
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
