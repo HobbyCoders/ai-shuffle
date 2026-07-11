@@ -5,6 +5,7 @@ Main FastAPI application entry point
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -346,7 +347,10 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     to eliminate noise from frequent successful polling requests.
     """
 
-    SLOW_REQUEST_THRESHOLD_MS = 5000
+    # Lowered from 5000ms so 2-4s "sluggish" actions become visible in the
+    # access log (they previously slipped under the threshold). Override with
+    # ACCESS_LOG_SLOW_MS if this proves too chatty on a slow host.
+    SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("ACCESS_LOG_SLOW_MS", "1500"))
 
     SKIP_PATHS = frozenset({"/health", "/api/v1/health", "/favicon.ico", "/favicon.svg"})
     SKIP_PREFIXES = ("/_app/", "/static/")

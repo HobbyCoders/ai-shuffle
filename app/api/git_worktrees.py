@@ -7,11 +7,13 @@ Provides endpoints for worktree management including:
 - Browse files within worktrees
 """
 
+import concurrent.futures
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
@@ -125,40 +127,96 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
     )
 
 
-def _collect_worktree_statuses(worktrees: list) -> dict:
-    """Compute git status for every existing worktree in a SINGLE git-pool job.
+# Dedicated, bounded thread pool for the per-worktree status fan-out.
+#
+# The fan-out runs INSIDE a single main-GitPool job (see _collect_worktree_statuses),
+# so submitting the endpoint still costs exactly ONE GitPool job regardless of
+# worktree count — preserving the queue-depth fix from 2b98408f. But that fix
+# made the fan-out fully SEQUENTIAL: N `git status` subprocesses run back-to-back
+# in one worker, so a project with 7+ worktrees took 6-9s (the observed
+# git/worktrees SLOW entries). Each worktree is a DISTINCT working directory with
+# its own index.lock, so concurrent `git status` across different worktrees is
+# safe (this is exactly what the code did before 2b98408f, via asyncio.gather).
+# We restore that parallelism but on a dedicated, bounded pool so it can never
+# saturate the main 4-worker GitPool or block unrelated queued git ops.
+_STATUS_FANOUT_MAX_WORKERS = 6
+_status_fanout_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_STATUS_FANOUT_MAX_WORKERS,
+    thread_name_prefix="git-wt-status",
+)
 
-    The list endpoint previously submitted one ``run_git`` job PER worktree, so a
-    project with N worktrees instantly queued N jobs onto the 4-worker GitPool.
-    On the main project (~40+ worktrees) every /git/worktrees call spiked the
-    queue to depth ~35 (matching the observed bursts). Running the per-worktree
-    ``git status`` calls sequentially inside one job occupies exactly ONE worker
-    regardless of worktree count. ``git_service.get_status`` keeps its own
-    short-TTL cache, so most calls here are cheap cache hits during polling.
+
+def _worktree_status_one(wt: dict) -> Tuple[str, Optional[dict]]:
+    """Read one worktree's git status. Never raises — returns (id, status|None).
+
+    Isolating each worktree's failure here guarantees one bad worktree (invalid
+    path, deleted on disk, corrupt repo) cannot poison the whole fan-out.
+    """
+    wt_id = wt.get("id", "?")
+    try:
+        worktree_full_path = get_worktree_working_dir(wt)
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Worktree {wt_id} has invalid path, skipping status: {e}")
+        return wt_id, None
+    try:
+        return wt_id, git_service.get_status(worktree_full_path)
+    except Exception as e:  # noqa: BLE001 — one worktree must not fail the batch
+        logger.warning(f"Failed to get git status for worktree {wt_id}: {e}")
+        return wt_id, None
+
+
+def _collect_worktree_statuses(worktrees: list) -> dict:
+    """Compute git status for every existing worktree in ONE GitPool job.
+
+    Submitting the /git/worktrees endpoint still costs a single main-GitPool job
+    regardless of worktree count (the 2b98408f invariant, guarded by tests). The
+    per-worktree ``git status`` calls now run CONCURRENTLY on a dedicated bounded
+    pool (``_status_fanout_executor``) instead of sequentially, cutting the
+    endpoint's wall time from ``N * per_status`` down to roughly
+    ``ceil(N / _STATUS_FANOUT_MAX_WORKERS) * per_status``. ``git_service.get_status``
+    keeps its own short-TTL per-dir cache, so most calls here are cheap hits.
 
     Returns a map of ``worktree_id -> status dict`` (or ``None`` when the status
     could not be read); worktrees that don't exist on disk are skipped entirely,
     preserving the previous behaviour of never setting ``git_status`` for them.
     """
+    existing = [wt for wt in worktrees if wt.get("exists", True)]
+    if not existing:
+        return {}
+
     statuses: dict = {}
-    for wt in worktrees:
-        if not wt.get("exists", True):
-            continue
-        wt_id = wt.get("id", "?")
-        try:
-            worktree_full_path = get_worktree_working_dir(wt)
-        except (ValueError, TypeError) as e:
-            logger.warning(
-                f"Worktree {wt_id} has invalid path, skipping status: {e}"
-            )
-            statuses[wt_id] = None
-            continue
-        try:
-            statuses[wt_id] = git_service.get_status(worktree_full_path)
-        except Exception as e:
-            logger.warning(f"Failed to get git status for worktree {wt_id}: {e}")
-            statuses[wt_id] = None
+    futures = [_status_fanout_executor.submit(_worktree_status_one, wt) for wt in existing]
+    for fut in concurrent.futures.as_completed(futures):
+        # _worktree_status_one never raises, so fut.result() is safe.
+        wt_id, status_data = fut.result()
+        statuses[wt_id] = status_data
     return statuses
+
+
+# Project-level TTL cache for the whole worktree-status fan-out.
+#
+# Multiple UI surfaces (sessions board + worktree panel, and every open tab)
+# poll /git/worktrees on a ~2s cadence, so bursts of concurrent/near-simultaneous
+# requests each re-ran the fan-out and re-submitted a GitPool job. Mirroring the
+# "check the TTL cache BEFORE submitting pool work" pattern (PG-pool #531/#532),
+# a short project-level cache lets a burst share one fan-out result and skip the
+# GitPool submit entirely on a hit. TTL matches the status poll cadence so the UI
+# stays fresh. Invalidated on any worktree create/delete/sync mutation.
+_WORKTREE_STATUS_CACHE_TTL = 2.0  # seconds
+_worktree_status_cache: Dict[str, Tuple[dict, float]] = {}
+
+
+def _peek_worktree_status_cache(project_id: str) -> Optional[dict]:
+    """Return the cached fan-out result for *project_id* if still fresh, else None."""
+    entry = _worktree_status_cache.get(project_id)
+    if entry and (time.monotonic() - entry[1]) < _WORKTREE_STATUS_CACHE_TTL:
+        return entry[0]
+    return None
+
+
+def _invalidate_worktree_status_cache(project_id: str) -> None:
+    """Drop any cached fan-out result for *project_id* (call after mutations)."""
+    _worktree_status_cache.pop(project_id, None)
 
 
 def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
@@ -338,11 +396,15 @@ async def list_worktrees(
     worktrees = worktree_manager.get_worktrees_for_project(project_id)
 
     # Optionally fetch git status for each existing worktree.
-    # All per-worktree `git status` calls run sequentially inside ONE git-pool
-    # job (see _collect_worktree_statuses) instead of one job per worktree, so
-    # this costs a single GitPool worker regardless of how many worktrees exist.
+    # Per-worktree `git status` calls run concurrently on a bounded dedicated
+    # pool inside ONE main-GitPool job (see _collect_worktree_statuses). A short
+    # project-level TTL cache is checked BEFORE submitting that job so a burst of
+    # UI polls shares one fan-out result and skips the pool entirely on a hit.
     if include_status:
-        statuses = await run_git(_collect_worktree_statuses, worktrees)
+        statuses = _peek_worktree_status_cache(project_id)
+        if statuses is None:
+            statuses = await run_git(_collect_worktree_statuses, worktrees)
+            _worktree_status_cache[project_id] = (statuses, time.monotonic())
         for wt in worktrees:
             if wt.get("exists", True):
                 wt["git_status"] = statuses.get(wt.get("id"))
@@ -459,6 +521,9 @@ async def create_worktree(
     # Surface any copy errors to the user
     copy_errors = copy_result.get("errors") if copy_result else None
 
+    # A new worktree changes the fan-out result — drop the cached status.
+    _invalidate_worktree_status_cache(project_id)
+
     return WorktreeCreateResponse(
         success=True,
         message=message,
@@ -514,6 +579,9 @@ async def delete_worktree(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to remove worktree"
         )
+
+    # The removed worktree changes the fan-out result — drop the cached status.
+    _invalidate_worktree_status_cache(project_id)
 
     branch_msg = " (branch kept)" if keep_branch else " (branch deleted)"
     return OperationResponse(
@@ -602,6 +670,9 @@ async def sync_worktrees(
         )
 
     result = await run_git(worktree_manager.sync_worktrees, project_id)
+
+    # Sync can add/remove/import worktrees — drop the cached fan-out status.
+    _invalidate_worktree_status_cache(project_id)
 
     return WorktreeSyncResponse(
         synced=result.get("synced", 0),
