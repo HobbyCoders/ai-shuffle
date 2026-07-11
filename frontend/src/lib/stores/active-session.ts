@@ -189,6 +189,17 @@ export interface ActiveSessionState {
 	 *  sendMessage waits for this to clear. Cleared by loadSession settling,
 	 *  switchSession/newChat navigation, or reconnect exhaustion. */
 	isRestoringSession: boolean;
+	/** True while an explicit openChat() navigation's history fetch is in flight
+	 *  (the sibling of isRestoringSession for user-driven session switches rather
+	 *  than the boot-restore path). During this window sessionId already points at
+	 *  the target session while messages is still [] — the transient empty state
+	 *  that must NOT be mistaken for a cleared/new conversation. ChatView treats
+	 *  it like the restore window (renders the message column, suppresses the
+	 *  empty hero) so the cleared-session hint can't flash before history loads.
+	 *  Unlike isRestoringSession, sendMessage does NOT wait on this flag —
+	 *  openChat resets it independently and sends are gated elsewhere. Cleared by
+	 *  openChat's loadSession settling and by newChat navigation. */
+	isLoadingSession: boolean;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -273,6 +284,7 @@ function defaultState(): ActiveSessionState {
 		remoteControllable: true,
 		relayError: undefined,
 		isRestoringSession: false,
+		isLoadingSession: false,
 	};
 }
 

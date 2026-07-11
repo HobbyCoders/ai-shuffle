@@ -357,6 +357,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Explicit navigation supersedes any pending boot restore — the user
 			// chose this session; don't leave sendMessage waiting on the old one.
 			isRestoringSession: false,
+			// History fetch for this target is in flight below. messages=[] is
+			// transient during this window, so ChatView must not read the empty
+			// state as a cleared/new conversation and flash the cleared hint for a
+			// session that turns out to have messages. Cleared once loadSession
+			// settles (below). Unlike isRestoringSession, sendMessage ignores this.
+			isLoadingSession: true,
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],
@@ -430,10 +436,18 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// A newer switchSession/newChat call was made while we were awaiting — bail out.
 		// Stop the poller for this now-stale session to avoid leaking resources.
+		// Leave isLoadingSession alone here: the newer navigation owns it now and
+		// has already set its own value (clearing it would lie about that fetch).
 		if (generation !== _switchGeneration) {
 			sessionPoller.stop(sessionId);
 			return;
 		}
+
+		// History fetch settled and we're still on this session — end the loading
+		// window. loadSession() has already applied the messages via onPollApplied,
+		// so if messages are still empty the session is genuinely cleared/empty and
+		// ChatView may now present the cleared-conversation hero.
+		update(s => (s.sessionId === sessionId ? { ...s, isLoadingSession: false } : s));
 
 		// Register with SyncEngine to receive broadcast events from other devices.
 		// Session state is loaded via HTTP, but real-time sync (streaming from
@@ -527,8 +541,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			...s,
 			sessionId: null,
 			// A fresh chat has no session to restore — cancel any pending boot
-			// restore so its window can't outlive the navigation.
+			// restore (and any in-flight openChat load) so neither window can
+			// outlive the navigation into the New Chat compose screen.
 			isRestoringSession: false,
+			isLoadingSession: false,
 			sessionProfileId: null,
 			currentQueryProfileId: null,
 			profile: getPersistedProfile() || s.profile,

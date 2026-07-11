@@ -46,6 +46,7 @@
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
+	import { chatHeaderTitle } from './chat-empty-state';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
@@ -121,14 +122,19 @@
 		$activeView?.type === 'chat' ? $activeSession : null
 	);
 
-	// Header title
+	// Header title. For a chat, a session BOUND to an id always shows its own
+	// title — including when it currently has zero messages (just cleared, or
+	// mid-load). Previously an open, titled session with no messages fell through
+	// to "New Chat", which read as "clearing deleted my session" (see #558 +
+	// chat-empty-state.ts). Only a genuinely unbound, empty chat shows "New Chat".
 	const headerTitle = $derived.by(() => {
 		if (!$activeView) return '';
 		if ($activeView.type === 'chat') {
-			if (activeTab && activeTab.messages.length > 0) {
-				return activeTab.title || 'Untitled';
-			}
-			return 'New Chat';
+			return chatHeaderTitle({
+				sessionId: activeTab?.sessionId ?? null,
+				title: activeTab?.title,
+				messageCount: activeTab?.messages.length ?? 0
+			});
 		}
 		return viewTitles[$activeView.type] || '';
 	});

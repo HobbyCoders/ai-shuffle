@@ -76,6 +76,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		remoteControllable: true,
 		relayError: undefined,
 		isRestoringSession: false,
+		isLoadingSession: false,
 		...overrides,
 	};
 }

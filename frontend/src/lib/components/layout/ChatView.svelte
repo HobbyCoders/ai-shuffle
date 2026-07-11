@@ -24,12 +24,29 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
+	import { RotateCcw } from 'lucide-svelte';
+	import { classifyChatSurface } from './chat-empty-state';
 
-	// Check if this is an empty state (no messages yet). While a persisted
-	// session is being restored, messages is still [] but sessionId already
-	// points at the old session — showing the "New Chat" hero then would invite
-	// sends into an invisible session, so treat the restore window as non-empty.
-	const isEmptyState = $derived($activeSession.messages.length === 0 && !$activeSession.isRestoringSession);
+	// Classify the empty-message surface. While a session's history is being
+	// fetched (boot restore OR an openChat navigation) messages is still [] but
+	// sessionId already points at the target — showing an empty hero then would
+	// invite sends into an invisible session AND could flash the cleared hint for
+	// a session that turns out to have messages, so the load window renders the
+	// message column (non-empty), not a hero. See chat-empty-state.ts + #558.
+	const chatSurface = $derived(
+		classifyChatSurface({
+			sessionId: $activeSession.sessionId,
+			messageCount: $activeSession.messages.length,
+			isRestoringSession: $activeSession.isRestoringSession,
+			isLoadingSession: $activeSession.isLoadingSession
+		})
+	);
+	const isEmptyState = $derived(chatSurface === 'new' || chatSurface === 'cleared');
+	// A BOUND, settled, empty session — a just-cleared conversation. Presents the
+	// hero with the session's own title + a "cleared" hint instead of the
+	// brand-new "Let's build your project" workspace picker.
+	const isClearedSession = $derived(chatSurface === 'cleared');
+	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -165,10 +182,24 @@
 			{/if}
 
 			<div class="empty-state-content">
-				<WorkspaceSelector
-					selectedProject={$activeSession.project}
-					onSelectProject={handleProjectSelect}
-				/>
+				{#if isClearedSession}
+					<!-- Bound existing session with an empty transcript (cleared via the
+					     sessions-board broom, #558). Show its OWN title + a cleared
+					     hint so it never reads as a brand-new chat. The project is
+					     fixed for an existing session, so no workspace picker here. -->
+					<div class="cleared-hero">
+						<div class="cleared-badge" aria-hidden="true">
+							<RotateCcw size={22} strokeWidth={1.5} />
+						</div>
+						<h1 class="cleared-title" title={clearedTitle}>{clearedTitle}</h1>
+						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
+					</div>
+				{:else}
+					<WorkspaceSelector
+						selectedProject={$activeSession.project}
+						onSelectProject={handleProjectSelect}
+					/>
+				{/if}
 				<div class="empty-input-wrapper">
 					<ChatInput />
 				</div>
@@ -405,6 +436,55 @@
 
 	.empty-input-wrapper {
 		width: 100%;
+	}
+
+	/* Cleared/empty existing-session hero. Reuses WorkspaceSelector's tokens
+	   (font-display heading, muted-foreground secondary text) so it reads as the
+	   same surface — just communicating "cleared" instead of "new". */
+	.cleared-hero {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		padding: 2rem 2rem 1rem;
+		text-align: center;
+		user-select: none;
+	}
+
+	.cleared-badge {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 44px;
+		height: 44px;
+		margin-bottom: 8px;
+		border-radius: 50%;
+		color: var(--muted-foreground);
+		background: var(--muted);
+		border: 1px solid var(--border);
+	}
+
+	.cleared-title {
+		font-family: var(--font-display, Georgia, serif);
+		font-size: clamp(1.375rem, 4vw, 2rem);
+		font-weight: 700;
+		color: var(--foreground);
+		letter-spacing: -0.02em;
+		line-height: 1.15;
+		max-width: 32ch;
+		/* Long prompts double as titles — clamp to two lines with an ellipsis. */
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.cleared-hint {
+		font-size: 0.875rem;
+		color: var(--muted-foreground);
+		line-height: 1.5;
+		max-width: 40ch;
 	}
 
 	/* ========================================
