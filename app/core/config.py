@@ -294,6 +294,18 @@ class Settings(BaseSettings):
     # field name automatically).
     preserve_background_on_interrupt: bool = False
 
+    # Auto-continue an autonomous turn cut at the autocompact boundary. The
+    # bundled CLI ends the agentic loop when the NEXT turn would cross the
+    # autocompact threshold and DEFERS compaction to the start of the next
+    # query (internal ``willRetriggerNextTurn``, never surfaced to the SDK), so
+    # from the app's side the turn just ends mid-task with
+    # ``stop_reason == "tool_use"`` and the session sits silent until a human
+    # sends a message. When ON, the server detects that boundary cut at turn end
+    # and spawns ONE continuation query so the CLI compacts and the model
+    # resumes. ON by default: this restores broken expected behavior. Set via
+    # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
+    auto_continue_on_compact: bool = True
+
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks
     # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget

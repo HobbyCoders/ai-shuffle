@@ -17,6 +17,7 @@ from fastapi.websockets import WebSocketState
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.core import account_failover
+from app.core import compact_continue
 from app.core.config import settings
 from app.core.connectors.manager import connector_manager
 from app.core.live_session_store import live_session_store
@@ -2288,6 +2289,11 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "Empty prompt"})
             return
 
+        # A genuine user message clears the compact-boundary auto-continue
+        # one-shot latch: the next boundary cut may auto-continue again.
+        if session_id:
+            compact_continue.reset_auto_continue(session_id)
+
         # Validate project-level authorization for API users
         # API users are scoped to a specific project — prevent cross-project access
         if self.api_user_id and project_id:
@@ -4075,6 +4081,7 @@ class ChatWebSocketHandler:
         is_failover_retry: bool = False,
         failover_attempted: Optional[set] = None,
         queue_drain_source: Optional[Dict[str, Any]] = None,
+        is_auto_continue: bool = False,
     ) -> None:
         """Execute query and stream results directly to WebSocket.
 
@@ -4107,6 +4114,13 @@ class ChatWebSocketHandler:
         front (``requeue_message_at_front``) instead of running the #420
         orphan-discard path — a committed queued message must never be silently
         dropped or bounced back into the input box as an abandoned draft.
+
+        ``is_auto_continue`` marks a server-initiated continuation turn spawned by
+        the context-boundary auto-continue seam (see
+        ``app.core.compact_continue``). It runs like a normal deferred-delivery
+        turn but must NEVER itself trigger another auto-continue: if this turn
+        also cuts at the boundary, compaction already ran at its start, so a
+        second cut is a different problem — we log it instead of chaining nudges.
         """
         from app.api.websocket import (
             _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
@@ -4525,6 +4539,105 @@ class ChatWebSocketHandler:
                         queue = await run_sync(database.get_queued_messages, session_id)
                         await sync_engine.broadcast_queue_updated(session_id, queue)
                         # Fall through to normal completion
+
+            # --- Context-boundary auto-continue ---
+            # The bundled CLI ends the agentic loop when the NEXT turn would
+            # cross the autocompact threshold and defers compaction to the start
+            # of the next query, so the turn just ends mid-task
+            # (stop_reason="tool_use") and the session goes silent until a human
+            # sends a message. On an autonomous run that strands the work. If
+            # this turn cut at the boundary AND context is over the autocompact
+            # threshold AND nothing else already resumes it (queued message /
+            # stop / interrupt), spawn ONE continuation turn so the CLI compacts
+            # and the model resumes. Mirrors the failover hand-off: spawn a
+            # successor run_query, register it under the lock, mark handed off,
+            # return. deferred_delivery=True keeps the device registered so the
+            # server-initiated turn streams live to open tabs (the #543 seam).
+            # A continuation turn (is_auto_continue) never re-nudges: compaction
+            # already ran at its start, so a second cut is a different problem.
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+                and not handed_off_to_queued
+                and not is_auto_continue
+            ):
+                decision = None
+                try:
+                    _has_queued = bool(
+                        await run_sync(database.count_queued_messages, session_id)
+                    )
+                    decision = await compact_continue.should_auto_continue(
+                        session_id,
+                        stream_state.final_metadata,
+                        is_stopped=session_id in _stopped_sessions,
+                        is_interrupted=session_id in _interrupt_pending_sessions,
+                        has_queued_user_message=_has_queued,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    ctx.warning(logger, f"Auto-continue: decision failed: {exc}")
+
+                if decision is not None and decision.should_continue:
+                    logger.info(
+                        "compact-boundary auto-continue session=%s preTokens=%s",
+                        session_id, decision.pre_tokens,
+                    )
+                    # Latch the one-shot guard BEFORE spawning so a boundary cut
+                    # on the continuation itself is not re-nudged.
+                    compact_continue.mark_auto_continued(session_id)
+                    try:
+                        # Persist + broadcast the automatic message so it renders
+                        # (labeled "[auto-continue]") and survives reload — mirror
+                        # the queue-drain hand-off.
+                        await run_sync(
+                            database.add_session_message,
+                            session_id=session_id,
+                            role="user",
+                            content=compact_continue.AUTO_CONTINUE_PROMPT,
+                            profile_id=profile_id,
+                        )
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={
+                                "role": "user",
+                                "content": compact_continue.AUTO_CONTINUE_PROMPT,
+                                "profile_id": profile_id,
+                            },
+                            source_device_id=None,
+                        )
+                        # End current streaming state so the successor re-inits.
+                        await live_session_store.end_streaming(
+                            session_id=session_id,
+                            metadata=stream_state.final_metadata,
+                            interrupted=False,
+                        )
+                        task = asyncio.create_task(
+                            self.run_query(
+                                compact_continue.AUTO_CONTINUE_PROMPT,
+                                session_id, profile_id, project_id, None, worktree_id,
+                                deferred_delivery=True,
+                                is_auto_continue=True,
+                            )
+                        )
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = task
+                        self.query_task = task
+                        handed_off_to_queued = True
+                        ctx.debug(logger, "Auto-continue: continuation turn started (handed off)")
+                        return  # Exit — the continuation task continues streaming
+                    except Exception as exc:  # noqa: BLE001
+                        ctx.error(logger, f"Auto-continue: failed to start continuation: {exc}")
+                        # Fall through to normal completion.
+            elif (
+                is_auto_continue
+                and compact_continue.is_abnormal_boundary_stop(stream_state.final_metadata)
+            ):
+                # The continuation turn itself cut at the boundary. Compaction
+                # already ran at its start, so this is NOT the lazy-compaction
+                # deferral — do not chain a nudge, just record it.
+                logger.info(
+                    "compact-boundary second cut on auto-continue turn — not re-nudging session=%s",
+                    session_id,
+                )
 
             # --- Background "unpark" drain pump (SLOW path) ---
             # This turn is genuinely ending: no in-stream notification handed off
