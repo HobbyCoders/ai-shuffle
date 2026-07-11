@@ -495,8 +495,18 @@
 				// which yanked the user to the blank New Chat hero and destroyed the row.
 				await appData.clearSession(id);
 				if (activeId === id) activeSession.clearMessages();
-			} catch {
-				toast.push('Failed to clear session', { tone: 'error' });
+			} catch (err) {
+				// The backend refuses to clear a session mid-stream (409): wiping it
+				// under an in-flight turn would corrupt the transcript. Surface the
+				// stop-first guidance rather than a generic failure.
+				const httpStatus = (err as { status?: number } | null)?.status;
+				if (httpStatus === 409) {
+					toast.push('Stop the current response before clearing this session', {
+						tone: 'error'
+					});
+				} else {
+					toast.push('Failed to clear session', { tone: 'error' });
+				}
 			} finally {
 				deleteLoading = false;
 				deleteInFlightId = null;

@@ -264,6 +264,41 @@ describe('SessionsBoard clear-session clears in place (no New Chat, no delete)',
 		expect(onNewSession).not.toHaveBeenCalled();
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 	});
+
+	it('surfaces a stop-first toast when the backend refuses a mid-stream clear (409)', async () => {
+		// The backend returns 409 while the session is streaming (wiping it under
+		// an in-flight turn would corrupt the transcript). The handler must show
+		// the stop-first guidance — NOT the generic failure — and must not clear
+		// the open chat's live store.
+		mocks.activeSession.set({ sessionId: 'a', isStreaming: false });
+		mocks.clearSession.mockRejectedValueOnce({ status: 409, detail: 'streaming' });
+		renderBoard();
+
+		await confirmClear('Local one');
+
+		expect(mocks.clearSession).toHaveBeenCalledWith('a');
+		await vi.waitFor(() =>
+			expect(mocks.toastPush).toHaveBeenCalledWith(
+				'Stop the current response before clearing this session',
+				{ tone: 'error' }
+			)
+		);
+		expect(mocks.clearMessages).not.toHaveBeenCalled();
+	});
+
+	it('surfaces the generic failure toast for a non-409 clear error', async () => {
+		mocks.activeSession.set({ sessionId: 'a', isStreaming: false });
+		mocks.clearSession.mockRejectedValueOnce({ status: 500, detail: 'boom' });
+		renderBoard();
+
+		await confirmClear('Local one');
+
+		await vi.waitFor(() =>
+			expect(mocks.toastPush).toHaveBeenCalledWith('Failed to clear session', {
+				tone: 'error'
+			})
+		);
+	});
 });
 
 /**

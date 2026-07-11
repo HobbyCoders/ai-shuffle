@@ -1278,6 +1278,90 @@ class TestClearSession:
         assert response.status_code == 403
         mock_database.clear_session_conversation.assert_not_called()
 
+    def test_clear_session_purges_live_overlay(self, client, mock_database, sample_session):
+        """The clear MUST purge the in-memory live overlay.
+
+        A recently-open session lingers in ``live_session_store`` after its turn
+        ends (end_streaming keeps its buffer as a fast-reconnect snapshot). The
+        GET /{id}/messages read path serves that buffer whenever it out-completes
+        the store (delta polls AND the fresh-load completeness check). If the
+        clear only wipes the DB, that stale buffer SHADOWS the now-empty store and
+        the old conversation resurrects on the next poll/reload — the reported
+        "clear does nothing" bug. So the endpoint must drop the overlay and the
+        sync-layer streaming remnant.
+        """
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = "sdk-123"
+
+        with patch("app.core.live_session_store.live_session_store") as mock_store, \
+                patch("app.core.sync_engine.sync_engine") as mock_sync:
+            mock_store.is_streaming.return_value = False
+            mock_store.has_session.return_value = True
+            mock_store.cleanup_session = AsyncMock()
+            mock_sync.is_session_streaming.return_value = False
+            mock_sync.clear_streaming_state = AsyncMock()
+
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        mock_database.clear_session_conversation.assert_called_once_with("test-session-id")
+        mock_store.cleanup_session.assert_awaited_once_with("test-session-id")
+        mock_sync.clear_streaming_state.assert_awaited_once_with("test-session-id")
+
+    def test_clear_session_skips_overlay_purge_when_absent(self, client, mock_database, sample_session):
+        """When the session is NOT in the live store, skip cleanup_session (there
+        is nothing to purge) but still clear the sync streaming remnant."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        with patch("app.core.live_session_store.live_session_store") as mock_store, \
+                patch("app.core.sync_engine.sync_engine") as mock_sync:
+            mock_store.is_streaming.return_value = False
+            mock_store.has_session.return_value = False
+            mock_store.cleanup_session = AsyncMock()
+            mock_sync.is_session_streaming.return_value = False
+            mock_sync.clear_streaming_state = AsyncMock()
+
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        mock_store.cleanup_session.assert_not_awaited()
+        mock_sync.clear_streaming_state.assert_awaited_once_with("test-session-id")
+
+    def test_clear_session_blocked_while_streaming(self, client, mock_database, sample_session):
+        """Never wipe a session mid-stream: the local streaming buffer is live.
+
+        Returns 409 and does NOT touch the DB — clearing under an in-flight turn
+        corrupts the transcript (the buffer keeps appending and re-persists the
+        old conversation on end_streaming).
+        """
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.live_session_store.live_session_store") as mock_store, \
+                patch("app.core.sync_engine.sync_engine") as mock_sync:
+            mock_store.is_streaming.return_value = True
+            mock_sync.is_session_streaming.return_value = False
+
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 409
+        mock_database.clear_session_conversation.assert_not_called()
+
+    def test_clear_session_blocked_while_streaming_cross_device(self, client, mock_database, sample_session):
+        """A turn live on ANOTHER install (sync_engine streaming map) also blocks
+        the clear with a 409 — same corruption risk across the sync layer."""
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.live_session_store.live_session_store") as mock_store, \
+                patch("app.core.sync_engine.sync_engine") as mock_sync:
+            mock_store.is_streaming.return_value = False
+            mock_sync.is_session_streaming.return_value = True
+
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 409
+        mock_database.clear_session_conversation.assert_not_called()
+
 
 # =============================================================================
 # Test Batch Delete Sessions Endpoint

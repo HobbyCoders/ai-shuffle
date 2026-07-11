@@ -1790,9 +1790,43 @@ async def clear_session(
     """
     existing = await require_session(request, session_id)
 
+    from app.core.sync_engine import sync_engine
+    from app.core.live_session_store import live_session_store
+
+    # Refuse to clear a session that is actively streaming. Wiping the DB out
+    # from under an in-flight turn corrupts the transcript (the streaming buffer
+    # keeps appending and re-persists the old conversation on end_streaming) and
+    # races the live-overlay purge below. The frontend surfaces this 409 as a
+    # "stop the turn first" toast. Check both the local streaming buffer and the
+    # cross-device sync map (a turn may be live on another install).
+    if live_session_store.is_streaming(session_id) or sync_engine.is_session_streaming(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This session is currently responding. Stop the turn before "
+                "clearing the conversation."
+            ),
+        )
+
     # Authoritative, synchronous reset — returns the OLD sdk_session_id (now
     # unlinked) so its subprocess + JSONL can be cleaned in the background.
     old_sdk_sid = await run_sync(database.clear_session_conversation, session_id)
+
+    # Purge the in-memory live overlay, or the clear silently "does nothing".
+    # end_streaming() keeps an ENDED session's full message buffer in the live
+    # store as a fast-reconnect snapshot, and the GET /{id}/messages read path
+    # serves that buffer whenever it is more complete than the store — both on
+    # delta polls (get_session_since) and via the completeness check on a fresh
+    # load. Since we just emptied the store, the stale buffer would SHADOW the
+    # cleared transcript and the old conversation would resurrect on the very
+    # next poll or reload. Dropping the overlay makes the read path fall through
+    # to the now-empty store. cleanup_session also reaps this session's task
+    # registry + Monitor shells (their conversation was just wiped).
+    if live_session_store.has_session(session_id):
+        await live_session_store.cleanup_session(session_id)
+    # Drop any lingering cross-device streaming-map remnant so the sync layer
+    # stops advertising this (now-empty) session as live.
+    await sync_engine.clear_streaming_state(session_id)
 
     background_tasks.add_task(
         _cleanup_session_artifacts,
