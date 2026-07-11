@@ -55,6 +55,60 @@ class TestUsageLimitsEndpoint:
         assert body["snapshots"] == []
         assert body["self_instance_id"] == "local-1"
 
+    def test_accepts_int_epoch_resets_at(self):
+        """Newer Claude CLI usage payloads carry ``resets_at`` as int epoch
+        seconds; cross-install rows persisted that way can't be retro-fixed, so
+        the response model must coerce them instead of 500-ing (pydantic
+        string_type ValidationError). Coerced to str — the FE contract declares
+        ``resets_at?: string | null`` and ``parseResetMs`` parses numeric
+        strings.
+        """
+        epoch = 1783739400
+        snapshot = {
+            "windows": [
+                {"type": "five_hour", "utilization": 12.0, "resets_at": epoch},
+            ],
+            "fetched_at": 1234567890.0,
+            "available": True,
+            "generation": 42,
+            "snapshots": [
+                {
+                    "instance_id": "local-1",
+                    "available": True,
+                    "windows": [
+                        {"type": "five_hour", "utilization": 12.0,
+                         "resets_at": "2026-07-09T05:00:00+00:00"},
+                    ],
+                },
+                {
+                    "instance_id": "worker-1",
+                    "available": True,
+                    "windows": [
+                        {"type": "five_hour", "utilization": 55.0, "resets_at": epoch},
+                    ],
+                },
+                {
+                    "instance_id": "worker-2",
+                    "available": True,
+                    "windows": [
+                        {"type": "seven_day", "utilization": 3.0, "resets_at": epoch},
+                    ],
+                },
+            ],
+            "self_instance_id": "local-1",
+        }
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=snapshot)
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # Int epoch coerced to its decimal-string form at every position.
+        assert body["windows"][0]["resets_at"] == str(epoch)
+        assert body["snapshots"][0]["windows"][0]["resets_at"] == "2026-07-09T05:00:00+00:00"
+        assert body["snapshots"][1]["windows"][0]["resets_at"] == str(epoch)
+        assert body["snapshots"][2]["windows"][0]["resets_at"] == str(epoch)
+
     def test_returns_empty_when_unavailable(self):
         with patch("app.api.usage.usage_limits_monitor") as mon:
             mon.get_cluster_snapshot = AsyncMock(

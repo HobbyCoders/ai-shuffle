@@ -10,7 +10,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.api.auth import require_auth
 from app.core.usage_limits import usage_limits_monitor
@@ -25,6 +25,24 @@ class UsageWindow(BaseModel):
     type: str
     utilization: float
     resets_at: Optional[str] = None
+
+    @field_validator("resets_at", mode="before")
+    @classmethod
+    def _coerce_resets_at(cls, v: object) -> object:
+        """Accept int/float epoch-seconds ``resets_at`` and emit them as str.
+
+        Newer Claude CLI usage payloads carry ``resets_at`` as an int epoch
+        instead of an ISO string, and those values are persisted verbatim into
+        the shared cross-install ``usage_snapshots`` rows (which this install
+        cannot retro-fix). Coerce to the decimal-string form here so the API
+        keeps its declared ``string | null`` contract — the frontend's
+        ``parseResetMs`` already parses numeric strings as epoch sec/ms.
+        """
+        if isinstance(v, bool):  # bool is an int subclass; don't stringify it
+            return v
+        if isinstance(v, (int, float)):
+            return str(int(v))
+        return v
 
 
 class InstallUsageSnapshot(BaseModel):
