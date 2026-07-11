@@ -2029,3 +2029,19 @@ class TestProfileConfigStrictMcpConfig:
         legacy_data = {"model": "claude-sonnet-4-5", "permission_mode": "default"}
         cfg = ProfileConfig.model_validate(legacy_data)
         assert cfg.strict_mcp_config is False
+
+
+class TestSeededDefaultAIProfileStreams:
+    """The built-in "Default AI" profile is the default chat profile on a fresh
+    install. Live streaming (typewriter, gap indicators, stream_delta handling)
+    requires ``include_partial_messages`` to be enabled — otherwise a fresh
+    install shows dead air for the whole turn and one chunk at turn end.
+    """
+
+    def test_seed_default_ai_profile_streams_partial_messages(self):
+        """Seed template must enable partial-message streaming for live chat."""
+        from app.core.profiles import DEFAULT_AI_PROFILE
+
+        assert (
+            DEFAULT_AI_PROFILE["config"]["include_partial_messages"] is True
+        ), "seeded Default AI profile must stream partial messages for live chat UX"

@@ -67,7 +67,15 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
             "content": "",
         },
         "allowed_tools": [],
-        "include_partial_messages": False,
+        # Live streaming deltas ON: the seeded profile is the default chat
+        # profile on a fresh install, and the app's streaming UX (typewriter,
+        # gap indicators, stream_delta handling) requires partial messages.
+        # With this False a fresh install saw dead air for the whole turn and
+        # then one chunk at turn end. Internal generation forces this off
+        # regardless via build_generation_options, so True here only affects
+        # interactive chat — where it should stream. Matches the True default
+        # every other code path uses (query_options, profiles API, new-profile UI).
+        "include_partial_messages": True,
         "continue_conversation": False,
         "fork_session": False,
         "enable_file_checkpointing": False,
