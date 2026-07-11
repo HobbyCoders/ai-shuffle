@@ -257,8 +257,14 @@ async def create_automation(
     requires_approval: bool = False,
     action_steps: Optional[List[Dict[str, Any]]] = None,
     triggers: Optional[List[Dict[str, Any]]] = None,
+    enabled: bool = False,
 ) -> Dict:
     """Create a new automation.
+
+    ``enabled`` sets the initial ``is_enabled`` state (default ``False`` to
+    preserve the create-then-enable UI flow). When ``True`` and the automation
+    has a cron/interval trigger, it is scheduled immediately so it fires without
+    waiting on the periodic reconcile.
 
     Returns the automation dict.
     """
@@ -318,10 +324,25 @@ async def create_automation(
         max_runs_per_day=max_runs_per_day,
         requires_approval=requires_approval,
         action_steps=action_steps,
+        enabled=enabled,
     )
 
     if not automation:
         raise RuntimeError("Failed to create automation in database")
+
+    # Schedule immediately when created enabled with a cron/interval trigger,
+    # so it fires without waiting for the periodic reconcile loop. Event-driven
+    # triggers (webhook/connector) need no APScheduler job.
+    if automation.get("is_enabled"):
+        has_scheduled = any(
+            t.get("type") in ("cron", "interval") for t in (automation.get("triggers") or [])
+        )
+        if has_scheduled:
+            try:
+                from app.core.automation_manager import automation_manager
+                await automation_manager.schedule_automation(automation_id)
+            except Exception as e:  # noqa: BLE001 — reconcile loop is the backstop
+                logger.warning(f"Automation {automation_id} created enabled but scheduling failed: {e}")
 
     return automation
 

@@ -108,7 +108,10 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
     @tool(
         "createAutomation",
         "Create a scheduled automation that runs a Claude prompt on a cron schedule, "
-        "at fixed intervals, or via webhook trigger. Always set budget limits.",
+        "at fixed intervals, or via webhook trigger. Always set budget limits. "
+        "New automations are created ENABLED by default and begin firing on their "
+        "schedule immediately — pass enabled=false to create it paused (then call "
+        "toggleAutomation to activate it later).",
         {
             "type": "object",
             "properties": {
@@ -168,6 +171,12 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "type": "boolean",
                     "description": "If true, each run requires manual approval before executing.",
                 },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether the automation is active on creation (default true). "
+                                   "When true it starts firing on its schedule right away; set false "
+                                   "to create it paused.",
+                },
             },
             "required": ["name", "trigger_type", "prompt", "profile_id"],
         },
@@ -209,6 +218,10 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         if max_cost_per_run is None:
             max_cost_per_run = 0.50  # Safe default
 
+        # Default enabled=True: an agent creating an automation intends it to
+        # run. Callers can pass enabled=false to create it paused.
+        enabled = args.get("enabled", True)
+
         automation_id = f"auto-{_secrets.token_hex(4)}"
         proj_id = args.get("project_id") or _project_id
 
@@ -227,25 +240,34 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             max_cost_per_day=args.get("max_cost_per_day"),
             max_runs_per_day=args.get("max_runs_per_day"),
             requires_approval=args.get("requires_approval", False),
+            enabled=enabled,
         )
 
         if not auto:
             return _error("Failed to create automation — database error.")
 
-        # Schedule it with APScheduler
+        # Reflect the REAL persisted state, never the requested one.
+        is_enabled = bool(auto.get("is_enabled"))
+        is_scheduled_trigger = trigger_type in ("cron", "interval")
+
+        # Only register a scheduler job when the automation is actually enabled.
+        # schedule_automation() itself no-ops for a disabled automation, so this
+        # can never claim a disabled automation is scheduled.
         scheduled = False
-        try:
-            from app.core.automation_manager import automation_manager
-            await automation_manager.schedule_automation(automation_id)
-            scheduled = True
-        except Exception as e:
-            logger.warning(f"Automation created but scheduling failed: {e}")
+        if is_enabled and is_scheduled_trigger:
+            try:
+                from app.core.automation_manager import automation_manager
+                await automation_manager.schedule_automation(automation_id)
+                scheduled = True
+            except Exception as e:
+                logger.warning(f"Automation created but scheduling failed: {e}")
 
         result: Dict[str, Any] = {
             "success": True,
             "automation_id": automation_id,
             "name": args["name"],
             "trigger_type": trigger_type,
+            "enabled": is_enabled,
             "scheduled": scheduled,
             "max_cost_per_run": max_cost_per_run,
         }
@@ -258,11 +280,29 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
         elif trigger_type == "webhook":
             result["webhook_note"] = "Webhook secret has been auto-generated. Use the Automations UI to view the endpoint URL."
 
-        result["message"] = (
-            f"Automation '{args['name']}' created"
-            + (" and scheduled." if scheduled else " (scheduling deferred — will activate on next restart).")
-            + " Visible in the Automations panel."
-        )
+        # Honest, state-accurate message.
+        if not is_enabled:
+            result["message"] = (
+                f"Automation '{args['name']}' created DISABLED — it will NOT run until you "
+                f"call toggleAutomation(automation_id='{automation_id}', enabled=true). "
+                "Visible in the Automations panel."
+            )
+        elif trigger_type == "cron":
+            result["message"] = (
+                f"Automation '{args['name']}' created and ACTIVE — next fire per cron "
+                f"'{args['cron_expression']}' ({args.get('cron_timezone', 'UTC')}). "
+                "Visible in the Automations panel."
+            )
+        elif trigger_type == "interval":
+            result["message"] = (
+                f"Automation '{args['name']}' created and ACTIVE — fires every "
+                f"{args['interval_seconds']}s. Visible in the Automations panel."
+            )
+        else:  # webhook
+            result["message"] = (
+                f"Automation '{args['name']}' created and ACTIVE — runs when its webhook "
+                "receives a valid signed request. Visible in the Automations panel."
+            )
 
         return _tool_result(result)
 

@@ -144,8 +144,16 @@ def create_automation(
     requires_approval: bool = False,
     action_steps: Optional[List[Dict[str, Any]]] = None,
     triggers: Optional[List[Dict[str, Any]]] = None,
+    enabled: bool = False,
 ) -> Optional[AutomationRow]:
-    """Create a new automation."""
+    """Create a new automation.
+
+    ``enabled`` controls the initial ``is_enabled`` state. It defaults to
+    ``False`` so REST/UI callers keep the historical create-then-enable flow,
+    but every caller can now opt an automation into being live at creation —
+    previously the INSERT omitted ``is_enabled`` entirely, so EVERY automation
+    was created disabled regardless of caller intent and silently never fired.
+    """
     now = datetime.now(timezone.utc).isoformat()
     if output_config is None:
         output_config = {"type": "session"}
@@ -159,14 +167,14 @@ def create_automation(
                (id, name, description, trigger_type, trigger_config, prompt,
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-                requires_approval, action_steps, triggers, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                requires_approval, action_steps, triggers, is_enabled, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt or "", profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
              max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
              requires_approval, json.dumps(action_steps) if action_steps else None,
-             json.dumps(triggers),
+             json.dumps(triggers), bool(enabled),
              now, now)
         )
     return get_automation(automation_id)

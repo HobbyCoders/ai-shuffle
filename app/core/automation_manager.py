@@ -175,6 +175,18 @@ class AutomationManager:
         if not automation:
             return
 
+        # A disabled automation must never hold scheduler jobs: the reconcile
+        # loop only loads enabled automations, so it would tear any job back
+        # down within the interval anyway. No-op here so the direct path agrees
+        # with reconcile and no caller can believe a disabled automation is live.
+        if not automation.get("is_enabled"):
+            logger.debug(
+                "schedule_automation(%s): automation is disabled — not scheduling", automation_id
+            )
+            self._remove_automation_jobs(automation_id)
+            self._scheduled_versions.pop(automation_id, None)
+            return
+
         # Remove all existing jobs for this automation
         self._remove_automation_jobs(automation_id)
 

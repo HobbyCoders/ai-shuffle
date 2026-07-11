@@ -1413,6 +1413,10 @@ class AutomationCreate(BaseModel):
     max_cost_total: Optional[float] = Field(default=None, ge=0)
     max_runs_per_day: Optional[int] = Field(default=None, ge=1)
     requires_approval: bool = False
+    # Initial enabled state. Defaults to False to preserve the create-then-enable
+    # UI flow; the create response always carries the real ``is_enabled`` so the
+    # client can render truthfully.
+    enabled: bool = False
 
 
 class AutomationUpdate(BaseModel):
