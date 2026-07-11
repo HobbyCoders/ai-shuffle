@@ -1695,6 +1695,52 @@ async def _drain_notifications_impl(
                         # start_streaming, or the pump exit paths.
                         task_registry.mark_unpark_pending(session_id)
                         _cli_wake_latched = True
+                        # STUCK-ACTIVE SUBAGENT CARD FIX: re-engage an IDLE
+                        # watcher's poller so it fetches the just-completed
+                        # subagent card. The terminal task_notification dispatch
+                        # above marked the subagent node done in the live store,
+                        # but a background (run_in_background) subagent's card +
+                        # "N/M tools" counter is rendered SOLELY from the /live
+                        # park-poll — never from the direct WS frame — so it only
+                        # flips active→done once the poller polls AFTER the node
+                        # completes. mark_unpark_pending (above) keeps /live
+                        # reporting busy, but that only helps a poller that is
+                        # STILL polling: a watcher whose bounded park-poll (#502)
+                        # already expired when the parent turn ended has a STOPPED
+                        # poller, and the node-completion + chip broadcasts
+                        # (subagent_*/system event_types) are dropped by the FE's
+                        # idle-watcher shouldNotify gate (ws-message-handlers.ts —
+                        # only stream_start/chunk/end pass while isStreaming=false).
+                        # So the card froze one short (M-1) + spinning until a full
+                        # reload read the persisted terminal state. The CLI-owned
+                        # wake path's own re-engagement broadcast (broadcast_stream_
+                        # start) only fires WHEN the CLI's injection turn is
+                        # forwarded (which lands +6ms…+5.8s later, or never for a
+                        # completion the model does not answer). Emit a neutral
+                        # stream_chunk nudge NOW so the stopped poller restarts
+                        # (notifier → startStreaming, self-limiting on the next
+                        # idle /live tick) and renders the completed card
+                        # immediately. Distinct seam from #543 (that fix keeps the
+                        # origin device registered for deferred run_query WAKE
+                        # turns — the app-unpark "deliver" branch below; this pump
+                        # branch never starts a run_query). stream_chunk (not
+                        # stream_start) avoids a spurious streaming-indicator flip
+                        # (no _streaming_sessions mutation, no optimistic
+                        # isStreaming=true on the FE) — it is a pure "re-fetch".
+                        try:
+                            await sync_engine.broadcast_stream_chunk(
+                                session_id=session_id,
+                                message_id=ctx.message_id,
+                                chunk_type="subagent_tool_result",
+                                chunk_data={"task_id": task_id, "status": status},
+                                source_device_id=None,
+                            )
+                        except Exception as _bexc:
+                            ctx.debug(
+                                logger,
+                                "Drain pump: stuck-card re-engagement broadcast "
+                                f"failed: {_bexc}",
+                            )
                     continue
 
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task

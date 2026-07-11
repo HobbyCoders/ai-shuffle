@@ -296,6 +296,92 @@ async def test_pump_redispatches_subagent_inner_activity_and_completes():
 
 
 # ---------------------------------------------------------------------------
+# 1c. STUCK-ACTIVE SUBAGENT CARD — a background (run_in_background) subagent's
+#     card stayed spinning with the "N/M tools" counter frozen one short after
+#     the agent completed; it healed only on reload. Root cause: the card +
+#     counter are rendered SOLELY from the /live park-poll (never the direct WS
+#     frame), so they flip active→done only once the poller polls AFTER the pump
+#     completes the node. A watcher whose bounded park-poll already expired has a
+#     STOPPED poller, and the node-completion / chip broadcasts the pump emits
+#     (subagent_*/system event_types) are dropped by the FE idle-watcher
+#     shouldNotify gate (only stream_start/chunk/end pass while isStreaming is
+#     false). The CLI-owned-wake branch relied on the CLI's own injection turn to
+#     later broadcast stream_start and re-engage the poller — which lands seconds
+#     later, or never. The fix emits a neutral stream_chunk re-engagement nudge
+#     the instant the node completes so the stopped poller restarts and fetches
+#     the completed card. Distinct seam from #543 (which keeps the origin device
+#     registered for deferred run_query WAKE turns — the app-unpark deliver
+#     branch; this pump branch never starts a run_query).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_reengages_poller_when_background_subagent_completes():
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
+
+    # A SLOW background sub-agent whose terminal notification arrives on the
+    # pooled client AFTER the parent turn returned (the stuck-card case). Its
+    # completion is CLI-owned (kind="agent" + a recorded background launch), so
+    # the pump `continue`s without an app unpark — hang=False so the stream ends
+    # and the pump terminates.
+    notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
+    client = _FakeClient([notif], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ), patch.object(
+        cwh.sync_engine, "broadcast_stream_chunk", new=AsyncMock()
+    ) as _bchunk:
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # The node was completed + the wake is CLI-owned (no app unpark) — unchanged.
+    assert task_registry.get_active("sess-1") == []
+    assert task_registry.was_unparked("sess-1", "task-1") is True
+    handler._deliver_unpark.assert_not_awaited()
+
+    # THE FIX: a stream_chunk re-engagement broadcast was emitted so a STOPPED
+    # idle-watcher poller restarts and fetches the just-completed card. Without
+    # it the poller never re-engages and the card stays spinning at M-1 until a
+    # full reload. (RED before the fix: broadcast_stream_chunk is never called.)
+    _bchunk.assert_awaited_once()
+    kwargs = _bchunk.await_args.kwargs
+    assert kwargs["session_id"] == "sess-1"
+    assert kwargs["chunk_type"] == "subagent_tool_result"
+    assert kwargs["chunk_data"]["task_id"] == "task-1"
+    assert kwargs["chunk_data"]["status"] == "completed"
+    # source_device_id=None → broadcast to every REGISTERED device (the watching
+    # tab), matching the pump's other server-initiated broadcasts.
+    assert kwargs["source_device_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_pump_reengage_nudge_only_once_per_task():
+    """The re-engagement nudge is gated on the same one-shot latch (mark_unparked
+    → _first) as the chip, so a duplicate terminal notification for the SAME task
+    (a fresh per-rest uuid) does NOT re-broadcast."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    n1 = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
+    n2 = _notif("task-1", uuid="u-2", tool_use_id="tu-1", summary="done again")
+    client = _FakeClient([n1, n2], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
+    ), patch.object(
+        cwh.sync_engine, "broadcast_stream_chunk", new=AsyncMock()
+    ) as _bchunk:
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Exactly one nudge despite two terminal notifications for the task.
+    _bchunk.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # 2. Single-reader invariant — stop_drain_pump cancels + awaits + removes
 # ---------------------------------------------------------------------------
 
