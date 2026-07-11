@@ -774,10 +774,16 @@
 </div>
 
 {#snippet sessionRow(session: Session, showProject: boolean)}
+	<!-- Armed = the clear confirm is showing OR its request is in flight. While
+	     armed, the rail freezes: every non-confirm action is inert and the icons
+	     never move, so a second/stray click can only ever hit Confirm or Cancel —
+	     never a different action (the old reflow silently pinned instead of
+	     clearing). -->
+	{@const isArmed = deletingSessionId === session.id || deleteInFlightId === session.id}
 	<div
 		class="row"
 		class:active={activeId === session.id}
-		class:deleting={deletingSessionId === session.id || deleteInFlightId === session.id}
+		class:deleting={isArmed}
 		role="button"
 		tabindex="0"
 		onclick={() => onRowClick(session)}
@@ -851,10 +857,21 @@
 			onToggle={(e) => toggleRowActions(e, session.id)}
 			label="Session actions"
 		>
+			<!-- Cancel is a LEADING icon that only exists while armed. Because the
+			     rail is right-anchored, growing it on the LEFT leaves every
+			     following icon (Fork / Star / broom) at its exact resting x — so
+			     the broom the user just clicked stays put and a second click lands
+			     on Confirm, never a shifted neighbour. -->
+			{#if isArmed}
+				<button class="row-action cancel" title="Cancel" onclick={cancelDelete}>
+					<X size={13} strokeWidth={2} />
+				</button>
+			{/if}
 			{#if session.is_remote}
 				<button
 					class="row-action"
 					title={resumeTitle(session)}
+					disabled={isArmed}
 					onclick={(e) => handleResume(e, session)}
 				>
 					<Play size={13} strokeWidth={1.6} />
@@ -863,6 +880,7 @@
 			<button
 				class="row-action"
 				title="Fork session"
+				disabled={isArmed}
 				onclick={(e) => handleFork(e, session)}
 			>
 				<GitFork size={13} strokeWidth={1.6} />
@@ -871,25 +889,25 @@
 				class="row-action fav"
 				class:is-fav={session.is_favorite}
 				title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
+				disabled={isArmed}
 				onclick={(e) => handleToggleFavorite(e, session)}
 			>
 				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
 			</button>
-			<!-- Confirm/Cancel stay rendered through the in-flight window too (not
-			     just while armed) so the plain Clear button can't reappear — and be
-			     re-armed — mid-request; Confirm is disabled for that whole window. -->
-			{#if deletingSessionId === session.id || deleteInFlightId === session.id}
-				<button class="row-action danger" disabled={deleteLoading} title="Confirm clear" onclick={(e) => handleDelete(e, session.id)}>
-					<BrushCleaning size={13} strokeWidth={2} />
-				</button>
-				<button class="row-action" title="Cancel" onclick={cancelDelete}>
-					<X size={13} strokeWidth={2} />
-				</button>
-			{:else}
-				<button class="row-action clear" title="Clear session" onclick={(e) => handleDelete(e, session.id)}>
-					<BrushCleaning size={13} strokeWidth={1.6} />
-				</button>
-			{/if}
+			<!-- ONE broom that stays mounted through arm → in-flight, keeping its
+			     slot (rightmost) fixed: it only swaps clear→danger styling and its
+			     handler intent (arm, then confirm). Disabled only while the request
+			     is actually in flight so the plain Clear can't be re-armed mid-wipe. -->
+			<button
+				class="row-action broom"
+				class:clear={!isArmed}
+				class:danger={isArmed}
+				disabled={deleteLoading}
+				title={isArmed ? 'Confirm clear' : 'Clear session'}
+				onclick={(e) => handleDelete(e, session.id)}
+			>
+				<BrushCleaning size={13} strokeWidth={isArmed ? 2 : 1.6} />
+			</button>
 		</RowActionMenu>
 	</div>
 {/snippet}
@@ -1384,11 +1402,37 @@
 		cursor: pointer;
 	}
 	.row-action:hover { color: var(--foreground); background: color-mix(in oklch, var(--muted) 60%, transparent); }
-	/* Active favourite + armed-delete stay visible at rest, even unhovered. */
+	/* Active favourite + armed-delete + its cancel stay visible at rest, even
+	   unhovered — the armed confirm must never depend on hover to be seen. */
 	.row-action.fav.is-fav { --ram-reveal: 1; color: var(--warning); }
 	.row-action.fav:hover { color: var(--warning); }
-	.row-action.danger { --ram-reveal: 1; color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+	.row-action.cancel { --ram-reveal: 1; }
+	.row-action.danger {
+		position: relative;
+		overflow: hidden;
+		--ram-reveal: 1;
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
 	.row-action.danger:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
+	/* Subtle 8s countdown: a hairline under the armed broom drains left-to-right,
+	   matching the safety auto-reset in armDeleteConfirm() so the confirm never
+	   vanishes "for no reason". Purely decorative — no layout, no pointer surface. */
+	.row-action.danger::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		bottom: 0;
+		height: 2px;
+		width: 100%;
+		background: var(--destructive);
+		transform-origin: left center;
+		animation: row-confirm-countdown 8s linear forwards;
+	}
+	@keyframes row-confirm-countdown {
+		from { transform: scaleX(1); }
+		to { transform: scaleX(0); }
+	}
 	.row-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	/* Empty */
@@ -1432,5 +1476,7 @@
 		.proj-card { transition: none; }
 		.section-toggle :global(.section-caret) { transition: none; }
 		.dot-streaming, .dot-attention { animation: none; }
+		/* No draining countdown — just hold the hairline as a static armed cue. */
+		.row-action.danger::after { animation: none; transform: scaleX(1); }
 	}
 </style>

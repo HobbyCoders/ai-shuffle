@@ -388,6 +388,79 @@ describe('SessionsBoard clear-session confirm timer', () => {
 });
 
 /**
+ * Misclick-safety for the armed clear confirm. The confirm used to grow a new
+ * Cancel icon on the RIGHT of a right-anchored rail, which shoved Fork/Star/broom
+ * ~28px left; a user double-clicking the broom then landed on a now-shifted
+ * neighbour (Star) and silently PINNED the session instead of clearing it.
+ *
+ * The stabilised rail freezes while armed: every non-confirm action is `disabled`
+ * (so a stray click can't fire a DIFFERENT action, and the disabled-button click
+ * that routes to the row is caught by openSession's armed guard), and the broom
+ * keeps its slot so a second click confirms. Position stability itself can't be
+ * measured in jsdom (no layout), so we assert the property that guarantees it:
+ * the siblings render disabled and inert while armed.
+ */
+describe('SessionsBoard armed clear confirm freezes the rail', () => {
+	async function arm(title: string) {
+		await fireEvent.click(rowFor(title).querySelector('[title="Clear session"]') as HTMLElement);
+	}
+
+	it('disables every non-confirm rail action while the clear confirm is armed', async () => {
+		renderBoard();
+		await arm('Local one');
+		const row = rowFor('Local one');
+
+		// The confirm + its cancel are present…
+		expect(row.querySelector('[title="Confirm clear"]')).toBeTruthy();
+		expect(row.querySelector('[title="Cancel"]')).toBeTruthy();
+		// …and the sibling actions are inert so a stray/second click can't fire them.
+		expect((row.querySelector('[title="Fork session"]') as HTMLButtonElement).disabled).toBe(true);
+		expect((row.querySelector('[title="Favorite"]') as HTMLButtonElement).disabled).toBe(true);
+		// The Cancel and Confirm themselves stay actionable.
+		expect((row.querySelector('[title="Cancel"]') as HTMLButtonElement).disabled).toBe(false);
+		expect((row.querySelector('[title="Confirm clear"]') as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('disables the remote Resume action too while armed', async () => {
+		renderBoard();
+		await arm('Remote one');
+		const resume = rowFor('Remote one').querySelector(
+			'[title="Resume here (Mac Studio)"]'
+		) as HTMLButtonElement;
+		expect(resume.disabled).toBe(true);
+	});
+
+	it('does not open the session when a click lands on the armed row', async () => {
+		// A real browser swallows a click on a `disabled` button but can route it to
+		// the parent row; jsdom's fireEvent bypasses the disabled swallow entirely,
+		// so we can't assert the sibling handler stays silent here (that guarantee
+		// is the `disabled` attribute asserted above). What IS testable — and is the
+		// backstop for a click that reaches the row — is openSession's armed guard:
+		// clicking the armed row must not open it.
+		const { onOpenSession } = renderBoard();
+		await arm('Local one');
+
+		await fireEvent.click(rowFor('Local one'));
+
+		expect(onOpenSession).not.toHaveBeenCalled();
+		// Still armed — the confirm survived.
+		expect(rowFor('Local one').querySelector('[title="Confirm clear"]')).toBeTruthy();
+	});
+
+	it('restores the enabled rail after the confirm is cancelled', async () => {
+		renderBoard();
+		await arm('Local one');
+		await fireEvent.click(rowFor('Local one').querySelector('[title="Cancel"]') as HTMLElement);
+
+		const row = rowFor('Local one');
+		expect(row.querySelector('[title="Confirm clear"]')).toBeNull();
+		expect(row.querySelector('[title="Cancel"]')).toBeNull();
+		expect((row.querySelector('[title="Fork session"]') as HTMLButtonElement).disabled).toBe(false);
+		expect((row.querySelector('[title="Favorite"]') as HTMLButtonElement).disabled).toBe(false);
+	});
+});
+
+/**
  * Regression: the mobile ⋮ tray (`actionsOpenId`) stayed open after acting on
  * any of its buttons. Every in-tray handler calls `e.stopPropagation()` so the
  * window-click closer (`handleFilterWindowClick`) never sees the click, and
