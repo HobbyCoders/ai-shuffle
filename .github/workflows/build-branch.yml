@@ -1,0 +1,83 @@
+name: Build Branch Image (Lab)
+
+# Builds a single-platform (linux/amd64) image for a non-main branch and
+# pushes it to ghcr.io tagged with the branch name, so an agent can pull a
+# disposable test image without waiting on a full multi-arch main/tag build.
+#
+# Two ways to trigger:
+#   - workflow_dispatch: build any ref on demand (`gh workflow run
+#     build-branch.yml --ref <branch>`), regardless of name.
+#   - push: auto-build branches under the `lab/**` prefix, so ad-hoc branches
+#     don't silently double the CI/Docker bill on every push.
+on:
+  workflow_dispatch:
+    inputs:
+      no_cache:
+        description: 'Build without Docker cache (forces full rebuild)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - 'lab/**'
+
+concurrency:
+  group: docker-build-branch-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    timeout-minutes: 30
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker requires lowercase image names but github.repository preserves casing
+      - name: Lowercase image name
+        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
+      # Tag as branch-<sanitized-branch-name> plus a sha tag for traceability.
+      # Single platform + direct push (no digest/manifest-list dance) since this
+      # is amd64-only for the Unraid lab host, not a public multi-arch release.
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch,prefix=branch-
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          no-cache: ${{ inputs.no_cache == true }}
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
