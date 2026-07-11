@@ -2,7 +2,8 @@
 AutomationManager — scheduler integration, event listener, execution lifecycle.
 
 Singleton that manages the APScheduler instance, handles trigger firing,
-budget enforcement, execution via execute_query(), and output delivery.
+budget enforcement, execution, and output delivery. Prompted runs execute
+as normal streaming chat sessions (see _run_prompt_as_session).
 """
 
 import asyncio
@@ -12,11 +13,11 @@ import json
 import logging
 import secrets
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-import psycopg2.errors
 
 from app.db import database
 
@@ -595,12 +596,17 @@ class AutomationManager:
             cost = 0.0
             tokens_in = 0
             tokens_out = 0
-            session_id = None
 
-            # Execute prompt if present
+            # Execute prompt if present — as a REAL streaming chat session.
+            # The run mints a fresh automation-badged session (AFTER the
+            # cross-install fire claim in _on_schedule_trigger and the budget
+            # check in _execute) and submits the rendered prompt through the
+            # same server-initiated streaming seam user chats use, so the run
+            # streams live to open tabs, is openable on the sessions board,
+            # and persists normal history — instead of the old headless
+            # one-shot collect that only surfaced in the run-history UI.
             if has_prompt:
                 from app.core.automation_service import resolve_local_project
-                from app.core import account_failover
 
                 # The stored project row may belong to another install; run
                 # against this install's clone of the same repo (link group).
@@ -616,22 +622,13 @@ class AutomationManager:
                         )
                         project_id = local_project["id"]
 
-                result = await asyncio.wait_for(
-                    account_failover.execute_query_with_failover(
-                        prompt=rendered_prompt,
-                        profile_id=automation["profile_id"],
-                        project_id=project_id,
-                        overrides={"max_turns": automation.get("max_turns", 1)},
-                        automation_id=automation_id,
-                    ),
-                    timeout=automation.get("timeout_seconds", 300),
+                outcome = await self._run_prompt_as_session(
+                    automation, run_id, rendered_prompt, project_id
                 )
-
-                response_text = result.get("response", "")
-                cost = result.get("total_cost_usd", 0)
-                tokens_in = result.get("input_tokens", 0)
-                tokens_out = result.get("output_tokens", 0)
-                session_id = result.get("session_id")
+                response_text = outcome["response"]
+                cost = outcome["cost_usd"]
+                tokens_in = outcome["tokens_in"]
+                tokens_out = outcome["tokens_out"]
 
                 # Check per-run cost limit
                 max_per_run = automation.get("max_cost_per_run")
@@ -649,28 +646,25 @@ class AutomationManager:
 
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Update run record. The run's session row can be deleted while a
-            # long run is still executing (turn messages only persist at turn
-            # end, so mid-run the session looks blank and gets cleaned up) —
-            # linking it then violates the FK. Record the successful run
-            # without the session link rather than marking it failed.
-            run_result = dict(
+            # Update run record. The run's session was created and linked
+            # BEFORE the turn started (the session is the primary artifact —
+            # this row is a thin index into it), so completion only stamps
+            # status/cost here and never re-writes session_id: the old
+            # completion-time FK race (session deleted while the run looked
+            # blank mid-turn) is gone by construction — the session carries
+            # its user message from the start and streams like a user chat.
+            # `response` keeps only a short tail for the runs-list preview;
+            # the full transcript lives in the session history.
+            database.update_automation_run(
+                run_id,
                 status="completed",
-                response=response_text[:10000],  # Cap stored response
+                response=self._response_tail(response_text),
                 cost_usd=cost,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 duration_ms=duration_ms,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
-            try:
-                database.update_automation_run(run_id, session_id=session_id, **run_result)
-            except psycopg2.errors.ForeignKeyViolation:
-                logger.warning(
-                    f"Automation {automation_id} run {run_id}: session {session_id} "
-                    f"was deleted mid-run; recording completed run without session link"
-                )
-                database.update_automation_run(run_id, session_id=None, **run_result)
 
             # Update automation stats. The increments happen in SQL (one
             # atomic UPDATE) so a concurrent run on another install can't
@@ -715,6 +709,163 @@ class AutomationManager:
                 failure_count=automation.get("failure_count", 0) + 1,
             )
             raise
+
+    # ------------------------------------------------------------------
+    # Prompt execution — automation runs ARE normal streaming sessions
+    # ------------------------------------------------------------------
+
+    #: The runs-list preview keeps only this much of the final assistant
+    #: text; the full transcript lives in the run's session history.
+    RESPONSE_TAIL_CHARS = 2000
+
+    @classmethod
+    def _response_tail(cls, text: str) -> str:
+        return (text or "")[-cls.RESPONSE_TAIL_CHARS:]
+
+    async def _run_prompt_as_session(
+        self,
+        automation: Dict[str, Any],
+        run_id: str,
+        rendered_prompt: str,
+        project_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Run the automation prompt as a normal streaming chat session.
+
+        Mints ONE FRESH automation-badged session per fire (no shared
+        session, so overlapping fires can never race each other's
+        history), persists the rendered prompt as a regular user message,
+        links the run row to the session, then submits the turn through
+        the headless streaming seam with ``deferred_delivery=True`` (the
+        server-initiated-turn contract) so the run streams live to any
+        open tab, is openable on the sessions board, and persists normal
+        history — exactly like a user chat.
+        """
+        from app.core import headless_query_runner
+
+        automation_id = automation["id"]
+        profile_id = automation["profile_id"]
+        timeout_seconds = automation.get("timeout_seconds", 300)
+
+        # 1. Fresh badged session. This runs only AFTER the cross-install
+        #    fire claim (_on_schedule_trigger) and budget check (_execute),
+        #    so a losing install never mints a session for a tick it
+        #    didn't win, and a broke automation mints nothing.
+        session_id = str(uuid.uuid4())
+        fired_label = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        title = f"{automation.get('name') or 'Automation'} — {fired_label}"
+        database.create_session(
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            title=title,
+            automation_id=automation_id,
+        )
+
+        # 2. Persist the prompt as a normal user message so the session
+        #    reads like any chat from the very start (never "blank"
+        #    mid-turn, so no cleanup reaper can mistake it for empty).
+        database.add_session_message(
+            session_id=session_id,
+            role="user",
+            content=rendered_prompt,
+            profile_id=profile_id,
+            metadata={"automation_id": automation_id, "automation_run_id": run_id},
+        )
+
+        # 3. Link run → session BEFORE the turn starts: the session is the
+        #    primary artifact, the run row a thin index into it. Completion
+        #    never re-writes the link, so the old completion-time
+        #    FK-violation race is unrepresentable.
+        database.update_automation_run(run_id, session_id=session_id)
+
+        # Best-effort: surface the new session + its prompt on connected
+        # devices immediately (scheduler-created sessions otherwise only
+        # appear on the next sidebar poll).
+        try:
+            from app.core import sync_engine as sync_engine_module
+
+            await sync_engine_module.sync_engine.broadcast_user_session_created(
+                user_id="admin", session_id=session_id, source_device_id=None
+            )
+            await sync_engine_module.sync_engine.broadcast_message_added(
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": rendered_prompt,
+                    "profile_id": profile_id,
+                },
+                source_device_id=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Automation {automation_id}: session broadcast failed: {e}")
+
+        # 4. Submit the streaming turn. deferred_delivery=True marks it
+        #    server-initiated so run_query keeps watching devices
+        #    registered with sync_engine — the turn streams live instead
+        #    of only surfacing on reload.
+        handler = await headless_query_runner.launch_headless_query(
+            prompt=rendered_prompt,
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            user_id="admin",
+            api_user_id=None,
+            overrides={"max_turns": automation.get("max_turns", 1)},
+            deferred_delivery=True,
+        )
+
+        # 5. Await turn completion under the automation timeout. wait_for
+        #    cancels the turn task on timeout (runaway guard) and the
+        #    TimeoutError propagates to _execute_run's timeout stamp.
+        await asyncio.wait_for(handler.query_task, timeout=timeout_seconds)
+
+        # run_query reports the turn outcome only via terminal frames; the
+        # headless handler sniffs them for socketless callers like us.
+        if handler.last_turn_error:
+            raise RuntimeError(handler.last_turn_error)
+        if handler.last_turn_interrupted:
+            raise RuntimeError("Turn was interrupted before completion")
+
+        metadata = handler.last_turn_metadata or {}
+        return {
+            "session_id": session_id,
+            "response": self._extract_final_assistant_text(session_id),
+            "cost_usd": float(metadata.get("total_cost_usd") or 0),
+            "tokens_in": int(metadata.get("tokens_in") or 0),
+            "tokens_out": int(metadata.get("tokens_out") or 0),
+        }
+
+    @staticmethod
+    def _extract_final_assistant_text(session_id: str) -> str:
+        """Final assistant text of the turn — feeds output delivery and the
+        runs-list preview. Reads the live store first (freshest right at
+        turn end), falling back to persisted history."""
+        from app.core import live_session_store
+
+        messages: List[Dict[str, Any]] = []
+        try:
+            session = live_session_store.live_session_store.get_session_dict(session_id)
+            if session and isinstance(session.get("messages"), list):
+                messages = session["messages"]
+        except Exception:  # noqa: BLE001
+            messages = []
+        if not messages:
+            try:
+                rows = database.get_session_messages(session_id)
+                if isinstance(rows, list):
+                    messages = rows
+            except Exception:  # noqa: BLE001
+                messages = []
+
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            if msg.get("type") not in (None, "text"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+        return ""
 
     # ------------------------------------------------------------------
     # Action step execution

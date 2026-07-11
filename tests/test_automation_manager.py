@@ -357,87 +357,301 @@ class TestHandleConnectorEvent:
             # (but the task might be created — depends on how get_automations_for_event works)
 
 # =============================================================================
-# Run Completion — session deleted mid-run (FK fallback)
+# Runs as normal streaming sessions — the new execution contract
 # =============================================================================
 
 
-class TestRunCompletionSessionFkFallback:
-    """A long run's session row can be deleted while the run executes (it looks
-    blank until turn-end persistence). Linking it at completion then raises a
-    ForeignKeyViolation — the run must still be recorded as completed, just
-    without the session link, instead of being marked failed."""
+def _fake_turn_handler(metadata=None, error=None, task=None):
+    """Stand-in for the HeadlessChatHandler launch_headless_query returns."""
+    handler = MagicMock()
+    if task is None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_future()
+        task.set_result(None)
+    handler.query_task = task
+    handler.last_turn_metadata = (
+        {"total_cost_usd": 0.01, "tokens_in": 10, "tokens_out": 20}
+        if metadata is None else metadata
+    )
+    handler.last_turn_error = error
+    handler.last_turn_interrupted = False
+    return handler
 
-    def _automation(self):
-        return {
-            "id": "auto-fk",
+
+def _session_run_env(handler, response_messages=None):
+    """Patch stack for the streaming-session run path."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    db = stack.enter_context(patch("app.core.automation_manager.database"))
+    launch = stack.enter_context(patch(
+        "app.core.headless_query_runner.launch_headless_query",
+        new=AsyncMock(return_value=handler),
+    ))
+    stack.enter_context(patch("app.core.sync_engine.sync_engine", new=AsyncMock()))
+    store = stack.enter_context(patch("app.core.live_session_store.live_session_store"))
+    store.get_session_dict.return_value = {
+        "messages": response_messages if response_messages is not None else [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "type": "text", "content": "all done"},
+        ],
+    }
+    db.update_automation_run.return_value = {}
+    db.update_automation.return_value = {}
+    return stack, db, launch, store
+
+
+class TestRunAsSession:
+    """An automation run IS a normal streaming chat session: the run mints a
+    fresh automation-badged session, persists the prompt as a regular user
+    message, and submits the turn through the headless streaming seam
+    (launch_headless_query → run_query, deferred_delivery=True)."""
+
+    def _automation(self, **overrides):
+        auto = {
+            "id": "auto-sess",
+            "name": "Daily Digest",
             "profile_id": "default",
             "project_id": None,
             "action_steps": [],
             "run_count": 0,
+            "failure_count": 0,
             "total_cost_used": 0,
-            "max_turns": None,
+            "max_turns": 3,
             "timeout_seconds": 60,
             "output_config": {"type": "none"},
         }
-
-    def _query_result(self):
-        return {
-            "response": "done",
-            "session_id": "sess-deleted",
-            "total_cost_usd": 0.01,
-            "input_tokens": 10,
-            "output_tokens": 20,
-        }
+        auto.update(overrides)
+        return auto
 
     @pytest.mark.asyncio
-    async def test_completed_run_recorded_without_session_link(self, manager):
-        import psycopg2.errors
+    async def test_run_creates_badged_session_and_submits_streaming_turn_once(self, manager):
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(self._automation(), "run-s1", "do it", {})
 
-        calls = []
+        # Exactly one fresh session, badged with the automation id
+        db.create_session.assert_called_once()
+        create_kwargs = db.create_session.call_args.kwargs
+        assert create_kwargs["automation_id"] == "auto-sess"
+        assert create_kwargs["profile_id"] == "default"
+        session_id = create_kwargs["session_id"]
+        assert session_id
 
-        def fake_update_run(run_id, **kwargs):
-            calls.append(kwargs)
-            if kwargs.get("status") == "completed" and kwargs.get("session_id"):
-                raise psycopg2.errors.ForeignKeyViolation("session row is gone")
-            return {}
+        # The prompt is persisted as a normal user message on that session
+        db.add_session_message.assert_called_once()
+        msg_kwargs = db.add_session_message.call_args.kwargs
+        assert msg_kwargs["session_id"] == session_id
+        assert msg_kwargs["role"] == "user"
+        assert msg_kwargs["content"] == "do it"
 
-        with patch("app.core.automation_manager.database") as db, patch(
-            "app.core.query_engine.execute_query",
-            new=AsyncMock(return_value=self._query_result()),
-        ):
-            db.update_automation_run.side_effect = fake_update_run
-            db.update_automation.return_value = {}
-            await manager._execute_run(self._automation(), "run-fk", "do it", {})
+        # Exactly one streaming submit, through the deferred-delivery seam
+        launch.assert_awaited_once()
+        launch_kwargs = launch.call_args.kwargs
+        assert launch_kwargs["prompt"] == "do it"
+        assert launch_kwargs["session_id"] == session_id
+        assert launch_kwargs["deferred_delivery"] is True
 
-        completed = [c for c in calls if c.get("status") == "completed"]
-        assert len(completed) == 2
-        assert completed[0]["session_id"] == "sess-deleted"
-        assert completed[1]["session_id"] is None
-        assert completed[1]["response"] == "done"
-        # The automation itself was marked healthy (atomic success UPDATE),
-        # not errored
-        db.record_automation_run_success.assert_called_once_with("auto-fk", 0.01)
+    @pytest.mark.asyncio
+    async def test_run_links_session_before_turn_starts(self, manager):
+        order = []
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack:
+            db.update_automation_run.side_effect = (
+                lambda run_id, **kw: order.append(("link", kw)) or {}
+            )
+            launch.side_effect = lambda **kw: order.append(("launch", kw)) or handler
+            await manager._execute_run(self._automation(), "run-s2", "do it", {})
+
+        link_idx = next(
+            i for i, (kind, kw) in enumerate(order)
+            if kind == "link" and kw.get("session_id")
+        )
+        launch_idx = next(i for i, (kind, _) in enumerate(order) if kind == "launch")
+        assert link_idx < launch_idx, "run→session link must precede the turn submit"
+
+    @pytest.mark.asyncio
+    async def test_max_turns_cap_passed_through(self, manager):
+        handler = _fake_turn_handler()
+        stack, _db, launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(
+                self._automation(max_turns=7), "run-s3", "do it", {}
+            )
+        assert launch.call_args.kwargs["overrides"] == {"max_turns": 7}
+
+    @pytest.mark.asyncio
+    async def test_turn_cost_lands_on_run_row_and_automation(self, manager):
+        handler = _fake_turn_handler(
+            metadata={"total_cost_usd": 0.05, "tokens_in": 11, "tokens_out": 22}
+        )
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(self._automation(), "run-s4", "do it", {})
+
+        completed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0]["cost_usd"] == 0.05
+        assert completed[0]["tokens_in"] == 11
+        assert completed[0]["tokens_out"] == 22
+        # Completion never re-writes session_id (linked at creation) — the old
+        # FK-violation race is gone by construction.
+        assert "session_id" not in completed[0]
+        db.record_automation_run_success.assert_called_once_with("auto-sess", 0.05)
+
+    @pytest.mark.asyncio
+    async def test_run_row_stores_response_tail_not_full_payload(self, manager):
+        long_response = "x" * 12000
+        handler = _fake_turn_handler()
+        stack, db, _launch, _store = _session_run_env(
+            handler,
+            response_messages=[
+                {"role": "user", "content": "do it"},
+                {"role": "assistant", "type": "text", "content": long_response},
+            ],
+        )
+        with stack:
+            await manager._execute_run(self._automation(), "run-s5", "do it", {})
+
+        completed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "completed"
+        ]
+        stored = completed[0]["response"]
+        assert len(stored) <= 2000
+        assert stored == long_response[-len(stored):]
+
+    @pytest.mark.asyncio
+    async def test_turn_error_stamps_failure_and_keeps_session_link(self, manager):
+        handler = _fake_turn_handler(metadata={}, error="Error: CLI exploded")
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            with pytest.raises(RuntimeError, match="CLI exploded"):
+                await manager._execute_run(self._automation(), "run-s6", "do it", {})
+
+        # Session was linked at creation and the link is never revoked
+        link_updates = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("session_id")
+        ]
+        assert link_updates, "run row must link its session even on failure"
+
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "CLI exploded" in failed[0]["error"]
         error_updates = [
             c.kwargs for c in db.update_automation.call_args_list
             if c.kwargs.get("status") == "error"
         ]
-        assert error_updates == []
+        assert error_updates and "CLI exploded" in error_updates[0]["last_error"]
+        db.record_automation_run_success.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_non_fk_completion_error_still_propagates(self, manager):
-        def fake_update_run(run_id, **kwargs):
-            if kwargs.get("status") == "completed":
-                raise RuntimeError("unrelated database failure")
-            return {}
+    async def test_timeout_cancels_turn_and_stamps_failure(self, manager):
+        loop = asyncio.get_running_loop()
+        never_done = loop.create_future()
+        handler = _fake_turn_handler(task=never_done)
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(
+                self._automation(timeout_seconds=0.05), "run-s7", "do it", {}
+            )
 
-        with patch("app.core.automation_manager.database") as db, patch(
-            "app.core.query_engine.execute_query",
-            new=AsyncMock(return_value=self._query_result()),
+        assert never_done.cancelled()
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "timed out" in failed[0]["error"]
+        db.record_automation_run_success.assert_not_called()
+
+
+class TestScheduledFireOrdering:
+    """The cross-install fire claim must be taken BEFORE any session exists —
+    a losing install must never mint a session for a tick it didn't win."""
+
+    @pytest.mark.asyncio
+    async def test_fire_claim_precedes_session_creation(self, manager):
+        order = []
+        tasks = []
+
+        def fake_track(coro, *, name):
+            task = asyncio.ensure_future(coro)
+            tasks.append(task)
+            return task
+
+        manager._create_tracked_task = fake_track
+
+        automation = {
+            "id": "auto-order",
+            "name": "Ordered",
+            "is_enabled": True,
+            "requires_approval": False,
+            "profile_id": "default",
+            "project_id": None,
+            "prompt": "tick",
+            "action_steps": [],
+            "run_count": 0,
+            "failure_count": 0,
+            "total_cost_used": 0,
+            "max_turns": 1,
+            "timeout_seconds": 60,
+            "output_config": {"type": "none"},
+        }
+
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack, patch(
+            "app.core.automation_service.should_run_scheduled_here",
+            return_value=(True, "elected"),
+        ), patch(
+            "app.core.automation_service.check_budget", return_value=(True, "ok")
         ):
-            db.update_automation_run.side_effect = fake_update_run
-            db.update_automation.return_value = {}
-            with pytest.raises(RuntimeError, match="unrelated database failure"):
-                await manager._execute_run(self._automation(), "run-fk2", "do it", {})
+            db.get_automation.return_value = automation
+            db.claim_automation_fire.side_effect = (
+                lambda *a, **k: order.append("claim") or True
+            )
+            db.create_session.side_effect = (
+                lambda **kw: order.append("create_session") or {}
+            )
+            await manager._on_schedule_trigger("auto-order", "interval", {"seconds": 60})
+            if tasks:
+                await asyncio.gather(*tasks)
+
+        assert "claim" in order and "create_session" in order
+        assert order.index("claim") < order.index("create_session")
+
+    @pytest.mark.asyncio
+    async def test_budget_denied_creates_no_session(self, manager):
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack, patch(
+            "app.core.automation_service.check_budget",
+            return_value=(False, "Budget exceeded"),
+        ):
+            db.get_automation.return_value = {
+                "id": "auto-broke",
+                "is_enabled": True,
+                "profile_id": "default",
+                "prompt": "tick",
+                "failure_count": 0,
+            }
+            await manager._execute("auto-broke", {"trigger": "schedule"})
+
+        db.create_session.assert_not_called()
+        launch.assert_not_awaited()
+        budget_runs = [
+            c.kwargs for c in db.create_automation_run.call_args_list
+            if c.kwargs.get("status") == "budget_exceeded"
+        ]
+        assert budget_runs
 
 
 # =============================================================================
@@ -447,16 +661,17 @@ class TestRunCompletionSessionFkFallback:
 
 class TestRunSessionProvenance:
     """Sessions created by an automation run carry automation_id so the
-    sessions list can badge them (they run headless, unlike interactive
-    chats)."""
+    sessions list can badge them."""
 
     def _automation(self):
         return {
             "id": "auto-badge",
+            "name": "Badge Me",
             "profile_id": "default",
             "project_id": None,
             "action_steps": [],
             "run_count": 0,
+            "failure_count": 0,
             "total_cost_used": 0,
             "max_turns": None,
             "timeout_seconds": 60,
@@ -464,23 +679,14 @@ class TestRunSessionProvenance:
         }
 
     @pytest.mark.asyncio
-    async def test_execute_query_receives_automation_id(self, manager):
-        mock_query = AsyncMock(return_value={
-            "response": "done",
-            "session_id": "sess-1",
-            "total_cost_usd": 0.01,
-            "input_tokens": 10,
-            "output_tokens": 20,
-        })
-        with patch("app.core.automation_manager.database") as db, patch(
-            "app.core.query_engine.execute_query", new=mock_query
-        ):
-            db.update_automation_run.return_value = {}
-            db.update_automation.return_value = {}
+    async def test_session_created_with_automation_id(self, manager):
+        handler = _fake_turn_handler()
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
             await manager._execute_run(self._automation(), "run-badge", "do it", {})
 
-        mock_query.assert_awaited_once()
-        assert mock_query.call_args.kwargs["automation_id"] == "auto-badge"
+        db.create_session.assert_called_once()
+        assert db.create_session.call_args.kwargs["automation_id"] == "auto-badge"
 
 
 # =============================================================================
@@ -658,70 +864,55 @@ class TestExecuteRunProjectResolution:
             "project_id": "proj-A",
             "action_steps": [],
             "run_count": 0,
+            "failure_count": 0,
             "total_cost_used": 0,
             "max_turns": 1,
             "timeout_seconds": 60,
             "output_config": {"type": "none"},
         }
 
-    def _query_result(self):
-        return {
-            "response": "done",
-            "session_id": None,
-            "total_cost_usd": 0.01,
-            "input_tokens": 10,
-            "output_tokens": 20,
-        }
-
     @pytest.mark.asyncio
     async def test_run_uses_local_link_group_clone(self, manager):
         sibling = {"id": "proj-B", "path": "/local/clone"}
-        with patch("app.core.automation_manager.database") as db, patch(
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=sibling
-        ) as resolve, patch(
-            "app.core.query_engine.execute_query",
-            new=AsyncMock(return_value=self._query_result()),
-        ) as eq:
-            db.update_automation_run.return_value = {}
-            db.update_automation.return_value = {}
+        ) as resolve:
             await manager._execute_run(self._automation(), "run-xi", "do it", {})
 
         resolve.assert_called_once_with("proj-A")
-        assert eq.call_args.kwargs["project_id"] == "proj-B"
+        assert launch.call_args.kwargs["project_id"] == "proj-B"
+        assert db.create_session.call_args.kwargs["project_id"] == "proj-B"
 
     @pytest.mark.asyncio
     async def test_run_keeps_own_project_when_local(self, manager):
         mine = {"id": "proj-A", "path": "/here"}
-        with patch("app.core.automation_manager.database") as db, patch(
+        handler = _fake_turn_handler()
+        stack, _db, launch, _store = _session_run_env(handler)
+        with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=mine
-        ), patch(
-            "app.core.query_engine.execute_query",
-            new=AsyncMock(return_value=self._query_result()),
-        ) as eq:
-            db.update_automation_run.return_value = {}
-            db.update_automation.return_value = {}
+        ):
             await manager._execute_run(self._automation(), "run-xj", "do it", {})
 
-        assert eq.call_args.kwargs["project_id"] == "proj-A"
+        assert launch.call_args.kwargs["project_id"] == "proj-A"
 
     @pytest.mark.asyncio
     async def test_unresolvable_project_fails_run_with_clear_error(self, manager):
-        with patch("app.core.automation_manager.database") as db, patch(
+        handler = _fake_turn_handler()
+        stack, db, launch, _store = _session_run_env(handler)
+        with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=None
-        ), patch(
-            "app.core.query_engine.execute_query",
-            new=AsyncMock(return_value=self._query_result()),
-        ) as eq:
+        ):
             db.get_project.return_value = {
                 "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
             }
             db.get_install.return_value = {"device_name": "Office PC"}
-            db.update_automation_run.return_value = {}
-            db.update_automation.return_value = {}
             with pytest.raises(ValueError, match="Office PC"):
                 await manager._execute_run(self._automation(), "run-xk", "do it", {})
 
-        eq.assert_not_called()
+        launch.assert_not_awaited()
+        db.create_session.assert_not_called()
         failed = [
             c.kwargs for c in db.update_automation_run.call_args_list
             if c.kwargs.get("status") == "failed"

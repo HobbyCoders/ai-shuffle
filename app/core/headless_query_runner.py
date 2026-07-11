@@ -72,6 +72,28 @@ class HeadlessChatHandler(ChatWebSocketHandler):
         self._ws_drops: int = 0
         self._handlers: Dict[str, Any] = {}
 
+        # Terminal-frame capture for socketless callers (automation runs read
+        # these to stamp cost/failure onto the run row). run_query reports the
+        # turn outcome only as direct frames to the (absent) socket, so sniff
+        # them in send_json before the websocket-None short-circuit swallows
+        # them. A successor turn on the same handler (account-failover retry,
+        # compact-boundary auto-continue) overwrites — latest turn wins.
+        self.last_turn_metadata: Dict[str, Any] = {}
+        self.last_turn_error: Optional[str] = None
+        self.last_turn_interrupted: bool = False
+
+    async def send_json(self, data: dict) -> bool:
+        frame_type = data.get("type")
+        if frame_type == "done":
+            self.last_turn_metadata = data.get("metadata") or {}
+            # A clean successor completion supersedes an earlier turn's error.
+            self.last_turn_error = None
+        elif frame_type == "error":
+            self.last_turn_error = str(data.get("message") or "unknown error")
+        elif frame_type in ("interrupted", "stopped"):
+            self.last_turn_interrupted = True
+        return await super().send_json(data)
+
 
 async def launch_headless_query(
     *,
@@ -83,12 +105,22 @@ async def launch_headless_query(
     api_user_id: Optional[str],
     worktree_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-) -> asyncio.Task:
+    deferred_delivery: bool = False,
+) -> HeadlessChatHandler:
     """Spawn ``run_query`` without an attached WebSocket.
 
     Registers the task in ``_active_chat_sessions`` so ``/stop`` and
     reconnect-attach paths behave identically to a WS-launched query.
-    Returns the created task (already scheduled on the event loop).
+
+    ``deferred_delivery=True`` marks the turn server-initiated (the #543
+    contract): run_query keeps watching devices registered with sync_engine so
+    the turn streams live to any open tab via broadcasts, instead of only
+    surfacing on reload. Automation runs use this; the interactive
+    ``/sessions/with-worktree`` path keeps the default.
+
+    Returns the handler; the scheduled task is ``handler.query_task`` and the
+    sniffed turn outcome lands on ``handler.last_turn_metadata`` /
+    ``last_turn_error`` / ``last_turn_interrupted`` once the task completes.
     """
     from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
@@ -115,6 +147,7 @@ async def launch_headless_query(
             project_id=project_id,
             overrides=overrides,
             worktree_id=worktree_id,
+            deferred_delivery=deferred_delivery,
         ),
         name=f"headless-run_query-{session_id}",
     )
@@ -135,4 +168,4 @@ async def launch_headless_query(
             )
 
     task.add_done_callback(_on_done)
-    return task
+    return handler

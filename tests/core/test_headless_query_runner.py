@@ -111,12 +111,17 @@ LAUNCH_ARGS = dict(
 async def test_launch_registers_task_and_passes_run_query_args():
     with _Harness() as h:
         with patch.object(HeadlessChatHandler, "run_query", new_callable=AsyncMock) as rq:
-            task = await launch_headless_query(**LAUNCH_ARGS)
-            assert h.registry.get("sess-h") is task, (
+            handler = await launch_headless_query(**LAUNCH_ARGS)
+            assert isinstance(handler, HeadlessChatHandler), (
+                "launch returns the handler so socketless callers (automation "
+                "runs) can await handler.query_task and read the sniffed turn "
+                "outcome off it"
+            )
+            assert h.registry.get("sess-h") is handler.query_task, (
                 "headless query must land in _active_chat_sessions so /stop and "
                 "reconnect-attach work identically to a WS-launched query"
             )
-            await task
+            await handler.query_task
 
     rq.assert_awaited_once_with(
         prompt="do the thing",
@@ -125,6 +130,7 @@ async def test_launch_registers_task_and_passes_run_query_args():
         project_id="proj-1",
         overrides={"model": "opus"},
         worktree_id="wt-9",
+        deferred_delivery=False,
     )
 
 
@@ -143,10 +149,10 @@ async def test_launch_cancels_existing_query_before_respawn():
         h.registry["sess-h"] = old
 
         with patch.object(HeadlessChatHandler, "run_query", new_callable=AsyncMock):
-            task = await launch_headless_query(**LAUNCH_ARGS)
+            handler = await launch_headless_query(**LAUNCH_ARGS)
             assert old.cancelled(), "pre-existing query task must be cancelled"
-            assert h.registry.get("sess-h") is task
-            await task
+            assert h.registry.get("sess-h") is handler.query_task
+            await handler.query_task
 
 
 # ═══ 2. __init__ field parity — the subclass skips super().__init__ ═══════════
@@ -166,8 +172,19 @@ def test_headless_init_mirrors_every_parent_field():
     )
     headless = HeadlessChatHandler(user_id="admin", api_user_id=None)
 
+    # Headless-ONLY additions (deliberate): terminal-frame capture for
+    # socketless callers — run_query reports the turn outcome only via
+    # direct send_json frames, so the handler sniffs done/error/interrupted
+    # before the websocket-None short-circuit swallows them. Automation
+    # runs read these to stamp cost/failure onto the run row.
+    HEADLESS_ONLY_FIELDS = {
+        "last_turn_metadata",
+        "last_turn_error",
+        "last_turn_interrupted",
+    }
+
     missing = set(vars(parent)) - set(vars(headless))
-    extra = set(vars(headless)) - set(vars(parent))
+    extra = set(vars(headless)) - set(vars(parent)) - HEADLESS_ONLY_FIELDS
     assert not missing, f"HeadlessChatHandler.__init__ is missing parent fields: {sorted(missing)}"
     assert not extra, f"HeadlessChatHandler.__init__ grew fields the parent lacks: {sorted(extra)}"
 
@@ -258,3 +275,63 @@ async def test_cluster_ingress_payload_stores_locally_and_never_relays():
     h.sync.broadcast_queue_updated.assert_awaited_once()
     drain.assert_awaited_once_with("sess-h")
     assert "sess-h" not in h.stopped, "queueing clears the stopped latch (local path ran)"
+
+
+# ═══ 6. terminal-frame capture — the socketless turn-outcome seam ═════════════
+# run_query reports the turn outcome ONLY as direct send_json frames (done /
+# error / interrupted). With no socket those frames would vanish in the
+# websocket-None short-circuit, so the headless handler sniffs them first —
+# automation runs await handler.query_task and read the outcome off these
+# fields to stamp cost/failure onto the run row.
+
+
+async def test_done_frame_captures_metadata():
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    ok = await handler.send_json(
+        {"type": "done", "metadata": {"total_cost_usd": 1.5, "tokens_in": 3}}
+    )
+    assert ok is True  # websocket-None short-circuit still reports success
+    assert handler.last_turn_metadata == {"total_cost_usd": 1.5, "tokens_in": 3}
+    assert handler.last_turn_error is None
+
+
+async def test_error_frame_captures_error():
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    await handler.send_json({"type": "error", "message": "Error: boom"})
+    assert handler.last_turn_error == "Error: boom"
+
+
+async def test_successor_done_clears_prior_error():
+    """A failover/auto-continue successor turn reuses the handler; its clean
+    completion must win over the earlier turn's error."""
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    await handler.send_json({"type": "error", "message": "Error: limit"})
+    await handler.send_json({"type": "done", "metadata": {"total_cost_usd": 0.2}})
+    assert handler.last_turn_error is None
+    assert handler.last_turn_metadata == {"total_cost_usd": 0.2}
+
+
+async def test_interrupted_frame_sets_flag():
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    await handler.send_json({"type": "interrupted", "message": "stopped"})
+    assert handler.last_turn_interrupted is True
+
+
+async def test_non_terminal_frames_do_not_touch_outcome_fields():
+    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
+    await handler.send_json({"type": "chunk", "content": "hi"})
+    assert handler.last_turn_metadata == {}
+    assert handler.last_turn_error is None
+    assert handler.last_turn_interrupted is False
+
+
+async def test_launch_deferred_delivery_passes_through():
+    """Automation runs are server-initiated turns: deferred_delivery=True must
+    reach run_query (the wake-turn contract — watching devices stay registered
+    so the turn streams live instead of surfacing on reload)."""
+    with _Harness():
+        with patch.object(HeadlessChatHandler, "run_query", new_callable=AsyncMock) as rq:
+            handler = await launch_headless_query(**LAUNCH_ARGS, deferred_delivery=True)
+            await handler.query_task
+
+    assert rq.call_args.kwargs["deferred_delivery"] is True

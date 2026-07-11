@@ -364,16 +364,29 @@ class TestAtomicRunAccounting:
             "timeout_seconds": 60,
             "output_config": {"type": "none"},
         }
-        result = {
-            "response": "done",
-            "session_id": None,
+        # Runs now execute as normal streaming sessions: the turn cost is
+        # sniffed off the headless handler's terminal-frame metadata.
+        handler = MagicMock()
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        done.set_result(None)
+        handler.query_task = done
+        handler.last_turn_metadata = {
             "total_cost_usd": 0.25,
-            "input_tokens": 1,
-            "output_tokens": 2,
+            "tokens_in": 1,
+            "tokens_out": 2,
         }
+        handler.last_turn_error = None
+        handler.last_turn_interrupted = False
+
         with patch("app.core.automation_manager.database") as db, patch(
-            "app.core.query_engine.execute_query", new=AsyncMock(return_value=result)
-        ):
+            "app.core.headless_query_runner.launch_headless_query",
+            new=AsyncMock(return_value=handler),
+        ), patch("app.core.sync_engine.sync_engine", new=AsyncMock()), patch(
+            "app.core.live_session_store.live_session_store"
+        ) as store:
+            store.get_session_dict.return_value = {
+                "messages": [{"role": "assistant", "type": "text", "content": "done"}],
+            }
             db.update_automation_run.return_value = {}
             db.update_automation.return_value = {}
             await manager._execute_run(automation, "run-at", "do it", {})
