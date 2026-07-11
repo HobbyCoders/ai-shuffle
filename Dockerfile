@@ -164,6 +164,16 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-su
 # Ensure /app is owned by appuser
 RUN chown appuser:appuser /app
 
+# ── Bake the git SHA into the image (deploy-restart detection) ──
+# scripts/unraid-lab/wake_detect.py compares this running-image SHA against a
+# pre-deploy marker to tell "new container landed" (matches target) apart from
+# "container restarted but old image is still running" (mismatch). Falls back
+# to boot-time-only detection (landed_unverified) if this file is absent.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+LABEL org.opencontainers.image.revision=$GIT_SHA
+RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
+
 # ── Claude in Chrome integration defaults ──
 # START_CHROME=1 launches headless Chromium at container start so the bundled
 # CLI's --chrome integration has a browser to drive (set 0 to disable).

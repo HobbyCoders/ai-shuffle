@@ -82,6 +82,7 @@ jobs:
           no-cache: ${{ inputs.no_cache == true }}
           build-args: |
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
+            GIT_SHA=${{ github.sha }}
           # Layer caching is automatic via Blacksmith's sticky disk:
           # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
           # runs, so no cache-from/cache-to registry round-trip is needed.
