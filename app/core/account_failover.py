@@ -405,6 +405,20 @@ async def attempt_failover(
     await _evict_pooled_session(session_id)
     schedule_usage_refresh()
 
+    # The active account changed under a running Claude-in-Chrome integration:
+    # the container browser is still signed in to the OLD account, so browser
+    # tools would now fail with "different claude.ai account". Clear the stale
+    # pairing pin and surface a reconnect prompt. Best-effort; never raises.
+    try:
+        from app.core.chrome_rebind import rebind_browser_after_account_switch
+        await rebind_browser_after_account_switch(
+            session_id=session_id,
+            api_user_id=api_user_id,
+            new_account_name=target_name,
+        )
+    except Exception:  # noqa: BLE001 — must never break the failover retry
+        logger.debug("chrome rebind after failover switch failed", exc_info=True)
+
     await _notify(
         api_user_id, session_id,
         severity="info",
