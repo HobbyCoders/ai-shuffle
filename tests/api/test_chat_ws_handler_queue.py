@@ -162,6 +162,7 @@ class _Harness:
         self.db.get_session_by_sdk_id = MagicMock(return_value=None)
         self.db.get_worktree = MagicMock(return_value=None)
         self.db.get_queued_messages = MagicMock(side_effect=lambda sid: list(self.queue))
+        self.db.count_queued_messages = MagicMock(side_effect=lambda sid: len(self.queue))
         self.db.pop_next_queued_message = MagicMock(side_effect=_pop)
         self.db.add_queued_message = MagicMock(side_effect=_add_queued)
         self.db.requeue_message_at_front = MagicMock(side_effect=_requeue_front)
@@ -604,3 +605,221 @@ async def test_load_session_drain_recovers_orphaned_send_later_end_to_end():
         assert prompts == ["orphaned send-later"]
         assert [m["content"] for m in h.popped] == ["orphaned send-later"]
         assert h.queue == []
+
+
+# ═══ C. Stop-before-output on a queue-drain successor must NOT lose messages ════
+# Data-loss regression: two messages queued, turn A ends → pre-close pops msg1 and
+# starts successor turn B; a Stop lands while turn B is running before it emits any
+# output. The pre-fix bug treated msg1 (an already-committed queued message) as an
+# abandoned user-typed draft — orphan-discarding it (user_message_discarded) — and
+# left msg2 stranded, so BOTH queued messages vanished silently.
+
+
+def _discarded_frames(handler):
+    """user_message_discarded frames sent via a stubbed AsyncMock send_json."""
+    return [
+        c.args[0]
+        for c in handler.send_json.call_args_list
+        if c.args and isinstance(c.args[0], dict)
+        and c.args[0].get("type") == "user_message_discarded"
+    ]
+
+
+async def test_stop_before_output_on_queue_drain_successor_requeues_not_discards(caplog):
+    """Repro B — the data loss. Two messages queued during turn A; turn A ends so
+    the pre-close drain pops msg1 and hands off to successor turn B. A Stop lands
+    while turn B is running BEFORE any output.
+
+    Pre-fix (RED): turn B's finally treats msg1 as an abandoned draft — it emits
+    user_message_discarded and calls discard_orphan_first_turn, and msg2 is left
+    stranded, so both messages are lost.
+
+    Post-fix (GREEN): msg1 is re-queued at the FRONT (never discarded, no
+    user_message_discarded, no orphan-discard DB op), msg2 is still present, and a
+    durable ``queue-strand-on-stop`` log records the incident."""
+    import logging
+
+    with _Harness() as h:
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+        gate2 = asyncio.Event()
+        mid_stream2 = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            # Turn A starts and streams.
+            outer = asyncio.create_task(
+                handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            # Two messages queued while streaming.
+            await handler.handle_queue_message({"content": "msg1", "session_id": "sess-1"})
+            await handler.handle_queue_message({"content": "msg2", "session_id": "sess-1"})
+            assert [m["content"] for m in h.queue] == ["msg1", "msg2"]
+
+            # Turn A ends: pre-close pops msg1 and hands off to successor turn B.
+            gate.set()
+            await asyncio.wait_for(outer, timeout=5.0)
+            await asyncio.wait_for(mid_stream2.wait(), timeout=5.0)
+            successor = h.registry.get("sess-1")
+            assert successor is not None and successor is not outer
+            assert [m["content"] for m in h.popped] == ["msg1"]
+            assert [m["content"] for m in h.queue] == ["msg2"]
+
+            # A Stop lands while turn B runs, before it emits output.
+            h.stopped.add("sess-1")
+
+            with caplog.at_level(logging.WARNING):
+                gate2.set()
+                await asyncio.wait_for(successor, timeout=5.0)
+
+        # GREEN expectations — msg1 re-queued at front, never discarded.
+        assert _discarded_frames(handler) == [], (
+            "a committed queued message must never be bounced back as a discarded draft"
+        )
+        assert not h.db.discard_orphan_first_turn.called, (
+            "a queue-drain successor must never wipe the shared SDK transcript"
+        )
+        h.db.requeue_message_at_front.assert_called_once()
+        assert h.db.requeue_message_at_front.call_args.kwargs["content"] == "msg1"
+        assert [m["content"] for m in h.queue] == ["msg1", "msg2"], (
+            "both queued messages must survive the Stop"
+        )
+        assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records), (
+            "a durable strand/re-queue log must record the incident"
+        )
+
+
+async def test_stop_stranding_nonempty_queue_emits_durable_log(caplog):
+    """Repro A — a Stop that strands a non-empty queue is non-lossy but must not be
+    silent. During a streaming turn a message is queued, then Stop lands. The row
+    stays (existing by-design behavior — not auto-processed) AND a durable
+    ``queue-strand-on-stop`` log is emitted so the strand is diagnosable."""
+    import logging
+
+    with _Harness() as h:
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            outer = asyncio.create_task(
+                handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            # Queue a message mid-stream, then Stop.
+            await handler.handle_queue_message({"content": "later msg", "session_id": "sess-1"})
+            assert [m["content"] for m in h.queue] == ["later msg"]
+            h.stopped.add("sess-1")
+
+            with caplog.at_level(logging.WARNING):
+                gate.set()
+                await asyncio.wait_for(outer, timeout=5.0)
+
+        # Row survives, never auto-processed, and the strand is logged.
+        assert [m["content"] for m in h.queue] == ["later msg"]
+        assert prompts == ["hello"], "a stranded message must not be auto-fired after Stop"
+        assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records)
+
+
+async def test_genuine_first_turn_stop_still_orphan_discards(caplog):
+    """Regression guard for #420: a genuine user-typed FIRST turn stopped before any
+    output STILL orphan-discards (user_message_discarded emitted + first-turn discard
+    DB op). The re-queue fix must fire ONLY for server-initiated queue-drain
+    successors, never for a real user draft."""
+    with _Harness() as h:
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            outer = asyncio.create_task(
+                handler.run_query("my draft", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            # Stop before any output on a brand-new session's first turn.
+            h.stopped.add("sess-1")
+            gate.set()
+            await asyncio.wait_for(outer, timeout=5.0)
+
+        discarded = _discarded_frames(handler)
+        assert len(discarded) == 1 and discarded[0]["prompt"] == "my draft", (
+            "#420 orphan-discard must still restore the user's typed draft"
+        )
+        assert h.db.discard_orphan_first_turn.called
+        assert not h.db.requeue_message_at_front.called
+
+
+async def test_stop_before_output_on_followup_queue_drain_requeues_and_cleans_legacy_row(caplog):
+    """The PRODUCTION follow-up case (sdk_session_id NOT None): a queue-drain
+    successor stopped before output must re-queue msg1 at front AND drop the eager
+    ``session_messages`` row the pre-close drain persisted for it (the silent,
+    legacy-table-only ``delete_orphan_user_turn`` cleanup) — so re-draining msg1
+    later does not leave a duplicate legacy user row. It must NEVER run
+    ``discard_orphan_first_turn`` (that wipes the SHARED SDK transcript — real
+    history) nor emit ``user_message_discarded`` (that would bounce a committed
+    message into the input box)."""
+    import logging
+
+    with _Harness() as h:
+        # Follow-up session: it already has an SDK transcript.
+        h.session_row["sdk_session_id"] = "sdk-existing"
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+        gate2 = asyncio.Event()
+        mid_stream2 = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            outer = asyncio.create_task(
+                handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            await handler.handle_queue_message({"content": "msg1", "session_id": "sess-1"})
+            await handler.handle_queue_message({"content": "msg2", "session_id": "sess-1"})
+
+            gate.set()
+            await asyncio.wait_for(outer, timeout=5.0)
+            await asyncio.wait_for(mid_stream2.wait(), timeout=5.0)
+            successor = h.registry.get("sess-1")
+            assert successor is not None and successor is not outer
+            assert [m["content"] for m in h.popped] == ["msg1"]
+
+            h.stopped.add("sess-1")
+            with caplog.at_level(logging.WARNING):
+                gate2.set()
+                await asyncio.wait_for(successor, timeout=5.0)
+
+        # Re-queued at front, legacy row dropped, transcript never wiped, no bounce.
+        assert _discarded_frames(handler) == []
+        assert not h.db.discard_orphan_first_turn.called, (
+            "a follow-up queue-drain successor must NOT wipe the shared transcript"
+        )
+        assert h.db.delete_orphan_user_turn.called, (
+            "the eager session_messages row for msg1 must be dropped so a re-drain "
+            "does not duplicate it in the legacy table"
+        )
+        h.db.requeue_message_at_front.assert_called_once()
+        assert h.db.requeue_message_at_front.call_args.kwargs["content"] == "msg1"
+        assert [m["content"] for m in h.queue] == ["msg1", "msg2"]
+        assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records)

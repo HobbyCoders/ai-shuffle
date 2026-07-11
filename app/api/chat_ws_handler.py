@@ -3770,7 +3770,14 @@ class ChatWebSocketHandler:
                                     f"on a fresh client"
                                 )
                             task = asyncio.create_task(
-                                self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+                                self.run_query(
+                                    content, session_id, profile_id, project_id, None, worktree_id,
+                                    queue_drain_source={
+                                        "content": content,
+                                        "profile_id": profile_id,
+                                        "project_id": project_id,
+                                    },
+                                )
                             )
                             _active_chat_sessions[session_id] = task
                 if preempted or latched or stale:
@@ -4021,6 +4028,7 @@ class ChatWebSocketHandler:
         request_id: Optional[str] = None,
         is_failover_retry: bool = False,
         failover_attempted: Optional[set] = None,
+        queue_drain_source: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket.
 
@@ -4044,6 +4052,15 @@ class ChatWebSocketHandler:
         the interactive new-session path — server-initiated turns (queue drain,
         unpark follow-up) leave it ``None``, so their ``start`` frame carries no
         token and can never be adopted as a foreign session's brand-new chat.
+
+        ``queue_drain_source`` marks this turn as a server-initiated queue-drain
+        successor: it carries ``{"content", "profile_id", "project_id"}`` of the
+        already-committed queued message that was popped to start this turn. Its
+        prompt is therefore NOT a user-typed draft. If a Stop lands before this
+        turn emits any output, the finally block RE-QUEUES that message at the
+        front (``requeue_message_at_front``) instead of running the #420
+        orphan-discard path — a committed queued message must never be silently
+        dropped or bounced back into the input box as an abandoned draft.
         """
         from app.api.websocket import (
             _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
@@ -4405,10 +4422,19 @@ class ChatWebSocketHandler:
                         interrupted=False,
                     )
 
-                    # Start new query inline — session stays active, no gap
+                    # Start new query inline — session stays active, no gap.
+                    # Mark it a queue-drain successor: msg1 is already committed,
+                    # so a Stop before output must re-queue it, not orphan-discard.
                     try:
                         task = asyncio.create_task(
-                            self.run_query(q_content, session_id, q_profile, q_project, None, worktree_id)
+                            self.run_query(
+                                q_content, session_id, q_profile, q_project, None, worktree_id,
+                                queue_drain_source={
+                                    "content": q_content,
+                                    "profile_id": q_profile,
+                                    "project_id": q_project,
+                                },
+                            )
                         )
                         async with _active_sessions_lock:
                             _active_chat_sessions[session_id] = task
@@ -4753,10 +4779,74 @@ class ChatWebSocketHandler:
                             await live_session_store.discard_empty_user_turn(session_id)
                         except Exception as discard_err:
                             ctx.warning(logger, f"discard_empty_user_turn (live) failed: {discard_err}")
+
+                        if queue_drain_source is not None:
+                            # DATA-LOSS FIX: this "empty" turn is a server-initiated
+                            # queue-drain successor — its prompt is an ALREADY-COMMITTED
+                            # queued message, NOT an abandoned user draft. The #420
+                            # orphan-discard path below would wrongly treat it as one
+                            # (emitting user_message_discarded / discard_orphan_first_turn),
+                            # dropping the message silently. Instead, re-queue it at the
+                            # FRONT so a Stop before output never loses a queued message.
+                            q_src_content = queue_drain_source.get("content", prompt)
+                            q_src_profile = queue_drain_source.get("profile_id")
+                            q_src_project = queue_drain_source.get("project_id")
+                            # Drop the eager session_messages row the pre-close drain
+                            # persisted for this message BEFORE re-queuing it, so the
+                            # re-drain does not leave two legacy user rows. This is the
+                            # SAME silent, legacy-table-only cleanup the follow-up
+                            # orphan path uses (delete_orphan_user_turn) — it never
+                            # touches the shared SDK transcript and never emits
+                            # user_message_discarded (we are re-queuing, not bouncing
+                            # the text back to the input box). NOTE: under
+                            # postgres_only the chat reads the SDK transcript
+                            # (session_store_entries), where this turn's eagerly
+                            # mirrored user line is left in place — the SAME
+                            # pre-existing #420 follow-up limitation as an ordinary
+                            # stop-before-output on a follow-up turn (a lone orphan
+                            # user line that cannot be cleanly reverted per-turn
+                            # without wiping shared history).
+                            try:
+                                await run_sync(database.delete_orphan_user_turn, session_id)
+                            except Exception as hygiene_err:  # noqa: BLE001
+                                ctx.warning(
+                                    logger,
+                                    f"queue-drain re-queue legacy-row cleanup failed: {hygiene_err}",
+                                )
+                            try:
+                                await run_sync(
+                                    database.requeue_message_at_front,
+                                    session_id=session_id,
+                                    content=q_src_content,
+                                    profile_id=q_src_profile if q_src_profile != "claude-code" else None,
+                                    project_id=q_src_project,
+                                )
+                                queue = await run_sync(database.get_queued_messages, session_id)
+                                await sync_engine.broadcast_queue_updated(session_id, queue)
+                            except Exception as requeue_err:
+                                # Never let a re-queue failure crash the finally; log
+                                # durably so the drop is at least diagnosable.
+                                logger.error(
+                                    "[Queue] queue-strand-on-stop: FAILED to re-queue a "
+                                    "drained message after Stop-before-output "
+                                    "(session=%s): %s",
+                                    session_id, requeue_err,
+                                )
+                            logger.warning(
+                                "[Queue] queue-strand-on-stop: re-queued a drained "
+                                "message at front after Stop-before-output "
+                                "(session=%s) — NOT discarded as an orphan draft",
+                                session_id,
+                            )
+                            ctx.info(
+                                logger,
+                                "Stopped before output on a queue-drain successor — "
+                                "re-queued the committed message instead of discarding it",
+                            )
                         # Durable cleanup. `sdk_sid` is the session's sdk_session_id
                         # captured at the START of this turn (before streaming),
                         # so it tells first turn from follow-up.
-                        if sdk_sid is None:
+                        elif sdk_sid is None:
                             # FIRST turn of a brand-new session. Under postgres_only
                             # the chat is read back from session_store_entries (the
                             # SDK transcript), so the SDK may already have mirrored
@@ -4807,6 +4897,26 @@ class ChatWebSocketHandler:
                             logger,
                             "Stopped after output began — keeping the partial turn "
                             "(not an orphan)",
+                        )
+
+                    # Non-lossy Stop: a Stop that leaves a non-empty queue keeps the
+                    # rows intact (by design — handle_stop never auto-fires them) but
+                    # must NOT be silent. Emit a durable, greppable record of the
+                    # strand (including any message just re-queued by the fix above)
+                    # so a "my queued messages vanished" incident is diagnosable.
+                    try:
+                        _q_stranded = await run_sync(
+                            database.count_queued_messages, session_id
+                        )
+                    except Exception as count_err:  # noqa: BLE001
+                        _q_stranded = None
+                        ctx.debug(logger, f"queue-strand count failed: {count_err}")
+                    if _q_stranded:
+                        logger.warning(
+                            "[Queue] queue-strand-on-stop: %d message(s) left queued "
+                            "after Stop for session=%s — kept in the queue, not "
+                            "auto-fired (send manually or reload to resume)",
+                            _q_stranded, session_id,
                         )
                 else:
                     # Check if a new query was already spawned by pre-close processing
