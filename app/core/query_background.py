@@ -134,6 +134,11 @@ async def _run_background_query(
         session_id=session_id
     )
 
+    # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
+    # spawn path too — previously only the WebSocket path did (issue #567).
+    from app.core.hook_service import attach_hooks_to_options
+    attach_hooks_to_options(options, project_id=project.get("id") if project else None)
+
     # --- Stale-turn early gate (F3) ---
     # Check stale_turn_undrained BEFORE stopping the drain pump: the pump is the
     # ONLY thing that can clear the flag (by consuming the killed turn's buffered

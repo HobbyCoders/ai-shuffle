@@ -900,3 +900,36 @@ def build_hooks_config(
     logger.debug(f"[HookService] Registered Stop handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config
+
+
+def attach_hooks_to_options(
+    options: Any,
+    project_id: Optional[str] = None,
+    stderr_callback: StderrCallback = None,
+) -> None:
+    """Build hooks from all sources and set them on ``options`` in place.
+
+    The single seam every SDK-session spawn path goes through — WebSocket chat,
+    one-shot ``execute_query``, SSE ``stream_query``, and the background REST
+    path — so DB hooks (including blocking PreToolUse security guards) fire
+    regardless of transport (issue #567). No-op when the options carry no
+    working directory.
+    """
+    working_dir = getattr(options, "cwd", None)
+    if not working_dir:
+        return
+
+    plugin_paths = []
+    for plugin_entry in (options.plugins or []):
+        if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
+            plugin_paths.append(plugin_entry["path"])
+
+    hooks_config = build_hooks_config(
+        working_dir=working_dir,
+        project_id=project_id,
+        plugin_paths=plugin_paths,
+        stderr_callback=stderr_callback,
+    )
+    if hooks_config:
+        options.hooks = hooks_config
+        logger.debug(f"[HookService] Hooks configured: {list(hooks_config.keys())}")

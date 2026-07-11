@@ -1,13 +1,13 @@
 """
 WebSocket API for real-time chat and synchronization.
 
-Primary endpoint: /ws/chat/{session_id}
+Primary endpoint: /api/v1/ws/chat (session id supplied per-message)
 - Handles all chat interactions via WebSocket
 - Streams Claude responses directly to client
 - Simple, reliable, no race conditions
 
 Additional endpoints:
-- /ws/cli/{session_id} - Interactive CLI bridge for commands like /rewind
+- /api/v1/ws/cli/{session_id} - Interactive CLI bridge for commands like /rewind
 """
 
 import logging

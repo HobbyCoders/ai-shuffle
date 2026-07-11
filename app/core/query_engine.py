@@ -859,6 +859,11 @@ async def execute_query(
         session_id=session_id,
     )
 
+    # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
+    # spawn path too — previously only the WebSocket path did (issue #567).
+    from app.core.hook_service import attach_hooks_to_options
+    attach_hooks_to_options(options, project_id=project_id)
+
     # Resolve virtual @Notes/note-id references to actual content
     prompt = resolve_note_references(prompt)
 
@@ -1257,6 +1262,11 @@ async def stream_query(
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
         yield {"type": "error", "message": str(e)}
         return
+
+    # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
+    # spawn path too — previously only the WebSocket path did (issue #567).
+    from app.core.hook_service import attach_hooks_to_options
+    attach_hooks_to_options(options, project_id=project_id)
 
     # Yield init event
     yield {"type": "init", "session_id": session_id}
@@ -2254,7 +2264,7 @@ async def stream_to_websocket(
         options.can_use_tool = can_use_tool_callback
 
         # Build hooks configuration from all sources (plugins, database)
-        from app.core.hook_service import build_hooks_config
+        from app.core.hook_service import attach_hooks_to_options
 
         async def stderr_callback(plugin_name: str, stderr_output: str, severity: str):
             """Callback for plugin hooks to broadcast stderr to frontend."""
@@ -2265,22 +2275,9 @@ async def stream_to_websocket(
                 "severity": severity
             })
 
-        if options.cwd:
-            plugin_paths = []
-            if options.plugins:
-                for plugin_entry in options.plugins:
-                    if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
-                        plugin_paths.append(plugin_entry["path"])
-
-            hooks_config = build_hooks_config(
-                working_dir=options.cwd,
-                project_id=project_id,
-                plugin_paths=plugin_paths,
-                stderr_callback=stderr_callback
-            )
-            if hooks_config:
-                options.hooks = hooks_config
-                logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
+        attach_hooks_to_options(
+            options, project_id=project_id, stderr_callback=stderr_callback
+        )
 
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
