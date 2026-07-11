@@ -449,6 +449,66 @@ class TestSessionOperations:
         assert len(result) == 1
         assert result[0]["id"] == "session-2"
 
+    def test_clear_session_conversation(self, mock_db, setup_profile):
+        """clear_session_conversation wipes transcript + message rows + usage
+        counters and unlinks sdk_session_id, but KEEPS the session row — the
+        in-place "Clear session" reset. Returns the old sdk_session_id."""
+        db.create_session("session-1", setup_profile)
+        # Link an SDK session and rack up usage / chat history / transcript rows.
+        db.update_session(
+            "session-1", sdk_session_id="sdk-1",
+            cost_increment=0.5, tokens_in_increment=100,
+            tokens_out_increment=200, turn_increment=3,
+        )
+        db.add_session_message("session-1", "user", "hello")
+        db.add_session_message("session-1", "assistant", "hi there")
+        mock_db.execute(
+            "INSERT INTO session_store_entries (project_key, session_id, subpath, entry) "
+            "VALUES (?, ?, ?, ?)",
+            ("proj", "sdk-1", None, '{"role":"user"}'),
+        )
+        mock_db.execute(
+            "INSERT INTO session_store_summaries (project_key, session_id, data, mtime_ms) "
+            "VALUES (?, ?, ?, ?)",
+            ("proj", "sdk-1", "{}", 1),
+        )
+        mock_db.commit()
+
+        prev_sdk = db.clear_session_conversation("session-1")
+
+        # Returned the old SDK id (so the caller can clean its JSONL/subprocess).
+        assert prev_sdk == "sdk-1"
+        # Session row SURVIVES, unlinked and zeroed.
+        s = db.get_session("session-1")
+        assert s is not None
+        assert s["sdk_session_id"] is None
+        assert s["total_cost_usd"] == 0
+        assert s["total_tokens_in"] == 0
+        assert s["total_tokens_out"] == 0
+        assert s["turn_count"] == 0
+        # Chat history + SDK transcript mirror wiped.
+        assert db.get_session_messages("session-1") == []
+        cur = mock_db.execute(
+            "SELECT COUNT(*) FROM session_store_entries WHERE session_id = ?", ("sdk-1",)
+        )
+        assert cur.fetchone()[0] == 0
+        cur = mock_db.execute(
+            "SELECT COUNT(*) FROM session_store_summaries WHERE session_id = ?", ("sdk-1",)
+        )
+        assert cur.fetchone()[0] == 0
+
+    def test_clear_session_conversation_no_sdk_session(self, mock_db, setup_profile):
+        """With no SDK session linked yet there is no transcript to wipe — the
+        message rows still go, the row stays, and the return is None."""
+        db.create_session("session-1", setup_profile)
+        db.add_session_message("session-1", "user", "hello")
+
+        prev_sdk = db.clear_session_conversation("session-1")
+
+        assert prev_sdk is None
+        assert db.get_session_messages("session-1") == []
+        assert db.get_session("session-1") is not None
+
 
 # =============================================================================
 # Session Message Operations Tests

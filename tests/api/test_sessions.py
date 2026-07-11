@@ -1236,6 +1236,49 @@ class TestDeleteSession:
         assert response.status_code == 403
 
 
+class TestClearSession:
+    """Test POST /api/v1/sessions/{session_id}/clear endpoint.
+
+    Clears a session's conversation IN PLACE — the row survives; only its
+    transcript/messages are reset (contrast with DELETE, which removes the row).
+    """
+
+    def test_clear_session_success(self, client, mock_database, sample_session):
+        """Should clear the conversation and KEEP the row (no delete_session)."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        assert response.json()["session_id"] == "test-session-id"
+        mock_database.clear_session_conversation.assert_called_once_with("test-session-id")
+        # In-place clear must NEVER delete the session row.
+        mock_database.delete_session.assert_not_called()
+
+    def test_clear_session_not_found(self, client, mock_database):
+        """Should return 404 for a non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/clear")
+
+        assert response.status_code == 404
+
+    def test_clear_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny clear for an unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 403
+        mock_database.clear_session_conversation.assert_not_called()
+
+
 # =============================================================================
 # Test Batch Delete Sessions Endpoint
 # =============================================================================

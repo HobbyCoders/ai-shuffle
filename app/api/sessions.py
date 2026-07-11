@@ -1768,6 +1768,42 @@ async def delete_session(
     )
 
 
+@router.post("/{session_id}/clear", status_code=status.HTTP_200_OK)
+async def clear_session(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(require_auth),
+):
+    """Clear a session's conversation IN PLACE — wipe its transcript/messages but
+    KEEP the session row.
+
+    This backs the "Clear session" row action: the session (id / title / project /
+    worktree link) survives, but its conversation is reset to empty so the user
+    stays on the same session and the next prompt starts a fresh SDK conversation.
+    Contrast with :func:`delete_session`, which removes the row entirely.
+
+    The DB reset (unlink sdk_session_id, wipe transcript store + message rows,
+    zero counters) runs synchronously so the client's reload is immediately empty.
+    Slow cleanup (pooled subprocess teardown + SDK JSONL file removal for the
+    now-orphaned old transcript) is deferred to a background task.
+    """
+    existing = await require_session(request, session_id)
+
+    # Authoritative, synchronous reset — returns the OLD sdk_session_id (now
+    # unlinked) so its subprocess + JSONL can be cleaned in the background.
+    old_sdk_sid = await run_sync(database.clear_session_conversation, session_id)
+
+    background_tasks.add_task(
+        _cleanup_session_artifacts,
+        session_id,
+        old_sdk_sid,
+        existing.get("project_id"),
+    )
+
+    return {"status": "ok", "session_id": session_id}
+
+
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
 async def batch_delete_sessions(
     request: Request,

@@ -60,6 +60,8 @@ const mocks = vi.hoisted(() => {
 		loadSessions: vi.fn(),
 		loadProjects: vi.fn(),
 		deleteSession: vi.fn(),
+		clearSession: vi.fn(),
+		clearMessages: vi.fn(),
 		toastPush: vi.fn(),
 		apiPost: vi.fn(),
 		apiDelete: vi.fn()
@@ -70,13 +72,17 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	appData: {
 		loadSessions: mocks.loadSessions,
 		loadProjects: mocks.loadProjects,
-		deleteSession: mocks.deleteSession
+		deleteSession: mocks.deleteSession,
+		clearSession: mocks.clearSession
 	},
 	sessions: mocks.sessions,
 	projects: mocks.projects
 }));
 vi.mock('$lib/stores/active-session', () => ({
-	activeSession: mocks.activeSession,
+	// The board reads `$activeSession` (subscribe) AND calls
+	// `activeSession.clearMessages()` on an in-place clear of the OPEN session, so
+	// the mocked store must carry that method too.
+	activeSession: Object.assign(mocks.activeSession, { clearMessages: mocks.clearMessages }),
 	streamingSessions: mocks.streamingSessions,
 	backgroundPermissions: mocks.backgroundPermissions
 }));
@@ -151,6 +157,8 @@ beforeEach(() => {
 	mocks.adoptSession.mockResolvedValue({ session_id: 'b', adopted: true });
 	mocks.toggleSessionFavorite.mockResolvedValue({});
 	mocks.loadSessions.mockResolvedValue(undefined);
+	mocks.clearSession.mockResolvedValue(undefined);
+	mocks.activeSession.set({ sessionId: null, isStreaming: false });
 	mocks.sessions.set([localSession, remoteSession]);
 });
 
@@ -212,6 +220,53 @@ describe('SessionsBoard action rail', () => {
 });
 
 /**
+ * Core behavior for the "Clear session opens a new screen" fix: confirming Clear
+ * on a session must clear its conversation IN PLACE — persist the clear to the
+ * backend and (for the OPEN session) empty the live message store — while STAYING
+ * on the session. It must NOT delete the session and must NOT navigate to New
+ * Chat. Previously the active-session path called onNewSession()+deleteSession(),
+ * which yanked the user to the blank New Chat hero and destroyed the row.
+ */
+describe('SessionsBoard clear-session clears in place (no New Chat, no delete)', () => {
+	// Confirm requires two clicks (arm, then confirm) on the row's Clear button.
+	async function confirmClear(title: string) {
+		await fireEvent.click(rowFor(title).querySelector('[title="Clear session"]') as HTMLElement);
+		await fireEvent.click(rowFor(title).querySelector('[title="Confirm clear"]') as HTMLElement);
+	}
+
+	it('clears the OPEN (active) session in place: persists, empties the live store, no navigate, no delete', async () => {
+		// The row under test IS the session currently open on screen.
+		mocks.activeSession.set({ sessionId: 'a', isStreaming: false });
+		const { onNewSession, onOpenSession } = renderBoard();
+
+		await confirmClear('Local one');
+
+		// Persisted the clear to the backend for id 'a'…
+		expect(mocks.clearSession).toHaveBeenCalledWith('a');
+		// …emptied the open chat's live message store for instant feedback…
+		await vi.waitFor(() => expect(mocks.clearMessages).toHaveBeenCalledTimes(1));
+		// …and stayed put: never navigated to New Chat, never re-opened, never deleted.
+		expect(onNewSession).not.toHaveBeenCalled();
+		expect(onOpenSession).not.toHaveBeenCalled();
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+
+	it('clears a NON-active session in place without touching the open chat', async () => {
+		// A DIFFERENT session is open; clearing row 'a' must persist but must NOT
+		// clear the open session's live store (that belongs to another session).
+		mocks.activeSession.set({ sessionId: 'z', isStreaming: false });
+		const { onNewSession } = renderBoard();
+
+		await confirmClear('Local one');
+
+		expect(mocks.clearSession).toHaveBeenCalledWith('a');
+		expect(mocks.clearMessages).not.toHaveBeenCalled();
+		expect(onNewSession).not.toHaveBeenCalled();
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
+	});
+});
+
+/**
  * Regression: the clear-session confirmation used to blank itself out after a
  * mere 3s via a fire-and-forget timer, so users perceived "the confirm button
  * vanished as if I never clicked". The confirm window is now 8s and its timer is
@@ -247,6 +302,7 @@ describe('SessionsBoard clear-session confirm timer', () => {
 		await vi.advanceTimersByTimeAsync(200);
 		expect(confirmVisible()).toBe(false);
 		expect(rowFor('Local one').querySelector('[title="Clear session"]')).toBeTruthy();
+		expect(mocks.clearSession).not.toHaveBeenCalled();
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 	});
 
@@ -273,6 +329,7 @@ describe('SessionsBoard clear-session confirm timer', () => {
 		// The fresh timer still auto-resets on schedule, and nothing was deleted.
 		await vi.advanceTimersByTimeAsync(4900);
 		expect(confirmVisible()).toBe(false);
+		expect(mocks.clearSession).not.toHaveBeenCalled();
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 	});
 
@@ -352,12 +409,14 @@ describe('SessionsBoard action tray open/close state', () => {
 		const clear = rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement;
 		await fireEvent.click(clear);
 		expect(isTrayOpen('Local one')).toBe(true);
-		expect(mocks.deleteSession).not.toHaveBeenCalled();
+		expect(mocks.clearSession).not.toHaveBeenCalled();
 
-		// Confirming actually deletes and must close the tray.
+		// Confirming actually clears the conversation (never deletes the row) and
+		// must close the tray.
 		const confirm = rowFor('Local one').querySelector('[title="Confirm clear"]') as HTMLElement;
 		await fireEvent.click(confirm);
-		expect(mocks.deleteSession).toHaveBeenCalledWith('a');
+		expect(mocks.clearSession).toHaveBeenCalledWith('a');
+		expect(mocks.deleteSession).not.toHaveBeenCalled();
 		expect(isTrayOpen('Local one')).toBe(false);
 	});
 
@@ -371,6 +430,7 @@ describe('SessionsBoard action tray open/close state', () => {
 		const cancel = rowFor('Local one').querySelector('[title="Cancel"]') as HTMLElement;
 		await fireEvent.click(cancel);
 		expect(isTrayOpen('Local one')).toBe(false);
+		expect(mocks.clearSession).not.toHaveBeenCalled();
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 	});
 });
@@ -394,18 +454,18 @@ describe('SessionsBoard clear-session confirm never opens a new chat', () => {
 	// returns the resolver so each test controls when the request "completes".
 	async function confirmWithDeleteHeldOpen() {
 		let resolveDelete!: () => void;
-		mocks.deleteSession.mockImplementationOnce(
+		mocks.clearSession.mockImplementationOnce(
 			() => new Promise<void>((res) => { resolveDelete = () => res(); })
 		);
 		const rendered = renderBoard();
 		await fireEvent.click(rowFor('Local one').querySelector('[title="Clear session"]') as HTMLElement);
 		await fireEvent.click(rowFor('Local one').querySelector('[title="Confirm clear"]') as HTMLElement);
-		expect(mocks.deleteSession).toHaveBeenCalledWith('a');
+		expect(mocks.clearSession).toHaveBeenCalledWith('a');
 		return { ...rendered, resolveDelete };
 	}
 	async function finish(resolveDelete: () => void) {
 		resolveDelete();
-		await vi.waitFor(() => expect(mocks.deleteSession).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() => expect(mocks.clearSession).toHaveBeenCalledTimes(1));
 	}
 
 	it('keeps the row-open guard live while the delete is in flight', async () => {

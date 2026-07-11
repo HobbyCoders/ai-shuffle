@@ -1156,6 +1156,77 @@ def discard_orphan_first_turn(session_id: str) -> Optional[str]:
         return discarded
 
 
+def clear_session_conversation(session_id: str) -> Optional[str]:
+    """Clear a session's conversation IN PLACE — wipe its transcript/messages but
+    KEEP the session row (and its ``worktree_id`` link).
+
+    Semantics: this is the "Clear session" row action. Unlike
+    :func:`delete_session` (which removes the row entirely) or a rewind (which
+    truncates to a checkpoint), this resets the whole conversation to empty while
+    preserving the session's identity (id / title / project / worktree) so the
+    user stays put and the next prompt starts a fresh SDK conversation.
+
+    Under ``SESSION_STORE_MODE=postgres_only`` the chat view is read back from
+    ``session_store_entries`` keyed by the session's ``sdk_session_id`` — NOT from
+    ``session_messages`` (see :func:`discard_orphan_first_turn`). So a durable
+    clear must: wipe the SDK transcript store rows, NULL ``sdk_session_id`` so the
+    read path skips the (now stale) transcript and returns nothing, drop the
+    legacy ``session_messages`` rows, and zero the persisted usage counters.
+
+    Returns the previous ``sdk_session_id`` (or None) so the caller can
+    background-clean its JSONL file / pooled subprocess.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+
+        cursor.execute(
+            f"SELECT sdk_session_id FROM sessions WHERE id = {_ph}", (session_id,)
+        )
+        srow = cursor.fetchone()
+        if srow is None:
+            return None
+        prev_sdk_sid = srow["sdk_session_id"] if isinstance(srow, dict) else srow[0]
+
+        if prev_sdk_sid:
+            # Wipe the SDK transcript mirror so postgres_only reads return nothing.
+            # session_id-only match (the SDK UUID is unique per session); subagent
+            # transcripts (subpath != NULL) for this session are swept too.
+            cursor.execute(
+                f"DELETE FROM session_store_entries WHERE session_id = {_ph}",
+                (prev_sdk_sid,),
+            )
+            cursor.execute(
+                f"DELETE FROM session_store_summaries WHERE session_id = {_ph}",
+                (prev_sdk_sid,),
+            )
+
+        # Drop the legacy chat-history rows for this session.
+        cursor.execute(
+            f"DELETE FROM session_messages WHERE session_id = {_ph}",
+            (session_id,),
+        )
+
+        # Unlink the SDK session and zero the persisted usage counters. Nulling
+        # sdk_session_id makes the read path skip the transcript block entirely
+        # (so even before the background JSONL cleanup runs, a reload is empty),
+        # and the next prompt mints a fresh SDK session. update_session() can't
+        # express the NULL (its ``sdk_session_id=None`` means "leave unchanged"),
+        # so write it directly here alongside the counter reset.
+        cursor.execute(
+            f"""UPDATE sessions
+                   SET sdk_session_id = NULL,
+                       total_cost_usd = 0,
+                       total_tokens_in = 0,
+                       total_tokens_out = 0,
+                       turn_count = 0,
+                       updated_at = {_ph}
+                 WHERE id = {_ph}""",
+            (datetime.now(timezone.utc).isoformat(), session_id),
+        )
+        return prev_sdk_sid
+
+
 def delete_session_messages_after(session_id: str, message_id: int) -> int:
     """Delete all messages after a specific message ID (for rewind)"""
     _ph = ph()

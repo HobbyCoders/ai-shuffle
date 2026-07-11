@@ -929,6 +929,7 @@ from app.db.sessions import (  # noqa: F401
     delete_session_message,
     delete_orphan_user_turn,
     discard_orphan_first_turn,
+    clear_session_conversation,
     delete_session_messages_after,
     delete_session_messages_after_jsonl_uuid,
     set_message_jsonl_uuid,

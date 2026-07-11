@@ -486,10 +486,17 @@
 			deleteInFlightId = id;
 			deleteLoading = true;
 			try {
-				if (activeId === id) onNewSession();
-				await appData.deleteSession(id);
+				// "Clear session" clears the conversation IN PLACE — the session row
+				// survives (never deleted) and we never navigate to New Chat. The
+				// backend wipes the transcript so a reload stays empty; if the cleared
+				// session is the one open on screen, empty its live message store too
+				// so the chat blanks instantly without a reload. Staying put is the
+				// whole point: previously this called onNewSession()+deleteSession(),
+				// which yanked the user to the blank New Chat hero and destroyed the row.
+				await appData.clearSession(id);
+				if (activeId === id) activeSession.clearMessages();
 			} catch {
-				toast.push('Failed to delete session', { tone: 'error' });
+				toast.push('Failed to clear session', { tone: 'error' });
 			} finally {
 				deleteLoading = false;
 				deleteInFlightId = null;

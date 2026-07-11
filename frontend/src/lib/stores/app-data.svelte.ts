@@ -383,6 +383,17 @@ export const appData = {
 		loadSessionsInternal(tagId);
 	},
 
+	async clearSession(sessionId: string) {
+		// Clear a session's conversation IN PLACE — the backend wipes its
+		// transcript/messages but KEEPS the session row, so (unlike deleteSession)
+		// there is nothing to splice out of the list here. The row stays; only its
+		// conversation is reset. The caller updates the open chat's local message
+		// store separately (activeSession.clearMessages()) for instant feedback.
+		await api.post(`/sessions/${sessionId}/clear`);
+		// Refresh the row so its updated_at / turn_count / cost reflect the reset.
+		await appData.loadSessions();
+	},
+
 	async deleteSession(sessionId: string) {
 		// Optimistic removal — splice from local state immediately for instant UI feedback.
 		// Snapshot previous state so we can roll back if the API call fails.
