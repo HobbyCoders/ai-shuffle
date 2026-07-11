@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 import {
 	computeContextBreakdown,
+	decideBreakdownRefresh,
 	formatTokenCount,
 	mapSdkContextUsage,
 	usageSeverity,
+	type BreakdownRefreshState,
 	type ContextUsageInput,
 } from './context-usage';
 import type { SdkContextUsage } from '$lib/api/sessions';
@@ -182,5 +184,79 @@ describe('mapSdkContextUsage', () => {
 		);
 		expect(b.rows[0].barPercent).toBe(0);
 		expect(b.totalPercent).toBe(0);
+	});
+});
+
+describe('decideBreakdownRefresh', () => {
+	const S = (over: Partial<BreakdownRefreshState> = {}): BreakdownRefreshState => ({
+		open: true,
+		sessionId: 'sess-1',
+		isStreaming: false,
+		...over,
+	});
+
+	it('fetches on open (single source is fetched when the popover opens)', () => {
+		const prev = S({ open: false });
+		const next = S({ open: true });
+		expect(decideBreakdownRefresh(prev, next)).toBe('open-fetch');
+	});
+
+	it('refreshes when a turn ends (fetched outside streaming, not only during it)', () => {
+		const prev = S({ isStreaming: true });
+		const next = S({ isStreaming: false });
+		expect(decideBreakdownRefresh(prev, next)).toBe('refresh');
+	});
+
+	it('clears when the popover closes or there is no session', () => {
+		expect(decideBreakdownRefresh(S(), S({ open: false }))).toBe('clear');
+		expect(decideBreakdownRefresh(S(), S({ sessionId: null }))).toBe('clear');
+	});
+
+	it('re-fetches when the session changes under an open popover', () => {
+		const prev = S({ sessionId: 'sess-1' });
+		const next = S({ sessionId: 'sess-2' });
+		expect(decideBreakdownRefresh(prev, next)).toBe('open-fetch');
+	});
+
+	it('stays idle while a turn streams — the display source never flips', () => {
+		// The effect only ever sees these three fields; a streaming poll tick that
+		// updates token counts leaves them unchanged, so the decision is `idle`
+		// (no reset, no refetch) for every tick of the turn.
+		const streaming = S({ isStreaming: true });
+		// Simulate many poll ticks over the same open, streaming session.
+		const actions = Array.from({ length: 5 }, () =>
+			decideBreakdownRefresh(streaming, streaming)
+		);
+		expect(actions).toEqual(['idle', 'idle', 'idle', 'idle', 'idle']);
+	});
+
+	it('does not re-fetch or reset just because the popover stays open at idle', () => {
+		const prev = S();
+		const next = S();
+		expect(decideBreakdownRefresh(prev, next)).toBe('idle');
+	});
+
+	it('models a full open→stream→turn-end sequence: one fetch on open, one on turn-end, none mid-stream', () => {
+		// Drive the exact transition sequence the component walks through and record
+		// which steps actually trigger a network fetch. The breakdown must be the
+		// stable single source: fetched at open and turn-end, never flip-flopped.
+		const steps: BreakdownRefreshState[] = [
+			S({ open: false, isStreaming: false }), // initial (closed)
+			S({ open: true, isStreaming: false }), //  user opens popover        -> open-fetch
+			S({ open: true, isStreaming: true }), //   turn starts streaming      -> idle
+			S({ open: true, isStreaming: true }), //   poll tick (tokens change)  -> idle
+			S({ open: true, isStreaming: true }), //   poll tick                  -> idle
+			S({ open: true, isStreaming: false }), //  turn ends                  -> refresh
+			S({ open: true, isStreaming: false }), //  post-turn idle             -> idle
+		];
+		const actions: string[] = [];
+		for (let i = 1; i < steps.length; i++) {
+			actions.push(decideBreakdownRefresh(steps[i - 1], steps[i]));
+		}
+		expect(actions).toEqual(['open-fetch', 'idle', 'idle', 'idle', 'refresh', 'idle']);
+		// Exactly two fetches (open + turn-end), and zero mid-stream flip-flops.
+		const fetches = actions.filter((a) => a === 'open-fetch' || a === 'refresh');
+		expect(fetches).toHaveLength(2);
+		expect(actions.filter((a) => a === 'clear')).toHaveLength(0);
 	});
 });

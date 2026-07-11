@@ -27,8 +27,10 @@
 	import {
 		computeContextBreakdown,
 		mapSdkContextUsage,
+		decideBreakdownRefresh,
 		formatTokenCount,
 		type ContextBreakdown,
+		type BreakdownRefreshState,
 	} from './context-usage';
 
 	// Resolve effective model: override → profile config → default
@@ -71,43 +73,82 @@
 		open = !open;
 	}
 
-	// ── Live SDK breakdown (fetched on open; falls back to the estimate) ───
-	// Populated only after a successful `available: true` fetch. Null while
-	// pending, on failure, or on `available: false` — so the popover renders the
-	// estimate meanwhile with no spinner or layout jump. Never cached across opens.
+	// ── Live SDK breakdown = the single display source for the popover ─────
+	// The breakdown returned by `/context-usage` is the canonical popover display.
+	// It's fetched on open and refreshed when a turn ends — NOT polled while
+	// streaming (the SDK breakdown can't change mid-turn and each call is a real
+	// CLI round-trip). Once fetched it STAYS on screen across streaming poll ticks;
+	// the estimate is only the fallback before the first successful fetch. This is
+	// what removes the old flip-flop: the popover no longer switched modes on every
+	// poll because reading the whole $activeSession store re-ran the fetch effect.
 	let richBreakdown = $state<ContextBreakdown | null>(null);
+
+	// Narrow, memoised reads so the refresh effect below only re-runs when one of
+	// these three actually changes — NOT on every streaming token update (which
+	// touches other $activeSession fields). $derived propagates only on value
+	// change, so streaming ticks that leave these equal never wake the effect.
+	const sessionId = $derived($activeSession.sessionId);
+	const isStreaming = $derived($activeSession.isStreaming);
 
 	// What the POPOVER renders: the live breakdown once it arrives, else the
 	// estimate. The pill above is untouched by this.
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
 	const isRich = $derived(richBreakdown !== null);
 
-	// Fetch on every open for the current session; abort/ignore when the popover
-	// closes, the component unmounts, or the session changes (effect re-run
-	// aborts the previous controller). Reading `open` + sessionId here makes the
-	// effect re-run on either change.
-	$effect(() => {
-		const sid = $activeSession.sessionId;
-		if (!open || !sid) {
-			richBreakdown = null;
-			return;
-		}
-		// Reset so a stale prior-session breakdown never lingers under the fresh
-		// fetch; the estimate shows until (and unless) this fetch succeeds.
-		richBreakdown = null;
+	// Abort the in-flight fetch when a newer one starts or the popover closes, so a
+	// stale response can never overwrite a fresher breakdown.
+	let currentController: AbortController | null = null;
+
+	function cancelFetch() {
+		currentController?.abort();
+		currentController = null;
+	}
+
+	async function fetchBreakdown(sid: string) {
+		cancelFetch();
 		const controller = new AbortController();
-		(async () => {
-			try {
-				const res = await getContextUsage(sid, { signal: controller.signal });
-				if (controller.signal.aborted) return;
-				richBreakdown = res.available ? mapSdkContextUsage(res.usage) : null;
-			} catch {
-				// Aborted, network error, or a shape we can't parse → stay on the
-				// estimate fallback. Nothing to surface to the user.
-				if (!controller.signal.aborted) richBreakdown = null;
-			}
-		})();
-		return () => controller.abort();
+		currentController = controller;
+		try {
+			const res = await getContextUsage(sid, { signal: controller.signal });
+			if (controller.signal.aborted) return;
+			// Only replace on a usable payload. On `available: false` (not
+			// connected / unsupported / timeout) or error we KEEP the last
+			// breakdown rather than snapping back to the estimate mid-view.
+			if (res.available) richBreakdown = mapSdkContextUsage(res.usage);
+		} catch {
+			// Aborted or network error → keep whatever is on screen.
+		}
+	}
+
+	// Refresh cadence lives in a pure, tested decision function. The effect reads
+	// open + sessionId + isStreaming (all value-stable across streaming ticks) and
+	// acts only on a real transition: fetch on open, refresh on turn-end, clear on
+	// close. `idle` — the streaming case — intentionally does nothing.
+	let prevRefresh: BreakdownRefreshState = { open: false, sessionId: null, isStreaming: false };
+	$effect(() => {
+		const next: BreakdownRefreshState = { open, sessionId, isStreaming };
+		const action = decideBreakdownRefresh(prevRefresh, next);
+		prevRefresh = next;
+
+		switch (action) {
+			case 'clear':
+				cancelFetch();
+				richBreakdown = null;
+				break;
+			case 'open-fetch':
+				// Fresh open (or session changed under an open popover): drop any
+				// stale breakdown so the estimate shows until the fetch lands.
+				richBreakdown = null;
+				fetchBreakdown(next.sessionId!);
+				break;
+			case 'refresh':
+				// Turn ended: pull a fresh breakdown, keep the current one visible
+				// until it arrives (no flash back to the estimate).
+				fetchBreakdown(next.sessionId!);
+				break;
+			case 'idle':
+				break;
+		}
 	});
 
 	function handleClickOutside(e: MouseEvent) {
@@ -125,6 +166,7 @@
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			document.removeEventListener('keydown', handleEscape);
+			cancelFetch();
 		};
 	});
 </script>
@@ -183,7 +225,11 @@
 			{/each}
 
 			<div class="popover-footer">
-				{isRich ? 'live breakdown' : 'estimated from last turn'}
+				{#if isRich}
+					{isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown'}
+				{:else}
+					estimated from last turn
+				{/if}
 			</div>
 		</div>
 	{/if}

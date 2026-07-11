@@ -138,6 +138,54 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 }
 
 /**
+ * Inputs the ContextUsageBar effect watches to decide when to (re)fetch the live
+ * `/context-usage` breakdown. Deliberately tiny so a streaming token update — which
+ * touches many other `$activeSession` fields but none of these — never triggers a
+ * refetch. Keeping this out of the component makes the refresh cadence unit-testable.
+ */
+export interface BreakdownRefreshState {
+	/** Popover open? Breakdown is only fetched while the user is looking at it. */
+	open: boolean;
+	sessionId: string | null;
+	/** The active turn is streaming — the SDK breakdown can't refresh mid-turn. */
+	isStreaming: boolean;
+}
+
+/**
+ * What the effect should do about the live breakdown given the previous and next
+ * watched state:
+ * - `clear`     — popover closed or no session: drop any breakdown, cancel fetches.
+ * - `open-fetch`— popover just opened (or session changed under it): show the
+ *                 estimate immediately, then fetch fresh breakdown.
+ * - `refresh`   — a turn just ended while the popover is open: fetch fresh, but
+ *                 keep the current breakdown on screen until the new one lands.
+ * - `idle`      — nothing relevant changed (e.g. a streaming poll tick): do NOT
+ *                 refetch and do NOT reset — this is what stops the mode flip-flop.
+ */
+export type BreakdownRefreshAction = 'clear' | 'open-fetch' | 'refresh' | 'idle';
+
+/**
+ * Decide the breakdown refresh action from the watched state transition.
+ *
+ * Single source of truth for the popover: the live breakdown is fetched on open,
+ * re-fetched when a turn ends, and otherwise left untouched. Crucially, streaming
+ * poll updates (which change token fields but NOT open/sessionId/isStreaming) map
+ * to `idle`, so the popover never oscillates between the live breakdown and the
+ * estimate while a turn streams.
+ */
+export function decideBreakdownRefresh(
+	prev: BreakdownRefreshState,
+	next: BreakdownRefreshState
+): BreakdownRefreshAction {
+	if (!next.open || !next.sessionId) return 'clear';
+	// Fresh open, or the session changed while the popover stayed open.
+	if (!prev.open || prev.sessionId !== next.sessionId) return 'open-fetch';
+	// A turn just finished — the breakdown is now stale, pull a fresh one.
+	if (prev.isStreaming && !next.isStreaming) return 'refresh';
+	return 'idle';
+}
+
+/**
  * Map the live SDK ContextUsageResponse.usage into the same display shape the
  * popover already renders, so the component can swap the estimate for the real
  * per-category breakdown without any layout change.
