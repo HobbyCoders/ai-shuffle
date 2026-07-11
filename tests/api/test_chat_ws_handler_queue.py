@@ -823,3 +823,139 @@ async def test_stop_before_output_on_followup_queue_drain_requeues_and_cleans_le
         assert h.db.requeue_message_at_front.call_args.kwargs["content"] == "msg1"
         assert [m["content"] for m in h.queue] == ["msg1", "msg2"]
         assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records)
+
+
+# ═══ D. interrupt_for_query-pending teardown of a queue-drain successor ═════════
+# The deferred #554 TOCTOU gap (incident: session 61e0f967, 2026-07-11). The
+# pre-close drain pops msg1 and starts successor turn B; before B emits output the
+# turn is torn down via the INTERRUPT-PENDING path (a two-phase interrupt_for_query
+# landed), NOT the user-Stop path. Pre-fix the interrupt-pending branch of the
+# fallback only logged "Skipping queue processing — interrupt_for_query pending"
+# and returned — it never re-queued msg1. msg1 was popped, written only to the
+# invisible legacy session_messages table (unread under postgres_only), never
+# mirrored to the transcript, and gone from both the UI and the queue. #554's
+# re-queue safety net lived ONLY in the Stop branch, so it never fired here.
+
+
+async def test_interrupt_pending_teardown_of_queue_drain_successor_requeues_not_loses(caplog):
+    """Repro of the #554-deferred gap. Two messages queued during turn A; turn A
+    ends so the pre-close drain pops msg1 and hands off to successor turn B. Before
+    turn B emits any output it is torn down via ``_interrupt_pending_sessions`` (an
+    ``interrupt_for_query`` landed), NOT via a user Stop.
+
+    Pre-fix (RED): the interrupt-pending fallback branch just logs and returns —
+    msg1 (already committed, popped, written only to the invisible legacy table) is
+    never re-queued, so ``requeue_message_at_front`` is not called and the queue is
+    left as just ``[msg2]`` — msg1 is silently lost.
+
+    Post-fix (GREEN): the generalized pre-output re-queue fires for the
+    interrupt-pending teardown too — msg1 is re-queued at the FRONT (queue becomes
+    ``[msg1, msg2]``), never discarded (no ``user_message_discarded``, no
+    ``discard_orphan_first_turn``), and a durable ``queue-strand-on-stop`` log
+    records the incident."""
+    import logging
+
+    with _Harness() as h:
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+        gate2 = asyncio.Event()
+        mid_stream2 = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            outer = asyncio.create_task(
+                handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            # Two messages queued while turn A streams.
+            await handler.handle_queue_message({"content": "msg1", "session_id": "sess-1"})
+            await handler.handle_queue_message({"content": "msg2", "session_id": "sess-1"})
+            assert [m["content"] for m in h.queue] == ["msg1", "msg2"]
+
+            # Turn A ends: pre-close pops msg1 and hands off to successor turn B.
+            gate.set()
+            await asyncio.wait_for(outer, timeout=5.0)
+            await asyncio.wait_for(mid_stream2.wait(), timeout=5.0)
+            successor = h.registry.get("sess-1")
+            assert successor is not None and successor is not outer
+            assert [m["content"] for m in h.popped] == ["msg1"]
+            assert [m["content"] for m in h.queue] == ["msg2"]
+
+            # Turn B is torn down via interrupt_for_query BEFORE it emits output.
+            h.interrupt_pending.add("sess-1")
+            with caplog.at_level(logging.WARNING):
+                gate2.set()
+                await asyncio.wait_for(successor, timeout=5.0)
+
+        # GREEN expectations — msg1 re-queued at front, never discarded/lost.
+        assert _discarded_frames(handler) == [], (
+            "a committed queued message must never be bounced back as a discarded draft"
+        )
+        assert not h.db.discard_orphan_first_turn.called, (
+            "a queue-drain successor must never wipe the shared SDK transcript"
+        )
+        h.db.requeue_message_at_front.assert_called_once()
+        assert h.db.requeue_message_at_front.call_args.kwargs["content"] == "msg1"
+        assert [m["content"] for m in h.queue] == ["msg1", "msg2"], (
+            "both queued messages must survive an interrupt-pending teardown"
+        )
+        assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records), (
+            "a durable strand/re-queue log must record the incident"
+        )
+
+
+async def test_interrupt_pending_teardown_followup_requeues_and_cleans_legacy_row(caplog):
+    """The production follow-up variant (sdk_session_id NOT None) of the
+    interrupt-pending gap: re-queue msg1 at front AND drop the eager
+    ``session_messages`` row (``delete_orphan_user_turn``) so a later re-drain does
+    not duplicate it, while NEVER wiping the shared transcript
+    (``discard_orphan_first_turn``) nor emitting ``user_message_discarded``."""
+    import logging
+
+    with _Harness() as h:
+        h.session_row["sdk_session_id"] = "sdk-existing"
+        handler, prompts = h.make_streaming_handler()
+        gate = asyncio.Event()
+        mid_stream = asyncio.Event()
+        gate2 = asyncio.Event()
+        mid_stream2 = asyncio.Event()
+
+        with patch(
+            "app.core.query_engine.stream_to_websocket",
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
+        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            outer = asyncio.create_task(
+                handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+            )
+            h.registry["sess-1"] = outer
+            await asyncio.wait_for(mid_stream.wait(), timeout=5.0)
+
+            await handler.handle_queue_message({"content": "msg1", "session_id": "sess-1"})
+            await handler.handle_queue_message({"content": "msg2", "session_id": "sess-1"})
+
+            gate.set()
+            await asyncio.wait_for(outer, timeout=5.0)
+            await asyncio.wait_for(mid_stream2.wait(), timeout=5.0)
+            successor = h.registry.get("sess-1")
+            assert successor is not None and successor is not outer
+            assert [m["content"] for m in h.popped] == ["msg1"]
+
+            h.interrupt_pending.add("sess-1")
+            with caplog.at_level(logging.WARNING):
+                gate2.set()
+                await asyncio.wait_for(successor, timeout=5.0)
+
+        assert _discarded_frames(handler) == []
+        assert not h.db.discard_orphan_first_turn.called
+        assert h.db.delete_orphan_user_turn.called, (
+            "the eager session_messages row for msg1 must be dropped on re-queue"
+        )
+        h.db.requeue_message_at_front.assert_called_once()
+        assert h.db.requeue_message_at_front.call_args.kwargs["content"] == "msg1"
+        assert [m["content"] for m in h.queue] == ["msg1", "msg2"]
+        assert any("queue-strand-on-stop" in r.getMessage() for r in caplog.records)

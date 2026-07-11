@@ -4937,6 +4937,88 @@ class ChatWebSocketHandler:
                 # (before end_streaming), so this only fires when:
                 #  - Query was cancelled (CancelledError) or errored
                 #  - A queued message arrived during the cancel/error teardown
+
+                # ── Generalized pre-output drain-source re-queue ──────────────
+                # A server-initiated queue-drain successor (``queue_drain_source``
+                # set) whose turn tears down BEFORE emitting any output must
+                # re-queue its already-committed message at the FRONT — never drop
+                # it — regardless of WHICH pre-output teardown latch fired. #554
+                # (5074cee6) added this only for the user-Stop branch and left the
+                # ``interrupt_for_query``-pending teardown as a deferred TOCTOU
+                # follow-up: that branch just logged "Skipping queue processing"
+                # and returned, silently losing the popped message. The pre-close
+                # drain had persisted it ONLY to the legacy ``session_messages``
+                # table, which the UI does NOT read under
+                # ``session_store_mode=postgres_only``, so it vanished from both the
+                # transcript and the queue (incident: session 61e0f967, 2026-07-11).
+                # Running the same re-queue for ANY pre-output teardown latch closes
+                # that gap.
+                drain_source_requeued = False
+                if (
+                    queue_drain_source is not None
+                    and not stream_state.stream_started
+                    and (
+                        session_id in _interrupt_pending_sessions
+                        or session_id in _stopped_sessions
+                    )
+                ):
+                    # Skip the #420 orphan-discard for this committed message even
+                    # if the re-queue write below fails — never discard it.
+                    drain_source_requeued = True
+                    q_src_content = queue_drain_source.get("content", prompt)
+                    q_src_profile = queue_drain_source.get("profile_id")
+                    q_src_project = queue_drain_source.get("project_id")
+                    # Drop the eager session_messages row the pre-close drain
+                    # persisted for this message BEFORE re-queuing it, so the
+                    # re-drain does not leave two legacy user rows. This is the
+                    # SAME silent, legacy-table-only cleanup the follow-up orphan
+                    # path uses (delete_orphan_user_turn) — it never touches the
+                    # shared SDK transcript and never emits user_message_discarded
+                    # (we are re-queuing, not bouncing the text back to the input
+                    # box). NOTE: under postgres_only the chat reads the SDK
+                    # transcript (session_store_entries), where this turn's eagerly
+                    # mirrored user line is left in place — the SAME pre-existing
+                    # #420 follow-up limitation as any pre-output teardown on a
+                    # follow-up turn (a lone orphan user line that cannot be cleanly
+                    # reverted per-turn without wiping shared history).
+                    try:
+                        await run_sync(database.delete_orphan_user_turn, session_id)
+                    except Exception as hygiene_err:  # noqa: BLE001
+                        ctx.warning(
+                            logger,
+                            f"queue-drain re-queue legacy-row cleanup failed: {hygiene_err}",
+                        )
+                    try:
+                        await run_sync(
+                            database.requeue_message_at_front,
+                            session_id=session_id,
+                            content=q_src_content,
+                            profile_id=q_src_profile if q_src_profile != "claude-code" else None,
+                            project_id=q_src_project,
+                        )
+                        queue = await run_sync(database.get_queued_messages, session_id)
+                        await sync_engine.broadcast_queue_updated(session_id, queue)
+                    except Exception as requeue_err:
+                        # Never let a re-queue failure crash the finally; log
+                        # durably so the drop is at least diagnosable.
+                        logger.error(
+                            "[Queue] queue-strand-on-stop: FAILED to re-queue a "
+                            "drained message after pre-output teardown "
+                            "(session=%s): %s",
+                            session_id, requeue_err,
+                        )
+                    logger.warning(
+                        "[Queue] queue-strand-on-stop: re-queued a drained message "
+                        "at front after pre-output teardown (session=%s) — NOT "
+                        "discarded as an orphan draft",
+                        session_id,
+                    )
+                    ctx.info(
+                        logger,
+                        "Torn down before output on a queue-drain successor — "
+                        "re-queued the committed message instead of discarding it",
+                    )
+
                 if session_id in _interrupt_pending_sessions:
                     ctx.debug(logger, "Skipping queue processing — interrupt_for_query pending")
                 elif session_id in _stopped_sessions:
@@ -4967,69 +5049,15 @@ class ChatWebSocketHandler:
                         except Exception as discard_err:
                             ctx.warning(logger, f"discard_empty_user_turn (live) failed: {discard_err}")
 
-                        if queue_drain_source is not None:
-                            # DATA-LOSS FIX: this "empty" turn is a server-initiated
-                            # queue-drain successor — its prompt is an ALREADY-COMMITTED
-                            # queued message, NOT an abandoned user draft. The #420
-                            # orphan-discard path below would wrongly treat it as one
-                            # (emitting user_message_discarded / discard_orphan_first_turn),
-                            # dropping the message silently. Instead, re-queue it at the
-                            # FRONT so a Stop before output never loses a queued message.
-                            q_src_content = queue_drain_source.get("content", prompt)
-                            q_src_profile = queue_drain_source.get("profile_id")
-                            q_src_project = queue_drain_source.get("project_id")
-                            # Drop the eager session_messages row the pre-close drain
-                            # persisted for this message BEFORE re-queuing it, so the
-                            # re-drain does not leave two legacy user rows. This is the
-                            # SAME silent, legacy-table-only cleanup the follow-up
-                            # orphan path uses (delete_orphan_user_turn) — it never
-                            # touches the shared SDK transcript and never emits
-                            # user_message_discarded (we are re-queuing, not bouncing
-                            # the text back to the input box). NOTE: under
-                            # postgres_only the chat reads the SDK transcript
-                            # (session_store_entries), where this turn's eagerly
-                            # mirrored user line is left in place — the SAME
-                            # pre-existing #420 follow-up limitation as an ordinary
-                            # stop-before-output on a follow-up turn (a lone orphan
-                            # user line that cannot be cleanly reverted per-turn
-                            # without wiping shared history).
-                            try:
-                                await run_sync(database.delete_orphan_user_turn, session_id)
-                            except Exception as hygiene_err:  # noqa: BLE001
-                                ctx.warning(
-                                    logger,
-                                    f"queue-drain re-queue legacy-row cleanup failed: {hygiene_err}",
-                                )
-                            try:
-                                await run_sync(
-                                    database.requeue_message_at_front,
-                                    session_id=session_id,
-                                    content=q_src_content,
-                                    profile_id=q_src_profile if q_src_profile != "claude-code" else None,
-                                    project_id=q_src_project,
-                                )
-                                queue = await run_sync(database.get_queued_messages, session_id)
-                                await sync_engine.broadcast_queue_updated(session_id, queue)
-                            except Exception as requeue_err:
-                                # Never let a re-queue failure crash the finally; log
-                                # durably so the drop is at least diagnosable.
-                                logger.error(
-                                    "[Queue] queue-strand-on-stop: FAILED to re-queue a "
-                                    "drained message after Stop-before-output "
-                                    "(session=%s): %s",
-                                    session_id, requeue_err,
-                                )
-                            logger.warning(
-                                "[Queue] queue-strand-on-stop: re-queued a drained "
-                                "message at front after Stop-before-output "
-                                "(session=%s) — NOT discarded as an orphan draft",
-                                session_id,
-                            )
-                            ctx.info(
-                                logger,
-                                "Stopped before output on a queue-drain successor — "
-                                "re-queued the committed message instead of discarding it",
-                            )
+                        if drain_source_requeued:
+                            # This "empty" turn is a server-initiated queue-drain
+                            # successor whose already-committed message was ALREADY
+                            # re-queued at the FRONT by the generalized pre-output
+                            # re-queue above (which fires for ANY pre-output teardown
+                            # latch — see there). Do NOT run the #420 orphan-discard
+                            # path below: a committed queued message must never be
+                            # discarded / bounced back into the input box.
+                            pass
                         # Durable cleanup. `sdk_sid` is the session's sdk_session_id
                         # captured at the START of this turn (before streaming),
                         # so it tells first turn from follow-up.
