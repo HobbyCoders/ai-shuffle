@@ -862,6 +862,12 @@ def add_session_message(
         from app.core.cost_utils import update_profile_map
         update_profile_map(session_id, content, profile_id)
 
+    # Same for the metadata map cache — every user row, even metadata-less
+    # ones, so the per-content queues stay aligned with the DB rows.
+    if role == "user" and content:
+        from app.core.cost_utils import update_user_metadata_map
+        update_user_metadata_map(session_id, content, metadata)
+
     return msg
 
 

@@ -814,16 +814,41 @@ class AutomationManager:
             deferred_delivery=True,
         )
 
-        # 5. Await turn completion under the automation timeout. wait_for
-        #    cancels the turn task on timeout (runaway guard) and the
-        #    TimeoutError propagates to _execute_run's timeout stamp.
-        await asyncio.wait_for(handler.query_task, timeout=timeout_seconds)
+        # 5. Await turn completion under the automation timeout. A hand-off
+        #    (account-failover retry, compact-boundary auto-continue) swaps
+        #    handler.query_task for a successor task and lets the original
+        #    return early — so keep re-awaiting the LATEST task until no new
+        #    successor appears, all under ONE shared deadline. Otherwise the
+        #    run row would be stamped from the first attempt's sniffed outcome
+        #    while the successor is still streaming, and the timeout wouldn't
+        #    cover the successor. wait_for cancels the current task on timeout
+        #    (runaway guard) and the TimeoutError propagates to _execute_run's
+        #    timeout stamp.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        task = handler.query_task
+        while task is not None:
+            await asyncio.wait_for(task, timeout=deadline - loop.time())
+            latest = handler.query_task
+            if latest is task:
+                break
+            task = latest
 
         # run_query reports the turn outcome only via terminal frames; the
         # headless handler sniffs them for socketless callers like us.
         if handler.last_turn_error:
             raise RuntimeError(handler.last_turn_error)
         if handler.last_turn_interrupted:
+            # The timeout cancel can be absorbed by run_query's graceful
+            # interrupt handling — the task then completes normally and
+            # wait_for never raises. Stamp that as the timeout it is, not as
+            # a generic interruption. A requested cancel (Task.cancelling) is
+            # the reliable tell: the deadline clock alone races, since the
+            # event loop may fire wait_for's timer up to one clock-resolution
+            # EARLY, while loop.time() still reads just under the deadline.
+            cancelling = getattr(task, "cancelling", None)
+            if (cancelling and cancelling()) or loop.time() >= deadline:
+                raise asyncio.TimeoutError()
             raise RuntimeError("Turn was interrupted before completion")
 
         metadata = handler.last_turn_metadata or {}

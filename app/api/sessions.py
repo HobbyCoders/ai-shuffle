@@ -801,8 +801,11 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             messages = await _legacy_db_messages(session_id)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
-    from app.core.cost_utils import attach_cost_metadata
+    from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
     attach_cost_metadata(messages, session_id)
+    # Store/JSONL transcripts drop the DB row's user-message metadata
+    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+    attach_user_message_metadata(messages, session_id)
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
@@ -1397,8 +1400,11 @@ async def get_live_session(
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     # This ensures the poller gets cost data on the first poll after streaming ends
-    from app.core.cost_utils import attach_cost_metadata
+    from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
     attach_cost_metadata(messages, session_id)
+    # Store/JSONL transcripts drop the DB row's user-message metadata
+    # (e.g. automation_id/automation_run_id) — merge it back (PR #560 follow-up)
+    attach_user_message_metadata(messages, session_id)
 
     # Build response in live format
     # IMPORTANT: For context window calculation, the frontend needs per-turn

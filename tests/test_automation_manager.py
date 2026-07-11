@@ -572,6 +572,91 @@ class TestRunAsSession:
         assert failed and "timed out" in failed[0]["error"]
         db.record_automation_run_success.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_handoff_successor_task_awaited_before_stamping(self, manager):
+        """A hand-off (failover retry / auto-continue) swaps handler.query_task
+        for a successor and lets the original task return early. The run must
+        be stamped from the SUCCESSOR's outcome, not the first attempt's
+        sniffed state (#560 follow-up 1)."""
+        handler = _fake_turn_handler()
+        # The first attempt's sniffed state: if the run were stamped when the
+        # original task returns, this error would (wrongly) fail the run.
+        handler.last_turn_error = "superseded first attempt"
+
+        async def _successor_turn():
+            handler.last_turn_error = None
+            handler.last_turn_metadata = {
+                "total_cost_usd": 0.07, "tokens_in": 5, "tokens_out": 6,
+            }
+
+        async def _first_attempt():
+            # Hand-off contract: the successor is installed on the handler
+            # BEFORE the original task returns (chat_ws_handler does this).
+            handler.query_task = asyncio.create_task(_successor_turn())
+
+        handler.query_task = asyncio.create_task(_first_attempt())
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(self._automation(), "run-s8", "do it", {})
+
+        completed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0]["cost_usd"] == 0.07
+        db.record_automation_run_success.assert_called_once_with("auto-sess", 0.07)
+
+    @pytest.mark.asyncio
+    async def test_timeout_absorbed_by_graceful_interrupt_still_stamps_timeout(self, manager):
+        """run_query can absorb wait_for's cancel gracefully — the task then
+        completes normally with last_turn_interrupted set and wait_for never
+        raises. Past the deadline that must stamp the timeout-specific error,
+        not a generic interruption (#560 follow-up 3)."""
+        handler = _fake_turn_handler()
+
+        async def _absorbs_cancel():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                # run_query's graceful interrupt path: swallow, finish normally
+                handler.last_turn_interrupted = True
+
+        handler.query_task = asyncio.create_task(_absorbs_cancel())
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            await manager._execute_run(
+                self._automation(timeout_seconds=0.05), "run-s9", "do it", {}
+            )
+
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "timed out" in failed[0]["error"]
+        db.record_automation_run_success.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_before_deadline_stamps_interruption(self, manager):
+        """A genuine interrupt (task done well before the deadline) keeps the
+        interruption message — it must not be mislabelled as a timeout."""
+        handler = _fake_turn_handler()
+        handler.last_turn_interrupted = True
+        stack, db, _launch, _store = _session_run_env(handler)
+        with stack:
+            with pytest.raises(RuntimeError, match="interrupted"):
+                await manager._execute_run(
+                    self._automation(timeout_seconds=60), "run-s10", "do it", {}
+                )
+
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "interrupted" in failed[0]["error"]
+        assert "timed out" not in failed[0]["error"]
+        db.record_automation_run_success.assert_not_called()
+
 
 class TestScheduledFireOrdering:
     """The cross-install fire claim must be taken BEFORE any session exists —

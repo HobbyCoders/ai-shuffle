@@ -211,6 +211,100 @@ def invalidate_profile_cache(session_id: Optional[str] = None) -> None:
             _profile_map_cache.pop(session_id, None)
         else:
             _profile_map_cache.clear()
+    with _user_meta_cache_lock:
+        if session_id:
+            _user_meta_cache.pop(session_id, None)
+        else:
+            _user_meta_cache.clear()
+
+
+# ─── User-Message Metadata Map Cache ─────────────────────────────────────────
+# session_id → dict mapping user message content → [metadata|None, ...], one
+# entry per DB user row with that content, in creation order. Mirrors the
+# profile map cache (kept separate — tests pin that cache's value shape).
+#
+# Why this exists (PR #560 follow-up): transcript reads (SDK store / JSONL)
+# rebuild user messages from the SDK payload, which never carried the DB row's
+# metadata — so automation-originated messages lose their
+# {automation_id, automation_run_id} badge on the read path. These queues let
+# the read path merge the DB row metadata back in positionally, the same way
+# profile ids are resolved.
+_user_meta_cache: OrderedDict = OrderedDict()
+_user_meta_cache_lock = threading.Lock()
+
+
+def get_cached_user_metadata_map(session_id: str) -> Dict[str, List[Optional[Dict[str, Any]]]]:
+    """content → ordered [metadata|None] for the session's DB user rows."""
+    with _user_meta_cache_lock:
+        cached = _user_meta_cache.get(session_id)
+        if cached is not None:
+            _user_meta_cache.move_to_end(session_id)
+            return cached
+
+    from app.db import database
+    db_messages = database.get_session_messages(session_id)
+    meta_map: Dict[str, List[Optional[Dict[str, Any]]]] = {}
+    for msg in db_messages:
+        if msg.get("role") == "user":
+            meta = msg.get("metadata")
+            meta_map.setdefault(msg.get("content", ""), []).append(
+                meta if isinstance(meta, dict) else None
+            )
+
+    with _user_meta_cache_lock:
+        _user_meta_cache[session_id] = meta_map
+        while len(_user_meta_cache) > _PROFILE_CACHE_MAX_SIZE:
+            _user_meta_cache.popitem(last=False)
+
+    return meta_map
+
+
+def update_user_metadata_map(
+    session_id: str, content: str, metadata: Optional[Dict[str, Any]]
+) -> None:
+    """Append a new user row's metadata (or None) if the cache is primed.
+
+    Must be called for EVERY user row (even metadata-less ones) so the
+    per-content queues stay positionally aligned with the DB rows.
+    """
+    with _user_meta_cache_lock:
+        cached = _user_meta_cache.get(session_id)
+        if cached is not None:
+            cached.setdefault(content, []).append(
+                metadata if isinstance(metadata, dict) else None
+            )
+            _user_meta_cache.move_to_end(session_id)
+
+
+def attach_user_message_metadata(
+    messages: List[Dict[str, Any]], session_id: str
+) -> List[Dict[str, Any]]:
+    """Merge DB user-row metadata into transcript user messages, in-place.
+
+    Store/JSONL transcripts rebuild user messages from the SDK payload, which
+    lacks the metadata written on the session_messages row (e.g. an automation
+    run's {automation_id, automation_run_id}). Pair each user message with its
+    DB row positionally via per-content queues (same pattern as profile ids)
+    and merge — transcript-side keys win on conflict. Messages that already
+    came from the DB merge their own metadata back: a no-op. Returns the same
+    list for chaining.
+    """
+    meta_queues = {
+        content: deque(metas)
+        for content, metas in get_cached_user_metadata_map(session_id).items()
+    }
+    if not meta_queues:
+        return messages
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        queue = meta_queues.get(m.get("content", ""))
+        db_meta = queue.popleft() if queue else None
+        if not db_meta:
+            continue
+        existing = m.get("metadata")
+        m["metadata"] = {**db_meta, **existing} if isinstance(existing, dict) else dict(db_meta)
+    return messages
 
 
 # ─── Cost Attachment Helper ──────────────────────────────────────────────────
