@@ -1,0 +1,253 @@
+{
+  "$defs": {
+    "AnswerInteraction": {
+      "properties": {
+        "answer": {
+          "additionalProperties": true,
+          "title": "Answer",
+          "type": "object"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "interaction_id": {
+          "title": "Interaction Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "answer_interaction",
+          "default": "answer_interaction",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "session_id",
+        "interaction_id"
+      ],
+      "title": "AnswerInteraction",
+      "type": "object"
+    },
+    "Interrupt": {
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "mode": {
+          "enum": [
+            "stop",
+            "send_now"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "interrupt",
+          "default": "interrupt",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "session_id",
+        "mode"
+      ],
+      "title": "Interrupt",
+      "type": "object"
+    },
+    "QueueMessage": {
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "queue_message",
+          "default": "queue_message",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "session_id",
+        "content"
+      ],
+      "title": "QueueMessage",
+      "type": "object"
+    },
+    "RemoveQueued": {
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "queued_command_id": {
+          "title": "Queued Command Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "remove_queued",
+          "default": "remove_queued",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "session_id",
+        "queued_command_id"
+      ],
+      "title": "RemoveQueued",
+      "type": "object"
+    },
+    "SendMessage": {
+      "properties": {
+        "attachments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "send_message",
+          "default": "send_message",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "session_id",
+        "content"
+      ],
+      "title": "SendMessage",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "answer_interaction": "#/$defs/AnswerInteraction",
+      "interrupt": "#/$defs/Interrupt",
+      "queue_message": "#/$defs/QueueMessage",
+      "remove_queued": "#/$defs/RemoveQueued",
+      "send_message": "#/$defs/SendMessage"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SendMessage"
+    },
+    {
+      "$ref": "#/$defs/Interrupt"
+    },
+    {
+      "$ref": "#/$defs/QueueMessage"
+    },
+    {
+      "$ref": "#/$defs/RemoveQueued"
+    },
+    {
+      "$ref": "#/$defs/AnswerInteraction"
+    }
+  ],
+  "title": "Command"
+}

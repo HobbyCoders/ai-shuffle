@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 55
+SCHEMA_VERSION = 56
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1396,6 +1396,138 @@ def create_postgres_schema(cursor) -> None:
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
+
+    # ------------------------------------------------------------------
+    # 50. session_events — append-only per-session event log (v2 core).
+    #
+    # The durable ordered record of everything that happens in a session.
+    # Seqs are dense and monotonic per session, allocated atomically via the
+    # session_event_counters companion table so a batch append reserves a
+    # contiguous [first_seq, last_seq] range. Writes are fenced by the owning
+    # run's fence_token (see app/db/session_events.py); readers tail by
+    # ``seq > from_seq``. pg_notify on the ``session_events`` channel wakes the
+    # gateway, with a poll fallback. See app/db/session_events.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            seq BIGINT NOT NULL,
+            run_id TEXT,
+            turn_id TEXT,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            command_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE (session_id, seq)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_event_counters (
+            session_id TEXT PRIMARY KEY,
+            next_seq BIGINT NOT NULL DEFAULT 0
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 51. runs — fenced, leased ownership of a session by a runner (v2 core).
+    #
+    # At most one active run per session (enforced by the partial unique
+    # index), each carrying a monotonic ``fence_token`` that stamps every
+    # event append so a stale/lost runner cannot write after being superseded.
+    # Runs carry a heartbeat-renewed lease; expired leases are reaped. See
+    # app/db/runs.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            runner_id TEXT NOT NULL,
+            fence_token BIGINT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'active',
+            lease_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_session ON runs(session_id) WHERE state = 'active'")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id)")
+
+    # ------------------------------------------------------------------
+    # 52. pending_interactions — durable prompt/answer state machine (v2 core).
+    #
+    # Records interactions (permission prompts, tool approvals, …) awaiting a
+    # user answer, with a TTL. Pure CRUD state machine here; session-event
+    # wiring is Phase 1. See app/db/interactions.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_interactions (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            kind TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'pending',
+            answer JSONB,
+            answered_by_device TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            answered_at TIMESTAMP WITH TIME ZONE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_state ON pending_interactions(session_id, state)")
+
+    # ------------------------------------------------------------------
+    # 53. artifacts — content-addressed blob registry (v2 core).
+    #
+    # Deduplicated by content ``hash``; upserts are idempotent. See
+    # app/db/artifacts.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS artifacts (
+            hash TEXT PRIMARY KEY,
+            size BIGINT NOT NULL,
+            mime TEXT,
+            filename TEXT,
+            created_by_session TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 54. projects_v2 — v2 project registry keyed by unique origin.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS projects_v2 (
+            id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            settings JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 55. checkouts — per-runner working-tree checkouts of a v2 project.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS checkouts (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects_v2(id) ON DELETE CASCADE,
+            runner_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            head_sha TEXT,
+            dirty BOOLEAN DEFAULT FALSE,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE (project_id, runner_id, path)
+        )
+    """)
 
     # ==================================================================
     # SEED DATA

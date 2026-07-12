@@ -1,0 +1,179 @@
+"""LISTEN/NOTIFY → asyncio fan-out gateway (v2 core).
+
+Bridges a dedicated PostgreSQL ``LISTEN session_events`` connection to
+per-session asyncio subscriber queues. The SSE route (``app/api/events.py``)
+subscribes a queue per client and wakes on the ``max_seq`` values pushed here.
+
+Delivery must never depend on this gateway: the SSE route also polls
+``get_max_seq`` on a keepalive timer, so if PostgreSQL is unreachable the
+gateway degrades to "no notifies, warnings logged" and the app keeps working.
+The listener runs on a single dedicated (non-pool) connection in a daemon
+thread, reconnecting with capped exponential backoff on any error.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import select
+import threading
+from typing import Dict, Set, Tuple
+
+import psycopg2
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+LISTEN_CHANNEL = "session_events"
+
+
+class EventGateway:
+    """Fan-out from a dedicated PG LISTEN connection to asyncio queues."""
+
+    def __init__(self) -> None:
+        # session_id -> set of (loop, queue) pairs.
+        self._subscribers: Dict[str, Set[Tuple[object, object]]] = {}
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()
+        self._stop = False
+
+    # ------------------------------------------------------------------
+    # Subscription management
+    # ------------------------------------------------------------------
+    def subscribe(self, session_id: str):
+        """Register and return a fresh asyncio.Queue for ``session_id``.
+
+        Captures the currently-running loop alongside the queue so the
+        listener thread can hand values back thread-safely. Lazily starts the
+        listener thread on first use.
+        """
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        with self._lock:
+            self._subscribers.setdefault(session_id, set()).add((loop, queue))
+        self._ensure_listener()
+        return queue
+
+    def unsubscribe(self, session_id: str, queue) -> None:
+        """Remove a subscriber; drop the session key once empty."""
+        with self._lock:
+            pairs = self._subscribers.get(session_id)
+            if not pairs:
+                return
+            for pair in list(pairs):
+                if pair[1] is queue:
+                    pairs.discard(pair)
+            if not pairs:
+                self._subscribers.pop(session_id, None)
+
+    # ------------------------------------------------------------------
+    # Dispatch
+    # ------------------------------------------------------------------
+    def _dispatch(self, session_id: str, max_seq: int) -> None:
+        """Push ``max_seq`` to every queue registered for ``session_id``.
+
+        Tolerates a closed loop (``RuntimeError``) by dropping that subscriber.
+        """
+        with self._lock:
+            pairs = list(self._subscribers.get(session_id, ()))
+        for loop, queue in pairs:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, max_seq)
+            except RuntimeError:
+                # Loop is closed — drop this subscriber.
+                self.unsubscribe(session_id, queue)
+
+    # ------------------------------------------------------------------
+    # Listener thread
+    # ------------------------------------------------------------------
+    def _ensure_listener(self) -> None:
+        """Start the listener thread exactly once (thread-safe)."""
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop = False
+            self._thread = threading.Thread(
+                target=self._listen_loop,
+                name="event-gateway-listener",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _listen_loop(self) -> None:
+        backoff = 1.0
+        while not self._stop:
+            conn = None
+            try:
+                conn = psycopg2.connect(settings.database_url)
+                # LISTEN must run outside a transaction.
+                conn.autocommit = True
+                cursor = conn.cursor()
+                cursor.execute(f"LISTEN {LISTEN_CHANNEL}")
+                backoff = 1.0  # Reset on a successful connect.
+                while not self._stop:
+                    if select.select([conn], [], [], 5.0) == ([], [], []):
+                        continue
+                    conn.poll()
+                    while conn.notifies:
+                        notify = conn.notifies.pop(0)
+                        self._handle_payload(notify.payload)
+            except Exception as e:  # noqa: BLE001 — must never crash the app.
+                logger.warning(
+                    "event gateway listener error (will reconnect): %s", e
+                )
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if self._stop:
+                    break
+                self._sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def _handle_payload(self, payload: str) -> None:
+        try:
+            data = json.loads(payload)
+            session_id = data["session_id"]
+            max_seq = int(data["max_seq"])
+        except (ValueError, TypeError, KeyError):
+            logger.warning("event gateway: malformed notify payload: %r", payload)
+            return
+        self._dispatch(session_id, max_seq)
+
+    def _sleep(self, seconds: float) -> None:
+        # Wrapped for testability; interruptible-ish via the stop flag between hops.
+        import time
+
+        time.sleep(seconds)
+
+    def stop(self) -> None:
+        """Stop the listener thread (tests/shutdown only)."""
+        self._stop = True
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=10.0)
+
+
+_gateway: EventGateway | None = None
+_gateway_lock = threading.Lock()
+
+
+def get_gateway() -> EventGateway:
+    """Return the process-wide :class:`EventGateway` singleton."""
+    global _gateway
+    if _gateway is None:
+        with _gateway_lock:
+            if _gateway is None:
+                _gateway = EventGateway()
+    return _gateway

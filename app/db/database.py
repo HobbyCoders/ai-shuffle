@@ -99,7 +99,8 @@ def _safe_json(value):
 #      mirrors start/update/complete/unpark transitions through
 #      app.core.task_persistence; no reader depends on it yet — boot reconcile
 #      marks this install's stale non-terminal rows killed)
-SCHEMA_VERSION = 55
+# 56: v2 core primitives (session_events, session_event_counters, runs, pending_interactions, artifacts, projects_v2, checkouts)
+SCHEMA_VERSION = 56
 
 
 def _run_column_migrations(cursor):
@@ -707,6 +708,130 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status "
         "ON background_tasks(instance_id, status)"
     )
+
+    # v2 core primitives (v56). session_events (append-only log) + its
+    # session_event_counters companion, fenced/leased runs, pending_interactions,
+    # content-addressed artifacts, and projects_v2/checkouts. Idempotent so
+    # upgrades from any older version land the tables without needing the
+    # SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
+    # the background_tasks block above).
+    if not table_exists(cursor, "session_events"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                seq BIGINT NOT NULL,
+                run_id TEXT,
+                turn_id TEXT,
+                event_type TEXT NOT NULL,
+                payload JSONB NOT NULL DEFAULT '{}',
+                command_id TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE (session_id, seq)
+            )
+        """)
+        migrations_applied.append("session_events")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_events_session_seq "
+        "ON session_events(session_id, seq)"
+    )
+
+    if not table_exists(cursor, "session_event_counters"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_event_counters (
+                session_id TEXT PRIMARY KEY,
+                next_seq BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        migrations_applied.append("session_event_counters")
+
+    if not table_exists(cursor, "runs"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                runner_id TEXT NOT NULL,
+                fence_token BIGINT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                lease_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("runs")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_session "
+        "ON runs(session_id) WHERE state = 'active'"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id)"
+    )
+
+    if not table_exists(cursor, "pending_interactions"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_interactions (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                kind TEXT NOT NULL,
+                payload JSONB NOT NULL DEFAULT '{}',
+                state TEXT NOT NULL DEFAULT 'pending',
+                answer JSONB,
+                answered_by_device TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                answered_at TIMESTAMP WITH TIME ZONE
+            )
+        """)
+        migrations_applied.append("pending_interactions")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_state "
+        "ON pending_interactions(session_id, state)"
+    )
+
+    if not table_exists(cursor, "artifacts"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS artifacts (
+                hash TEXT PRIMARY KEY,
+                size BIGINT NOT NULL,
+                mime TEXT,
+                filename TEXT,
+                created_by_session TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("artifacts")
+
+    if not table_exists(cursor, "projects_v2"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS projects_v2 (
+                id TEXT PRIMARY KEY,
+                origin TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                settings JSONB NOT NULL DEFAULT '{}',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("projects_v2")
+
+    if not table_exists(cursor, "checkouts"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS checkouts (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects_v2(id) ON DELETE CASCADE,
+                runner_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                head_sha TEXT,
+                dirty BOOLEAN DEFAULT FALSE,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE (project_id, runner_id, path)
+            )
+        """)
+        migrations_applied.append("checkouts")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

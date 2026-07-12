@@ -1,0 +1,164 @@
+"""Append-only per-session event log (v2 core).
+
+Every observable thing that happens in a session is recorded here as an ordered
+event. Sequence numbers (``seq``) are dense and monotonic per session, allocated
+atomically through the ``session_event_counters`` companion table so a batched
+append reserves a contiguous ``[first_seq, last_seq]`` range in one statement.
+
+Appends are optionally *fenced* by the owning run's ``fence_token`` (see
+``app.db.runs``): a runner that has been superseded — its run no longer
+``active`` or its token bumped — is rejected with :class:`FenceViolation` before
+any rows are written, so a stale/lost runner can never interleave events.
+
+The log is append-only by design: there are deliberately no delete/truncate
+helpers. Readers tail by ``seq > from_seq``. A best-effort ``pg_notify`` on the
+``session_events`` channel wakes the gateway; delivery must not depend on it (the
+gateway also polls), and ``pg_notify`` does not exist on the SQLite test shim, so
+the notify is guarded and non-fatal.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.db.base import get_db, rows_to_list
+
+logger = logging.getLogger(__name__)
+
+NOTIFY_CHANNEL = "session_events"
+
+
+class FenceViolation(Exception):
+    """Raised when an append is rejected because the run fence no longer holds
+    (run missing, not active, or token superseded)."""
+
+
+def _parse_payload(raw: Any) -> Dict[str, Any]:
+    """Parse the payload field, handling both str (test shim TEXT) and dict."""
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def append_events(
+    session_id: str,
+    events: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+    fence_token: Optional[int] = None,
+) -> Tuple[int, int]:
+    """Append a batch of events, returning the ``(first_seq, last_seq)`` range.
+
+    All work happens in one transaction: fence check, atomic seq allocation,
+    row inserts, and a best-effort notify. Raises :class:`FenceViolation` if a
+    supplied ``run_id`` no longer owns the session, ``ValueError`` if ``events``
+    is empty or ``run_id`` is given without ``fence_token``.
+    """
+    if not events:
+        raise ValueError("events must be non-empty")
+    if run_id is not None and fence_token is None:
+        raise ValueError("fence_token is required when run_id is provided")
+
+    n = len(events)
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 1. Fence check — reject a stale/superseded runner before writing.
+        if run_id is not None:
+            cursor.execute(
+                "SELECT state, fence_token FROM runs WHERE id = %s FOR SHARE",
+                (run_id,),
+            )
+            row = cursor.fetchone()
+            actual = None if row is None else row["fence_token"]
+            if row is None or row["state"] != "active" or actual != fence_token:
+                raise FenceViolation(
+                    f"fence violation for session {session_id!r} run {run_id!r}: "
+                    f"expected active token {fence_token!r}, got "
+                    f"state={None if row is None else row['state']!r} "
+                    f"token={actual!r}"
+                )
+
+        # 2. Allocate N contiguous seqs atomically.
+        cursor.execute(
+            "INSERT INTO session_event_counters (session_id, next_seq) "
+            "VALUES (%s, %s) "
+            "ON CONFLICT (session_id) DO UPDATE "
+            "SET next_seq = session_event_counters.next_seq + %s "
+            "RETURNING next_seq",
+            (session_id, n, n),
+        )
+        last_seq = int(cursor.fetchone()["next_seq"])
+        first_seq = last_seq - n + 1
+
+        # 3. Insert one row per event.
+        params = [
+            (
+                str(uuid.uuid4()),
+                session_id,
+                first_seq + i,
+                run_id,
+                event.get("turn_id"),
+                event["type"],
+                json.dumps(event.get("payload", {})),
+                event.get("command_id"),
+            )
+            for i, event in enumerate(events)
+        ]
+        cursor.executemany(
+            "INSERT INTO session_events "
+            "(id, session_id, seq, run_id, turn_id, event_type, payload, command_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            params,
+        )
+
+        # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
+        # shim, and delivery must not depend on it — the gateway also polls).
+        try:
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (
+                    NOTIFY_CHANNEL,
+                    json.dumps({"session_id": session_id, "max_seq": last_seq}),
+                ),
+            )
+        except Exception:
+            logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
+
+    return first_seq, last_seq
+
+
+def get_events(
+    session_id: str, from_seq: int = 0, limit: int = 500
+) -> List[Dict[str, Any]]:
+    """Return events with ``seq > from_seq`` ordered ascending, up to ``limit``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, session_id, seq, run_id, turn_id, event_type, payload, "
+            "command_id, created_at FROM session_events "
+            "WHERE session_id = %s AND seq > %s ORDER BY seq ASC LIMIT %s",
+            (session_id, from_seq, limit),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    for row in rows:
+        row["payload"] = _parse_payload(row.get("payload"))
+    return rows
+
+
+def get_max_seq(session_id: str) -> int:
+    """Return the highest allocated seq for a session (0 if none)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT next_seq FROM session_event_counters WHERE session_id = %s",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return int(row["next_seq"]) if row else 0

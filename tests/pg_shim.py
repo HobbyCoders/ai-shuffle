@@ -159,6 +159,21 @@ def translate_sql(sql: str) -> str:
         s,
         flags=re.I,
     )
+    # `NOW() + (<n> * INTERVAL '1 second')` — used by app.db.runs to compute a
+    # lease expiry from a ttl-in-seconds param. SQLite has no INTERVAL literal;
+    # rewrite to datetime() second-modifier arithmetic. The bound placeholder
+    # (<n>, already qmark) stays in place, preserving parameter order; the
+    # concat form handles positive, zero, and negative ttls.
+    s = re.sub(
+        r"(?:CURRENT_TIMESTAMP|NOW\(\))\s*\+\s*\(\s*([^)*]+?)\s*\*\s*INTERVAL\s*'1 second'\s*\)",
+        r"datetime('now', (\1) || ' seconds')",
+        s,
+        flags=re.I,
+    )
+    # Row-lock clauses (`FOR SHARE` / `FOR UPDATE`) — no-ops on SQLite's single
+    # writer; strip them so the SELECT parses.
+    s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)
+    s = re.sub(r"\bFOR\s+UPDATE\b", "", s, flags=re.I)
     s = _CAST_RE.sub("", s)                    # x::date -> x
     s = re.sub(r"\bILIKE\b", "LIKE", s, flags=re.I)
     s = re.sub(r"\bjsonb_agg\b", "json_group_array", s, flags=re.I)

@@ -237,11 +237,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 55 for the background_tasks table (durable WRITE-ONLY
-    # background-task lifecycle snapshots; v54 was the sse_entry_text() FTS
-    # function + idx_sse_fts GIN index).
-    assert db_version == 55
-    assert pg_version == 55
+    # Bumped to 56 for the V2 Phase-0 primitives (session_events, runs,
+    # pending_interactions, artifacts, projects_v2, checkouts; v55 was the
+    # background_tasks table).
+    assert db_version == 56
+    assert pg_version == 56
     assert db_version == pg_version
 
 
