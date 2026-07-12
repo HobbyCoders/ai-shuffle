@@ -104,16 +104,22 @@ class EventGateway:
             self._thread.start()
 
     def _listen_loop(self) -> None:
+        from app.db.base import parse_database_url
+
         backoff = 1.0
+        consecutive_failures = 0
         while not self._stop:
             conn = None
             try:
-                conn = psycopg2.connect(settings.database_url)
+                # Decompose the DSN like the pool does — a raw URL with a
+                # literal '@' in the password makes libpq mis-parse the host.
+                conn = psycopg2.connect(**parse_database_url(settings.database_url))
                 # LISTEN must run outside a transaction.
                 conn.autocommit = True
                 cursor = conn.cursor()
                 cursor.execute(f"LISTEN {LISTEN_CHANNEL}")
                 backoff = 1.0  # Reset on a successful connect.
+                consecutive_failures = 0
                 while not self._stop:
                     if select.select([conn], [], [], 5.0) == ([], [], []):
                         continue
@@ -125,6 +131,25 @@ class EventGateway:
                 logger.warning(
                     "event gateway listener error (will reconnect): %s", e
                 )
+                consecutive_failures += 1
+                if consecutive_failures == 3:
+                    # Without this connection every SSE reader silently
+                    # degrades to the keepalive poll, so surface the streak
+                    # durably (once — record_error dedups by fingerprint and
+                    # never raises; it uses the pool, not this connection).
+                    try:
+                        from app.db.error_logs import record_error
+
+                        record_error(
+                            "backend",
+                            "Event gateway LISTEN connection failing "
+                            "repeatedly; live SSE delivery degraded to "
+                            f"keepalive polling: {e}",
+                            logger_name=__name__,
+                            context={"consecutive_failures": consecutive_failures},
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("failed to record gateway error")
                 if conn is not None:
                     try:
                         conn.close()

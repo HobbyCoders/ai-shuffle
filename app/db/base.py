@@ -87,6 +87,29 @@ def is_sqlite() -> bool:
 # Pool management
 # =============================================================================
 
+def parse_database_url(db_url: str) -> Dict[str, Any]:
+    """Decompose a PostgreSQL URL into ``psycopg2.connect`` keyword args.
+
+    psycopg2/libpq cannot reliably parse raw DSNs: percent-encoded passwords
+    stay encoded, and a literal ``@`` in the password makes libpq treat part
+    of it as the hostname. ``urlparse`` splits userinfo at the LAST ``@`` and
+    credentials are unquoted, so both encodings work. Every direct PG
+    connection (pool or dedicated, e.g. the event-gateway LISTEN connection)
+    must connect through this instead of passing the raw URL.
+    Tolerates URLs missing the ``postgresql://`` scheme prefix.
+    """
+    if not db_url.startswith(("postgresql://", "postgres://")):
+        db_url = f"postgresql://{db_url}"
+    parsed = urlparse(db_url)
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "dbname": parsed.path.lstrip("/"),
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+    }
+
+
 def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
     """Initialize the PostgreSQL connection pool.
 
@@ -98,21 +121,10 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         logger.warning("PostgreSQL pool already initialized, closing old pool")
         _pg_pool.closeall()
 
-    # Parse the DATABASE_URL to extract components — handles percent-encoded
-    # passwords (e.g. %40 for @) that psycopg2 cannot decode from a raw DSN.
-    # Also handles URLs with or without the postgresql:// scheme prefix.
-    db_url = settings.database_url
-    if not db_url.startswith(("postgresql://", "postgres://")):
-        db_url = f"postgresql://{db_url}"
-    parsed = urlparse(db_url)
     _pg_pool = psycopg2.pool.ThreadedConnectionPool(
         min_conn,
         max_conn,
-        host=parsed.hostname,
-        port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/"),
-        user=unquote(parsed.username or ""),
-        password=unquote(parsed.password or ""),
+        **parse_database_url(settings.database_url),
     )
     logger.info(
         f"PostgreSQL connection pool initialized (min={min_conn}, max={max_conn})"

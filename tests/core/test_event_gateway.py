@@ -58,3 +58,94 @@ def test_dispatch_to_closed_loop_does_not_raise(gw):
     # Must not raise; the dead subscriber is dropped.
     gw._dispatch("s3", 1)
     assert "s3" not in gw._subscribers
+
+
+# ── Listener-thread connection handling ──────────────────────────────────────
+# _listen_loop is driven synchronously (no thread): psycopg2.connect is patched
+# and _sleep is used as the loop-exit lever.
+
+
+def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
+    """Run _listen_loop with a scripted psycopg2.connect and capture calls.
+
+    connect_effects: list of "fail" (raise OSError) or "success" (return a mock
+    conn whose select() wakeup then raises to re-enter the retry path).
+    Returns (connect_calls, record_error_mock).
+    """
+    from unittest.mock import MagicMock
+
+    import app.core.event_gateway as eg
+
+    connect_calls = []
+    effects = list(connect_effects)
+
+    def fake_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        effect = effects.pop(0) if effects else "fail"
+        if effect == "fail":
+            raise OSError('could not translate host name "Pwd@10.0.0.200"')
+        conn = MagicMock()
+        return conn
+
+    # A successful connect enters the notify wait; make it blow up immediately
+    # so the loop returns to the reconnect path instead of blocking.
+    def fake_select(*args, **kwargs):
+        raise RuntimeError("connection dropped")
+
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= max_sleeps:
+            gateway._stop = True
+
+    record = MagicMock()
+    if not getattr(eg.settings, "database_url", None):
+        monkeypatch.setattr(
+            eg.settings, "database_url", "postgresql://REDACTED@localhost:5432/test"
+        )
+    monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
+    monkeypatch.setattr(eg.select, "select", fake_select)
+    monkeypatch.setattr(gateway, "_sleep", fake_sleep)
+    monkeypatch.setattr("app.db.error_logs.record_error", record)
+    gateway._listen_loop()
+    return connect_calls, record
+
+
+def test_listen_loop_connects_with_parsed_dsn_kwargs(monkeypatch, gw):
+    """The listener must decompose the DSN like the pool does — a raw URL with
+    a literal '@' in the password makes libpq mis-parse the host."""
+    import app.core.event_gateway as eg
+
+    monkeypatch.setattr(
+        eg.settings, "database_url",
+        "postgresql://REDACTED@10.0.0.200:5432/aihub",
+    )
+    calls, _ = _drive_listen_loop(monkeypatch, gw, ["fail"], max_sleeps=1)
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ()  # no raw-DSN positional argument
+    assert kwargs["host"] == "10.0.0.200"
+    assert kwargs["password"] == "p@ssPwd"
+    assert kwargs["dbname"] == "aihub"
+
+
+def test_listener_reports_durable_error_once_per_failure_streak(monkeypatch, gw):
+    calls, record = _drive_listen_loop(
+        monkeypatch, gw, ["fail"] * 6, max_sleeps=6
+    )
+    assert len(calls) == 6
+    # Fires exactly once, on the 3rd consecutive failure — not on every retry.
+    assert record.call_count == 1
+    message = record.call_args.args[1]
+    assert "LISTEN" in message
+
+
+def test_successful_connect_resets_failure_streak(monkeypatch, gw):
+    # fail, fail, success (streak resets), then the dropped connection counts
+    # as failure #1 — the streak never reaches 3, so no durable error.
+    _, record = _drive_listen_loop(
+        monkeypatch, gw, ["fail", "fail", "success"], max_sleeps=3
+    )
+    assert record.call_count == 0

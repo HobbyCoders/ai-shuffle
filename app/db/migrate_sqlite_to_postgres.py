@@ -24,6 +24,8 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 
+from app.db.base import parse_database_url
+
 # ---------------------------------------------------------------------------
 # Migration phases — ordered by foreign-key dependencies
 # ---------------------------------------------------------------------------
@@ -266,7 +268,7 @@ def migrate(
     pg_conn = None
     if not dry_run:
         try:
-            pg_conn = psycopg2.connect(postgres_url)
+            pg_conn = psycopg2.connect(**parse_database_url(postgres_url))
         except Exception as exc:
             print(f"ERROR: Cannot connect to PostgreSQL: {exc}")
             sys.exit(1)
@@ -283,7 +285,7 @@ def migrate(
         # For dry-run we still need a pg connection to check table existence
         # but if we can't connect, just proceed without table checks
         try:
-            pg_conn = psycopg2.connect(postgres_url)
+            pg_conn = psycopg2.connect(**parse_database_url(postgres_url))
         except Exception:
             pg_conn = None
 
