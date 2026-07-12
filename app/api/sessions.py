@@ -1040,6 +1040,11 @@ async def get_live_session(
         _pb_settings.preserve_background_on_interrupt and is_patch_active()
     )
 
+    # Per-session V2 streaming opt-in (V2 Phase 1). Surfaced on every response
+    # body so a polling client always knows which streaming path this session
+    # is on, the same way the flags above are attached to every path.
+    v2_stream = bool(session.get("v2_stream"))
+
     # Cross-install session: owned by another install on the shared DB. History
     # is already in the shared DB, so there is ALWAYS something to show. When the
     # owning install is reachable we relay its live stream (fully controllable);
@@ -1183,6 +1188,7 @@ async def get_live_session(
                         "activeTasks": active_tasks,
                         "unpark_pending": unpark_pending,
                         "preserve_background_on_interrupt": preserve_background_on_interrupt,
+                        "v2_stream": v2_stream,
                     }
                     if session_meta:
                         body["session_meta"] = session_meta
@@ -1191,6 +1197,7 @@ async def get_live_session(
             live_data["activeTasks"] = active_tasks
             live_data["unpark_pending"] = unpark_pending
             live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
+            live_data["v2_stream"] = v2_stream
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
@@ -1201,6 +1208,7 @@ async def get_live_session(
                 live_data["activeTasks"] = active_tasks
                 live_data["unpark_pending"] = unpark_pending
                 live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
+                live_data["v2_stream"] = v2_stream
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
@@ -1376,6 +1384,7 @@ async def get_live_session(
             pending_live_full["activeTasks"] = active_tasks
             pending_live_full["unpark_pending"] = unpark_pending
             pending_live_full["preserve_background_on_interrupt"] = preserve_background_on_interrupt
+            pending_live_full["v2_stream"] = v2_stream
             if session_meta:
                 pending_live_full["session_meta"] = session_meta
             return pending_live_full
@@ -1442,6 +1451,7 @@ async def get_live_session(
         "activeTasks": active_tasks,
         "unpark_pending": unpark_pending,
         "preserve_background_on_interrupt": preserve_background_on_interrupt,
+        "v2_stream": v2_stream,
     }
     if session_meta:
         result["session_meta"] = session_meta
@@ -1455,9 +1465,10 @@ async def update_session(
     session_id: str,
     title: Optional[str] = None,
     session_status: Optional[str] = Query(None, alias="status"),
+    v2_stream: Optional[bool] = None,
     token: str = Depends(require_auth)
 ):
-    """Update session title or status. API users can only modify their accessible sessions."""
+    """Update session title, status, or v2_stream flag. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
 
     # Sync title rename to Claude SDK session if available
@@ -1473,7 +1484,8 @@ async def update_session(
         database.update_session,
         session_id=session_id,
         title=title,
-        status=session_status
+        status=session_status,
+        v2_stream=v2_stream,
     )
 
     return session

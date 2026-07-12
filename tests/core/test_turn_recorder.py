@@ -1,0 +1,621 @@
+"""Unit tests for app/core/turn_recorder.py — the V2 Phase 1 TurnRecorder.
+
+Covers: maybe_create gating, the full §3 pump→contract translation table
+(docs/V2_PHASE1_DESIGN.md), delta batching/coalescing, the fenced run lease,
+the crash-path terminal, the drain-pump module-level taps, and the
+never-propagate-exceptions invariant.
+
+All tests drive the recorder DIRECTLY with pump-shaped dicts (no HTTP, no
+ASGITransport streaming — that buffers infinite bodies and deadlocks). The
+autouse ``_auto_db_shim`` conftest fixture routes every DB call to a per-test
+in-memory SQLite shim.
+"""
+
+import asyncio
+
+import pytest
+
+from app.core import turn_recorder as tr
+from app.core.turn_recorder import (
+    TurnRecorder,
+    record_drained_event,
+    record_interrupting,
+    record_parked,
+)
+from app.db import runs as runs_db
+from app.db import session_events as se
+from app.db import sessions as sessions_db
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+SID = "sess-v2"
+
+
+@pytest.fixture(autouse=True)
+def _reset_recorder_module_state():
+    tr._reset_flag_cache()
+    yield
+    tr._reset_flag_cache()
+
+
+def _mk_session(session_id: str = SID, v2: bool = True) -> None:
+    sessions_db.create_session(session_id, "default", v2_stream=v2)
+
+
+async def _recorder(session_id: str = SID, command_id=None) -> TurnRecorder:
+    rec = await TurnRecorder.maybe_create(session_id, command_id=command_id)
+    assert rec is not None
+    return rec
+
+
+def _rows(session_id: str = SID):
+    return se.get_events(session_id)
+
+
+def _types(session_id: str = SID):
+    return [r["event_type"] for r in _rows(session_id)]
+
+
+# ---------------------------------------------------------------------------
+# maybe_create gating
+# ---------------------------------------------------------------------------
+
+async def test_maybe_create_none_when_flag_off(mock_db):
+    _mk_session(v2=False)
+    assert await TurnRecorder.maybe_create(SID) is None
+
+
+async def test_maybe_create_none_when_session_missing(mock_db):
+    assert await TurnRecorder.maybe_create("no-such-session") is None
+
+
+async def test_maybe_create_recorder_when_flag_on(mock_db):
+    _mk_session(v2=True)
+    rec = await TurnRecorder.maybe_create(SID)
+    assert rec is not None
+    assert rec.run_id is not None
+    assert rec.fence_token is not None
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# start()
+# ---------------------------------------------------------------------------
+
+async def test_start_appends_turn_started_then_message_user(mock_db):
+    _mk_session()
+    rec = await _recorder(command_id="cmd-1")
+    await rec.start("hello world")
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["turn.started", "message.user"]
+    assert rows[1]["payload"]["content"] == "hello world"
+    assert rows[0]["command_id"] == "cmd-1"
+    assert rows[1]["command_id"] == "cmd-1"
+    assert rows[0]["turn_id"] == rows[1]["turn_id"] == rec.turn_id
+    assert rows[0]["run_id"] == rec.run_id
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# §3 golden translations (non-delta rows append immediately)
+# ---------------------------------------------------------------------------
+
+async def test_chunk_maps_to_assistant_text_delta(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "chunk", "content": "full text block"})
+    rows = _rows()
+    assert rows[-1]["event_type"] == "assistant.text_delta"
+    assert rows[-1]["payload"]["text"] == "full text block"
+    await rec.close()
+
+
+async def test_tool_use_maps_to_tool_use(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "tool_use", "name": "Bash", "id": "tu_1",
+        "input": {"command": "ls"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "tool.use"
+    assert row["payload"]["tool_use_id"] == "tu_1"
+    assert row["payload"]["name"] == "Bash"
+    assert row["payload"]["input"] == {"command": "ls"}
+    await rec.close()
+
+
+async def test_tool_result_maps_to_tool_result_with_truncation(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    big = "x" * (tr.RESULT_TRUNCATE_CHARS + 500)
+    await rec.on_event({
+        "type": "tool_result", "name": "Bash", "tool_use_id": "tu_1",
+        "output": big, "is_error": True,
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "tool.result"
+    assert row["payload"]["tool_use_id"] == "tu_1"
+    assert row["payload"]["is_error"] is True
+    assert len(row["payload"]["content_preview"]) == tr.RESULT_TRUNCATE_CHARS
+    await rec.close()
+
+
+async def test_subagent_start_maps_to_subagent_started(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "subagent_start", "tool_id": "task_1", "agent_id": "task_1",
+        "agent_type": "Explore", "description": "look around",
+        "prompt": "find things",
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "subagent.started"
+    assert row["payload"]["task_id"] == "task_1"
+    assert row["payload"]["agent_type"] == "Explore"
+    assert row["payload"]["description"] == "look around"
+    assert row["payload"]["prompt_preview"] == "find things"
+    await rec.close()
+
+
+@pytest.mark.parametrize("pump_type,kind", [
+    ("subagent_chunk", "chunk"),
+    ("subagent_tool_use", "tool_use"),
+    ("subagent_tool_result", "tool_result"),
+])
+async def test_subagent_progress_kinds(mock_db, pump_type, kind):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": pump_type, "agent_id": "task_1", "content": "inner",
+        "name": "Read",
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "subagent.progress"
+    assert row["payload"]["task_id"] == "task_1"
+    assert row["payload"]["kind"] == kind
+    # Remaining pump fields are carried in the progress payload dict.
+    assert row["payload"]["payload"]["content"] == "inner"
+    await rec.close()
+
+
+@pytest.mark.parametrize("is_error,status", [
+    (False, "completed"),
+    (True, "failed"),
+])
+async def test_subagent_done_maps_to_subagent_completed(mock_db, is_error, status):
+    _mk_session()
+    rec = await _recorder()
+    big = "r" * (tr.RESULT_TRUNCATE_CHARS + 10)
+    await rec.on_event({
+        "type": "subagent_done", "tool_id": "task_1", "agent_id": "task_1",
+        "agent_type": "Explore", "result": big, "is_error": is_error,
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "subagent.completed"
+    assert row["payload"]["task_id"] == "task_1"
+    assert row["payload"]["status"] == status
+    assert len(row["payload"]["result_preview"]) == tr.RESULT_TRUNCATE_CHARS
+    await rec.close()
+
+
+@pytest.mark.parametrize("pump_type,default_state", [
+    ("task_started", "started"),
+    ("task_progress", "running"),
+    ("task_notification", "notified"),
+])
+async def test_task_events_map_to_task_updated(mock_db, pump_type, default_state):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": pump_type, "task_id": "t1", "description": "bg work",
+        "summary": "half done", "tool_use_id": "tu_9",
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["task_id"] == "t1"
+    assert row["payload"]["state"] == default_state
+    assert row["payload"]["description"] == "bg work"
+    assert row["payload"]["summary"] == "half done"
+    assert row["payload"]["tool_use_id"] == "tu_9"
+    await rec.close()
+
+
+async def test_task_event_explicit_status_wins(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "task_progress", "task_id": "t1", "status": "paused"})
+    assert _rows()[-1]["payload"]["state"] == "paused"
+    await rec.close()
+
+
+@pytest.mark.parametrize("data,state", [
+    # Registry-patch shape (TaskUpdatedMessage / drained chip): patch.status wins.
+    ({"task_id": "t1", "patch": {"status": "completed"}}, "completed"),
+    # Notification-synthesized chip mirrors status at top level too.
+    ({"task_id": "t1", "status": "failed", "patch": {"status": "failed"}}, "failed"),
+    # Top-level status only (no patch).
+    ({"task_id": "t1", "status": "running"}, "running"),
+    # No status anywhere: generic "updated".
+    ({"task_id": "t1"}, "updated"),
+])
+async def test_system_task_updated_maps_to_task_updated(mock_db, data, state):
+    # A background task's terminal status crossing a turn boundary arrives as a
+    # {"type": "system", "subtype": "task_updated"} chip (see
+    # _task_status_events_from_message). It must land as task.updated — a
+    # system.note here leaves the replayed task strip stuck on "running".
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "system", "subtype": "task_updated", "data": data})
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["task_id"] == "t1"
+    assert row["payload"]["state"] == state
+    await rec.close()
+
+
+async def test_system_task_updated_without_task_id_falls_back_to_note(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "task_updated",
+        "data": {"patch": {"status": "completed"}},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.note"
+    assert row["payload"]["subtype"] == "task_updated"
+    await rec.close()
+
+
+async def test_system_maps_to_system_note(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "local_command",
+        "data": {"content": "output"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.note"
+    assert row["payload"]["subtype"] == "local_command"
+    assert row["payload"]["data"] == {"content": "output"}
+    await rec.close()
+
+
+async def test_system_compaction_boundary_passthrough(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "compact_boundary",
+        "data": {"trigger": "auto"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.compaction_boundary"
+    assert row["payload"]["subtype"] == "compact_boundary"
+    assert row["payload"]["data"] == {"trigger": "auto"}
+    await rec.close()
+
+
+async def test_turn_usage_maps_to_turn_usage(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "turn_usage", "usage": {"input_tokens": 10}})
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.usage"
+    assert row["payload"]["usage"] == {"input_tokens": 10}
+    await rec.close()
+
+
+async def test_done_maps_to_turn_completed_with_usage_summary(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {
+            "stop_reason": "end_turn", "tokens_in": 5, "tokens_out": 7,
+            "total_cost_usd": 0.01, "duration_ms": 1200, "num_turns": 1,
+            "last_assistant_uuid": "not-a-usage-key",
+        },
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert row["payload"]["stop_reason"] == "end_turn"
+    assert row["payload"]["usage"] == {
+        "tokens_in": 5, "tokens_out": 7, "total_cost_usd": 0.01,
+        "duration_ms": 1200, "num_turns": 1,
+    }
+    await rec.close()
+
+
+async def test_interrupted_maps_to_turn_aborted_interrupt(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "interrupted", "session_id": SID})
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.aborted"
+    assert row["payload"]["reason"] == "interrupt"
+    await rec.close()
+
+
+async def test_error_maps_to_turn_aborted_error_with_message(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "error", "message": "boom"})
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.aborted"
+    assert row["payload"]["reason"] == "error"
+    assert row["payload"]["message"] == "boom"
+    await rec.close()
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "stream_block_start", "block_type": "text", "content_block": {"type": "text"}},
+    {"type": "stream_block_stop", "index": 0},
+    {"type": "stream_message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
+    {"type": "rate_limit", "status": "allowed"},
+    {"type": "hook_event", "hook_event_name": "PreToolUse"},
+    {"type": "plugin_message", "message": "hi"},
+    {"type": "api_error", "status": 500},
+    {"type": "init", "session_id": "sdk-1"},
+    {"type": "permission_request", "id": "p1"},
+    {"type": "totally_unknown_frame"},
+])
+async def test_not_recorded_rows_append_nothing(mock_db, event):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event(event)
+    assert _rows() == []
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# delta batching
+# ---------------------------------------------------------------------------
+
+async def test_text_deltas_coalesce_into_one_event_on_timer(mock_db, monkeypatch):
+    monkeypatch.setattr(tr, "FLUSH_INTERVAL_SECONDS", 0.01)
+    _mk_session()
+    rec = await _recorder()
+    for piece in ("Hel", "lo ", "world"):
+        await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": piece})
+    assert _rows() == []  # still buffered
+    await asyncio.sleep(0.08)
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["assistant.text_delta"]
+    assert rows[0]["payload"]["text"] == "Hello world"
+    await rec.close()
+
+
+async def test_deltas_flush_before_any_non_delta_event(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "before "})
+    await rec.on_event({"type": "stream_delta", "delta_type": "thinking", "content": "hmm"})
+    await rec.on_event({"type": "tool_use", "name": "Read", "id": "tu_2", "input": {}})
+    types = _types()
+    # Coalesced buffers land BEFORE the tool.use, preserving pump order.
+    assert types == ["assistant.text_delta", "assistant.thinking_delta", "tool.use"]
+    await rec.close()
+
+
+async def test_size_threshold_flushes_immediately(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    half = "a" * 1500
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": half})
+    assert _rows() == []
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": half})
+    rows = _rows()  # 3000 >= 2048 — flushed with no sleep
+    assert [r["event_type"] for r in rows] == ["assistant.text_delta"]
+    assert rows[0]["payload"]["text"] == half + half
+    await rec.close()
+
+
+async def test_tool_input_deltas_carry_open_block_tool_use_id(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "stream_block_start", "block_type": "tool_use",
+        "content_block": {"type": "tool_use", "id": "tu_open"},
+    })
+    await rec.on_event({"type": "stream_delta", "delta_type": "tool_input", "content": '{"a":'})
+    await rec.on_event({"type": "stream_delta", "delta_type": "tool_input", "content": "1}"})
+    await rec.on_event({"type": "stream_block_stop", "index": 0})  # forces flush
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["tool.input_delta"]
+    assert rows[0]["payload"]["tool_use_id"] == "tu_open"
+    assert rows[0]["payload"]["partial_json"] == '{"a":1}'
+    await rec.close()
+
+
+async def test_close_flushes_buffered_deltas(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "tail"})
+    await rec.close()
+    types = _types()
+    assert types[0] == "assistant.text_delta"
+    assert _rows()[0]["payload"]["text"] == "tail"
+
+
+# ---------------------------------------------------------------------------
+# turn.usage coalescing
+# ---------------------------------------------------------------------------
+
+async def test_usage_coalesced_to_one_per_window_and_flushed_at_done(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "turn_usage", "usage": {"n": 1}})
+    await rec.on_event({"type": "turn_usage", "usage": {"n": 2}})  # within 2s → held
+    await rec.on_event({"type": "turn_usage", "usage": {"n": 3}})  # replaces held
+    assert _types() == ["turn.usage"]
+    assert _rows()[0]["payload"]["usage"] == {"n": 1}
+    await rec.on_event({"type": "done", "session_id": SID, "metadata": {}})
+    types = _types()
+    # The held latest usage flushes BEFORE the terminal.
+    assert types == ["turn.usage", "turn.usage", "turn.completed"]
+    assert _rows()[1]["payload"]["usage"] == {"n": 3}
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# run lease
+# ---------------------------------------------------------------------------
+
+async def test_lease_run_id_stamped_on_rows_and_released_on_close(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    assert rec.run_id is not None
+    await rec.start("hi")
+    assert all(r["run_id"] == rec.run_id for r in _rows())
+    await rec.close()
+    # Lease released: a different runner can claim the session now.
+    other = runs_db.claim_run(SID, "other-runner", 60)
+    assert other is not None
+    runs_db.release_run(other["id"], other["fence_token"])
+
+
+async def test_claim_conflict_records_unfenced(mock_db):
+    _mk_session()
+    held = runs_db.claim_run(SID, "someone-else", 60)
+    assert held is not None
+    rec = await TurnRecorder.maybe_create(SID)
+    assert rec is not None  # never blocks the turn
+    assert rec.run_id is None
+    await rec.start("hi")
+    rows = _rows()
+    assert len(rows) == 2
+    assert all(r["run_id"] is None for r in rows)
+    await rec.close()
+    # close() must NOT release someone else's lease.
+    assert runs_db.claim_run(SID, "third-runner", 60) is None
+    runs_db.release_run(held["id"], held["fence_token"])
+
+
+# ---------------------------------------------------------------------------
+# close() semantics (crash path + idempotence)
+# ---------------------------------------------------------------------------
+
+async def test_close_without_terminal_appends_turn_aborted(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("hi")
+    await rec.on_event({"type": "chunk", "content": "partial"})
+    await rec.close()
+    types = _types()
+    assert types[-1] == "turn.aborted"
+    assert _rows()[-1]["payload"]["reason"] == "error"
+
+
+async def test_close_after_done_appends_nothing(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({"type": "done", "session_id": SID, "metadata": {}})
+    n = len(_rows())
+    await rec.close()
+    assert len(_rows()) == n
+    assert _types()[-1] == "turn.completed"
+
+
+async def test_double_close_appends_nothing(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.close()
+    n = len(_rows())
+    await rec.close()
+    await rec.close()
+    assert len(_rows()) == n
+
+
+# ---------------------------------------------------------------------------
+# module-level taps: record_drained_event / record_parked / record_interrupting
+# ---------------------------------------------------------------------------
+
+async def test_record_drained_event_translates_allowed_types(mock_db):
+    _mk_session()
+    await record_drained_event(SID, {
+        "type": "subagent_chunk", "agent_id": "task_1", "content": "late",
+    })
+    await record_drained_event(SID, {"type": "task_progress", "task_id": "t1"})
+    await record_drained_event(SID, {
+        "type": "system", "subtype": "note", "data": {"k": "v"},
+    })
+    types = _types()
+    assert types == ["subagent.progress", "task.updated", "system.note"]
+    # Drained events are unfenced, outside any turn.
+    assert all(r["run_id"] is None for r in _rows())
+    assert all(r["turn_id"] is None for r in _rows())
+
+
+async def test_record_drained_event_filters_other_types(mock_db):
+    _mk_session()
+    await record_drained_event(SID, {"type": "chunk", "content": "x"})
+    await record_drained_event(SID, {"type": "tool_use", "id": "t", "name": "Bash"})
+    await record_drained_event(SID, {"type": "done", "metadata": {}})
+    assert _rows() == []
+
+
+async def test_record_drained_event_noop_when_flag_off(mock_db):
+    _mk_session(v2=False)
+    await record_drained_event(SID, {
+        "type": "subagent_chunk", "agent_id": "task_1", "content": "late",
+    })
+    assert _rows() == []
+
+
+async def test_record_parked_appends_turn_parked(mock_db):
+    _mk_session()
+    await record_parked(SID, ["t1", "t2", ""])
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["turn.parked"]
+    assert rows[0]["payload"]["task_ids"] == ["t1", "t2"]
+
+
+async def test_record_interrupting_appends_turn_interrupting(mock_db):
+    _mk_session()
+    await record_interrupting(SID, "stop")
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["turn.interrupting"]
+    assert rows[0]["payload"]["mode"] == "stop"
+
+
+async def test_record_parked_noop_when_flag_off(mock_db):
+    _mk_session(v2=False)
+    await record_parked(SID, ["t1"])
+    await record_interrupting(SID, "stop")
+    assert _rows() == []
+
+
+# ---------------------------------------------------------------------------
+# never-propagate invariant
+# ---------------------------------------------------------------------------
+
+async def test_append_raises_does_not_propagate(mock_db, monkeypatch):
+    _mk_session()
+    rec = await _recorder()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tr.session_events_db, "append_events", _boom)
+    # None of these may raise.
+    await rec.start("hi")
+    await rec.on_event({"type": "chunk", "content": "x"})
+    await rec.on_event({"type": "done", "session_id": SID, "metadata": {}})
+    await rec.close()
+    await record_drained_event(SID, {"type": "task_progress", "task_id": "t1"})
+    await record_parked(SID, ["t1"])
+    await record_interrupting(SID, "stop")
+
+
+async def test_on_event_with_garbage_input_does_not_raise(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event(None)  # type: ignore[arg-type]
+    await rec.on_event("not a dict")  # type: ignore[arg-type]
+    await rec.on_event({})  # no type key
+    await rec.on_event({"type": "tool_use"})  # missing every field
+    assert "tool.use" in _types()  # defaults applied, still recorded
+    await rec.close()

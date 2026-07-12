@@ -399,6 +399,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							role: 'user' as const,
 							content: prompt,
 							profileId: queryProfileId,
+							// V2 Phase 1: stamp the client-generated adoption token as the
+							// commandId so the SSE reducer can reconcile the eventual
+							// `message.user` event onto THIS optimistic row (in place, no
+							// remount) instead of appending a duplicate. Only set for a
+							// new-session query (requestId is null for existing sessions —
+							// the reducer then falls back to content+recency matching).
+							commandId: requestId || undefined,
 							timestamp: new Date().toISOString(),
 						}],
 						isStreaming: true,

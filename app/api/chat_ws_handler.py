@@ -854,6 +854,7 @@ async def _drain_notifications_impl(
     from app.api.websocket import _drain_pumps
     from app.core.session_pool import get_session_pool
     from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_drained_event
     from app.core.query_engine import (
         _cli_turn_events_from_message,
         _record_subagent_lane_launches,
@@ -1093,6 +1094,8 @@ async def _drain_notifications_impl(
                     ):
                         for _sub_ev in _subagent_events_from_message(message):
                             await dispatch_event(_sub_ev, sub_ectx, sub_state)
+                            # V2 recording tap (no-op unless sessions.v2_stream)
+                            await record_drained_event(session_id, _sub_ev)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
@@ -1139,6 +1142,8 @@ async def _drain_notifications_impl(
                         if _chip_ok:
                             for _status_ev in _status_evs:
                                 await dispatch_event(_status_ev, sub_ectx, sub_state)
+                                # V2 recording tap (no-op unless v2_stream)
+                                await record_drained_event(session_id, _status_ev)
                             if _tu_terminal:
                                 # A TERMINAL TaskUpdated chip rendered — record it
                                 # so a following terminal notification for the
@@ -1245,6 +1250,9 @@ async def _drain_notifications_impl(
                                 await live_session_store.finalize_thinking(session_id)
                             else:
                                 await dispatch_event(_cli_ev, sub_ectx, sub_state)
+                                # V2 recording tap (record_drained_event itself
+                                # filters to subagent_*/task_*/system types)
+                                await record_drained_event(session_id, _cli_ev)
                         if _cli_evs:
                             _cli_turn_forwarded = True
                     except Exception as _exc:
@@ -1987,6 +1995,25 @@ def _start_drain_pump_impl(
     _drain_pumps[session_id] = task
     logger.info("Drain pump: task created [session=%s]", session_id)
 
+    # V2 recording tap: the session is now parked awaiting background work —
+    # append turn.parked to the event log (no-op unless sessions.v2_stream).
+    # Fire-and-forget: recording must never delay or fail the pump start.
+    try:
+        from app.core.task_registry import task_registry
+        from app.core.turn_recorder import record_parked
+
+        _parked_ids = [
+            w.get("id")
+            for w in task_registry.get_active_background_work(session_id)
+            if w.get("id")
+        ]
+        _rp_task = asyncio.create_task(record_parked(session_id, _parked_ids))
+        _rp_task.add_done_callback(
+            lambda t: t.exception() if not t.cancelled() else None
+        )
+    except Exception:
+        logger.debug("Drain pump: record_parked tap failed", exc_info=True)
+
 
 class WebSocketRateLimiter:
     """Sliding-window rate limiter for WebSocket messages per connection.
@@ -2451,6 +2478,7 @@ class ChatWebSocketHandler:
                         worktree_id=worktree_id,
                         worktree_branch=wt_branch,
                         worktree_path=wt_path,
+                        v2_stream=settings.v2_stream_default,
                         _conn=txn
                     )
                     _msg_role = "user"
@@ -2480,7 +2508,10 @@ class ChatWebSocketHandler:
                 "type": "session_created",
                 "session_id": session_id,
                 "title": title,
-                "worktree_id": worktree_id  # Include worktree_id in response
+                "worktree_id": worktree_id,  # Include worktree_id in response
+                # V2: the session was just created with this flag — echo it so
+                # the client knows whether to attach the typed event feed.
+                "v2_stream": settings.v2_stream_default
             }
             if request_id:
                 session_created_frame["request_id"] = request_id
@@ -2683,6 +2714,15 @@ class ChatWebSocketHandler:
             # does NOT auto-fire queued messages.  The queue stays intact —
             # the user can send them manually or clear them.
             _stopped_sessions.add(session_id)
+
+            # V2 recording tap: append turn.interrupting to the event log
+            # (no-op unless sessions.v2_stream). Fire-and-forget — recording
+            # must never delay the actual interrupt below.
+            from app.core.turn_recorder import record_interrupting
+            _ri_task = asyncio.create_task(record_interrupting(session_id, "stop"))
+            _ri_task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
 
             # Call SDK's interrupt() - this signals the subprocess to stop.
             # Don't cancel the task immediately: let the streaming loop continue
@@ -4283,6 +4323,13 @@ class ChatWebSocketHandler:
             start_frame: Dict[str, Any] = {"type": "start", "session_id": session_id, "message_id": message_id}
             if request_id:
                 start_frame["request_id"] = request_id
+            # V2: tell the client whether this session records to the typed
+            # event log (Phase 1) so it can attach the SSE tail feed.
+            try:
+                _v2_row = await run_sync(database.get_session, session_id)
+                start_frame["v2_stream"] = bool(_v2_row and _v2_row.get("v2_stream"))
+            except Exception:
+                start_frame["v2_stream"] = False
             if not await self.send_json(start_frame):
                 ctx.warning(logger, "Connection lost before query could start")
                 if deferred_delivery:
@@ -4324,7 +4371,8 @@ class ChatWebSocketHandler:
                 overrides=overrides,
                 broadcast_func=self.send_json,  # Pass send_json for permission requests
                 api_user_id=self.api_user_id,  # Pass for user-scoped credential resolution
-                user_id=self.user_id  # Pass for user-level broadcasts (awaiting-input indicator)
+                user_id=self.user_id,  # Pass for user-level broadcasts (awaiting-input indicator)
+                v2_command_id=request_id  # V2: client command echo on recorded events
             ):
                 if (
                     not stop_interrupt_reissued

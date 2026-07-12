@@ -107,6 +107,9 @@ async def test_idle_full_body_exact(mock_db):
         "unpark_pending": False,
         "preserve_background_on_interrupt": False,
         "session_meta": {"title": "Idle"},
+        # CONSCIOUS flip edit (V2 Phase 1): /live now surfaces the session's
+        # v2_stream flag so clients know whether to attach the typed event feed.
+        "v2_stream": False,
     }
 
 
@@ -286,6 +289,8 @@ async def test_parked_delta_poll_lightweight_body_exact(mock_db):
         "unpark_pending": False,
         "preserve_background_on_interrupt": False,
         "session_meta": {"title": "DP"},
+        # CONSCIOUS flip edit (V2 Phase 1): /live now surfaces v2_stream.
+        "v2_stream": False,
     }
 
 

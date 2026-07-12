@@ -1805,6 +1805,51 @@ async def stream_to_websocket(
     overrides: Optional[Dict[str, Any]] = None,
     broadcast_func: Optional[callable] = None,
     api_user_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    v2_command_id: Optional[str] = None,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Recording tap around ``_stream_to_websocket_impl`` (V2 Phase 1).
+
+    For sessions flagged ``sessions.v2_stream``, a ``TurnRecorder`` observes
+    every yielded pump event BEFORE it is passed to the consumer and appends
+    the typed translation to the session event log; ``close()`` runs in the
+    ``finally`` so the crash/abandonment path still records a terminal
+    ``turn.aborted``. For all other sessions (recorder is None) this wrapper
+    is a pure passthrough. See app/core/turn_recorder.py and
+    docs/V2_PHASE1_DESIGN.md §2.
+    """
+    from app.core.turn_recorder import TurnRecorder
+
+    recorder = await TurnRecorder.maybe_create(session_id, command_id=v2_command_id)
+    if recorder:
+        await recorder.start(prompt)
+    try:
+        async for event in _stream_to_websocket_impl(
+            prompt=prompt,
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            overrides=overrides,
+            broadcast_func=broadcast_func,
+            api_user_id=api_user_id,
+            user_id=user_id,
+        ):
+            if recorder:
+                await recorder.on_event(event)
+            yield event
+    finally:
+        if recorder:
+            await recorder.close()
+
+
+async def _stream_to_websocket_impl(
+    prompt: str,
+    session_id: str,
+    profile_id: str,
+    project_id: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    broadcast_func: Optional[callable] = None,
+    api_user_id: Optional[str] = None,
     user_id: Optional[str] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """

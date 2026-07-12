@@ -610,6 +610,18 @@
           "title": "Id",
           "type": "string"
         },
+        "result_preview": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Preview"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -696,6 +708,23 @@
           "title": "Id",
           "type": "string"
         },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "chunk",
+                "tool_use",
+                "tool_result"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
         "note": {
           "anyOf": [
             {
@@ -707,6 +736,11 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
         },
         "run_id": {
           "anyOf": [
@@ -775,6 +809,30 @@
     },
     "SubagentStarted": {
       "properties": {
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        },
+        "agent_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Type"
+        },
         "command_id": {
           "anyOf": [
             {
@@ -807,6 +865,18 @@
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "prompt_preview": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Preview"
         },
         "run_id": {
           "anyOf": [
@@ -1032,6 +1102,18 @@
           "title": "Created At",
           "type": "string"
         },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -1060,9 +1142,33 @@
           "title": "State",
           "type": "string"
         },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
         "task_id": {
           "title": "Task Id",
           "type": "string"
+        },
+        "tool_use_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Use Id"
         },
         "turn_id": {
           "anyOf": [
@@ -1092,6 +1198,87 @@
         "state"
       ],
       "title": "TaskUpdated",
+      "type": "object"
+    },
+    "ToolInputDelta": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "partial_json": {
+          "title": "Partial Json",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "tool.input_delta",
+          "default": "tool.input_delta",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "tool_use_id",
+        "partial_json"
+      ],
+      "title": "ToolInputDelta",
       "type": "object"
     },
     "ToolResult": {
@@ -1511,6 +1698,11 @@
           "default": "turn.completed",
           "title": "Type",
           "type": "string"
+        },
+        "usage": {
+          "additionalProperties": true,
+          "title": "Usage",
+          "type": "object"
         }
       },
       "required": [
@@ -1833,6 +2025,82 @@
       ],
       "title": "TurnStarted",
       "type": "object"
+    },
+    "TurnUsage": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "turn.usage",
+          "default": "turn.usage",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "additionalProperties": true,
+          "title": "Usage",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at"
+      ],
+      "title": "TurnUsage",
+      "type": "object"
     }
   },
   "discriminator": {
@@ -1850,6 +2118,7 @@
       "system.compaction_boundary": "#/$defs/SystemCompactionBoundary",
       "system.note": "#/$defs/SystemNote",
       "task.updated": "#/$defs/TaskUpdated",
+      "tool.input_delta": "#/$defs/ToolInputDelta",
       "tool.result": "#/$defs/ToolResult",
       "tool.use": "#/$defs/ToolUse",
       "transcript.rewound": "#/$defs/TranscriptRewound",
@@ -1858,7 +2127,8 @@
       "turn.interrupting": "#/$defs/TurnInterrupting",
       "turn.parked": "#/$defs/TurnParked",
       "turn.queued": "#/$defs/TurnQueued",
-      "turn.started": "#/$defs/TurnStarted"
+      "turn.started": "#/$defs/TurnStarted",
+      "turn.usage": "#/$defs/TurnUsage"
     },
     "propertyName": "type"
   },
@@ -1882,6 +2152,9 @@
       "$ref": "#/$defs/TurnAborted"
     },
     {
+      "$ref": "#/$defs/TurnUsage"
+    },
+    {
       "$ref": "#/$defs/MessageUser"
     },
     {
@@ -1892,6 +2165,9 @@
     },
     {
       "$ref": "#/$defs/ToolUse"
+    },
+    {
+      "$ref": "#/$defs/ToolInputDelta"
     },
     {
       "$ref": "#/$defs/ToolResult"

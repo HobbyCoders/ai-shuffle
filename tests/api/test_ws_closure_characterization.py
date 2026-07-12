@@ -512,7 +512,12 @@ async def test_query_new_session_mints_session_and_spawns_run_query():
     broadcast excluding the sender, exactly one run_query registered.
 
     CONSCIOUS flip edit (plan: class-canonical): session_created now carries
-    ``title`` so the frontend can show it without a round-trip."""
+    ``title`` so the frontend can show it without a round-trip.
+
+    CONSCIOUS flip edit (V2 Phase 1): session_created now also carries
+    ``v2_stream`` (the flag the session was just created with) so the client
+    knows whether to attach the typed event feed. The Phase-1 cutover flipped
+    v2_stream_default ON, so a plain new session now stamps True."""
     with _ClosureHarness() as h:
         ws = await h.run([{
             "type": "query",
@@ -534,6 +539,7 @@ async def test_query_new_session_mints_session_and_spawns_run_query():
         "session_id": sid,
         "title": "hello there",
         "worktree_id": None,
+        "v2_stream": True,
     }], "no request_id given => key must be OMITTED (adoption-token contract)"
 
     h.sync.broadcast_user_session_created.assert_awaited_once()

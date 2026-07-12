@@ -32,6 +32,8 @@ import {
 
 // Extracted sub-modules
 import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session/session-init';
+// V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
+import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
@@ -231,6 +233,17 @@ function getAuthToken(): string | null {
 	return null;
 }
 
+/**
+ * V2 Phase 1: whether a session opts into the SSE-fed reducer path. Sourced from
+ * the session-list row (the backend surfaces `v2_stream` on `Session`). Unknown
+ * sessions (row not yet loaded) fall back to legacy — the safe default.
+ */
+function isSessionV2(sessionId: string | null): boolean {
+	if (!sessionId) return false;
+	const row = appData.current.sessions.find((s) => s.id === sessionId);
+	return !!row?.v2_stream;
+}
+
 // ─── Default state ───────────────────────────────────────────────────────────
 
 function defaultState(): ActiveSessionState {
@@ -370,6 +383,18 @@ const wsConn: WsConnection = createWsConnection({
 			wsConn.send({ type: 'get_pending_permissions' });
 			wsConn.send({ type: 'get_pending_questions' });
 
+			// V2 Phase 1: for v2_stream sessions the feed controller owns the
+			// transcript + streaming state (fed from the SSE event log). Start it
+			// instead of the poller on (re)connect / boot-restore; permissions and
+			// questions still flow over legacy WS above.
+			if (isSessionV2(sessionId)) {
+				feedController.start(sessionId);
+				if (_state.isRestoringSession) {
+					_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));
+				}
+				return;
+			}
+
 			// Always re-sync on (re)connect. We may have missed messages during
 			// the disconnect window (e.g. phone lock / network drop). The poller's
 			// shallow-equality check in onPollApplied prevents redundant renders
@@ -406,7 +431,9 @@ const wsConn: WsConnection = createWsConnection({
 		// down. startStreaming forces a full (since_update_id=0) poll, so the park
 		// branch in _applyPollResult re-arms the 1500ms park timer; without this a
 		// parked session is stranded with no poller until a manual reload.
-		if (sessionId && (wasStreaming || _state.activeTasks.length > 0)) {
+		// V2 sessions: the feed controller owns reconnect (SSE backoff + revive);
+		// don't spin up the legacy poller, which is not the writer for them.
+		if (sessionId && !isSessionV2(sessionId) && (wasStreaming || _state.activeTasks.length > 0)) {
 			sessionPoller.startStreaming(sessionId);
 		}
 
@@ -432,6 +459,9 @@ const wsConn: WsConnection = createWsConnection({
 	},
 	onVisibilityVisible: () => {
 		if (!_state.sessionId) return;
+		// V2 sessions: the feed controller revives itself on visibilitychange;
+		// the poller must not be started for them.
+		if (isSessionV2(_state.sessionId)) return;
 		// Always fire an immediate HTTP poll — this renders fresh messages
 		// before the WS reconnect handshake completes. Critical for mobile
 		// unlock latency. No-op updates are filtered by shallow-equality in
@@ -571,6 +601,11 @@ const messageSender = createMessageSender({
 	},
 	getActiveSession: () => activeSession,
 });
+
+// V2 Phase 1: inject the private writer into the feed-controller singleton so it
+// can fold SSE-fed reducer state into activeSession as the single writer for
+// v2_stream sessions.
+feedController.attach({ update: _update, getState: () => _state });
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 

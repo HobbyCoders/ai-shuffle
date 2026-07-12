@@ -52,6 +52,7 @@ export interface Session {
 	project_name?: string | null;  // Resolved server-side (cross-install projects)
 	link_group_id?: string | null;  // Folds same-repo clones into one board group
 	automation_id?: string | null;  // Set when an automation run created this session
+	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 }
 
 export interface SessionMessage {

@@ -74,6 +74,7 @@ class SessionRow(TypedDict):
     updated_at: str
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
+    v2_stream: bool
 
 
 class SessionSearchResult(TypedDict):
@@ -400,6 +401,7 @@ def create_session(
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
     automation_id: Optional[str] = None,
+    v2_stream: bool = False,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -416,16 +418,19 @@ def create_session(
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         automation_id: Automation that created this session (NULL = user/API session)
+        v2_stream: Opt-in to the V2 streaming path (stamped at chat-session
+            creation from settings.v2_stream_default; defaults False for all
+            other creation paths)
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs14 = ", ".join([_ph] * 14)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, created_at, updated_at)
-               VALUES ({_phs14})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, now, now)
+    _phs15 = ", ".join([_ph] * 15)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, v2_stream, created_at, updated_at)
+               VALUES ({_phs15})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, bool(v2_stream), now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -502,6 +507,7 @@ def update_session(
     cache_creation_tokens: Optional[int] = None,
     cache_read_tokens: Optional[int] = None,
     launched_model: Optional[str] = None,
+    v2_stream: Optional[bool] = None,
 ) -> Optional[SessionRow]:
     """Update a session with usage stats
 
@@ -555,6 +561,9 @@ def update_session(
     if launched_model is not None:
         updates.append(f"launched_model = {_ph}")
         values.append(launched_model)
+    if v2_stream is not None:
+        updates.append(f"v2_stream = {_ph}")
+        values.append(bool(v2_stream))
 
     values.append(session_id)
 

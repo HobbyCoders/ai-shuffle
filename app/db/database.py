@@ -100,7 +100,8 @@ def _safe_json(value):
 #      app.core.task_persistence; no reader depends on it yet — boot reconcile
 #      marks this install's stale non-terminal rows killed)
 # 56: v2 core primitives (session_events, session_event_counters, runs, pending_interactions, artifacts, projects_v2, checkouts)
-SCHEMA_VERSION = 56
+# 57: sessions.v2_stream — per-session opt-in flag for the V2 streaming path (Phase 1 cutover)
+SCHEMA_VERSION = 57
 
 
 def _run_column_migrations(cursor):
@@ -832,6 +833,14 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("checkouts")
+
+    # Per-session opt-in for the V2 streaming path (v57). Stamped at chat/REST
+    # session creation from settings.v2_stream_default; flippable per session.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "v2_stream"):
+        cursor.execute(
+            "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS v2_stream BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        migrations_applied.append("sessions.v2_stream")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

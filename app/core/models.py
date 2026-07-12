@@ -360,6 +360,9 @@ class Session(SessionBase):
     # response model FastAPI strips it and the board falls back to project_id,
     # rendering the same repo as a separate card per install.
     link_group_id: Optional[str] = None
+    # V2 Phase 1: per-session opt-in to the V2 streaming path. Stamped at chat
+    # session creation from settings.v2_stream_default; flippable via PATCH.
+    v2_stream: bool = False
 
 
 class SessionWithMessages(Session):

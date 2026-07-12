@@ -7,10 +7,12 @@ export type SessionEvent =
   | TurnParked
   | TurnCompleted
   | TurnAborted
+  | TurnUsage
   | MessageUser
   | AssistantTextDelta
   | AssistantThinkingDelta
   | ToolUse
+  | ToolInputDelta
   | ToolResult
   | SubagentStarted
   | SubagentProgress
@@ -76,163 +78,189 @@ export type Seq5 = number;
 export type SessionId5 = string;
 export type TurnId5 = string | null;
 export type Type5 = 'turn.aborted';
-export type Attachments = string[];
 export type CommandId6 = string | null;
-export type Content = string;
 export type CreatedAt6 = string;
 export type Id6 = string;
 export type RunId6 = string | null;
 export type Seq6 = number;
 export type SessionId6 = string;
 export type TurnId6 = string | null;
-export type Type6 = 'message.user';
+export type Type6 = 'turn.usage';
+export type Attachments = string[];
 export type CommandId7 = string | null;
+export type Content = string;
 export type CreatedAt7 = string;
 export type Id7 = string;
 export type RunId7 = string | null;
 export type Seq7 = number;
 export type SessionId7 = string;
-export type Text = string;
 export type TurnId7 = string | null;
-export type Type7 = 'assistant.text_delta';
+export type Type7 = 'message.user';
 export type CommandId8 = string | null;
 export type CreatedAt8 = string;
 export type Id8 = string;
 export type RunId8 = string | null;
 export type Seq8 = number;
 export type SessionId8 = string;
-export type Text1 = string;
+export type Text = string;
 export type TurnId8 = string | null;
-export type Type8 = 'assistant.thinking_delta';
+export type Type8 = 'assistant.text_delta';
 export type CommandId9 = string | null;
 export type CreatedAt9 = string;
 export type Id9 = string;
-export type Name = string;
 export type RunId9 = string | null;
 export type Seq9 = number;
 export type SessionId9 = string;
-export type ToolUseId = string;
+export type Text1 = string;
 export type TurnId9 = string | null;
-export type Type9 = 'tool.use';
-export type ArtifactHashes = string[];
+export type Type9 = 'assistant.thinking_delta';
 export type CommandId10 = string | null;
-export type ContentPreview = string | null;
 export type CreatedAt10 = string;
 export type Id10 = string;
-export type IsError = boolean;
+export type Name = string;
 export type RunId10 = string | null;
 export type Seq10 = number;
 export type SessionId10 = string;
-export type ToolUseId1 = string;
+export type ToolUseId = string;
 export type TurnId10 = string | null;
-export type Type10 = 'tool.result';
+export type Type10 = 'tool.use';
 export type CommandId11 = string | null;
 export type CreatedAt11 = string;
-export type Description = string | null;
 export type Id11 = string;
+export type PartialJson = string;
 export type RunId11 = string | null;
 export type Seq11 = number;
 export type SessionId11 = string;
-export type TaskId = string;
+export type ToolUseId1 = string;
 export type TurnId11 = string | null;
-export type Type11 = 'subagent.started';
+export type Type11 = 'tool.input_delta';
+export type ArtifactHashes = string[];
 export type CommandId12 = string | null;
+export type ContentPreview = string | null;
 export type CreatedAt12 = string;
 export type Id12 = string;
-export type Note = string | null;
+export type IsError = boolean;
 export type RunId12 = string | null;
 export type Seq12 = number;
 export type SessionId12 = string;
-export type TaskId1 = string;
-export type Tokens = number | null;
+export type ToolUseId2 = string;
 export type TurnId12 = string | null;
-export type Type12 = 'subagent.progress';
+export type Type12 = 'tool.result';
+export type AgentId = string | null;
+export type AgentType = string | null;
 export type CommandId13 = string | null;
 export type CreatedAt13 = string;
+export type Description = string | null;
 export type Id13 = string;
+export type PromptPreview1 = string | null;
 export type RunId13 = string | null;
 export type Seq13 = number;
 export type SessionId13 = string;
-export type Status = 'completed' | 'failed' | 'killed';
-export type TaskId2 = string;
+export type TaskId = string;
 export type TurnId13 = string | null;
-export type Type13 = 'subagent.completed';
+export type Type13 = 'subagent.started';
 export type CommandId14 = string | null;
 export type CreatedAt14 = string;
 export type Id14 = string;
+export type Kind = ('chunk' | 'tool_use' | 'tool_result') | null;
+export type Note = string | null;
 export type RunId14 = string | null;
 export type Seq14 = number;
 export type SessionId14 = string;
-export type State = string;
-export type TaskId3 = string;
+export type TaskId1 = string;
+export type Tokens = number | null;
 export type TurnId14 = string | null;
-export type Type14 = 'task.updated';
+export type Type14 = 'subagent.progress';
 export type CommandId15 = string | null;
 export type CreatedAt15 = string;
 export type Id15 = string;
+export type ResultPreview = string | null;
 export type RunId15 = string | null;
 export type Seq15 = number;
 export type SessionId15 = string;
-export type Subtype = string;
+export type Status = 'completed' | 'failed' | 'killed';
+export type TaskId2 = string;
 export type TurnId15 = string | null;
-export type Type15 = 'system.note';
+export type Type15 = 'subagent.completed';
 export type CommandId16 = string | null;
 export type CreatedAt16 = string;
+export type Description1 = string | null;
 export type Id16 = string;
 export type RunId16 = string | null;
 export type Seq16 = number;
 export type SessionId16 = string;
+export type State = string;
+export type Summary = string | null;
+export type TaskId3 = string;
+export type ToolUseId3 = string | null;
 export type TurnId16 = string | null;
-export type Type16 = 'system.compaction_boundary';
+export type Type16 = 'task.updated';
 export type CommandId17 = string | null;
 export type CreatedAt17 = string;
 export type Id17 = string;
-export type InteractionId = string;
-export type Kind = 'permission' | 'question';
 export type RunId17 = string | null;
 export type Seq17 = number;
 export type SessionId17 = string;
+export type Subtype = string;
 export type TurnId17 = string | null;
-export type Type17 = 'interaction.requested';
+export type Type17 = 'system.note';
 export type CommandId18 = string | null;
 export type CreatedAt18 = string;
 export type Id18 = string;
-export type InteractionId1 = string;
 export type RunId18 = string | null;
 export type Seq18 = number;
 export type SessionId18 = string;
 export type TurnId18 = string | null;
-export type Type18 = 'interaction.answered';
+export type Type18 = 'system.compaction_boundary';
 export type CommandId19 = string | null;
 export type CreatedAt19 = string;
 export type Id19 = string;
-export type InteractionId2 = string;
+export type InteractionId = string;
+export type Kind1 = 'permission' | 'question';
 export type RunId19 = string | null;
 export type Seq19 = number;
 export type SessionId19 = string;
 export type TurnId19 = string | null;
-export type Type19 = 'interaction.expired';
+export type Type19 = 'interaction.requested';
 export type CommandId20 = string | null;
 export type CreatedAt20 = string;
-export type FromSeq = number;
 export type Id20 = string;
+export type InteractionId1 = string;
 export type RunId20 = string | null;
 export type Seq20 = number;
 export type SessionId20 = string;
 export type TurnId20 = string | null;
-export type Type20 = 'transcript.rewound';
+export type Type20 = 'interaction.answered';
 export type CommandId21 = string | null;
 export type CreatedAt21 = string;
-export type Filename = string | null;
-export type Hash = string;
 export type Id21 = string;
-export type Mime = string | null;
+export type InteractionId2 = string;
 export type RunId21 = string | null;
 export type Seq21 = number;
 export type SessionId21 = string;
-export type Size = number;
 export type TurnId21 = string | null;
-export type Type21 = 'artifact.created';
+export type Type21 = 'interaction.expired';
+export type CommandId22 = string | null;
+export type CreatedAt22 = string;
+export type FromSeq = number;
+export type Id22 = string;
+export type RunId22 = string | null;
+export type Seq22 = number;
+export type SessionId22 = string;
+export type TurnId22 = string | null;
+export type Type22 = 'transcript.rewound';
+export type CommandId23 = string | null;
+export type CreatedAt23 = string;
+export type Filename = string | null;
+export type Hash = string;
+export type Id23 = string;
+export type Mime = string | null;
+export type RunId23 = string | null;
+export type Seq23 = number;
+export type SessionId23 = string;
+export type Size = number;
+export type TurnId23 = string | null;
+export type Type23 = 'artifact.created';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -291,6 +319,10 @@ export interface TurnCompleted {
   stop_reason?: StopReason;
   turn_id?: TurnId4;
   type?: Type4;
+  usage?: Usage;
+  [k: string]: unknown;
+}
+export interface Usage {
   [k: string]: unknown;
 }
 export interface TurnAborted {
@@ -305,10 +337,8 @@ export interface TurnAborted {
   type?: Type5;
   [k: string]: unknown;
 }
-export interface MessageUser {
-  attachments?: Attachments;
+export interface TurnUsage {
   command_id?: CommandId6;
-  content: Content;
   created_at: CreatedAt6;
   id: Id6;
   run_id?: RunId6;
@@ -316,167 +346,179 @@ export interface MessageUser {
   session_id: SessionId6;
   turn_id?: TurnId6;
   type?: Type6;
+  usage?: Usage1;
   [k: string]: unknown;
 }
-export interface AssistantTextDelta {
+export interface Usage1 {
+  [k: string]: unknown;
+}
+export interface MessageUser {
+  attachments?: Attachments;
   command_id?: CommandId7;
+  content: Content;
   created_at: CreatedAt7;
   id: Id7;
   run_id?: RunId7;
   seq: Seq7;
   session_id: SessionId7;
-  text: Text;
   turn_id?: TurnId7;
   type?: Type7;
   [k: string]: unknown;
 }
-export interface AssistantThinkingDelta {
+export interface AssistantTextDelta {
   command_id?: CommandId8;
   created_at: CreatedAt8;
   id: Id8;
   run_id?: RunId8;
   seq: Seq8;
   session_id: SessionId8;
-  text: Text1;
+  text: Text;
   turn_id?: TurnId8;
   type?: Type8;
   [k: string]: unknown;
 }
-export interface ToolUse {
+export interface AssistantThinkingDelta {
   command_id?: CommandId9;
   created_at: CreatedAt9;
   id: Id9;
-  input?: Input;
-  name: Name;
   run_id?: RunId9;
   seq: Seq9;
   session_id: SessionId9;
-  tool_use_id: ToolUseId;
+  text: Text1;
   turn_id?: TurnId9;
   type?: Type9;
+  [k: string]: unknown;
+}
+export interface ToolUse {
+  command_id?: CommandId10;
+  created_at: CreatedAt10;
+  id: Id10;
+  input?: Input;
+  name: Name;
+  run_id?: RunId10;
+  seq: Seq10;
+  session_id: SessionId10;
+  tool_use_id: ToolUseId;
+  turn_id?: TurnId10;
+  type?: Type10;
   [k: string]: unknown;
 }
 export interface Input {
   [k: string]: unknown;
 }
-export interface ToolResult {
-  artifact_hashes?: ArtifactHashes;
-  command_id?: CommandId10;
-  content_preview?: ContentPreview;
-  created_at: CreatedAt10;
-  id: Id10;
-  is_error?: IsError;
-  run_id?: RunId10;
-  seq: Seq10;
-  session_id: SessionId10;
-  tool_use_id: ToolUseId1;
-  turn_id?: TurnId10;
-  type?: Type10;
-  [k: string]: unknown;
-}
-export interface SubagentStarted {
+export interface ToolInputDelta {
   command_id?: CommandId11;
   created_at: CreatedAt11;
-  description?: Description;
   id: Id11;
+  partial_json: PartialJson;
   run_id?: RunId11;
   seq: Seq11;
   session_id: SessionId11;
-  task_id: TaskId;
+  tool_use_id: ToolUseId1;
   turn_id?: TurnId11;
   type?: Type11;
   [k: string]: unknown;
 }
-export interface SubagentProgress {
+export interface ToolResult {
+  artifact_hashes?: ArtifactHashes;
   command_id?: CommandId12;
+  content_preview?: ContentPreview;
   created_at: CreatedAt12;
   id: Id12;
-  note?: Note;
+  is_error?: IsError;
   run_id?: RunId12;
   seq: Seq12;
   session_id: SessionId12;
-  task_id: TaskId1;
-  tokens?: Tokens;
+  tool_use_id: ToolUseId2;
   turn_id?: TurnId12;
   type?: Type12;
   [k: string]: unknown;
 }
-export interface SubagentCompleted {
+export interface SubagentStarted {
+  agent_id?: AgentId;
+  agent_type?: AgentType;
   command_id?: CommandId13;
   created_at: CreatedAt13;
+  description?: Description;
   id: Id13;
+  prompt_preview?: PromptPreview1;
   run_id?: RunId13;
   seq: Seq13;
   session_id: SessionId13;
-  status: Status;
-  task_id: TaskId2;
+  task_id: TaskId;
   turn_id?: TurnId13;
   type?: Type13;
   [k: string]: unknown;
 }
-export interface TaskUpdated {
+export interface SubagentProgress {
   command_id?: CommandId14;
   created_at: CreatedAt14;
   id: Id14;
+  kind?: Kind;
+  note?: Note;
+  payload?: Payload;
   run_id?: RunId14;
   seq: Seq14;
   session_id: SessionId14;
-  state: State;
-  task_id: TaskId3;
+  task_id: TaskId1;
+  tokens?: Tokens;
   turn_id?: TurnId14;
   type?: Type14;
   [k: string]: unknown;
 }
-export interface SystemNote {
+export interface Payload {
+  [k: string]: unknown;
+}
+export interface SubagentCompleted {
   command_id?: CommandId15;
   created_at: CreatedAt15;
-  data?: Data;
   id: Id15;
+  result_preview?: ResultPreview;
   run_id?: RunId15;
   seq: Seq15;
   session_id: SessionId15;
-  subtype: Subtype;
+  status: Status;
+  task_id: TaskId2;
   turn_id?: TurnId15;
   type?: Type15;
+  [k: string]: unknown;
+}
+export interface TaskUpdated {
+  command_id?: CommandId16;
+  created_at: CreatedAt16;
+  description?: Description1;
+  id: Id16;
+  run_id?: RunId16;
+  seq: Seq16;
+  session_id: SessionId16;
+  state: State;
+  summary?: Summary;
+  task_id: TaskId3;
+  tool_use_id?: ToolUseId3;
+  turn_id?: TurnId16;
+  type?: Type16;
+  [k: string]: unknown;
+}
+export interface SystemNote {
+  command_id?: CommandId17;
+  created_at: CreatedAt17;
+  data?: Data;
+  id: Id17;
+  run_id?: RunId17;
+  seq: Seq17;
+  session_id: SessionId17;
+  subtype: Subtype;
+  turn_id?: TurnId17;
+  type?: Type17;
   [k: string]: unknown;
 }
 export interface Data {
   [k: string]: unknown;
 }
 export interface SystemCompactionBoundary {
-  command_id?: CommandId16;
-  created_at: CreatedAt16;
-  id: Id16;
-  run_id?: RunId16;
-  seq: Seq16;
-  session_id: SessionId16;
-  turn_id?: TurnId16;
-  type?: Type16;
-  [k: string]: unknown;
-}
-export interface InteractionRequested {
-  command_id?: CommandId17;
-  created_at: CreatedAt17;
-  id: Id17;
-  interaction_id: InteractionId;
-  kind: Kind;
-  request?: Request;
-  run_id?: RunId17;
-  seq: Seq17;
-  session_id: SessionId17;
-  turn_id?: TurnId17;
-  type?: Type17;
-  [k: string]: unknown;
-}
-export interface Request {
-  [k: string]: unknown;
-}
-export interface InteractionAnswered {
-  answer?: Answer;
   command_id?: CommandId18;
   created_at: CreatedAt18;
   id: Id18;
-  interaction_id: InteractionId1;
   run_id?: RunId18;
   seq: Seq18;
   session_id: SessionId18;
@@ -484,14 +526,13 @@ export interface InteractionAnswered {
   type?: Type18;
   [k: string]: unknown;
 }
-export interface Answer {
-  [k: string]: unknown;
-}
-export interface InteractionExpired {
+export interface InteractionRequested {
   command_id?: CommandId19;
   created_at: CreatedAt19;
   id: Id19;
-  interaction_id: InteractionId2;
+  interaction_id: InteractionId;
+  kind: Kind1;
+  request?: Request;
   run_id?: RunId19;
   seq: Seq19;
   session_id: SessionId19;
@@ -499,11 +540,15 @@ export interface InteractionExpired {
   type?: Type19;
   [k: string]: unknown;
 }
-export interface TranscriptRewound {
+export interface Request {
+  [k: string]: unknown;
+}
+export interface InteractionAnswered {
+  answer?: Answer;
   command_id?: CommandId20;
   created_at: CreatedAt20;
-  from_seq: FromSeq;
   id: Id20;
+  interaction_id: InteractionId1;
   run_id?: RunId20;
   seq: Seq20;
   session_id: SessionId20;
@@ -511,18 +556,45 @@ export interface TranscriptRewound {
   type?: Type20;
   [k: string]: unknown;
 }
-export interface ArtifactCreated {
+export interface Answer {
+  [k: string]: unknown;
+}
+export interface InteractionExpired {
   command_id?: CommandId21;
   created_at: CreatedAt21;
-  filename?: Filename;
-  hash: Hash;
   id: Id21;
-  mime?: Mime;
+  interaction_id: InteractionId2;
   run_id?: RunId21;
   seq: Seq21;
   session_id: SessionId21;
-  size: Size;
   turn_id?: TurnId21;
   type?: Type21;
+  [k: string]: unknown;
+}
+export interface TranscriptRewound {
+  command_id?: CommandId22;
+  created_at: CreatedAt22;
+  from_seq: FromSeq;
+  id: Id22;
+  run_id?: RunId22;
+  seq: Seq22;
+  session_id: SessionId22;
+  turn_id?: TurnId22;
+  type?: Type22;
+  [k: string]: unknown;
+}
+export interface ArtifactCreated {
+  command_id?: CommandId23;
+  created_at: CreatedAt23;
+  filename?: Filename;
+  hash: Hash;
+  id: Id23;
+  mime?: Mime;
+  run_id?: RunId23;
+  seq: Seq23;
+  session_id: SessionId23;
+  size: Size;
+  turn_id?: TurnId23;
+  type?: Type23;
   [k: string]: unknown;
 }

@@ -237,11 +237,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 56 for the V2 Phase-0 primitives (session_events, runs,
-    # pending_interactions, artifacts, projects_v2, checkouts; v55 was the
-    # background_tasks table).
-    assert db_version == 56
-    assert pg_version == 56
+    # Bumped to 57 for sessions.v2_stream (V2 Phase 1 cutover; v56 added the
+    # V2 Phase-0 primitives: session_events, runs, pending_interactions,
+    # artifacts, projects_v2, checkouts).
+    assert db_version == 57
+    assert pg_version == 57
     assert db_version == pg_version
 
 

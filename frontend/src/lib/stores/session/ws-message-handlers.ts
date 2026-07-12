@@ -21,6 +21,21 @@ import { notify, type NotificationAction, type NotificationSeverity, type Notifi
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
+// V2 Phase 1: SSE-fed reducer store for v2_stream sessions.
+import { feedController } from './v2/feed-controller';
+import { appData } from '../app-data.svelte';
+
+/**
+ * Whether an incoming frame's session is a V2 (SSE-fed) session. Prefers an
+ * explicit `v2_stream` field on the frame (forward-compatible with the backend
+ * stamping it on session_created/start), falling back to the session-list row.
+ */
+function frameIsV2(data: Record<string, unknown>): boolean {
+	if (typeof data.v2_stream === 'boolean') return data.v2_stream;
+	const sid = data.session_id as string | undefined;
+	if (!sid) return false;
+	return !!appData.current.sessions.find((x) => x.id === sid)?.v2_stream;
+}
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -367,7 +382,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				eventType === 'stream_start' ||
 				eventType === 'stream_end' ||
 				eventType === 'stream_chunk';
-			if (!isInterruptTransition && shouldNotify) {
+			// V2 Phase 1: v2 sessions are fed by the SSE reducer, not the poller —
+			// suppress notifier-driven poll triggers for them (session-notifier's
+			// sole caller is here, so this fully gates it without touching it).
+			if (!isInterruptTransition && shouldNotify && !feedController.isFeeding(state.sessionId)) {
 				sessionNotifier.handleMessage(state.sessionId, data);
 			}
 		}
@@ -598,6 +616,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
 						internal.stopBackgroundRequested = false;
 					}
+					// V2 Phase 1: adopt a freshly-minted v2 session by starting the
+					// SSE feed (idempotent - start() no-ops if already feeding this
+					// id). The feed's replay renders the turn; the poller stays off.
+					if (frameIsV2(data) && !feedController.isFeeding(sessionId)) {
+						feedController.start(sessionId);
+					}
 					onPersistSession();
 				}
 				appLoadSessions();
@@ -639,6 +663,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
 						internal.stopBackgroundRequested = false;
 					}
+					// V2 Phase 1: for v2_stream sessions the SSE feed owns the transcript
+					// and streaming state. Adopt the sessionId and start the feed; do
+					// NOT inject a synthetic streaming assistant message or start the
+					// poller (the feed's replay renders the turn).
+					if (frameIsV2(data)) {
+						update(s => ({
+							...s,
+							sessionId,
+							isStreaming: true,
+							streamStartTime: Date.now(),
+							...(startAdoptsNewSession ? { activeTasks: [] } : {}),
+						}));
+						if (!feedController.isFeeding(sessionId)) {
+							feedController.start(sessionId);
+						}
+						onPersistSession();
+						break;
+					}
+
 					// Set sessionId, streamStartTime, and inject a synthetic streaming
 					// assistant message so the streaming indicator appears immediately
 					// (don't wait for the poller to deliver the first assistant message).
@@ -734,6 +777,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Previously only rejected on mismatch, letting events without
 				// session_id through — root cause of cross-session bleed.
 				if (!deltaSessionId || deltaSessionId !== deltaState.sessionId) break;
+					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
+					if (feedController.isFeeding(deltaSessionId)) break;
 
 				const deltaType = data.delta_type as string;
 				if (deltaType === 'text') {
@@ -759,6 +804,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const chunkState = getState();
 				// Reject if session_id missing OR doesn't match (same fix as stream_delta)
 				if (!chunkSessionId || chunkSessionId !== chunkState.sessionId) break;
+					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
+					if (feedController.isFeeding(chunkSessionId)) break;
 
 				const chunkContent = data.content as string;
 				if (chunkContent) {
@@ -774,6 +821,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const blockSessionId = data.session_id as string | undefined;
 				const blockState = getState();
 				if (!blockSessionId || blockSessionId !== blockState.sessionId) break;
+					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
+					if (feedController.isFeeding(blockSessionId)) break;
 				// Clear the WS text buffer at the block boundary — the principled fix
 				// for the "mega-blob" incident. `wsStreamContent` accumulates every
 				// stream_delta with no separator and is otherwise cleared ONLY at turn
@@ -800,6 +849,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const ssSessionId = data.session_id as string | undefined;
 				const ssState = getState();
 				if (!ssSessionId || ssSessionId !== ssState.sessionId) break;
+					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
+					if (feedController.isFeeding(ssSessionId)) break;
 				// OPTIMISTIC WAKE ENGAGEMENT (item 6b): a stream_start for the
 				// active session means a turn is starting NOW — engage
 				// immediately instead of waiting a poll cycle. /live stays the
@@ -818,6 +869,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sysSessionId = data.session_id as string | undefined;
 				const sysState = getState();
 				if (!sysSessionId || sysSessionId !== sysState.sessionId) break;
+					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
+					if (feedController.isFeeding(sysSessionId)) break;
 				// Ensure polling is started if we're streaming but poller isn't running.
 				// This handles slash commands that don't trigger a 'start' event.
 				if (sysState.isStreaming && !sessionPoller.isPolling(sysState.sessionId)) {

@@ -16,6 +16,13 @@ import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
+// V2 Phase 1: SSE-fed reducer store for v2_stream sessions.
+import { feedController } from './v2/feed-controller';
+
+/** Whether a session opts into the V2 SSE-fed reducer path (from the list row). */
+function targetIsV2(sessionId: string): boolean {
+	return !!appData.current.sessions.find((x) => x.id === sessionId)?.v2_stream;
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -307,6 +314,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionPoller.stop(state.sessionId);
 			deps.sessionState?.removeSession(state.sessionId);
 		}
+		// V2 Phase 1: tear down any active SSE feed for the leaving session.
+		if (feedController.isFeeding()) {
+			feedController.stop();
+		}
 
 		// Reset cross-session internal state
 		internal.pendingTools.clear();
@@ -430,6 +441,20 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 
+		// V2 Phase 1: for v2_stream sessions the SSE-fed reducer is the transcript
+		// authority (full replay from_seq=0 = history load). Start the feed instead
+		// of the poller; permissions/questions still flow over legacy WS.
+		if (targetIsV2(sessionId)) {
+			if (generation !== _switchGeneration) return;
+			update(s => (s.sessionId === sessionId ? { ...s, isLoadingSession: false } : s));
+			wsSend({ type: 'watch_session', session_id: sessionId });
+			wsSend({ type: 'get_pending_permissions' });
+			wsSend({ type: 'get_pending_questions' });
+			feedController.start(sessionId);
+			persistSession();
+			return;
+		}
+
 		// Load full session state via HTTP — sole authority for session data.
 		// This replaces the old WS load_session → history flow.
 		const pollData = await sessionPoller.loadSession(sessionId);
@@ -506,6 +531,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		if (leavingSessionId) {
 			sessionPoller.stop(leavingSessionId);
 			deps.sessionState?.removeSession(leavingSessionId);
+		}
+		// V2 Phase 1: tear down any active SSE feed for the leaving session.
+		if (feedController.isFeeding()) {
+			feedController.stop();
 		}
 
 		// Save ephemeral for the session we're leaving
