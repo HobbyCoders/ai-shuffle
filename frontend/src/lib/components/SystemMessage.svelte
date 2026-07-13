@@ -109,7 +109,7 @@
 	}
 
 	// Get formatted content based on subtype
-	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string; rawInput?: string } {
+	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string; rawInput?: string; taskStatus?: string } {
 		const subtype = message.systemSubtype || 'system';
 		const data: Record<string, unknown> = message.systemData || {};
 
@@ -486,13 +486,8 @@
 					(patch.description as string) ||
 					(data.description as string) ||
 					(data.summary as string) ||
+					(data.subject as string) ||
 					'';
-
-				const summaryParts = [
-					taskId ? `task ${taskId.slice(0, 8)}` : '',
-					status,
-					description
-				].filter(Boolean);
 
 				const statusColor =
 					status === 'failed' ? 'red'
@@ -508,10 +503,14 @@
 				}
 
 				return {
-					title: subtype === 'task_notification' ? 'Task Notification' : 'Task Updated',
-					content: summaryParts.join(' \u00b7 ') || 'task state changed',
+					// Header name label matches a tool card: a stable 'Task' label,
+					// with the live status carried by the chip (badge) and the task's
+					// description as the truncated summary.
+					title: 'Task',
+					content: description || (taskId ? taskId.slice(0, 8) : ''),
 					badge: status || subtype,
 					badgeColor: statusColor,
+					taskStatus: status || subtype,
 					collapsible: true,
 					rawOutput
 				};
@@ -637,6 +636,14 @@
 
 	const formatted = $derived(getFormattedContent());
 
+	// Background-task state patches render their collapsed header with the
+	// tool-card convention (three-way status icon + bot icon + status chip)
+	// rather than the generic hook lightning-bolt row.
+	const isTaskSubtype = $derived(
+		message.systemSubtype === 'task_updated' ||
+			message.systemSubtype === 'task_notification'
+	);
+
 	// Badge color classes
 	function getBadgeClasses(color: string): string {
 		switch (color) {
@@ -749,26 +756,55 @@
 		<div class="w-full border border-border rounded-lg overflow-hidden">
 			<details class="group/hook">
 				<summary class="hook-summary w-full px-3 py-2 flex items-center gap-2 min-w-0 cursor-pointer list-none">
-					<!-- Status icon -->
-					{#if formatted.badgeColor === 'green'}
-						<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
-					{:else if formatted.badgeColor === 'red'}
-						<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					{#if isTaskSubtype}
+						<!-- Status icon — three-way, matching ToolUseMessage's convention -->
+						{#if formatted.taskStatus === 'running' || formatted.taskStatus === 'pending'}
+							<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+							</svg>
+						{:else if formatted.taskStatus === 'failed' || formatted.taskStatus === 'error' || formatted.taskStatus === 'killed'}
+							<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						{:else}
+							<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+						{/if}
+						<!-- Task icon (bot) — matches ToolUseMessage's Task entry -->
+						<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+							<rect x="3" y="11" width="18" height="10" rx="2"/>
+							<circle cx="12" cy="5" r="2"/>
+							<path d="M12 7v4"/>
+							<line x1="8" y1="16" x2="8" y2="16"/>
+							<line x1="16" y1="16" x2="16" y2="16"/>
 						</svg>
 					{:else}
-						<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						<!-- Status icon -->
+						{#if formatted.badgeColor === 'green'}
+							<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+						{:else if formatted.badgeColor === 'red'}
+							<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						{:else}
+							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+						{/if}
+						<!-- Hook icon (lightning bolt) -->
+						<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
 						</svg>
 					{/if}
-					<!-- Hook icon (lightning bolt) -->
-					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-					</svg>
 					<!-- Title -->
 					<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+					<!-- Status chip (task subtypes only) — muted pill, matching a tool card -->
+					{#if isTaskSubtype && formatted.badge}
+						<span class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-border bg-muted text-muted-foreground flex-shrink-0 uppercase tracking-wide">{formatted.badge}</span>
+					{/if}
 					<!-- Content summary -->
 					{#if formatted.content}
 						<span class="text-muted-foreground flex-shrink-0">&bull;</span>

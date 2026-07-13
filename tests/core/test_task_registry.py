@@ -981,70 +981,62 @@ class TestTaskListTool:
 # =============================================================================
 
 class TestLiveActiveTasks:
-    @pytest.mark.asyncio
-    async def test_live_includes_active_tasks_for_streaming_session(self):
-        """The /live endpoint attaches a top-level activeTasks field.
+    """V2: /live serves the persisted transcript plus lifecycle fields.
 
-        Drives the in-memory live-store path (session present + since_update_id=0),
-        which returns get_session_dict without touching the DB message loaders.
-        require_session and the live store are stubbed so no Postgres is needed.
-        """
+    ``activeTasks`` / ``unpark_pending`` are computed by
+    ``lifecycle_state.compute`` straight from the task registry (the old
+    in-memory live-store path is deleted) and attached to every local
+    response. These tests drive the REAL endpoint with only ``require_session``
+    and the cloud-relay check stubbed — registry, lifecycle compute and the
+    (empty) DB loaders all run for real.
+    """
+
+    @staticmethod
+    async def _call_live(session_id):
         from app.api import sessions as sessions_api
-        from app.core.live_session_store import live_session_store
+
+        fake_session = {"id": session_id, "title": "T"}
+        with patch.object(
+            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
+        ), patch(
+            "app.core.cloud_relay.is_remote_session", return_value=False
+        ):
+            return await sessions_api.get_live_session(
+                request=object(),
+                session_id=session_id,
+                token="tok",
+            )
+
+    @pytest.mark.asyncio
+    async def test_live_includes_active_tasks_for_session(self):
+        """The /live endpoint attaches a top-level activeTasks field."""
         from app.core.task_registry import task_registry as tr
 
         session_id = "live-sess"
         tr.reset_all()
         tr.start_task(session_id, "bg1", "shell", "tail -f log")
 
-        # Seed a streaming live session so the in-memory path is taken.
-        await live_session_store.start_streaming(session_id, initial_messages=[])
-
-        fake_session = {"id": session_id, "title": "T"}
-
-        with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ):
-            result = await sessions_api.get_live_session(
-                request=object(),
-                session_id=session_id,
-                since_update_id=0,
-                token="tok",
-            )
+        result = await self._call_live(session_id)
 
         assert isinstance(result, dict)
         assert "activeTasks" in result
         assert [t["id"] for t in result["activeTasks"]] == ["bg1"]
         assert result["activeTasks"][0]["kind"] == "shell"
 
-        await live_session_store.cleanup_session(session_id)
         tr.reset_all()
 
     @pytest.mark.asyncio
     async def test_live_active_tasks_empty_when_none(self):
-        from app.api import sessions as sessions_api
-        from app.core.live_session_store import live_session_store
         from app.core.task_registry import task_registry as tr
 
         session_id = "live-sess-empty"
         tr.reset_all()
-        await live_session_store.start_streaming(session_id, initial_messages=[])
-        fake_session = {"id": session_id, "title": "T"}
 
-        with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ):
-            result = await sessions_api.get_live_session(
-                request=object(),
-                session_id=session_id,
-                since_update_id=0,
-                token="tok",
-            )
+        result = await self._call_live(session_id)
 
         assert result["activeTasks"] == []
         # unpark_pending defaults to False and is always present.
         assert result["unpark_pending"] is False
-        await live_session_store.cleanup_session(session_id)
         tr.reset_all()
 
     @pytest.mark.asyncio
@@ -1053,18 +1045,14 @@ class TestLiveActiveTasks:
 
         Reproduces the silent-vanish bug end-to-end at the endpoint: a task is
         reaped to "killed" and the registry's live bucket is cleared (what
-        force-cleanup does), yet /live still carries the failed row in activeTasks
-        because the endpoint reads the DISPLAY view (get_visible), which retains
-        the failure for a window. The live session is kept streaming purely as a
-        no-DB harness so the in-memory /live path returns without a Postgres load.
+        force-cleanup does), yet /live still carries the failed row in
+        activeTasks because the endpoint reads the DISPLAY view (get_visible),
+        which retains the failure for a window.
         """
-        from app.api import sessions as sessions_api
-        from app.core.live_session_store import live_session_store
         from app.core.task_registry import task_registry as tr
 
         session_id = "live-reaped"
         tr.reset_all()
-        await live_session_store.start_streaming(session_id, initial_messages=[])
 
         # Background task runs, then its SDK client dies: reap to killed + clear.
         tr.start_task(session_id, "bg1", "agent", "doomed work")
@@ -1072,16 +1060,7 @@ class TestLiveActiveTasks:
         tr.clear_session(session_id)
         assert tr.get_active(session_id) == []  # gone from the running-only view
 
-        fake_session = {"id": session_id, "title": "T"}
-        with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ):
-            result = await sessions_api.get_live_session(
-                request=object(),
-                session_id=session_id,
-                since_update_id=0,
-                token="tok",
-            )
+        result = await self._call_live(session_id)
 
         # The failed row is surfaced (not silently dropped) with its killed status.
         assert [t["id"] for t in result["activeTasks"]] == ["bg1"]
@@ -1089,89 +1068,69 @@ class TestLiveActiveTasks:
 
         # Once the retention window lapses, the row ages out of activeTasks.
         tr._recent_terminal[session_id]["bg1"]["recorded_at"] = 0.0
-        with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ):
-            result2 = await sessions_api.get_live_session(
-                request=object(),
-                session_id=session_id,
-                since_update_id=0,
-                token="tok",
-            )
+        result2 = await self._call_live(session_id)
         assert result2["activeTasks"] == []
 
-        await live_session_store.cleanup_session(session_id)
         tr.reset_all()
 
     @pytest.mark.asyncio
     async def test_live_surfaces_then_clears_unpark_pending(self):
-        """/live carries the unpark-pending latch; start_streaming clears it.
+        """/live carries the unpark-pending latch; the turn-end finalize clears it.
 
-        Reproduces the hand-off gap: a parked session's sub-agent completed (so it
-        has no activeTasks) but the follow-up turn hasn't flipped is_streaming yet.
-        The latch must surface on /live so the poller keeps park-polling, and must
-        clear the instant the follow-up turn starts streaming (the wake).
+        Reproduces the hand-off gap: a parked session's sub-agent completed (so
+        it has no activeTasks) but the follow-up turn hasn't started yet. The
+        latch must surface on /live so the poller keeps park-polling. V2's
+        primary release is the durable turn-end finalize
+        (``persist_turn_end_state``) — after it runs, /live reports the latch
+        down again.
         """
-        from app.api import sessions as sessions_api
-        from app.core.live_session_store import live_session_store
         from app.core.task_registry import task_registry as tr
+        from app.core.turn_finalize import persist_turn_end_state
 
         session_id = "live-unpark"
         tr.reset_all()
-        await live_session_store.start_streaming(session_id, initial_messages=[])
 
         # The unpark hand-off latches "pending" after the parked turn, before the
         # follow-up streams. (No active tasks — the sub-agent already completed.)
         tr.mark_unpark_pending(session_id)
         assert tr.is_unpark_pending(session_id) is True
 
-        fake_session = {"id": session_id, "title": "T"}
-        with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ):
-            result = await sessions_api.get_live_session(
-                request=object(),
-                session_id=session_id,
-                since_update_id=0,
-                token="tok",
-            )
+        result = await self._call_live(session_id)
         assert result["unpark_pending"] is True
         assert result["activeTasks"] == []
 
-        # The follow-up turn starting to stream is the wake — it clears the latch
-        # (it flips together with is_streaming, so the poller upshifts on its own).
-        await live_session_store.start_streaming(session_id, initial_messages=[])
+        # The follow-up turn's end-of-turn finalize releases the latch (V2: the
+        # latch-clear lives in persist_turn_end_state, not a live-store flip).
+        await persist_turn_end_state(session_id)
         assert tr.is_unpark_pending(session_id) is False
 
-        await live_session_store.cleanup_session(session_id)
+        result2 = await self._call_live(session_id)
+        assert result2["unpark_pending"] is False
+
         tr.reset_all()
 
     @pytest.mark.asyncio
-    async def test_end_streaming_clears_latch_even_when_session_absent(self):
-        """end_streaming clears the unpark latch ABOVE its not-found guard.
+    async def test_finalize_clears_latch_even_when_session_absent(self):
+        """persist_turn_end_state clears the unpark latch with NO session state.
 
-        Backstop hardening: if a follow-up unpark turn dies/cancels before its
-        start_streaming (the primary clear) AND its session buffer was already
-        evicted, the error-path end_streaming finds no session. The clear must
-        still fire (it sits above the `if not session: return None` guard) so the
-        latch can't strand a polling client until the ~30s reaper.
+        Backstop hardening (V2 home of the old end-streaming-clears-latch
+        guarantee): if a follow-up unpark turn dies/cancels before it starts
+        AND the session has no row/pool entry anywhere, the error-path finalize
+        must still drop the latch — it never raises and never gates the clear
+        on the session existing — so the latch can't strand a polling client.
         """
-        from app.core.live_session_store import live_session_store
         from app.core.task_registry import task_registry as tr
+        from app.core.turn_finalize import persist_turn_end_state
 
         session_id = "live-unpark-evicted"
         tr.reset_all()
 
-        # Latch set, but the session is NOT in the live store (already reaped).
+        # Latch set, but the session exists nowhere else (already reaped).
         tr.mark_unpark_pending(session_id)
-        assert live_session_store.get_session(session_id) is None
         assert tr.is_unpark_pending(session_id) is True
 
-        # end_streaming returns None (session not found) yet still clears the latch.
-        result = await live_session_store.end_streaming(
-            session_id=session_id, metadata={}, interrupted=True
-        )
-        assert result is None
+        # Never raises (absent session row included) yet still clears the latch.
+        await persist_turn_end_state(session_id)
         assert tr.is_unpark_pending(session_id) is False
 
         tr.reset_all()

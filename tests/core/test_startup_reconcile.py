@@ -4,7 +4,9 @@ Covers:
 - clearing this install's orphaned parked markers (with an error_log entry);
 - resetting drifted live-looking ``sessions.status`` values;
 - never touching another install's sessions (instance scoping);
-- the durable parked marker being set/cleared at the live-store turn seams;
+- the durable parked marker being set/cleared at the turn-end finalize seam
+  (V2: ``turn_finalize.persist_turn_end_state`` is the ONLY marker writer —
+  the live store and its start/end_streaming seams are deleted);
 - reconcile failures never raising out of startup;
 - schema parity + the v51 ``parked_task_kind`` column (fresh schema and the
   idempotent column migration from a v50-shaped database).
@@ -129,48 +131,39 @@ async def test_archived_status_is_terminal_and_untouched(mock_db, test_db):
 
 
 # =============================================================================
-# Durable parked marker: set on park, cleared on unpark/turn start
+# Durable parked marker: set/cleared at the turn-end finalize seam
+#
+# V2: ``persist_turn_end_state`` is the only marker writer. There is NO
+# start-of-turn clear seam anymore (the live store's start_streaming clear is
+# deleted): a stale marker is cleared either by the NEXT turn's own finalize
+# (no work left → kind=None, pinned below) or by the reconcilers.
 # =============================================================================
 
-async def test_end_streaming_with_background_agent_sets_marker(mock_db, test_db):
-    from app.core.live_session_store import live_session_store
+async def test_turn_end_with_background_agent_sets_marker(mock_db, test_db):
     from app.core.task_registry import task_registry
+    from app.core.turn_finalize import persist_turn_end_state
 
     session_id = _make_session(test_db)
-    await live_session_store.start_streaming(session_id)
     task_registry.start_task(session_id, "task-1", "agent", "background research")
-
-    await live_session_store.end_streaming(session_id)
+    try:
+        await persist_turn_end_state(session_id)
+    finally:
+        task_registry.clear_session(session_id)
 
     assert _session_row(test_db, session_id)["parked_task_kind"] == "agent"
 
 
-async def test_start_streaming_clears_marker(mock_db, test_db):
-    from app.core.live_session_store import live_session_store
+async def test_turn_end_without_background_work_clears_marker(mock_db, test_db):
     from app.core.task_registry import task_registry
-
-    session_id = _make_session(test_db)
-    await live_session_store.start_streaming(session_id)
-    task_registry.start_task(session_id, "task-1", "agent", "background research")
-    await live_session_store.end_streaming(session_id)
-    assert _session_row(test_db, session_id)["parked_task_kind"] == "agent"
-
-    # The unpark follow-up turn starts streaming → the marker must clear.
-    await live_session_store.start_streaming(session_id)
-
-    assert _session_row(test_db, session_id)["parked_task_kind"] is None
-
-
-async def test_end_streaming_without_background_work_clears_marker(mock_db, test_db):
-    from app.core.live_session_store import live_session_store
-    from app.core.task_registry import task_registry
+    from app.core.turn_finalize import persist_turn_end_state
 
     session_id = _make_session(test_db, parked_task_kind="agent")
-    await live_session_store.start_streaming(session_id)
     task_registry.start_task(session_id, "task-1", "agent", "background research")
     task_registry.complete_task(session_id, "task-1", "completed")
-
-    await live_session_store.end_streaming(session_id)
+    try:
+        await persist_turn_end_state(session_id)
+    finally:
+        task_registry.clear_session(session_id)
 
     assert _session_row(test_db, session_id)["parked_task_kind"] is None
 
@@ -178,14 +171,15 @@ async def test_end_streaming_without_background_work_clears_marker(mock_db, test
 async def test_plain_shell_task_does_not_park(mock_db, test_db):
     # Monitor-style shells (kind="shell", not SDK-backgrounded) do not pin the
     # session in the pool, so they must not set the durable parked marker.
-    from app.core.live_session_store import live_session_store
     from app.core.task_registry import task_registry
+    from app.core.turn_finalize import persist_turn_end_state
 
     session_id = _make_session(test_db)
-    await live_session_store.start_streaming(session_id)
     task_registry.start_task(session_id, "shell-1", "shell", "npm run build")
-
-    await live_session_store.end_streaming(session_id)
+    try:
+        await persist_turn_end_state(session_id)
+    finally:
+        task_registry.clear_session(session_id)
 
     assert _session_row(test_db, session_id)["parked_task_kind"] is None
 
@@ -237,11 +231,12 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 57 for sessions.v2_stream (V2 Phase 1 cutover; v56 added the
-    # V2 Phase-0 primitives: session_events, runs, pending_interactions,
-    # artifacts, projects_v2, checkouts).
-    assert db_version == 57
-    assert pg_version == 57
+    # Bumped to 58 for the V2 Phase-1 deletion: v2_stream forced TRUE on every
+    # session + the column default flipped TRUE (v57 added the opt-in flag; v56
+    # added the V2 Phase-0 primitives: session_events, runs,
+    # pending_interactions, artifacts, projects_v2, checkouts).
+    assert db_version == 58
+    assert pg_version == 58
     assert db_version == pg_version
 
 

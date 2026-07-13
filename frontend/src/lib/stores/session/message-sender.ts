@@ -12,6 +12,8 @@ import { api, isApiError } from '$lib/api/client';
 import { toast } from '$lib/stores/toast';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
+// V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
+import { feedController } from './v2/feed-controller';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -86,13 +88,6 @@ export interface MessageSenderDeps {
 	};
 
 	// External modules
-	sessionPoller: {
-		stop: (sessionId: string) => void;
-		startStreaming: (sessionId: string) => void;
-	};
-	sessionState: {
-		removeSession: (sessionId: string) => void;
-	};
 	sessionEphemeralCache: {
 		remove: (key: string) => void;
 	};
@@ -130,7 +125,7 @@ interface SendMessageOptions {
 export function createMessageSender(deps: MessageSenderDeps) {
 	const {
 		update, getState, internal, wsConn,
-		sessionPoller, sessionState, sessionEphemeralCache,
+		sessionEphemeralCache,
 		appData, persistSession, stopTimeout, getActiveSession,
 	} = deps;
 
@@ -375,7 +370,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId,
-						wsStreamContent: '',
 					};
 				});
 			} else {
@@ -412,7 +406,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId,
-						wsStreamContent: '',
 					};
 				});
 			}
@@ -715,27 +708,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// so a prior session's running tasks can't flash on it.
 					activeTasks: [],
 					...(response.query_started
-						? { isStreaming: true, wsStreamContent: '', error: null }
+						? { isStreaming: true, error: null }
 						: {}),
 				}));
 
 				persistSession();
 
 				if (response.query_started) {
-					// Kick the poller FIRST — before any async WS work. The
+					// Start the SSE feed FIRST — before any async WS work. The
 					// headless query runner (sessions_worktree.py →
 					// launch_headless_query) starts run_query WITHOUT a
-					// WebSocket attached, so session-level sync_engine
-					// broadcasts (stream_start / stream_chunk /
-					// message_added) are dropped because no device is
-					// registered to this freshly-created session_id.
-					// The poller is the PRIMARY data source for
-					// auto-worktree streams; starting it synchronously
-					// (with isStreaming already true in state) ensures the
-					// onPollApplied guard in session-init doesn't reject
-					// the first response due to sessionId mismatch, and
-					// that typing indicators render immediately.
-					sessionPoller.startStreaming(response.session_id);
+					// WebSocket attached, so the freshly-created session_id has
+					// no live socket. The live SSE event log is the transcript
+					// authority: feedController.start() opens
+					// GET /sessions/{id}/events?from_seq=0 and its reducer folds
+					// every stream/message event into activeSession, so typing
+					// indicators and content render immediately.
+					feedController.start(response.session_id);
 
 					// Ensure WS is connected for side-channel delivery of
 					// future events — but the query itself keeps running
@@ -879,15 +868,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					sessionId: response.session_id,
 					isCreatingWorktree: false,
 					isStreaming: true,
-					wsStreamContent: '',
 					error: null,
 				}));
 
 				persistSession();
 
-				// The worker runs the query headlessly; the proxied /live endpoint
-				// is our data source, so start the poller immediately.
-				sessionPoller.startStreaming(response.session_id);
+				// The worker runs the query headlessly; the live SSE event log is
+				// the transcript authority, so start the feed immediately.
+				feedController.start(response.session_id);
 
 				// Connect WS for follow-up messages / interrupt forwarding.
 				if (!wsConn.isConnected()) {

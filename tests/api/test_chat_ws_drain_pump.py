@@ -31,9 +31,18 @@ ROUND 4 (cli-owned wake — section 13): the app-delivered unpark now applies ON
 to backgrounded SHELLS and killed/stopped TaskUpdated-alone terminals. A
 top-level backgrounded Task/Agent completion is CLI-OWNED: the CLI injects its
 own wake turn, the pump spends the dedup token (``decision=cli-owned-wake``),
-forwards that CLI-driven turn's content into the live pipeline, and delivers
+records that CLI-driven turn's content to the session event log, and delivers
 NO app unpark (the historical duplicate). Agent-class tests that previously
 asserted app delivery were flipped or converted to shells accordingly.
+
+V2 (Phase-1 deletion): the pump's re-dispatch seam is
+``app.core.turn_recorder.record_drained_event(session_id, event)`` — imported
+function-locally at the top of ``_drain_notifications_impl``, so patching the
+turn_recorder module attribute intercepts it — and the turn-END seam is
+``app.core.turn_finalize.persist_turn_end_state`` (module-level import in
+chat_ws_handler: patch ``cwh.persist_turn_end_state``). The old
+``ws_event_handlers.dispatch_event`` / ``live_session_store`` /
+``sync_engine.broadcast_stream_*`` seams are deleted with their modules.
 """
 
 import asyncio
@@ -219,9 +228,10 @@ async def test_pump_catches_slow_terminal_notification_and_unparks():
 
 
 # ---------------------------------------------------------------------------
-# 1b. SLOW sub-agent inner activity — re-dispatched so the inner group fills in
-#     (assistant text + tool calls/results) instead of "no activity recorded",
-#     and the node is COMPLETED by the terminal notification.
+# 1b. SLOW sub-agent inner activity — recorded to the session event log so the
+#     inner group fills in (assistant text + tool calls/results) instead of
+#     "no activity recorded", and the node is COMPLETED by the terminal
+#     notification.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -256,17 +266,18 @@ async def test_pump_redispatches_subagent_inner_activity_and_completes():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
+        assert sid == "sess-1"
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     by_type = {e["type"]: e for e in captured}
-    # (a) inner activity was re-dispatched into the SAME inner group (agent_id="tu-1").
+    # (a) inner activity was recorded into the SAME inner group (agent_id="tu-1").
     assert "subagent_chunk" in by_type
     assert by_type["subagent_chunk"]["agent_id"] == "tu-1"
     assert by_type["subagent_chunk"]["content"] == "STEP-1 done"
@@ -280,8 +291,8 @@ async def test_pump_redispatches_subagent_inner_activity_and_completes():
     assert "task_notification" in by_type
     assert by_type["task_notification"]["tool_use_id"] == "tu-1"
     assert by_type["task_notification"]["status"] == "completed"
-    # The summary rides the dispatched event so the parked card gets its short
-    # result text (result_text=summary in handle_task_notification).
+    # The summary rides the recorded event so log readers render the parked
+    # card's short result text.
     assert by_type["task_notification"]["summary"] == "done"
     # Order: inner activity precedes completion.
     assert [e["type"] for e in captured].index("subagent_chunk") < [
@@ -296,44 +307,40 @@ async def test_pump_redispatches_subagent_inner_activity_and_completes():
 
 
 # ---------------------------------------------------------------------------
-# 1c. STUCK-ACTIVE SUBAGENT CARD — a background (run_in_background) subagent's
-#     card stayed spinning with the "N/M tools" counter frozen one short after
-#     the agent completed; it healed only on reload. Root cause: the card +
-#     counter are rendered SOLELY from the /live park-poll (never the direct WS
-#     frame), so they flip active→done only once the poller polls AFTER the pump
-#     completes the node. A watcher whose bounded park-poll already expired has a
-#     STOPPED poller, and the node-completion / chip broadcasts the pump emits
-#     (subagent_*/system event_types) are dropped by the FE idle-watcher
-#     shouldNotify gate (only stream_start/chunk/end pass while isStreaming is
-#     false). The CLI-owned-wake branch relied on the CLI's own injection turn to
-#     later broadcast stream_start and re-engage the poller — which lands seconds
-#     later, or never. The fix emits a neutral stream_chunk re-engagement nudge
-#     the instant the node completes so the stopped poller restarts and fetches
-#     the completed card. Distinct seam from #543 (which keeps the origin device
-#     registered for deferred run_query WAKE turns — the app-unpark deliver
-#     branch; this pump branch never starts a run_query).
+# 1c. SUBAGENT COMPLETION SURFACING — a background (run_in_background) subagent
+#     whose terminal notification arrives BETWEEN turns must still surface to
+#     watchers. V2: the pump durably records the ``task_notification`` event to
+#     the session event log (record_drained_event) — SSE readers / park-pollers
+#     render the completed card from the log — and sends one best-effort direct
+#     WS frame (send_json) as an FE nudge. The old broadcast_stream_chunk
+#     poller re-engagement nudge is deleted with the streaming broadcast path.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_pump_reengages_poller_when_background_subagent_completes():
+async def test_pump_records_completion_and_nudges_fe_when_background_subagent_completes():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
     task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
 
     # A SLOW background sub-agent whose terminal notification arrives on the
-    # pooled client AFTER the parent turn returned (the stuck-card case). Its
-    # completion is CLI-owned (kind="agent" + a recorded background launch), so
-    # the pump `continue`s without an app unpark — hang=False so the stream ends
-    # and the pump terminates.
+    # pooled client AFTER the parent turn returned. Its completion is CLI-owned
+    # (kind="agent" + a recorded background launch), so the pump `continue`s
+    # without an app unpark — hang=False so the stream ends and the pump
+    # terminates.
     notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
     client = _FakeClient([notif], hang=False)
     state = _fake_state(client)
     handler = _make_handler()
 
+    captured = []
+
+    async def _capture(sid, event):
+        assert sid == "sess-1"
+        captured.append(event)
+
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ), patch.object(
-        cwh.sync_engine, "broadcast_stream_chunk", new=AsyncMock()
-    ) as _bchunk:
+        "app.core.turn_recorder.record_drained_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     # The node was completed + the wake is CLI-owned (no app unpark) — unchanged.
@@ -341,26 +348,38 @@ async def test_pump_reengages_poller_when_background_subagent_completes():
     assert task_registry.was_unparked("sess-1", "task-1") is True
     handler._deliver_unpark.assert_not_awaited()
 
-    # THE FIX: a stream_chunk re-engagement broadcast was emitted so a STOPPED
-    # idle-watcher poller restarts and fetches the just-completed card. Without
-    # it the poller never re-engages and the card stays spinning at M-1 until a
-    # full reload. (RED before the fix: broadcast_stream_chunk is never called.)
-    _bchunk.assert_awaited_once()
-    kwargs = _bchunk.await_args.kwargs
-    assert kwargs["session_id"] == "sess-1"
-    assert kwargs["chunk_type"] == "subagent_tool_result"
-    assert kwargs["chunk_data"]["task_id"] == "task-1"
-    assert kwargs["chunk_data"]["status"] == "completed"
-    # source_device_id=None → broadcast to every REGISTERED device (the watching
-    # tab), matching the pump's other server-initiated broadcasts.
-    assert kwargs["source_device_id"] is None
+    # V2: the terminal completion is durably RECORDED to the session event log,
+    # keyed by the launch tool_use_id, so any reader (SSE, park-poll) renders
+    # the completed card from the log instead of needing a live broadcast.
+    notifs = [e for e in captured if e["type"] == "task_notification"]
+    assert len(notifs) == 1
+    assert notifs[0]["tool_use_id"] == "tu-1"
+    assert notifs[0]["status"] == "completed"
+    assert notifs[0]["summary"] == "done"
+    # ...and the parked-state completion chip was recorded alongside it.
+    chips = [e for e in captured if e["type"] == "system"]
+    assert len(chips) == 1
+    assert chips[0]["subtype"] == "task_updated"
+    assert chips[0]["data"]["task_id"] == "task-1"
+    # Plus one best-effort direct-WS nudge carrying the full wire frame.
+    nudges = [
+        c.args[0]
+        for c in handler.send_json.await_args_list
+        if c.args and c.args[0].get("type") == "task_notification"
+    ]
+    assert len(nudges) == 1
+    assert nudges[0]["session_id"] == "sess-1"
+    assert nudges[0]["task_id"] == "task-1"
+    assert nudges[0]["status"] == "completed"
 
 
 @pytest.mark.asyncio
-async def test_pump_reengage_nudge_only_once_per_task():
-    """The re-engagement nudge is gated on the same one-shot latch (mark_unparked
-    → _first) as the chip, so a duplicate terminal notification for the SAME task
-    (a fresh per-rest uuid) does NOT re-broadcast."""
+async def test_pump_completion_chip_recorded_only_once_per_task():
+    """The parked completion chip is gated on the one-shot latch (mark_unparked
+    → _first) + mark_chipped, so a duplicate terminal notification for the SAME
+    task (a fresh per-rest uuid) records the chip only ONCE. (The raw
+    task_notification record + FE nudge are per-notification by design — the
+    dedup that matters is the user-visible chip.)"""
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
     task_registry.mark_background_launch("sess-1", "tu-1")
 
@@ -370,15 +389,20 @@ async def test_pump_reengage_nudge_only_once_per_task():
     state = _fake_state(client)
     handler = _make_handler()
 
+    captured = []
+
+    async def _capture(sid, event):
+        captured.append(event)
+
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ), patch.object(
-        cwh.sync_engine, "broadcast_stream_chunk", new=AsyncMock()
-    ) as _bchunk:
+        "app.core.turn_recorder.record_drained_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
-    # Exactly one nudge despite two terminal notifications for the task.
-    _bchunk.assert_awaited_once()
+    # Exactly one chip recorded despite two terminal notifications for the task.
+    chips = [e for e in captured if e["type"] == "system"]
+    assert len(chips) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -541,50 +565,37 @@ def _fake_stream(events):
 
 
 def _run_query_patches(handler, fake_stream):
-    """Mock every boundary run_query touches (mirrors test_chat_ws_unpark.py)."""
+    """Mock every boundary run_query touches (mirrors test_chat_ws_unpark.py).
+
+    V2: the live_session_store / sync_engine.broadcast_stream_* /
+    ws_event_handlers.dispatch_event / message_resolver.resolve_for_streaming_init
+    seams are DELETED with their modules — run_query records via TurnRecorder and
+    finalizes via persist_turn_end_state instead.
+    """
     from contextlib import ExitStack
 
     stack = ExitStack()
     stack.enter_context(patch("app.core.query_engine.stream_to_websocket", new=fake_stream))
 
-    store = stack.enter_context(patch.object(cwh, "live_session_store"))
-    store.start_streaming = AsyncMock()
-    store.add_user_message = AsyncMock()
-    store.end_streaming = AsyncMock()
-    store.cleanup_session = AsyncMock()
-    store.get_session_dict = MagicMock(return_value=None)
-    store.has_session = MagicMock(return_value=False)
-    store.is_streaming = MagicMock(return_value=False)
-
     sync = stack.enter_context(patch.object(cwh, "sync_engine"))
+    sync.register_device = AsyncMock()
     sync.unregister_device = AsyncMock()
     sync.broadcast_message_added = AsyncMock()
     sync.broadcast_queue_updated = AsyncMock()
-    sync.broadcast_stream_end = AsyncMock()
-    sync.is_session_streaming = MagicMock(return_value=False)
 
     conn = stack.enter_context(patch.object(cwh, "connector_manager"))
     conn.dispatch_event = AsyncMock()
     stack.enter_context(patch.object(cwh, "dispatch_session_complete", new=AsyncMock()))
+    stack.enter_context(patch.object(cwh, "persist_turn_end_state", new=AsyncMock()))
 
     db = stack.enter_context(patch.object(cwh, "database"))
     db.get_session = MagicMock(return_value={"sdk_session_id": "sdk-1"})
 
-    async def _fake_run_sync(fn, *a, **k):
-        # run_query routes resolve_for_streaming_init through run_sync (thread
-        # offload) — call through so the seed gets its list. Everything else
-        # (queue pops / db writes) stays a falsy no-op so the drain path under
-        # test is driven only by the explicit mocks below.
-        if fn is mr.resolve_for_streaming_init:
-            return fn(*a, **k)
-        return None
+    # Every run_sync-offloaded DB write / queue pop stays a falsy no-op so the
+    # drain path under test is driven only by the explicit mocks here.
+    stack.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(return_value=None)))
 
-    stack.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
-
-    mr = stack.enter_context(patch.object(cwh, "message_resolver"))
-    mr.resolve_for_streaming_init = MagicMock(return_value=[])
     stack.enter_context(patch.object(cwh, "resolve_working_dir", return_value="/tmp"))
-    stack.enter_context(patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()))
 
     import app.api.websocket as ws_mod
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new={}))
@@ -605,8 +616,8 @@ async def test_run_query_starts_pump_on_completion_with_active_agent_task():
         {"type": "done", "session_id": "sess-1", "metadata": {}},
     ]
 
-    # dispatch_event is mocked, so feed the registry directly to emulate the
-    # SDK lifecycle the real dispatch path would have recorded.
+    # stream_to_websocket is faked, so feed the registry directly to emulate
+    # the SDK lifecycle the real in-stream path would have recorded.
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
 
     with _run_query_patches(handler, _fake_stream(events)):
@@ -883,7 +894,7 @@ async def test_pump_completed_update_then_notification_unparks_exactly_once():
 
 
 def _system_chip_events(captured):
-    """The subset of captured dispatch_event payloads that render a system chip."""
+    """The subset of captured record_drained_event payloads that render a system chip."""
     return [
         e for e in captured
         if e.get("type") == "system" and e.get("subtype") == "task_updated"
@@ -895,10 +906,11 @@ async def test_pump_synthesizes_task_updated_chip_from_notification_alone():
     """RC2 (parked 'Task Updated' chip): a NORMAL background completion between
     turns arrives ONLY as a TaskNotificationMessage (no task_updated patch). The
     pump must SYNTHESIZE the same ``{"type":"system","subtype":"task_updated"}``
-    chip the in-stream loop renders so a completion landing while PARKED drops a
-    visible card — the Part-2 failure this fix closes. Round 4: for the agent
-    class the WAKE is cli-owned (no app unpark), but the completion chip is
-    still the app's to render — exactly once."""
+    chip the in-stream loop renders — V2: recorded to the session event log — so
+    a completion landing while PARKED drops a visible card — the Part-2 failure
+    this fix closes. Round 4: for the agent class the WAKE is cli-owned (no app
+    unpark), but the completion chip is still the app's to render — exactly
+    once."""
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
     task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
 
@@ -914,11 +926,11 @@ async def test_pump_synthesizes_task_updated_chip_from_notification_alone():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
@@ -965,11 +977,11 @@ async def test_pump_no_double_chip_when_update_and_notification_both_arrive():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
@@ -1000,11 +1012,11 @@ async def test_pump_suppressed_foreground_notification_synthesizes_no_chip():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
@@ -1214,10 +1226,10 @@ async def test_run_query_orphan_notification_does_not_unpark_but_clears_registry
         {"type": "done", "session_id": "sess-1", "metadata": {}},
     ]
 
-    # dispatch_event is mocked in _run_query_patches, so the in-stream
-    # _record_task_message that clears the registry doesn't run via the fake
-    # stream. Emulate that side-effect: the real stream_to_websocket would have
-    # called complete_task for the terminal notification.
+    # stream_to_websocket is faked in _run_query_patches, so the in-stream
+    # _record_task_message that clears the registry never runs. Emulate that
+    # side-effect: the real stream_to_websocket would have called
+    # complete_task for the terminal notification.
     def _stream_with_registry(evs):
         async def _gen(*args, **kwargs):
             sid = kwargs.get("session_id")
@@ -1619,9 +1631,7 @@ async def test_pump_arms_and_delivers_subagent_lane_launch_arriving_between_turn
     state = _fake_state(client)
     handler = _make_handler()
 
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ):
+    with _patch_pool(state):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     # The pump-side recorder armed the dedicated markers...
@@ -1710,9 +1720,7 @@ async def test_pump_arms_and_delivers_sidechain_monitor_builtin_between_turns():
     state = _fake_state(client)
     handler = _make_handler()
 
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ):
+    with _patch_pool(state):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     # The pump-side recorder armed the dedicated markers by tool name...
@@ -1785,9 +1793,7 @@ async def test_pump_keeps_suppressing_top_level_monitor_builtin():
     state = _fake_state(client)
     handler = _make_handler()
 
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ):
+    with _patch_pool(state):
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     # Indicator cleared (registry completed via _record_task_message)...
@@ -1997,74 +2003,97 @@ async def test_pump_suppresses_agent_completion_without_ack_arm():
 
 
 # ---------------------------------------------------------------------------
-# 12. RC2: parked-state "Task Updated" chip delivery (test C).
-#     A non-terminal TaskUpdatedMessage (e.g. a running→ still-running status patch)
-#     drained BETWEEN turns must be converted into the SAME {"type": "system",
-#     "subtype": "task_updated", ...} event the in-stream loop yields for it and
-#     dispatched through handle_system → add_system_message so a system message
-#     lands in the live store and its update_id increments — otherwise the
-#     park-poller (keyed on update_id) has nothing to fetch and the chip never
-#     renders while parked.
+# 12. RC2: parked-state "Task Updated" chip recording (test C).
+#     A non-terminal TaskUpdatedMessage (e.g. a running→ still-running status
+#     patch) drained BETWEEN turns must be converted into the SAME
+#     {"type": "system", "subtype": "task_updated", ...} event the in-stream
+#     loop yields for it and recorded to the SESSION EVENT LOG as a
+#     ``task.updated`` row — V2's sole render path (the old live_session_store
+#     ``add_system_message`` delivery is deleted with the module). The event-log
+#     readers (SSE/reload) surface the chip from there.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_pump_delivers_task_updated_chip_to_live_store():
-    from app.core.live_session_store import live_session_store, LiveSession
+async def test_pump_records_task_updated_chips_to_event_log():
+    """End-to-end through the REAL recorder + per-test DB shim: the running
+    status patch AND the terminal completion land as unfenced ``task.updated``
+    rows in the session event log."""
+    from app.db import session_events as se
+    from app.db import sessions as sessions_db
 
     session_id = "sess-chip"
+    sessions_db.create_session(session_id, "default")
     # A genuine background agent is still running (keeps the pump on its normal
     # unpark duty); the TaskUpdatedMessage is a non-terminal progress patch on it.
-    task_registry.start_task(session_id, "task-1", "agent", "bg agent")
+    # tool_use_id mirrors the real TaskStartedMessage feed — the chip-flood gate
+    # (is_own_background_task) admits only tasks whose registry record's launch
+    # tool_use_id the parent recorded as a background launch.
+    task_registry.start_task(
+        session_id, "task-1", "agent", "bg agent", tool_use_id="tu-1"
+    )
     task_registry.mark_background_launch(session_id, "tu-1")
 
-    # Seed a real live-store session so add_system_message has somewhere to land.
-    session = LiveSession(session_id=session_id)
-    session.last_update_id = 5
-    live_session_store._sessions[session_id] = session
-    baseline_update_id = session.last_update_id
-    baseline_msg_count = len(session.messages)
-
     # A non-terminal (running) TaskUpdatedMessage, then a terminal notification.
+    # Built inline with a REALISTIC ``data`` payload (the shared _updated helper
+    # sends data={}): the pump mirrors the in-stream chip shape by passing
+    # ``message.data`` through, and the recorder translates a task_updated chip
+    # to a ``task.updated`` row only when ``data.task_id`` is present — exactly
+    # what real SDK TaskUpdatedMessages carry (the FE renders from data too).
     # hang=False: the agent-class terminal is cli-owned (`continue`s, no delivery
     # window), so the stream must end for the pump to terminate.
-    upd = _updated("task-1", status="running", uuid="uu-run")
+    upd = TaskUpdatedMessage(
+        subtype="task_updated",
+        data={"task_id": "task-1", "status": "running", "patch": {"status": "running"}},
+        task_id="task-1",
+        patch={"status": "running"},
+        status="running",
+        session_id=session_id,
+        uuid="uu-run",
+    )
     notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
     client = _FakeClient([upd, notif], hang=False)
     state = _fake_state(client)
     handler = _make_handler()
 
-    # Keep live_session_store REAL (assert its state), but stub the broadcaster in
-    # ws_event_handlers so handle_system doesn't hit real sync fan-out.
-    import app.api.ws_event_handlers as weh
-    try:
-        with _patch_pool(state), patch.object(weh, "sync_engine", new=MagicMock(
-            broadcast_stream_start=AsyncMock(),
-            broadcast_stream_chunk=AsyncMock(),
-        )):
-            await handler._drain_notifications(session_id, "claude-code", None, None)
+    with _patch_pool(state):
+        await handler._drain_notifications(session_id, "claude-code", None, None)
 
-        # (a) a system message with subtype "task_updated" landed in the live store.
-        sys_msgs = [m for m in session.messages if m.type == "system"]
-        assert any(m.system_subtype == "task_updated" for m in sys_msgs), (
-            f"no task_updated system message landed: "
-            f"{[getattr(m, 'system_subtype', None) for m in session.messages]}"
-        )
-        assert len(session.messages) > baseline_msg_count
-        # (b) update_id incremented so the park-poll (keyed on it) will fetch it.
-        assert session.last_update_id > baseline_update_id
-    finally:
-        live_session_store._sessions.pop(session_id, None)
+    rows = se.get_events(session_id)
+    assert rows, "pump recorded nothing to the session event log"
+    # Everything the pump drained here translates to task.updated chips, all
+    # UNFENCED (run_id None — the pump runs between turns with no owning run).
+    assert all(r["event_type"] == "task.updated" for r in rows), (
+        [r["event_type"] for r in rows]
+    )
+    assert all(r["run_id"] is None for r in rows)
+    payloads = [r["payload"] for r in rows]
+    # (a) the non-terminal running patch chipped.
+    assert any(
+        p["task_id"] == "task-1" and p["state"] == "running" for p in payloads
+    ), payloads
+    # (b) the terminal notification recorded the raw completion (keyed by
+    #     tool_use_id — the durable subagent-node completion record)...
+    assert any(
+        p.get("tool_use_id") == "tu-1"
+        and p["state"] == "completed"
+        and p.get("summary") == "done"
+        for p in payloads
+    ), payloads
+    # (c) ...and synthesized the parked completion CARD chip for the task.
+    assert any(
+        p["task_id"] == "task-1" and p["state"] == "completed" for p in payloads
+    ), payloads
 
 
 @pytest.mark.asyncio
-async def test_pump_task_updated_chip_survives_missing_live_session():
-    """RC2 robustness: if the live store has no session (cleanup raced), the chip
-    dispatch must NOT crash the pump — add_system_message logs + drops the message,
-    and the pump still completes its normal unpark duty."""
+async def test_pump_survives_recorder_failure():
+    """RC2 robustness, V2 seam: if recording blows up entirely (DB down — the
+    real ``record_drained_event`` swallows internally, so this also guards a
+    regression of that contract), the pump must NOT crash — every recording
+    call site is try/except-wrapped — and still completes its normal duty."""
     session_id = "sess-chip-missing"
     task_registry.start_task(session_id, "task-1", "agent", "bg agent")
     task_registry.mark_background_launch(session_id, "tu-1")
-    # NOTE: no live-store session seeded.
 
     upd = _updated("task-1", status="running", uuid="uu-run")
     notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
@@ -2072,11 +2101,10 @@ async def test_pump_task_updated_chip_survives_missing_live_session():
     state = _fake_state(client)
     handler = _make_handler()
 
-    import app.api.ws_event_handlers as weh
-    with _patch_pool(state), patch.object(weh, "sync_engine", new=MagicMock(
-        broadcast_stream_start=AsyncMock(),
-        broadcast_stream_chunk=AsyncMock(),
-    )):
+    with _patch_pool(state), patch(
+        "app.core.turn_recorder.record_drained_event",
+        new=AsyncMock(side_effect=RuntimeError("recorder down")),
+    ):
         # Must not raise — the pump still consumes the terminal completion
         # (cli-owned for the agent class: token spent, no app delivery).
         await handler._drain_notifications(session_id, "claude-code", None, None)
@@ -2199,10 +2227,15 @@ async def test_pump_cli_owned_wake_suppresses_app_unpark(caplog):
             pump = asyncio.create_task(
                 handler._drain_notifications("sess-1", "claude-code", None, None)
             )
-            # Wait until the completion has been consumed.
+            # Wait until the completion has been consumed AND the pump armed the
+            # poller-liveness latch. (Two separate registry writes: the V2 chip
+            # recording between them awaits a real DB thread hop, so sampling on
+            # was_unparked alone races the mark_unpark_pending that follows it.)
             for _ in range(200):
                 await asyncio.sleep(0.005)
-                if task_registry.was_unparked("sess-1", "task-1"):
+                if task_registry.was_unparked(
+                    "sess-1", "task-1"
+                ) and task_registry.is_unpark_pending("sess-1"):
                     break
             # (a) dedup token spent as bookkeeping.
             assert task_registry.was_unparked("sess-1", "task-1") is True
@@ -2223,14 +2256,17 @@ async def test_pump_cli_owned_wake_suppresses_app_unpark(caplog):
 
 
 @pytest.mark.asyncio
-async def test_pump_forwards_cli_injection_turn_to_event_pipeline():
+async def test_pump_forwards_cli_injection_turn_to_recorder():
     """THE SURFACING GAP: the CLI's injection turn (user-lane string + the
     model's answer + its tool calls/results + ResultMessage) arrives on the
-    pooled client with only the pump reading. The pump must forward the
-    top-level assistant/tool events through the SAME dispatch pipeline a normal
-    turn uses, hide the injected user-lane string (parity with in-stream and the
-    reload parser), and finalize the live view at the turn's ResultMessage. RED
-    against the pre-round-4 pump, which dropped all top-level content."""
+    pooled client with only the pump reading. The pump must hand the top-level
+    assistant/tool events to ``record_drained_event`` — the SAME main-lane
+    event shapes a normal turn yields — hide the injected user-lane string
+    (parity with in-stream and the reload parser), and finalize the durable
+    turn-end state at the turn's ResultMessage (``persist_turn_end_state``).
+    NOTE: the recorder itself then filters main-lane chunk/tool types (the
+    durable SDK transcript carries them on reload); this pins the PUMP-side
+    hand-off, the recorder filter is pinned in test_turn_recorder.py."""
     task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
     task_registry.mark_background_launch("sess-1", "tu-1")
 
@@ -2262,15 +2298,16 @@ async def test_pump_forwards_cli_injection_turn_to_event_pipeline():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
+        assert sid == "sess-1"
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ), patch.object(
-        cwh.live_session_store, "end_streaming", new=AsyncMock()
-    ) as end_streaming:
+        cwh, "persist_turn_end_state", new=AsyncMock()
+    ) as finalize:
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     by_type = {}
@@ -2284,34 +2321,29 @@ async def test_pump_forwards_cli_injection_turn_to_event_pipeline():
     # (b) its tool call + result flow as main-lane tool events.
     assert any(e.get("name") == "Read" for e in by_type.get("tool_use", []))
     assert any(e.get("tool_use_id") == "tb-1" for e in by_type.get("tool_result", []))
-    # (c) the injected user-lane string is HIDDEN (never dispatched as content) —
+    # (c) the injected user-lane string is HIDDEN (never handed off as content) —
     # parity with in-stream steering messages and the reload parser.
     for e in captured:
         assert "[SYSTEM NOTIFICATION" not in str(e)
-    # (d) the CLI turn's ResultMessage finalizes the live view (end_streaming:
-    # streaming flags cleared + full-refresh + update_id bump + latch release).
-    end_streaming.assert_awaited_once()
+    # (d) the CLI turn's ResultMessage runs the durable turn-end side effects
+    # (parked-kind marker + unpark_pending latch release).
+    finalize.assert_awaited_once_with("sess-1")
     # (e) and, throughout, the app delivered NO unpark of its own.
     handler._deliver_unpark.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_pump_cli_turn_lands_in_live_store_and_bumps_update_id():
-    """End-to-end through the REAL handlers + live store: the CLI-driven turn's
-    thinking + answer land in the live store, the injected user string does not,
-    update_id advances (so a park-poller keyed on it fetches the content), the
-    messages are finalized (not streaming) by the turn's ResultMessage, and the
-    unpark_pending latch is released once the turn is fully surfaced."""
-    from app.core.live_session_store import live_session_store, LiveSession
-
+async def test_pump_cli_turn_finalizes_with_latch_armed_through_the_gap():
+    """End-to-end through the REAL turn_finalize: the poller-liveness latch
+    (``unpark_pending``) arms when the CLI wake turn's first content forwards,
+    stays up through the turn (so a poll sampling between complete_task and the
+    finalize never reads idle-and-stop), and the turn's ResultMessage runs the
+    REAL ``persist_turn_end_state`` which releases it. Thinking blocks are
+    dropped at the pump (not a recordable drained type — the durable SDK
+    transcript surfaces them on reload); the answer text forwards as a chunk."""
     session_id = "sess-cli-live"
     task_registry.start_task(session_id, "task-1", "agent", "bg agent")
     task_registry.mark_background_launch(session_id, "tu-1")
-
-    session = LiveSession(session_id=session_id)
-    session.last_update_id = 7
-    live_session_store._sessions[session_id] = session
-    baseline_update_id = session.last_update_id
 
     injection = UserMessage(content=_cli_injection_user_string("task-1", "tu-1"))
     answer = AssistantMessage(
@@ -2334,60 +2366,52 @@ async def test_pump_cli_turn_lands_in_live_store_and_bumps_update_id():
     state = _fake_state(client)
     handler = _make_handler()
 
-    import app.api.ws_event_handlers as weh
+    captured = []
+
+    async def _capture(sid, event):
+        captured.append(event)
 
     # Observe the poller-liveness latch at the exact moment the pump finalizes
     # the CLI turn (the fake client yields synchronously, so the latch arms and
-    # releases within one scheduling slice — an outside poll can't sample it).
-    real_end_streaming = live_session_store.end_streaming
+    # releases within one scheduling slice — an outside poll can't sample it),
+    # then run the REAL persist_turn_end_state (durable marker + latch release).
+    from app.core.turn_finalize import persist_turn_end_state as real_finalize
     latch_at_finalize = {}
 
-    async def _observing_end_streaming(**kwargs):
+    async def _observing_finalize(sid):
         latch_at_finalize["armed"] = task_registry.is_unpark_pending(session_id)
-        return await real_end_streaming(**kwargs)
+        await real_finalize(sid)
 
-    try:
-        with _patch_pool(state), patch.object(weh, "sync_engine", new=MagicMock(
-            broadcast_stream_start=AsyncMock(),
-            broadcast_stream_chunk=AsyncMock(),
-        )), patch("app.db.database.set_session_parked_task_kind", new=MagicMock()), \
-             patch.object(
-                 live_session_store, "end_streaming",
-                 new=AsyncMock(side_effect=_observing_end_streaming),
-             ):
-            await handler._drain_notifications(session_id, "claude-code", None, None)
+    set_kind = MagicMock()
+    with _patch_pool(state), patch(
+        "app.core.turn_recorder.record_drained_event",
+        new=AsyncMock(side_effect=_capture),
+    ), patch("app.db.database.set_session_parked_task_kind", new=set_kind), \
+         patch.object(
+             cwh, "persist_turn_end_state",
+             new=AsyncMock(side_effect=_observing_finalize),
+         ):
+        await handler._drain_notifications(session_id, "claude-code", None, None)
 
-        # (a) the assistant's answer + thinking landed as live messages.
-        texts = [
-            m for m in session.messages
-            if m.role == "assistant" and m.type == "text"
-        ]
-        assert any("summary attached" in m.content for m in texts), (
-            f"CLI-turn answer missing from live store: "
-            f"{[(m.type, m.content[:40]) for m in session.messages]}"
-        )
-        assert any(
-            m.type == "thinking" and "summarize" in m.content
-            for m in session.messages
-        )
-        # (b) the injected user-lane string is NOT rendered (end_streaming also
-        # filters any <task-notification> user rows).
-        assert not any(
-            "[SYSTEM NOTIFICATION" in (m.content or "") for m in session.messages
-        )
-        # (c) finalized: nothing left streaming after the turn's ResultMessage.
-        assert all(not m.streaming for m in session.messages)
-        # (d) update_id advanced so the park-poll delta has something to fetch.
-        assert session.last_update_id > baseline_update_id
-        # (e) the poller-liveness latch was up through the CLI turn (observed at
-        # the finalize call) and released at its end (activeTasks carries
-        # liveness beyond this point if other background work remains).
-        assert latch_at_finalize.get("armed") is True
-        assert task_registry.is_unpark_pending(session_id) is False
-        # (f) no app unpark for the cli-owned class.
-        handler._deliver_unpark.assert_not_awaited()
-    finally:
-        live_session_store._sessions.pop(session_id, None)
+    # (a) the assistant's answer forwarded to the recorder as a main-lane chunk;
+    # the ThinkingBlock did NOT (dropped at the pump by design).
+    assert any(
+        e.get("type") == "chunk" and "summary attached" in e.get("content", "")
+        for e in captured
+    ), f"CLI-turn answer never handed to the recorder: {captured}"
+    assert not any(e.get("type") == "thinking_block" for e in captured)
+    # (b) the injected user-lane string is HIDDEN (never handed off as content).
+    assert not any("[SYSTEM NOTIFICATION" in str(e) for e in captured)
+    # (c) the poller-liveness latch was up through the CLI turn (observed at
+    # the finalize call) and released by the REAL persist_turn_end_state
+    # (activeTasks carries liveness beyond this point if other work remains).
+    assert latch_at_finalize.get("armed") is True
+    assert task_registry.is_unpark_pending(session_id) is False
+    # (d) the durable parked-kind marker was re-written for the idle session.
+    set_kind.assert_called_once_with(session_id, None)
+    # (e) no app unpark for the cli-owned class, dedup token spent as bookkeeping.
+    handler._deliver_unpark.assert_not_awaited()
+    assert task_registry.was_unparked(session_id, "task-1") is True
 
 
 @pytest.mark.asyncio
@@ -2406,19 +2430,20 @@ async def test_pump_cli_turn_forwarding_skipped_during_stale_wind_down():
 
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
         captured.append(event)
 
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
-    ), patch.object(cwh.live_session_store, "end_streaming", new=AsyncMock()) as _es:
+    ), patch.object(cwh, "persist_turn_end_state", new=AsyncMock()) as finalize:
         await handler._drain_notifications("sess-1", "claude-code", None, None)
 
     assert not any(e.get("type") == "chunk" for e in captured), (
-        "killed-turn residual output must not be forwarded"
+        "killed-turn residual output must not be recorded"
     )
-    _es.assert_not_awaited()
+    # No CLI turn forwarded → the stale ResultMessage runs no turn-end finalize.
+    finalize.assert_not_awaited()
     # The stale ResultMessage cleared the wind-down flag (existing behavior).
     assert state.stale_turn_undrained is False
 
@@ -2443,149 +2468,6 @@ async def test_pump_shell_completion_still_app_delivered_exactly_once():
     handler._deliver_unpark.assert_awaited_once()
     pending = handler._deliver_unpark.await_args.kwargs["pending"]
     assert len(pending) == 1 and pending[0]["task_id"] == "sh-1"
-
-
-# ---------------------------------------------------------------------------
-# 6z. CLI-OWNED WAKE — CLIENT ENGAGEMENT BROADCAST (follow-up to PR #503)
-#     Observed live: a CLI-owned wake turn's content landed in the live store
-#     and update_id bumped, but a CONNECTED, IDLE viewing client rendered
-#     nothing until a manual refresh. The poller goes idle after a turn ends;
-#     its only rescue is the WS parked-watcher, which restarts polling on a
-#     stream_start/chunk/end broadcast. The pump forwards via dispatch_event
-#     whose stream_start broadcast is gated behind the pump's shared
-#     ``sub_state.stream_started`` latch (fires at most ONCE per pump lifetime),
-#     so the second+ wake turn lands silently. The pump must broadcast
-#     stream_start on the FIRST forwarded event of EVERY wake turn and a
-#     matching stream_end at its ResultMessage finalize.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_pump_cli_wake_broadcasts_stream_engagement():
-    """The pump must emit a stream_start engagement signal on the first forwarded
-    event of a CLI-owned wake turn (so a connected idle client's parked-watcher
-    restarts its poller) and a matching stream_end when the turn's ResultMessage
-    finalizes. dispatch_event is mocked so the ONLY thing that can broadcast is
-    the pump itself — RED against pre-fix main (the pump broadcast nothing;
-    engagement rode solely on dispatch_event's once-per-pump-lifetime start)."""
-    task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
-    task_registry.mark_background_launch("sess-1", "tu-1")
-
-    injection = UserMessage(content=_cli_injection_user_string("task-1", "tu-1"))
-    answer = AssistantMessage(
-        content=[TextBlock("Agent finished — results look good.")], model="claude"
-    )
-    client = _FakeClient(
-        [
-            _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done"),
-            injection,
-            answer,
-            _result_msg(),
-        ],
-        hang=False,
-    )
-    state = _fake_state(client)
-    handler = _make_handler()
-
-    fake_sync = MagicMock(
-        broadcast_stream_start=AsyncMock(),
-        broadcast_stream_end=AsyncMock(),
-    )
-
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
-        cwh.live_session_store, "end_streaming", new=AsyncMock()
-    ):
-        await handler._drain_notifications("sess-1", "claude-code", None, None)
-
-    # (a) the pump announced the wake turn to connected clients with stream_start.
-    fake_sync.broadcast_stream_start.assert_awaited_once()
-    assert fake_sync.broadcast_stream_start.await_args.kwargs["session_id"] == "sess-1"
-    # (b) and closed it with a matching stream_end at the turn's ResultMessage.
-    fake_sync.broadcast_stream_end.assert_awaited_once()
-    assert fake_sync.broadcast_stream_end.await_args.kwargs["session_id"] == "sess-1"
-    # (c) the wake stays app-unpark-free (cli-owned class).
-    handler._deliver_unpark.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_pump_cli_wake_broadcasts_stream_start_per_turn():
-    """The core of the observed bug: TWO CLI-owned wake turns in one pump run
-    (the parent parks, a first agent completes and the CLI answers, then a second
-    agent completes and the CLI answers again). Each wake turn must get its OWN
-    stream_start — the pre-fix path fired stream_start at most ONCE for the whole
-    pump lifetime (shared ``sub_state.stream_started`` latch), so the SECOND wake
-    turn landed silently and an idle client showed nothing until refresh."""
-    task_registry.start_task("sess-1", "task-1", "agent", "bg agent 1")
-    task_registry.start_task("sess-1", "task-2", "agent", "bg agent 2")
-    task_registry.mark_background_launch("sess-1", "tu-1")
-    task_registry.mark_background_launch("sess-1", "tu-2")
-
-    def _wake(task_id, tool_use_id, uuid, text):
-        return [
-            _notif(task_id, uuid=uuid, tool_use_id=tool_use_id, summary="done"),
-            UserMessage(content=_cli_injection_user_string(task_id, tool_use_id)),
-            AssistantMessage(content=[TextBlock(text)], model="claude"),
-            _result_msg(),
-        ]
-
-    client = _FakeClient(
-        _wake("task-1", "tu-1", "u-1", "first agent done")
-        + _wake("task-2", "tu-2", "u-2", "second agent done"),
-        hang=False,
-    )
-    state = _fake_state(client)
-    handler = _make_handler()
-
-    fake_sync = MagicMock(
-        broadcast_stream_start=AsyncMock(),
-        broadcast_stream_end=AsyncMock(),
-    )
-
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
-        cwh.live_session_store, "end_streaming", new=AsyncMock()
-    ):
-        await handler._drain_notifications("sess-1", "claude-code", None, None)
-
-    # BOTH wake turns engaged connected clients — one stream_start + stream_end each.
-    assert fake_sync.broadcast_stream_start.await_count == 2
-    assert fake_sync.broadcast_stream_end.await_count == 2
-    handler._deliver_unpark.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_pump_no_stream_broadcast_when_nothing_forwarded():
-    """NEGATIVE: a pump run that forwards NO CLI wake turn content (a cli-owned
-    completion whose injection turn never arrives before the stream ends) must
-    NOT emit a spurious stream_start/stream_end — there is nothing to render."""
-    task_registry.start_task("sess-1", "task-1", "agent", "bg agent")
-    task_registry.mark_background_launch("sess-1", "tu-1")
-
-    # Only the terminal notification arrives, then the stream ends — the CLI's
-    # injection turn (user string + answer) never lands, so no content forwards.
-    client = _FakeClient(
-        [_notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")],
-        hang=False,
-    )
-    state = _fake_state(client)
-    handler = _make_handler()
-
-    fake_sync = MagicMock(
-        broadcast_stream_start=AsyncMock(),
-        broadcast_stream_end=AsyncMock(),
-    )
-
-    with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event", new=AsyncMock()
-    ), patch.object(cwh, "sync_engine", new=fake_sync), patch.object(
-        cwh.live_session_store, "end_streaming", new=AsyncMock()
-    ):
-        await handler._drain_notifications("sess-1", "claude-code", None, None)
-
-    fake_sync.broadcast_stream_start.assert_not_awaited()
-    fake_sync.broadcast_stream_end.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

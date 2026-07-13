@@ -10,17 +10,23 @@ long-running command), and the _background_tasks entry leaked for the whole
 process lifetime.
 
 stop_session_background_shells() terminates the subprocess, cancels the reader,
-and drops the dict entry — scoped to one session. live_session_store.
-cleanup_ended_session() schedules it (fire-and-forget) when it removes a session.
+and drops the dict entry — scoped to one session.
+
+V2 (Phase-1 deletion): ``LiveSessionStore.cleanup_ended_session`` — the old
+fire-and-forget scheduler of this reap — is deleted with the live store. The
+reap is now scheduled by session teardown in
+``resource_monitor._cleanup_evicted_sessions`` (pool eviction / death), and
+THAT wiring is pinned in
+tests/core/test_cleanup_session_reap.py::test_force_cleanup_schedules_monitor_shell_reap.
+This file keeps the reap mechanics themselves, which are unchanged.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.mcp import builtin_tools as bt
-from app.core.live_session_store import LiveSessionStore
 
 
 def _make_running_shell(task_id: str, session_id: str):
@@ -111,21 +117,6 @@ async def test_reap_also_removes_finished_shells():
 
 async def test_reap_no_shells_is_noop():
     assert await bt.stop_session_background_shells("ghost") == 0
-
-
-async def test_cleanup_ended_session_schedules_shell_reap():
-    """cleanup_ended_session must schedule the shell reap when it removes a session."""
-    store = LiveSessionStore()
-    await store.start_streaming("s1", initial_messages=[])
-    await store.end_streaming("s1")
-
-    with patch(
-        "app.mcp.builtin_tools.reap_session_background_shells"
-    ) as mock_reap:
-        removed = await store.cleanup_ended_session("s1")
-
-    assert removed is True
-    mock_reap.assert_called_once_with("s1")
 
 
 async def test_reap_scheduler_runs_without_running_loop_guard():

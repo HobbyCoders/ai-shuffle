@@ -8,7 +8,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
 from app.core.sync_engine import sync_engine
-from app.core.live_session_store import live_session_store
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.ws_auth import authenticate_websocket
@@ -32,17 +31,15 @@ async def session_sync_websocket(
 
     Connect to this endpoint to:
     - Receive real-time message updates from other devices
-    - See streaming content as it's generated
     - Get notified of session state changes
+
+    (V2: live render deltas ride the session event feed (SSE), not this socket.)
 
     Query Parameters:
         - device_id: Unique identifier for this device (generated on frontend)
         - token: Authentication token (session cookie or API key)
 
     Messages from server:
-        - stream_start: Streaming has begun
-        - stream_chunk: A piece of streaming content
-        - stream_end: Streaming has completed
         - message_added: A new message was added
         - session_updated: Session metadata changed
         - state: Current session state (sent on connect)
@@ -151,18 +148,10 @@ async def session_sync_websocket(
         if remaining_devices == 0 and is_task_done:
             logger.debug(f"Last device disconnected from legacy sync session {session_id}")
 
-            if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                await live_session_store.cleanup_session(session_id)
-
+            # V2: no in-memory streaming state to purge — busy truth is the
+            # durable runs table and a stale run lease self-heals via TTL.
             async with _active_sessions_lock:
                 _active_chat_sessions.pop(session_id, None)
-            if sync_engine.is_session_streaming(session_id):
-                await sync_engine.broadcast_stream_end(
-                    session_id=session_id,
-                    message_id="legacy-cleanup",
-                    metadata={},
-                    interrupted=True,
-                )
 
 
 @router.websocket("/ws/global")

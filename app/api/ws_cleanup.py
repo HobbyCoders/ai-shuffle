@@ -116,9 +116,9 @@ _draining_sessions: set[str] = set()
 async def cleanup_session_handlers(session_id: str) -> None:
     """Clean up session-keyed data from global handler singletons.
 
-    Called alongside live_session_store cleanup to prevent unbounded
-    growth of _pending_requests, _session_rules, and _pending_questions
-    dicts over the process lifetime.
+    Called from session teardown paths (clear, eviction, worktree
+    termination) to prevent unbounded growth of _pending_requests,
+    _session_rules, and _pending_questions dicts over the process lifetime.
     """
     try:
         await permission_handler.cancel_all_requests(session_id)

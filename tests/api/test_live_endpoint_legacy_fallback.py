@@ -10,14 +10,17 @@ The rescue must fire ONLY when the store yields nothing: for post-cutover
 sessions the legacy table holds user-rows-only, and serving it over a populated
 store was the "assistant replies vanish on reopen" bug.
 
-Same direct-call harness as test_live_endpoint_park_revival.py.
+V2: /live serves the persisted transcript plus lifecycle fields; live render
+deltas ride the session event feed (SSE). The lifecycle snapshot (activeTasks /
+unpark_pending from ``lifecycle_state.compute``) is stubbed here and its
+surfacing on the response body is asserted alongside the transcript checks.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.api.sessions import get_live_session
 from app.core.config import settings
-from app.core.live_session_store import live_session_store
 
 LEGACY_MSGS = [
     {"id": 1, "role": "user", "content": "old question", "type": "text"},
@@ -28,30 +31,42 @@ STORE_MSGS = [
 ]
 
 
-def _owner_path_patches(session):
+def _lifecycle_stub(active_tasks=None, unpark_pending=False):
+    """Minimal LifecycleSnapshot stand-in: only the fields /live destructures."""
+    return SimpleNamespace(
+        active_tasks=list(active_tasks or []),
+        unpark_pending=unpark_pending,
+        drift=[],
+    )
+
+
+def _owner_path_patches(session, lifecycle=None):
     return [
         patch("app.api.sessions.require_session", new=AsyncMock(return_value=session)),
         patch("app.api.sessions.enrich_session_worktree_meta", new=MagicMock(return_value={})),
         patch("app.core.cloud_relay.is_remote_session", new=MagicMock(return_value=False)),
+        patch("app.core.lifecycle_state.compute",
+              new=AsyncMock(return_value=lifecycle or _lifecycle_stub())),
+        patch("app.core.streaming_status.has_active_run", new=MagicMock(return_value=False)),
     ]
 
 
-async def _poll_live(session, store_result, legacy_result, store_side_effect=None):
-    patches = _owner_path_patches(session)
+async def _poll_live(session, store_result, legacy_result, store_side_effect=None,
+                     lifecycle=None):
+    patches = _owner_path_patches(session, lifecycle=lifecycle)
     for p in patches:
         p.start()
     try:
         with patch.object(settings, "session_store_mode", "postgres_only"), \
-             patch.object(live_session_store, "has_session", return_value=False), \
              patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
              patch("app.core.cost_utils.attach_cost_metadata"), \
+             patch("app.core.cost_utils.attach_user_message_metadata"), \
              patch("app.api.sessions.parse_session_history_via_store",
                    return_value=store_result, side_effect=store_side_effect), \
              patch("app.core.db_message_loader.load_messages_from_db",
                    return_value=legacy_result) as legacy_loader:
             result = await get_live_session(
-                request=MagicMock(), session_id=session["id"],
-                since_update_id=0, token="tok",
+                request=MagicMock(), session_id=session["id"], token="tok",
             )
     finally:
         for p in patches:
@@ -102,3 +117,26 @@ async def test_postgres_only_raised_store_parse_serves_empty_not_legacy():
 
     assert result["messages"] == []
     legacy_loader.assert_not_called()
+
+
+async def test_live_surfaces_lifecycle_fields_on_response_body():
+    """/live attaches the lifecycle snapshot (activeTasks / unpark_pending) and
+    the runs-table busy truth to every local response body (replacement-level
+    coverage for the retired park-revival delta-poll suite; the field SEMANTICS
+    are pinned in tests/core/test_lifecycle_state.py)."""
+    session = {"id": "parked-sess", "title": "Parked", "sdk_session_id": "sdk-park-1"}
+    lifecycle = _lifecycle_stub(
+        active_tasks=[{"id": "task-1", "status": "running", "kind": "agent"}],
+        unpark_pending=True,
+    )
+
+    result, _ = await _poll_live(
+        session, store_result=([], {}), legacy_result=([], False),
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, dict)
+    assert result["activeTasks"][0]["id"] == "task-1"
+    assert result["unpark_pending"] is True
+    assert result["is_streaming"] is False
+    assert result["last_update_id"] == 0

@@ -34,9 +34,9 @@ from tests.api.test_chat_ws_handler_queue import _Harness, _gated_stream
 
 async def _run_turn(h, handler, *, deferred_delivery: bool):
     """Drive one REAL run_query turn to completion with a fast fake stream."""
-    with patch(
-        "app.core.query_engine.stream_to_websocket", new=_gated_stream()
-    ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+    # (V2: the dispatch layer is deleted — run_query handles stream events
+    # inline, so only the stream itself needs a stand-in.)
+    with patch("app.core.query_engine.stream_to_websocket", new=_gated_stream()):
         await asyncio.wait_for(
             handler.run_query(
                 "hello", "sess-1", "claude-code", None, None, None,

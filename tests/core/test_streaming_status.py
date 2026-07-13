@@ -1,0 +1,272 @@
+"""Unit tests for app/core/streaming_status.py — the durable session-busy view.
+
+Busy truth comes from REAL runs-table writer sequences (``runs.claim_run`` /
+``release_run``, plus the negative-TTL trick from tests/db/test_runs.py for an
+already-expired lease) — never from planting state into the module's private
+dicts. Broadcast assertions capture the module's send hook (or, for the
+wire-shape test, the sync engine's ``_broadcast_user_message`` helper itself).
+"""
+
+import asyncio
+import time
+
+import pytest
+
+from app.core import streaming_status
+from app.db import database
+from app.db import runs
+
+
+@pytest.fixture(autouse=True)
+def _fresh_status_state():
+    """The guard cache / last-broadcast map are module-global — isolate tests."""
+    streaming_status._reset_state()
+    yield
+    streaming_status._reset_state()
+
+
+class _Recorder:
+    """Async stand-in for streaming_status._send_streaming_changed."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, session_id, is_streaming, info):
+        self.calls.append((session_id, is_streaming, info))
+
+
+async def _wait_until(pred, timeout=2.0):
+    """Poll ``pred`` until true or timeout (notify schedules background tasks)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        await asyncio.sleep(0.01)
+    return pred()
+
+
+# =============================================================================
+# has_active_run — lease-valid busy reads
+# =============================================================================
+
+def test_live_lease_is_busy(mock_db):
+    runs.claim_run("s1", "runnerA", 60)
+    assert streaming_status.has_active_run("s1") is True
+    assert streaming_status.has_active_run("s-other") is False
+    assert streaming_status.has_active_run(None) is False
+    assert streaming_status.has_active_run("") is False
+
+
+def test_expired_lease_is_not_busy(mock_db):
+    # Negative ttl -> the active row's lease is already lapsed on insert
+    # (deterministic without freezegun — see tests/db/test_runs.py).
+    runs.claim_run("s1", "runnerA", -1)
+    assert streaming_status.has_active_run("s1") is False
+
+
+def test_released_run_is_not_busy(mock_db):
+    r = runs.claim_run("s1", "runnerA", 60)
+    runs.release_run(r["id"], r["fence_token"])
+    assert streaming_status.has_active_run("s1") is False
+
+
+def test_ttl_cache_serves_cached_value_then_expires(mock_db):
+    r = runs.claim_run("s1", "runnerA", 60)
+    assert streaming_status.has_active_run("s1") is True  # caches True
+
+    # The DB flips under the cache...
+    runs.release_run(r["id"], r["fence_token"])
+    # ...but within the TTL the cached value is served (no DB re-read).
+    assert streaming_status.has_active_run("s1") is True
+
+    # Age the entry past the TTL -> the next read goes back to the DB.
+    with streaming_status._cache_lock:
+        checked_at, busy = streaming_status._cache["s1"]
+        streaming_status._cache["s1"] = (
+            checked_at - (streaming_status.CACHE_TTL_SECONDS + 1),
+            busy,
+        )
+    assert streaming_status.has_active_run("s1") is False
+
+
+def test_notify_drops_the_guard_cache(mock_db):
+    """notify() must pop the cache entry so guards see transitions promptly.
+
+    Called here with no running loop and no captured loop, so the async
+    re-check is skipped — the synchronous cache drop is the part under test.
+    """
+    r = runs.claim_run("s1", "runnerA", 60)
+    assert streaming_status.has_active_run("s1") is True
+    runs.release_run(r["id"], r["fence_token"])
+    assert streaming_status.has_active_run("s1") is True  # still cached
+
+    streaming_status.notify("s1")
+
+    assert streaming_status.has_active_run("s1") is False
+
+
+def test_has_any_active_run(mock_db):
+    assert streaming_status.has_any_active_run() is False
+    runs.claim_run("s-expired", "runnerA", -1)  # lapsed lease -> not live
+    assert streaming_status.has_any_active_run() is False
+    runs.claim_run("s-live", "runnerB", 60)
+    assert streaming_status.has_any_active_run() is True
+
+
+# =============================================================================
+# notify -> uncached re-check -> diff -> broadcast
+# =============================================================================
+
+async def test_notify_broadcasts_once_per_transition(mock_db, monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(streaming_status, "_send_streaming_changed", rec)
+    database.create_session(session_id="s1", profile_id="default")
+    r = runs.claim_run("s1", "runnerA", 60)
+
+    # idle -> busy: exactly one spinner-on broadcast.
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: len(rec.calls) == 1)
+    sid, busy, info = rec.calls[0]
+    assert (sid, busy) == ("s1", True)
+    assert info["user_id"] == "admin"  # api_user_id NULL -> admin routing
+
+    # Still busy: the diff says unchanged -> NO second broadcast.
+    streaming_status.notify("s1")
+    await asyncio.sleep(0.2)
+    assert len(rec.calls) == 1
+
+    # busy -> idle: exactly one spinner-off broadcast.
+    runs.release_run(r["id"], r["fence_token"])
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: len(rec.calls) == 2)
+    assert rec.calls[1][:2] == ("s1", False)
+
+    # Already idle: unchanged again -> no extra broadcast.
+    streaming_status.notify("s1")
+    await asyncio.sleep(0.2)
+    assert len(rec.calls) == 2
+
+
+async def test_broadcast_uses_exact_legacy_wire_shape(mock_db, monkeypatch):
+    """The frame must be byte-compatible with the legacy sync_engine emission —
+    the frontend's user_streaming_changed handler needs ZERO changes."""
+    from app.core.sync_engine import sync_engine
+
+    sent = []
+
+    async def _capture(user_id, message, source_device_id=None):
+        sent.append((user_id, message))
+
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", _capture)
+
+    mock_db.execute(
+        "INSERT INTO projects (id, name, path) VALUES ('p1', 'P', '/tmp/p')"
+    )
+    mock_db.commit()
+    database.create_session(
+        session_id="s1", profile_id="default", project_id="p1"
+    )
+    runs.claim_run("s1", "runnerA", 60)
+
+    streaming_status.notify("s1")
+
+    assert await _wait_until(lambda: len(sent) == 1)
+    user_id, message = sent[0]
+    assert user_id == "admin"
+    assert message == {
+        "type": "user_streaming_changed",
+        "session_id": "s1",
+        "is_streaming": True,
+        "project_id": "p1",
+        "worktree_id": None,
+    }
+
+
+# =============================================================================
+# Sweep reconciler — lease expiry with no terminal event
+# =============================================================================
+
+async def test_sweep_broadcasts_spinner_off_after_lease_expiry(mock_db, monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(streaming_status, "_send_streaming_changed", rec)
+    database.create_session(session_id="s1", profile_id="default")
+    runs.claim_run("s1", "runnerA", 60)
+
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: len(rec.calls) == 1)  # spinner on
+
+    # Crash scenario: the lease lapses with NO terminal event — no release, no
+    # notify. (Direct SQL because production reaches this state by a runner
+    # dying, which no writer API can simulate.)
+    mock_db.execute(
+        "UPDATE runs SET lease_expires_at = datetime('now', '-5 seconds') "
+        "WHERE session_id = 's1'"
+    )
+    mock_db.commit()
+
+    cleared = await streaming_status.sweep_once()
+
+    assert cleared == 1
+    assert len(rec.calls) == 2
+    assert rec.calls[1][:2] == ("s1", False)  # spinner off
+    assert "s1" not in streaming_status._last_broadcast
+    # The sweep also dropped the guard cache, so guards converge immediately.
+    assert streaming_status.has_active_run("s1") is False
+
+    # Idempotent: nothing left to clear, no duplicate broadcast.
+    assert await streaming_status.sweep_once() == 0
+    assert len(rec.calls) == 2
+
+
+async def test_sweep_keeps_live_sessions(mock_db, monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(streaming_status, "_send_streaming_changed", rec)
+    database.create_session(session_id="s1", profile_id="default")
+    runs.claim_run("s1", "runnerA", 60)
+
+    streaming_status.notify("s1")
+    assert await _wait_until(lambda: len(rec.calls) == 1)
+
+    assert await streaming_status.sweep_once() == 0  # lease still valid
+    assert len(rec.calls) == 1
+    assert "s1" in streaming_status._last_broadcast
+
+
+# =============================================================================
+# get_user_streaming_sessions — connect-time snapshot join
+# =============================================================================
+
+def test_get_user_streaming_sessions_join(mock_db):
+    mock_db.execute(
+        "INSERT INTO projects (id, name, path) VALUES ('p1', 'P', '/tmp/p')"
+    )
+    mock_db.execute(
+        "INSERT INTO api_users (id, name, api_key_hash) VALUES ('u1', 'U', 'x')"
+    )
+    mock_db.commit()
+    database.create_session(
+        session_id="s-admin", profile_id="default", project_id="p1"
+    )
+    database.create_session(
+        session_id="s-user", profile_id="default", api_user_id="u1"
+    )
+    database.create_session(session_id="s-admin-idle", profile_id="default")
+    database.create_session(session_id="s-admin-expired", profile_id="default")
+
+    runs.claim_run("s-admin", "runnerA", 60)
+    runs.claim_run("s-user", "runnerB", 60)
+    runs.claim_run("s-admin-expired", "runnerC", -1)  # lapsed lease -> excluded
+    # s-admin-idle has no run at all -> excluded.
+
+    # Admin sees only admin-owned (api_user_id NULL) lease-valid sessions.
+    assert streaming_status.get_user_streaming_sessions("admin") == [
+        {"session_id": "s-admin", "project_id": "p1", "worktree_id": None}
+    ]
+
+    # An API user sees only their own.
+    assert streaming_status.get_user_streaming_sessions("u1") == [
+        {"session_id": "s-user", "project_id": None, "worktree_id": None}
+    ]
+
+    # Unknown user -> nothing.
+    assert streaming_status.get_user_streaming_sessions("nobody") == []

@@ -2,7 +2,8 @@
  * Active Streaming Derived Store (Svelte 5 Runes)
  *
  * Provides streaming state for the currently active session and workspace.
- * Reads from activeSession store, sessionState, and streamingSessions.
+ * Reads from the activeSession store (its isStreaming is owned by the SSE-fed
+ * reducer) and the cross-device streamingSessions map.
  *
  * Uses createMultiDerived to subscribe to multiple Svelte 4 stores and
  * expose a runes-compatible interface (.current + .subscribe).
@@ -10,7 +11,6 @@
 
 import { untrack } from 'svelte';
 import { activeSession, streamingSessions } from '../active-session';
-import { sessionState } from '../session/session-state';
 import { computeGitControlsStreaming } from './git-controls-streaming';
 
 // ─── Multi-Store Derived Helper ──────────────────────────────────────────────
@@ -75,17 +75,15 @@ function createMultiDerived<T>(
  * For project-mode: locked if ANY non-worktree session in the same project is streaming.
  */
 export const gitControlsStreaming = createMultiDerived(
-	[activeSession, sessionState, streamingSessions],
+	[activeSession, streamingSessions],
 	() => {
 		const active = activeSession.current;
 		// Pure decision logic lives in ./git-controls-streaming so it can be
 		// unit-tested without the store plumbing (see git-controls-streaming.test.ts).
 		return computeGitControlsStreaming({
 			activeIsStreaming: active.isStreaming,
-			activeSessionId: active.sessionId,
 			activeExecutionMode: active.executionMode,
 			activeProject: active.project || null,
-			sessionStreaming: sessionState.current.sessions,
 			crossDeviceStreaming: streamingSessions.current
 		});
 	}

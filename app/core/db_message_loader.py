@@ -5,7 +5,7 @@ Converts session_messages DB rows into the same frontend message format
 that parse_session_history() returns from JSONL files, but ~100x faster
 (indexed DB query + simple transform vs. 1200-line JSONL parse).
 
-Fallback chain: live_session_store → DB → JSONL → SDK.
+Fallback chain: DB → JSONL → SDK.
 """
 
 import logging

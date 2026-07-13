@@ -11,11 +11,6 @@
  * interrupt path would abort the live generation).
  */
 
-/** Minimal shape of a tracked session's streaming flag (sessionState.sessions). */
-export interface SessionStreamingFlag {
-	isStreaming?: boolean;
-}
-
 /** Minimal shape of a cross-device streaming entry (streamingSessions). */
 export interface CrossDeviceStreamingInfo {
 	projectId: string | null;
@@ -23,16 +18,13 @@ export interface CrossDeviceStreamingInfo {
 }
 
 export interface GitControlsStreamingInput {
-	/** The active session's own streaming flag — set the instant a send begins. */
+	/** The active session's own streaming flag — set the instant a send begins.
+	 *  Owned by the SSE-fed reducer via activeSession.isStreaming. */
 	activeIsStreaming: boolean;
-	/** The active session's id, or null for a brand-new unsent session. */
-	activeSessionId: string | null;
 	/** The active session's execution mode ('local' | 'worktree'). */
 	activeExecutionMode: string;
 	/** The active session's project id (empty string / null when none). */
 	activeProject: string | null;
-	/** Per-session streaming flags, keyed by session id (sessionState.sessions). */
-	sessionStreaming: ReadonlyMap<string, SessionStreamingFlag>;
 	/** Cross-device streaming sessions, keyed by session id (streamingSessions). */
 	crossDeviceStreaming: ReadonlyMap<string, CrossDeviceStreamingInfo>;
 }
@@ -50,16 +42,13 @@ export interface GitControlsStreamingInput {
 export function computeGitControlsStreaming(input: GitControlsStreamingInput): boolean {
 	const {
 		activeIsStreaming,
-		activeSessionId,
 		activeExecutionMode,
 		activeProject,
-		sessionStreaming,
 		crossDeviceStreaming
 	} = input;
 
 	// Active session is streaming (always relevant, regardless of mode).
 	if (activeIsStreaming) return true;
-	if (activeSessionId && sessionStreaming.get(activeSessionId)?.isStreaming) return true;
 
 	// Worktree-mode has an independent working directory — cross-session
 	// streaming in the same project can't touch it, so it doesn't lock controls.

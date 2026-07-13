@@ -1080,7 +1080,7 @@ class WorktreeManager:
 
         Finds all sessions linked to the worktree via DB, removes them from
         the session pool (which gracefully kills the SDK subprocess), and
-        cleans up sync engine streaming state.
+        tears down their task-registry/Monitor-shell state.
 
         This MUST be called before `git worktree remove` — otherwise the
         subprocess holds a CWD lock on the worktree folder and removal fails
@@ -1093,8 +1093,7 @@ class WorktreeManager:
             List of session IDs that were terminated.
         """
         from app.core.session_pool import get_session_pool
-        from app.core.sync_engine import sync_engine
-        from app.core.live_session_store import live_session_store
+        from app.core import streaming_status
 
         sessions = database.get_sessions_for_worktree(worktree_id)
         if not sessions:
@@ -1115,20 +1114,34 @@ class WorktreeManager:
                 )
                 terminated.append(session_id)
 
-            # Clean up sync engine streaming state if this session was streaming
-            if session_id in sync_engine._streaming_sessions:
-                await sync_engine.broadcast_stream_end(
-                    session_id=session_id,
-                    message_id="worktree-cleanup",
-                    metadata={"reason": "worktree_deleted"},
-                    interrupted=True,
-                )
+            # Durable end-of-turn writes if this session was mid-turn (busy
+            # truth from the durable runs table — the stale run lease itself
+            # self-heals via TTL).
+            if streaming_status.has_active_run(session_id):
+                from app.core.turn_finalize import persist_turn_end_state
+                await persist_turn_end_state(session_id)
                 logger.info(
                     f"Ended streaming for session {session_id} (worktree cleanup)"
                 )
 
-            # Clean up live session store
-            await live_session_store.cleanup_session(session_id)
+            # Reap the session's background work: the SDK client is gone, so
+            # tracked tasks can never complete — flip them to killed (surfaced
+            # on the taskbar), drop the registry bucket, and reap any Monitor
+            # shells the session spawned.
+            try:
+                from app.core.task_registry import task_registry
+                for rec in task_registry.get_active(session_id):
+                    task_registry.complete_task(session_id, rec["id"], "killed")
+                task_registry.clear_session(session_id)
+            except Exception:
+                logger.debug("worktree-cleanup task reap failed", exc_info=True)
+            try:
+                from app.mcp.builtin_tools import reap_session_background_shells
+                reap_session_background_shells(session_id)
+            except Exception:
+                logger.debug(
+                    "worktree-cleanup shell reap scheduling failed", exc_info=True
+                )
 
         if terminated:
             logger.info(

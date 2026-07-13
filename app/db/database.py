@@ -101,7 +101,8 @@ def _safe_json(value):
 #      marks this install's stale non-terminal rows killed)
 # 56: v2 core primitives (session_events, session_event_counters, runs, pending_interactions, artifacts, projects_v2, checkouts)
 # 57: sessions.v2_stream — per-session opt-in flag for the V2 streaming path (Phase 1 cutover)
-SCHEMA_VERSION = 57
+# 58: force v2_stream TRUE on every session + flip the column default TRUE (V2 Phase 1 deletion; the per-session opt-in is retired)
+SCHEMA_VERSION = 58
 
 
 def _run_column_migrations(cursor):
@@ -257,8 +258,8 @@ def _run_column_migrations(cursor):
         # Durable parked marker (v51): non-NULL means the parent turn ended
         # while background work (a sub-agent, or an SDK-backgrounded shell) was
         # still running — the session is "parked" awaiting an unpark follow-up.
-        # Written by live_session_store.end_streaming, cleared on the next
-        # start_streaming, and force-cleared at boot by
+        # Written at turn end by turn_finalize.persist_turn_end_state, cleared
+        # at the next turn start, and force-cleared at boot by
         # app.core.startup_reconcile (no background work survives a restart).
         if not column_exists(cursor, "sessions", "parked_task_kind"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN parked_task_kind TEXT")
@@ -834,13 +835,23 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("checkouts")
 
-    # Per-session opt-in for the V2 streaming path (v57). Stamped at chat/REST
-    # session creation from settings.v2_stream_default; flippable per session.
+    # Per-session V2 streaming column (v57). Originally a per-session opt-in;
+    # the v58 block below forces it TRUE on every session and flips the default.
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "v2_stream"):
         cursor.execute(
             "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS v2_stream BOOLEAN NOT NULL DEFAULT FALSE"
         )
         migrations_applied.append("sessions.v2_stream")
+
+    # Force every session onto the V2 streaming path (v58). The per-session
+    # opt-in is retired: flip the column default TRUE so new rows land on V2 and
+    # backfill every existing row. Idempotent — the UPDATE only touches rows not
+    # already TRUE, and re-issuing SET DEFAULT is a harmless no-op.
+    if table_exists(cursor, "sessions") and column_exists(cursor, "sessions", "v2_stream"):
+        cursor.execute("ALTER TABLE sessions ALTER COLUMN v2_stream SET DEFAULT TRUE")
+        cursor.execute("UPDATE sessions SET v2_stream = TRUE WHERE v2_stream = FALSE")
+        if cursor.rowcount and cursor.rowcount > 0:
+            migrations_applied.append("sessions.v2_stream=TRUE")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

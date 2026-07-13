@@ -11,9 +11,9 @@ These tests pin the three reuse gates:
 - ``stream_to_websocket`` (the chat path) refuses a busy pooled client with a
   clear error event and never calls ``client.query()``.
 - ``stream_query`` (REST) does the same.
-- ``_run_background_query`` refuses and surfaces the error via
-  ``broadcast_stream_end`` (its callers' error surface) without touching the
-  live session store the active turn owns.
+- ``_run_background_query`` refuses and surfaces the error on the v2 session
+  event log (a ``turn.aborted`` terminal — its only error surface since the
+  live-store/sync-engine broadcasts were deleted in the V2 Phase-1 cutover).
 
 And the claim semantics:
 
@@ -35,6 +35,8 @@ import pytest
 import app.core.query_engine as qe
 import app.core.query_background as qb
 from app.core.session_pool import SessionState
+from app.db import session_events as se
+from app.db import sessions as sessions_db
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -122,11 +124,10 @@ def _chat_patches(stack: ExitStack, pool: _StubPool, *, credentials_rotated=Fals
 
 
 def _fake_sync_engine():
+    # V2: the broadcast_stream_* seams are deleted with the streaming
+    # broadcast path — sync_engine's surviving surface here is message-added.
     sync = MagicMock()
     sync.broadcast_message_added = AsyncMock()
-    sync.broadcast_stream_start = AsyncMock()
-    sync.broadcast_stream_chunk = AsyncMock()
-    sync.broadcast_stream_end = AsyncMock()
     return sync
 
 
@@ -302,13 +303,13 @@ async def test_rest_gate_refuses_busy_client_and_never_writes_stdin():
 # ─── _run_background_query gate ─────────────────────────────────────────────
 
 
-async def test_background_gate_refuses_busy_client_and_never_writes_stdin():
+async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_db):
     state = _fake_state(is_streaming=True)
     pool = _StubPool(state)
+    # v2 session — the event log is the background path's only error surface.
+    sessions_db.create_session("sess-busy", "default")
 
     sync = _fake_sync_engine()
-    store = MagicMock()
-    store.cleanup_session = AsyncMock()
 
     async def _fake_run_sync(fn, *a, **k):
         return {"id": "row-1"}
@@ -326,22 +327,22 @@ async def test_background_gate_refuses_busy_client_and_never_writes_stdin():
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
         stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-        stack.enter_context(patch.object(qb, "live_session_store", new=store))
         stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=AsyncMock()))
 
         await qb._run_background_query(
             "sess-busy", "hello", {"id": "claude-code"}, None, None, None, None, None,
-            message_id="msg-1",
         )
 
     state.adapter.sdk_client.query.assert_not_awaited()
     assert state.is_streaming is True  # active turn's claim untouched
-    # The failure is surfaced on the callers' error channel...
-    sync.broadcast_stream_end.assert_awaited_once()
-    kwargs = sync.broadcast_stream_end.await_args.kwargs
-    assert "busy" in (kwargs.get("metadata") or {}).get("error", "").lower()
-    # ...WITHOUT nuking the live store the active turn owns.
-    store.cleanup_session.assert_not_awaited()
+    # The failure is surfaced on the session event log: the refused turn
+    # recorded its start + user message, then a turn.aborted terminal.
+    rows = se.get_events("sess-busy")
+    types = [r["event_type"] for r in rows]
+    assert types == ["turn.started", "message.user", "turn.aborted"], types
+    aborted = rows[-1]["payload"]
+    assert aborted["reason"] == "error"
+    assert "busy" in (aborted.get("message") or "").lower()
 
 
 # ─── Claim-to-try windows: a failure between the claim and the main try must ─
@@ -409,17 +410,16 @@ async def test_stream_query_refuses_stale_undrained_client():
     assert state.stale_turn_undrained is True
 
 
-async def test_background_query_refuses_stale_undrained_client():
+async def test_background_query_refuses_stale_undrained_client(mock_db):
     """F3: the stale refusal must happen BEFORE stop_drain_pump — the pump is
     the only thing that can clear the flag, so killing it first and then
     refusing would orphan the flag forever (bricked session). The running pump
     must be left untouched."""
     state = _fake_state(is_streaming=False, stale_turn_undrained=True)
     pool = _StubPool(state)
+    sessions_db.create_session("sess-stale", "default")
 
     sync = _fake_sync_engine()
-    store = MagicMock()
-    store.cleanup_session = AsyncMock()
     stop_pump = AsyncMock()
 
     async def _fake_run_sync(fn, *a, **k):
@@ -438,20 +438,21 @@ async def test_background_query_refuses_stale_undrained_client():
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
         stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-        stack.enter_context(patch.object(qb, "live_session_store", new=store))
         stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=stop_pump))
 
         await qb._run_background_query(
             "sess-stale", "hello", {"id": "claude-code"}, None, None, None, None, None,
-            message_id="msg-1",
         )
 
     state.adapter.sdk_client.query.assert_not_awaited()
     assert state.stale_turn_undrained is True
-    sync.broadcast_stream_end.assert_awaited_once()
-    kwargs = sync.broadcast_stream_end.await_args.kwargs
-    assert "winding down" in (kwargs.get("metadata") or {}).get("error", "").lower()
-    store.cleanup_session.assert_not_awaited()
+    # The refusal is surfaced as a turn.aborted terminal on the event log.
+    rows = se.get_events("sess-stale")
+    types = [r["event_type"] for r in rows]
+    assert types == ["turn.started", "message.user", "turn.aborted"], types
+    aborted = rows[-1]["payload"]
+    assert aborted["reason"] == "error"
+    assert "winding down" in (aborted.get("message") or "").lower()
     # F3: the between-turns drain pump must be left RUNNING — it is what clears
     # the flag. Stopping it before the refusal orphaned the flag forever.
     stop_pump.assert_not_awaited()
@@ -496,16 +497,24 @@ async def test_chat_claim_window_cancel_clears_flag():
 
 
 async def test_rest_claim_window_exception_clears_flag():
-    """stream_query: a failure in the post-claim window (broadcast_stream_start
-    is the first await after the 'Mark as streaming' claim) clears the flag and
-    propagates as before."""
+    """stream_query: a failure in the post-claim window (V2: the stream_start
+    sync-log write is the first await after the 'Mark as streaming' claim — the
+    old broadcast_stream_start seam is deleted) clears the flag and propagates
+    as before."""
     state = _fake_state()
     pool = _StubPool(state)
 
+    async def _run_sync_boom(fn, *a, **k):
+        if k.get("event_type") == "stream_start":
+            raise RuntimeError("sync-log boom")
+        return {"id": "row-1"}
+
     with ExitStack() as stack:
-        sync = _rest_patches(stack, pool)
-        sync.broadcast_stream_start = AsyncMock(side_effect=RuntimeError("broadcast boom"))
-        with pytest.raises(RuntimeError, match="broadcast boom"):
+        _rest_patches(stack, pool)
+        stack.enter_context(
+            patch.object(qe, "run_sync", new=AsyncMock(side_effect=_run_sync_boom))
+        )
+        with pytest.raises(RuntimeError, match="sync-log boom"):
             await _collect(qe.stream_query("hi", "claude-code", session_id="sess-window"))
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
@@ -521,8 +530,6 @@ async def test_background_claim_window_exception_clears_flag():
     pool = _StubPool(state)
 
     sync = _fake_sync_engine()
-    store = MagicMock()
-    store.cleanup_session = AsyncMock()
 
     async def _fake_run_sync(fn, *a, **k):
         return {"id": "row-1"}
@@ -545,13 +552,11 @@ async def test_background_claim_window_exception_clears_flag():
             qb, "refresh_subprocess_credentials",
             new=AsyncMock(side_effect=RuntimeError("refresh boom")),
         ))
-        stack.enter_context(patch.object(qb, "live_session_store", new=store))
         stack.enter_context(patch("app.api.ws_cleanup.stop_drain_pump", new=AsyncMock()))
 
         with pytest.raises(RuntimeError, match="refresh boom"):
             await qb._run_background_query(
                 "sess-window", "hello", {"id": "claude-code"}, None, None, None, None, None,
-                message_id="msg-1",
             )
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"

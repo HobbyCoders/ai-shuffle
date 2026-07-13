@@ -27,10 +27,19 @@
 		messages.every((m) => (m.systemSubtype || '').startsWith('hook_'))
 	);
 
+	// If every message is a background-task subtype, label the group as task
+	// updates and swap the header to the bot icon (matching the task rows).
+	const TASK_SUBTYPES = ['task_started', 'task_progress', 'task_updated', 'task_notification'];
+	const allTasks = $derived(
+		messages.every((m) => TASK_SUBTYPES.includes(m.systemSubtype || ''))
+	);
+
 	const label = $derived(
-		allHooks
-			? `${messages.length} ${messages.length === 1 ? 'hook' : 'hooks'}`
-			: `${messages.length} system ${messages.length === 1 ? 'message' : 'messages'}`
+		allTasks
+			? `${messages.length} task ${messages.length === 1 ? 'update' : 'updates'}`
+			: allHooks
+				? `${messages.length} ${messages.length === 1 ? 'hook' : 'hooks'}`
+				: `${messages.length} system ${messages.length === 1 ? 'message' : 'messages'}`
 	);
 
 	// Consider the group to be in an error state if any child has an error-ish
@@ -71,10 +80,21 @@
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
 				{/if}
-				<!-- Hook icon (lightning bolt) matches individual SystemMessage rows -->
-				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-				</svg>
+				{#if allTasks}
+					<!-- Task icon (bot) matches individual task rows -->
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<rect x="3" y="11" width="18" height="10" rx="2"/>
+						<circle cx="12" cy="5" r="2"/>
+						<path d="M12 7v4"/>
+						<line x1="8" y1="16" x2="8" y2="16"/>
+						<line x1="16" y1="16" x2="16" y2="16"/>
+					</svg>
+				{:else}
+					<!-- Hook icon (lightning bolt) matches individual SystemMessage rows -->
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+				{/if}
 				<!-- Summary text -->
 				<span class="text-sm font-medium text-foreground flex-shrink-0">
 					{label}

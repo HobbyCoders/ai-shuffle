@@ -9,10 +9,9 @@
 	 * whether the context window is 200k (standard) or 1M (extended).
 	 *
 	 * IMPORTANT: Usage comes from $activeSession (contextUsed + the per-type token
-	 * fields), all set by the onPollApplied callback (session-poller →
-	 * active-session). Do NOT import from session-state.svelte.ts directly — that
-	 * .svelte.ts file suffers from dual module evaluation (see KNOWN_ISSUES Root
-	 * Cause 10), causing reads to hit a different instance than the poller writes.
+	 * fields), all set by the SSE-fed reducer (feedController → active-session).
+	 * Read only through the $activeSession store so the values track the single
+	 * writer.
 	 *
 	 * The popover interaction mirrors UsageLimitIndicator: a wrapper with
 	 * `bind:this`, a document-level click + Escape listener that closes when the

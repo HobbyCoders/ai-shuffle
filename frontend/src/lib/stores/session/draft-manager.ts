@@ -13,7 +13,6 @@
 
 import type { ActiveSessionState } from '../active-session';
 import type { MessageType } from '../types';
-import type { PollAppliedData } from './session-poller';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -22,14 +21,15 @@ interface DraftManagerDeps {
 	getState: () => ActiveSessionState;
 	wsSend: (data: Record<string, unknown>) => boolean;
 	wsIsConnected: () => boolean;
-	sessionStateRemoveSession: (sessionId: string) => void;
-	sessionPollerLoadSession: (sessionId: string) => Promise<PollAppliedData | null>;
+	/** Restart the SSE feed for a session (full from_seq=0 replay). Used after a
+	 *  reload/takeover to re-fetch the transcript from the event log. */
+	feedRestart: (sessionId: string) => void;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createDraftManager(deps: DraftManagerDeps) {
-	const { update, getState, wsSend, wsIsConnected, sessionStateRemoveSession, sessionPollerLoadSession } = deps;
+	const { update, getState, wsSend, wsIsConnected, feedRestart } = deps;
 
 	return {
 		setDraft(text: string) {
@@ -58,14 +58,12 @@ export function createDraftManager(deps: DraftManagerDeps) {
 		},
 
 		/** Reload the current session from backend (e.g. after rewind).
-		 * Unlike WS-reconnect reloads, this is an explicit user action that
-		 * should do a full reset to pick up truncated/changed data. */
-		async reloadSession(_forceJsonl = false) {
+		 * Restarts the SSE feed, which replays the event log from_seq=0 — a full
+		 * reset that picks up truncated/changed data. */
+		reloadSession(_forceJsonl = false) {
 			const state = getState();
 			if (state.sessionId) {
-				// Force a fresh fetch by removing stale session state first
-				sessionStateRemoveSession(state.sessionId);
-				await sessionPollerLoadSession(state.sessionId);
+				feedRestart(state.sessionId);
 			}
 		},
 
@@ -87,29 +85,27 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			this.clearError();
 		},
 
-		/** Rewind session to a specific message. After rewind completes externally
-		 * (via MessageActions component), reload the session to pick up the
-		 * truncated message list. */
-		async rewindToMessage(_messageId: string) {
-			const state = getState();
-			if (!state.sessionId) return;
-			// Force reset since the JSONL was modified by the rewind.
-			sessionStateRemoveSession(state.sessionId);
-			await sessionPollerLoadSession(state.sessionId);
+		/** Rewind session to a specific message. The rewind command is executed
+		 * externally (via MessageActions → executeRewind HTTP), and the backend
+		 * emits a `rewound` event on the session's SSE event log; the live feed's
+		 * reducer folds that truncation into the transcript. No client-side
+		 * truncation or reload is required here. */
+		rewindToMessage(_messageId: string) {
+			// Intentionally a no-op: truncation arrives via the live SSE `rewound`
+			// event. Kept for API compatibility.
 		},
 
 		/** Take over a locked session from another device. */
-		async takeOverSession() {
+		takeOverSession() {
 			const state = getState();
 			if (!state.sessionId) return;
 			update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
-			// Send takeover via WS (to acquire the lock), then load state via HTTP
+			// Send takeover via WS (to acquire the lock), then restart the SSE feed
+			// to re-fetch the transcript (which may differ from another device).
 			if (wsIsConnected()) {
 				wsSend({ type: 'load_session', session_id: state.sessionId, force: true });
 			}
-			// Force reset — takeover may load different state from another device
-			sessionStateRemoveSession(state.sessionId);
-			await sessionPollerLoadSession(state.sessionId);
+			feedRestart(state.sessionId);
 		},
 	};
 }

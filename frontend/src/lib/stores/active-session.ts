@@ -3,13 +3,14 @@
  *
  * One WebSocket connection, one active session at a time.
  * Session switching saves ephemeral state to sessionEphemeralCache and restores it.
- * Polling is delegated to sessionPoller; WebSocket is notification-only for streaming.
+ * The SSE-fed reducer (feed-controller) is the single writer of the transcript +
+ * streaming state; WebSocket carries lifecycle, permissions, and questions.
  *
  * Uses manual subscribe() pattern for backward compatibility with
  * $storeName auto-subscription in .svelte files.
  *
  * Sub-modules (in ./session/):
- * - session-init.ts      — init/destroy lifecycle, poll & stream-end callbacks
+ * - session-init.ts      — init/destroy lifecycle
  * - message-sender.ts    — sendMessage, worktree creation, message queue
  * - permission-handler.ts — permission/question responses
  * - draft-manager.ts     — draft, scroll, error, system messages, rewind, takeover
@@ -19,9 +20,6 @@ import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, P
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
-import { sessionPoller } from './session/session-poller';
-import { sessionNotifier } from './session/session-notifier';
-import { sessionState, type SessionUsage } from './session/session-state';
 import { createWsConnection, type WsConnection } from './session/ws-connection';
 import { createMessageHandlers, type InternalMutableState } from './session/ws-message-handlers';
 import {
@@ -164,9 +162,6 @@ export interface ActiveSessionState {
 	worktreeDeleted: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
-	/** Accumulated text from WebSocket stream_delta events for instant rendering.
-	 *  Cleared when the poller catches up or streaming ends. */
-	wsStreamContent: string;
 	/** Holds the user's message text while waiting for interrupt confirmation.
 	 *  If the interrupt fails/times out, ChatInput restores this to the editor
 	 *  so the user doesn't lose their message. Cleared on success or session switch. */
@@ -233,17 +228,6 @@ function getAuthToken(): string | null {
 	return null;
 }
 
-/**
- * V2 Phase 1: whether a session opts into the SSE-fed reducer path. Sourced from
- * the session-list row (the backend surfaces `v2_stream` on `Session`). Unknown
- * sessions (row not yet loaded) fall back to legacy — the safe default.
- */
-function isSessionV2(sessionId: string | null): boolean {
-	if (!sessionId) return false;
-	const row = appData.current.sessions.find((s) => s.id === sessionId);
-	return !!row?.v2_stream;
-}
-
 // ─── Default state ───────────────────────────────────────────────────────────
 
 function defaultState(): ActiveSessionState {
@@ -292,7 +276,6 @@ function defaultState(): ActiveSessionState {
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
@@ -383,59 +366,22 @@ const wsConn: WsConnection = createWsConnection({
 			wsConn.send({ type: 'get_pending_permissions' });
 			wsConn.send({ type: 'get_pending_questions' });
 
-			// V2 Phase 1: for v2_stream sessions the feed controller owns the
-			// transcript + streaming state (fed from the SSE event log). Start it
-			// instead of the poller on (re)connect / boot-restore; permissions and
-			// questions still flow over legacy WS above.
-			if (isSessionV2(sessionId)) {
-				feedController.start(sessionId);
-				if (_state.isRestoringSession) {
-					_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));
-				}
-				return;
+			// The feed controller owns the transcript + streaming state (fed from
+			// the SSE event log). Start it on (re)connect / boot-restore; permissions
+			// and questions still flow over legacy WS above. The SSE feed replays
+			// from_seq=0, so any messages missed during the disconnect window are
+			// re-delivered.
+			feedController.start(sessionId);
+			if (_state.isRestoringSession) {
+				_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));
 			}
-
-			// Always re-sync on (re)connect. We may have missed messages during
-			// the disconnect window (e.g. phone lock / network drop). The poller's
-			// shallow-equality check in onPollApplied prevents redundant renders
-			// when nothing actually changed.
-			sessionPoller.loadSession(sessionId).then(pollData => {
-				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
-				// The restore window is over — success or failure, we now know
-				// what this session looks like. Only clear if we're still on it
-				// (the user may have navigated away mid-fetch).
-				if (_state.sessionId === sessionId && _state.isRestoringSession) {
-					_update(s => ({ ...s, isRestoringSession: false }));
-				}
-				if (pollData && pollData.isStreaming) {
-					sessionPoller.startStreaming(sessionId);
-				} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
-					_update(s => ({
-						...s,
-						error: 'Failed to load session. Try starting a new chat.',
-						contextUsed: 0,
-					}));
-				}
-			});
 		}
 	},
-	onDisconnected: (code, _reason, wasClean) => {
-		const wasStreaming = _state.isStreaming;
-		const sessionId = _state.sessionId;
-
+	onDisconnected: (code, _reason, _wasClean) => {
 		_update(s => ({ ...s, wsConnected: false }));
 
-		// Revive HTTP polling on WS loss for streaming AND parked sessions. A
-		// session parked on background work (isStreaming=false, activeTasks>0) is
-		// still live — its sub-agent can complete and unpark while the socket is
-		// down. startStreaming forces a full (since_update_id=0) poll, so the park
-		// branch in _applyPollResult re-arms the 1500ms park timer; without this a
-		// parked session is stranded with no poller until a manual reload.
-		// V2 sessions: the feed controller owns reconnect (SSE backoff + revive);
-		// don't spin up the legacy poller, which is not the writer for them.
-		if (sessionId && !isSessionV2(sessionId) && (wasStreaming || _state.activeTasks.length > 0)) {
-			sessionPoller.startStreaming(sessionId);
-		}
+		// The feed controller owns reconnect (SSE backoff + visibility/online
+		// revive), so a WS drop needs no polling revival here.
 
 		if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
@@ -444,7 +390,7 @@ const wsConn: WsConnection = createWsConnection({
 		}
 	},
 	isStreaming: () => {
-		return _state.isStreaming && (!_state.sessionId || !sessionPoller.isPolling(_state.sessionId));
+		return _state.isStreaming;
 	},
 	hasPendingTools: () => internal.pendingTools.size > 0,
 	onMaxReconnectAttempts: () => {
@@ -452,36 +398,8 @@ const wsConn: WsConnection = createWsConnection({
 		// pending sendMessage waiters so they fail fast instead of timing out.
 		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', isRestoringSession: false }));
 	},
-	onVisibilityHidden: () => {
-		if (_state.sessionId && sessionPoller.isPolling(_state.sessionId)) {
-			sessionPoller.stop(_state.sessionId);
-		}
-	},
-	onVisibilityVisible: () => {
-		if (!_state.sessionId) return;
-		// V2 sessions: the feed controller revives itself on visibilitychange;
-		// the poller must not be started for them.
-		if (isSessionV2(_state.sessionId)) return;
-		// Always fire an immediate HTTP poll — this renders fresh messages
-		// before the WS reconnect handshake completes. Critical for mobile
-		// unlock latency. No-op updates are filtered by shallow-equality in
-		// the poller, so this is cheap even when nothing changed.
-		//
-		// Streaming AND parked sessions go through startStreaming, not pollNow.
-		// onVisibilityHidden stop()s the poll timer; for a parked session
-		// (isStreaming=false, activeTasks>0) pollNow then issues ONE
-		// since_update_id=<non-zero> request that 304s when nothing changed, so
-		// _applyPollResult never runs and the park branch never re-arms the
-		// 1500ms timer — the session is stranded (no poller) until reload.
-		// startStreaming forces a full since_update_id=0 poll so the park branch
-		// re-arms; it does NOT flip the UI to streaming (isStreaming comes from
-		// the server response, which is false for a parked session).
-		if (_state.isStreaming || _state.activeTasks.length > 0) {
-			sessionPoller.startStreaming(_state.sessionId);
-		} else {
-			sessionPoller.pollNow(_state.sessionId);
-		}
-	},
+	// The SSE feed self-revives on visibilitychange/online (see sse-feed.ts), so
+	// no visibility-driven polling is wired here.
 });
 
 // ─── Session Switcher (extracted module) ─────────────────────────────────────
@@ -492,8 +410,6 @@ const switcher = createSessionSwitcher({
 	wsSend: (data) => wsConn.send(data),
 	internal,
 	sessionEphemeralCache,
-	sessionPoller,
-	sessionState,
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },
 });
 
@@ -502,7 +418,7 @@ const persistSession = switcher.persistSession;
 // ─── WebSocket helpers (delegated to wsConn) ─────────────────────────────────
 
 function disconnect() {
-	if (_state.sessionId) sessionPoller.stop(_state.sessionId);
+	feedController.stop();
 
 	internal.pendingTools.clear();
 	internal.interruptPending = false;
@@ -524,8 +440,6 @@ const { handleMessage } = createMessageHandlers({
 	update: _update,
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
-	sessionPoller,
-	sessionNotifier,
 	streamingSessions,
 	backgroundPermissions,
 	gitRefreshStatus: () => git.refreshStatus(),
@@ -552,7 +466,6 @@ const sessionInitModule = createSessionInit({
 	defaultState,
 	setState: (s) => { _state = s; },
 	internal,
-	sessionPoller,
 	wsConn,
 	switcher,
 	appData,
@@ -573,8 +486,7 @@ const draftManager = createDraftManager({
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
 	wsIsConnected: () => wsConn.isConnected(),
-	sessionStateRemoveSession: (id) => sessionState.removeSession(id),
-	sessionPollerLoadSession: (id) => sessionPoller.loadSession(id),
+	feedRestart: (id) => feedController.start(id),
 });
 
 // Message sender needs a reference to activeSession for recursive calls
@@ -590,8 +502,6 @@ const messageSender = createMessageSender({
 		resetLastMessageTime: () => wsConn.resetLastMessageTime(),
 		resetReconnectAttempts: () => wsConn.resetReconnectAttempts(),
 	},
-	sessionPoller,
-	sessionState,
 	sessionEphemeralCache,
 	appData,
 	persistSession,

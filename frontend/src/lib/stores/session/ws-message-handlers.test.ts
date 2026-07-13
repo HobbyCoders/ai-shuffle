@@ -1,9 +1,12 @@
 /**
  * Tests for ws-message-handlers.ts — Message dispatch and key handler behavior.
  *
- * Architecture: WS handlers are notification-only. They trigger polls and fire
- * callbacks but NEVER write session message state (messages, isStreaming).
- * Session state is written SOLELY by the session-poller via onPollApplied.
+ * Architecture (SSE-fed): the SSE-fed reducer (feedController) owns the session
+ * transcript and its streaming state — it is the sole writer of `messages` /
+ * isStreaming for the active session. These handlers NEVER render stream content;
+ * they adopt sessions (start the feed), manage permissions/questions and the
+ * cross-session streaming map, and fire side-effect callbacks (completion
+ * notifications, error banners).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -20,9 +23,22 @@ vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
 // the store via `notify.ingest`, rather than rendering them itself. `notify.error`
 // is used by the failed-answer-relay path to toast the user.
 vi.mock('../notifications', () => ({ notify: { ingest: vi.fn(), error: vi.fn() } }));
+// The SSE-fed reducer singleton. Session adoption (session_created/start) starts
+// the feed; mock it so we can assert adoption without a real EventSource, and so
+// isFeeding() reports "not yet feeding" (the branch that triggers start()).
+vi.mock('./v2/feed-controller', () => ({
+	feedController: {
+		attach: vi.fn(),
+		start: vi.fn(),
+		stop: vi.fn(),
+		isFeeding: vi.fn(() => false),
+		currentSessionId: vi.fn(() => null),
+	},
+}));
 
 import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
+import { feedController } from './v2/feed-controller';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -45,17 +61,6 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		update: vi.fn((fn) => fn(mockState())),
 		getState: vi.fn(() => mockState()),
 		wsSend: vi.fn(() => true),
-		sessionPoller: {
-			pollNow: vi.fn(),
-			pollFinal: vi.fn(),
-			startStreaming: vi.fn(),
-			stop: vi.fn(),
-			isPolling: vi.fn(() => false),
-			loadSession: vi.fn(async () => null),
-		},
-		sessionNotifier: {
-			handleMessage: vi.fn(),
-		},
 		streamingSessions: {
 			update: vi.fn(),
 			set: vi.fn(),
@@ -126,7 +131,6 @@ function mockState(): ActiveSessionState {
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
@@ -142,6 +146,8 @@ describe('ws-message-handlers', () => {
 	let handlers: ReturnType<typeof createMessageHandlers>;
 
 	beforeEach(() => {
+		(feedController.start as ReturnType<typeof vi.fn>).mockClear();
+		(feedController.isFeeding as ReturnType<typeof vi.fn>).mockReturnValue(false);
 		deps = createMockDeps();
 		handlers = createMessageHandlers(deps);
 	});
@@ -260,24 +266,6 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('done handler', () => {
-		it('should trigger a final poll (notification-only, no state writes)', () => {
-			const state = mockState();
-			state.isStreaming = true;
-			state.sessionId = 'session-1';
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'done',
-				session_id: 'session-1',
-			});
-
-			// done triggers pollFinal (survives stop()) so the
-			// post-end_streaming state is always fetched.
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
-		});
-
 		it('should call onNotifySessionComplete with metadata', () => {
 			const state = mockState();
 			state.isStreaming = true;
@@ -346,23 +334,6 @@ describe('ws-message-handlers', () => {
 			expect(deps.internal.pendingTools.size).toBe(0);
 		});
 
-		it('should trigger pollFinal when interruptPending is false', () => {
-			const state = mockState();
-			state.isStreaming = true;
-			state.sessionId = 'session-1';
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			deps.internal.interruptPending = false;
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stopped',
-				session_id: 'session-1',
-			});
-
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
-		});
-
 		it('clears any stale attention dot for the stopped session', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
@@ -382,9 +353,9 @@ describe('ws-message-handlers', () => {
 		it('does NOT clobber the active session when a BACKGROUND session stops', () => {
 			// Bug 3: pre-fix, handleStoppedOrInterrupted ignored data.session_id and
 			// always mutated the ACTIVE session — so a stopped/interrupted event for
-			// any OTHER session wiped the active session's pendingTools /
-			// wsStreamContent and fired a spurious pollFinal on it. Mirror handleDone:
-			// route by the event's session_id.
+			// any OTHER session wiped the active session's pendingTools. Route by the
+			// event's session_id (mirror handleDone) so the active session's
+			// active-only block is skipped for a background stop.
 			const state = mockState();
 			state.sessionId = 'session-active';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
@@ -394,14 +365,10 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'stopped', session_id: 'session-bg' });
 
-			// Final poll targets the session that actually stopped, not the active one.
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-bg');
-			expect(deps.sessionPoller.pollFinal).not.toHaveBeenCalledWith('session-active');
 			// The active session is untouched: pending tools preserved, no stop-timeout
-			// clear, no wsStreamContent mutation (the whole active-only block is skipped).
+			// clear (the whole active-only block is skipped).
 			expect(deps.internal.pendingTools.has('tool-keep')).toBe(true);
 			expect(deps.clearStopTimeout).not.toHaveBeenCalled();
-			expect(deps.update).not.toHaveBeenCalled();
 		});
 
 		it('clears the active session pendingTools on its OWN stopped event', () => {
@@ -416,7 +383,6 @@ describe('ws-message-handlers', () => {
 
 			expect(deps.internal.pendingTools.has('tool-x')).toBe(false);
 			expect(deps.clearStopTimeout).toHaveBeenCalled();
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
 		});
 
 		it('treats a stopped event with no session_id as the active session', () => {
@@ -432,100 +398,12 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type: 'stopped' });
 
 			expect(deps.internal.pendingTools.has('tool-y')).toBe(false);
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
-		});
-	});
-
-	describe('stream_block_stop handler (per-block buffer clear)', () => {
-		// Principled layer of the mega-blob fix: wsStreamContent accumulates every
-		// text delta with no separator and is cleared ONLY at turn boundaries
-		// (done / stopped / start). If a text block finalizes mid-turn into a tool
-		// call, nothing clears the buffer at the source, so cross-block deltas pile
-		// up and the poll-time staleness drop is the sole guard. Clearing the
-		// buffer on the block-boundary WS event (`stream_block_stop`) makes
-		// cross-block accumulation impossible in the first place; the next block
-		// then refills from empty (the documented intent). Non-text blocks
-		// (tool_use/thinking) never wrote to the buffer, so their block-stop clears
-		// a buffer that is already empty — harmless.
-		it('clears wsStreamContent on the active session', () => {
-			const state = mockState();
-			state.sessionId = 'session-1';
-			state.isStreaming = true;
-			state.wsStreamContent = 'Hello world, this block just finalized';
-			let captured = '__unset__';
-
-			deps = createMockDeps({
-				getState: vi.fn(() => state),
-				update: vi.fn((fn) => {
-					captured = fn(state).wsStreamContent;
-				}),
-			});
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stream_block_stop',
-				session_id: 'session-1',
-				index: 0,
-			});
-
-			expect(captured).toBe('');
-		});
-
-		it('does NOT clear the buffer for a background (non-active) session', () => {
-			const state = mockState();
-			state.sessionId = 'session-active';
-			state.wsStreamContent = 'live text for the active session';
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stream_block_stop',
-				session_id: 'session-bg',
-				index: 0,
-			});
-
-			// Session guard rejects the event → no state write at all.
-			expect(deps.update).not.toHaveBeenCalled();
-		});
-
-		it('multi-block turn: each block-stop resets the buffer so blocks cannot accumulate', () => {
-			// Simulate the accumulation shape the incident produced: text deltas of
-			// block 1, its block-stop, then text deltas of block 2. Without the
-			// per-block clear, block 2's buffer would be block1+block2 concatenated
-			// (the mega-blob seed). With the clear, block 2 starts from empty.
-			const state = mockState();
-			state.sessionId = 'session-1';
-			state.isStreaming = true;
-			handlers = createMessageHandlers(
-				createMockDeps({
-					getState: vi.fn(() => state),
-					update: vi.fn((fn) => {
-						// Apply the reducer against the live mock state so successive
-						// deltas accumulate the way the real store does.
-						const next = fn(state);
-						state.wsStreamContent = next.wsStreamContent;
-					}),
-				})
-			);
-
-			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'Block one ' });
-			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'text.' });
-			expect(state.wsStreamContent).toBe('Block one text.');
-
-			// Block 1 finalizes → buffer cleared at the source.
-			handlers.handleMessage({ type: 'stream_block_stop', session_id: 'session-1', index: 0 });
-			expect(state.wsStreamContent).toBe('');
-
-			// Block 2 deltas refill from empty — no cross-block accumulation.
-			handlers.handleMessage({ type: 'stream_delta', session_id: 'session-1', delta_type: 'text', content: 'Block two text.' });
-			expect(state.wsStreamContent).toBe('Block two text.');
-			expect(state.wsStreamContent).not.toContain('Block one');
+			expect(deps.clearStopTimeout).toHaveBeenCalled();
 		});
 	});
 
 	describe('user_message_discarded handler', () => {
-		it('should set pendingInterruptPrompt and trigger a final poll', () => {
+		it('should stash the discarded prompt for the active session', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			let captured: string | null = '__unset__';
@@ -544,11 +422,9 @@ describe('ws-message-handlers', () => {
 				prompt: 'write me a haiku',
 			});
 
-			// Prompt is stashed so ChatInput can restore it to the editor.
+			// Prompt is stashed so ChatInput can restore it to the editor. The SSE
+			// feed drops the now-removed orphan user message from the transcript.
 			expect(captured).toBe('write me a haiku');
-			// Poller (sole authority for the chat view) re-fetches the now-cleaned
-			// live store so the orphan user message disappears.
-			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
 		});
 
 		it('should ignore events for a non-active session', () => {
@@ -565,7 +441,6 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(deps.update).not.toHaveBeenCalled();
-			expect(deps.sessionPoller.pollFinal).not.toHaveBeenCalled();
 		});
 	});
 
@@ -662,9 +537,9 @@ describe('ws-message-handlers', () => {
 			// unpark turns never carry one).
 			handlers.handleMessage({ type: 'start', session_id: 'other-session', message_id: 'm-foreign' });
 
-			// Must NOT be adopted: state untouched, poller not started, still awaiting.
+			// Must NOT be adopted: state untouched, feed not started, still awaiting.
 			expect(deps.update).not.toHaveBeenCalled();
-			expect(deps.sessionPoller.startStreaming).not.toHaveBeenCalled();
+			expect(feedController.start).not.toHaveBeenCalled();
 			expect(deps.internal.awaitingNewSession).toBe(true);
 			expect(deps.internal.pendingRequestId).toBe('req-mine-123');
 		});
@@ -693,7 +568,7 @@ describe('ws-message-handlers', () => {
 			handlers.handleMessage({ type: 'start', session_id: 'other-session', request_id: 'req-someone-else' });
 
 			expect(deps.update).not.toHaveBeenCalled();
-			expect(deps.sessionPoller.startStreaming).not.toHaveBeenCalled();
+			expect(feedController.start).not.toHaveBeenCalled();
 			expect(deps.internal.awaitingNewSession).toBe(true);
 		});
 
@@ -726,7 +601,7 @@ describe('ws-message-handlers', () => {
 			expect(deps.internal.pendingRequestId).toBeNull();
 		});
 
-		it('adopts a start with the matching request_id, resets activeTasks, and starts polling', () => {
+		it('adopts a start with the matching request_id, resets activeTasks, and starts the feed', () => {
 			const state = awaitingState();
 			state.activeTasks = [
 				{ id: 'inherited', subject: 'stale', status: 'running', kind: 'shell', summary: null, startedAt: '', updatedAt: '' },
@@ -749,7 +624,7 @@ describe('ws-message-handlers', () => {
 
 			expect(applied?.sessionId).toBe('my-session');
 			expect(applied?.activeTasks).toEqual([]);
-			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('my-session');
+			expect(feedController.start).toHaveBeenCalledWith('my-session');
 			expect(deps.internal.awaitingNewSession).toBe(false);
 			expect(deps.internal.pendingRequestId).toBeNull();
 		});
@@ -775,7 +650,7 @@ describe('ws-message-handlers', () => {
 			expect(applied?.sessionId).toBe('session-1');
 			// sessionId did NOT change → activeTasks preserved (reset is adoption-only).
 			expect(applied?.activeTasks).toHaveLength(1);
-			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('session-1');
+			expect(feedController.start).toHaveBeenCalledWith('session-1');
 		});
 	});
 
@@ -804,7 +679,7 @@ describe('ws-message-handlers', () => {
 			expect(capturedError).toBe('Something went wrong');
 		});
 
-		it('stops the active session poller and clears interrupt state on its OWN error', () => {
+		it('clears interrupt state and resets streaming on its OWN error', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
@@ -819,9 +694,8 @@ describe('ws-message-handlers', () => {
 				message: 'boom',
 			});
 
-			// Active error: poller stopped, banner shown, interrupt-and-query promise
-			// rejected and the flag cleared.
-			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-1');
+			// Active error: banner shown + isStreaming reset (so the user can send
+			// again), interrupt-and-query promise rejected and the flag cleared.
 			expect(deps.update).toHaveBeenCalled();
 			expect(deps.internal.interruptPending).toBe(false);
 			expect(rejected).toBe(false);
@@ -830,10 +704,10 @@ describe('ws-message-handlers', () => {
 
 		it('does NOT clobber the active session when a BACKGROUND session errors', () => {
 			// Frontend U1: pre-fix, the error handler ignored data.session_id and
-			// always stopped the ACTIVE session's poller, reset its isStreaming, blew
-			// away wsStreamContent, and rejected its interrupt-and-query promise — so a
-			// background session's stream error froze whatever was in view. Mirror
-			// handleDone / handleStoppedOrInterrupted: route by the event's session_id.
+			// always reset the ACTIVE session's isStreaming and rejected its
+			// interrupt-and-query promise — so a background session's stream error
+			// froze whatever was in view. Mirror handleDone / handleStoppedOrInterrupted:
+			// route by the event's session_id.
 			const state = mockState();
 			state.sessionId = 'session-active';
 			deps = createMockDeps({ getState: vi.fn(() => state) });
@@ -848,9 +722,8 @@ describe('ws-message-handlers', () => {
 				message: 'background blew up',
 			});
 
-			// The errored (background) session's poller is stopped — cross-session safe.
-			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-bg');
-			expect(deps.sessionPoller.stop).not.toHaveBeenCalledWith('session-active');
+			// The errored (background) session's streaming pill is dropped — cross-session safe.
+			expect(deps.streamingSessions.update).toHaveBeenCalled();
 			// The active session is untouched: no banner, no isStreaming reset, and the
 			// interrupt machinery is preserved (the whole active-only block is skipped).
 			expect(deps.update).not.toHaveBeenCalled();
@@ -869,7 +742,6 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'error', message: 'empty prompt' });
 
-			expect(deps.sessionPoller.stop).toHaveBeenCalledWith('session-1');
 			expect(deps.update).toHaveBeenCalled();
 		});
 	});
@@ -1492,7 +1364,7 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('start handler', () => {
-		it('should start polling and persist session', () => {
+		it('should start the SSE feed and persist session', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
 			state.isStreaming = false;
@@ -1507,54 +1379,14 @@ describe('ws-message-handlers', () => {
 				session_id: 'session-1',
 			});
 
-			// In the polling-only architecture, start triggers startStreaming on the poller.
-			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('session-1');
+			// The SSE-fed reducer owns the transcript: start adopts the id and starts
+			// the feed (its replay renders the turn).
+			expect(feedController.start).toHaveBeenCalledWith('session-1');
 			expect(deps.onPersistSession).toHaveBeenCalled();
 		});
 	});
 
-	describe('history handler (notification-only)', () => {
-		it('should trigger a poll instead of writing state directly', () => {
-			const state = mockState();
-			state.sessionId = 'session-1';
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'history',
-				session_id: 'session-1',
-				messages: [
-					{ id: 'msg-1', role: 'user', type: 'text', content: 'Hello' },
-				],
-			});
-
-			// History is now loaded via HTTP — WS history triggers pollNow
-			expect(deps.sessionPoller.pollNow).toHaveBeenCalledWith('session-1');
-		});
-	});
-
 	// Queue processing is now server-side — no frontend tests needed
-
-	describe('sync event forwarding', () => {
-		it('should forward sync events to session notifier', () => {
-			const state = mockState();
-			state.sessionId = 'session-1';
-			state.isStreaming = true;
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stream_chunk',
-				event_type: 'stream_chunk',
-				session_id: 'session-1',
-				data: { content: 'hello' },
-			});
-
-			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalled();
-		});
-	});
 
 	describe('query_queued handler (send-now replacement routed to the queue)', () => {
 		// Finding F5: the user clicks "Send now" while a turn is streaming. The FE
@@ -1563,11 +1395,10 @@ describe('ws-message-handlers', () => {
 		// — but the pooled client is still winding down the force-cancelled turn, so
 		// the backend routes the query to the queue and acks with `query_queued`
 		// (plus the usual queue_updated broadcast for the chip). Without a handler,
-		// interruptPending stays latched and isStreaming stays optimistically true;
-		// session-init's poll callback then discards every idle (isStreaming=false)
-		// poll as a stale interrupt poll → unbounded spinner. The handler must clear
-		// interruptPending, drop the optimistic streaming state + streaming-session
-		// map entry, and poll so the poller truth-ups from /live.
+		// interruptPending stays latched and isStreaming stays optimistically true →
+		// the spinner never clears. The handler clears interruptPending, drops the
+		// optimistic streaming state + streaming-session map entry; the SSE feed
+		// truth-ups the transcript.
 
 		function interruptedState() {
 			const state = mockState();
@@ -1576,7 +1407,7 @@ describe('ws-message-handlers', () => {
 			return state;
 		}
 
-		it('clears interruptPending, drops isStreaming, cleans the streaming map, and polls', () => {
+		it('clears interruptPending, drops isStreaming, and cleans the streaming map', () => {
 			const state = interruptedState();
 			let applied: ActiveSessionState | undefined;
 			deps = createMockDeps({
@@ -1588,42 +1419,15 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'query_queued', session_id: 'session-1' });
 
-			// The interrupt latch is released so the poll callback stops discarding
-			// idle polls (the root cause of the unbounded spinner).
+			// The interrupt latch is released.
 			expect(deps.internal.interruptPending).toBe(false);
-			// Optimistic streaming state cleared so the poller's idle truth wins.
+			// Optimistic streaming state cleared so the feed's truth wins.
 			expect(applied?.isStreaming).toBe(false);
 			expect(applied?.streamStartTime).toBeNull();
 			// Streaming-session map entry removed (mirrors done/stopped terminal frames).
 			const fn = (deps.streamingSessions.update as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
 			expect(fn).toBeDefined();
 			expect(fn(new Map([['session-1', { projectId: null, worktreeId: null }]])).has('session-1')).toBe(false);
-			// Poll so the poller re-fetches authoritative /live state.
-			expect(deps.sessionPoller.pollNow).toHaveBeenCalledWith('session-1');
-		});
-
-		it('lets the poller resume accepting idle polls after the queue-route (no more stale-discard)', () => {
-			// End-to-end of the fix's intent: while interruptPending is latched, the
-			// session-init poll callback drops idle (isStreaming=false) polls. After
-			// query_queued clears the latch, an idle poll must be ACCEPTED. We assert
-			// the state the poll callback keys on: interruptPending is false and
-			// isStreaming is false, which is exactly what makes the callback's
-			// `if (interruptPending) { if (!data.isStreaming) return; }` guard fall
-			// through instead of swallowing the poll.
-			const state = interruptedState();
-			deps = createMockDeps({
-				getState: vi.fn(() => state),
-				update: vi.fn((fn) => Object.assign(state, fn(state))),
-			});
-			deps.internal.interruptPending = true;
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({ type: 'query_queued', session_id: 'session-1' });
-
-			// Simulate the guard in session-init.onPollApplied for an idle poll.
-			const idlePollWouldBeDiscarded =
-				deps.internal.interruptPending && state.isStreaming === false;
-			expect(idlePollWouldBeDiscarded).toBe(false);
 		});
 
 		it('ignores a query_queued for a non-active session', () => {
@@ -1637,187 +1441,6 @@ describe('ws-message-handlers', () => {
 			// Cross-session safety: the active session's latch/streaming/state untouched.
 			expect(deps.internal.interruptPending).toBe(true);
 			expect(deps.update).not.toHaveBeenCalled();
-			expect(deps.sessionPoller.pollNow).not.toHaveBeenCalledWith('some-other-session');
-		});
-	});
-
-	describe('parked-watcher recovery (Bug 2)', () => {
-		// A watcher whose session parked on a long-running background task has
-		// isStreaming=false (it stopped streaming when the turn parked). When the
-		// task finishes, the server fires a follow-up unpark turn that sync_engine
-		// broadcasts as an `event_type` ('stream_start'/'stream_end'/'stream_chunk')
-		// with NO top-level `type`. Before the fix, the shouldNotify gate matched
-		// only `type` values, so a not-streaming watcher dropped these events, the
-		// stopped poller never restarted, and the UI showed stale state until a
-		// manual reload. These tests pin the recovery: each unpark event_type must
-		// reach the notifier for the in-view session even when isStreaming=false.
-
-		function parkedWatcherDeps() {
-			const state = mockState();
-			state.sessionId = 'session-1';
-			state.isStreaming = false; // parked — not actively streaming
-			const d = createMockDeps({ getState: vi.fn(() => state) });
-			return d;
-		}
-
-		it('forwards an unpark stream_start to the notifier while parked (isStreaming=false)', () => {
-			deps = parkedWatcherDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_start',
-				session_id: 'session-1',
-				data: { message_id: 'm-unpark' },
-			});
-
-			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
-				'session-1',
-				expect.objectContaining({ event_type: 'stream_start' }),
-			);
-		});
-
-		it('forwards an unpark stream_end to the notifier while parked', () => {
-			deps = parkedWatcherDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_end',
-				session_id: 'session-1',
-				data: {},
-			});
-
-			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
-				'session-1',
-				expect.objectContaining({ event_type: 'stream_end' }),
-			);
-		});
-
-		it('forwards an unpark stream_chunk to the notifier while parked', () => {
-			deps = parkedWatcherDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_chunk',
-				session_id: 'session-1',
-				data: { content: 'resumed work' },
-			});
-
-			expect(deps.sessionNotifier.handleMessage).toHaveBeenCalledWith(
-				'session-1',
-				expect.objectContaining({ event_type: 'stream_chunk' }),
-			);
-		});
-
-		it('does NOT forward an unpark stream event for a different (background) session', () => {
-			// The recovery is scoped inside the isForActiveSession guard, so an
-			// unpark broadcast for a session that is NOT in view must not trigger a
-			// poll for the active session (that was the ghost-poll / phantom-token
-			// regression the routing comment warns about).
-			deps = parkedWatcherDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_start',
-				session_id: 'some-other-session',
-				data: {},
-			});
-
-			expect(deps.sessionNotifier.handleMessage).not.toHaveBeenCalled();
-		});
-
-		it('does NOT forward a non-stream event_type to a parked watcher (e.g. message_added)', () => {
-			// Only the three streaming-lifecycle event_types recover a parked
-			// watcher. A generic sync event like message_added must still be gated
-			// out while not streaming, so we do not re-introduce broad ghost polls.
-			deps = parkedWatcherDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'message_added',
-				session_id: 'session-1',
-				data: {},
-			});
-
-			expect(deps.sessionNotifier.handleMessage).not.toHaveBeenCalled();
-		});
-	});
-
-	describe('optimistic wake engagement (stream_start broadcast, item 6b)', () => {
-		// A CLI-owned wake turn is broadcast by the drain pump as an
-		// event_type='stream_start' sync event. An idle-parked client used to
-		// only restart its poller (via the notifier) and wait a full poll cycle
-		// before the composer locked / streaming affordances showed. The handler
-		// now ALSO optimistically flips isStreaming=true for the ACTIVE session;
-		// /live stays the source of truth (the next poll confirms or corrects).
-
-		function idleDeps(overrides?: Partial<ActiveSessionState>) {
-			const state = { ...mockState(), isStreaming: false, ...overrides };
-			return createMockDeps({ getState: vi.fn(() => state) });
-		}
-
-		function appliedState(d: MessageHandlerDeps, base: ActiveSessionState) {
-			// Fold every update() call over the base state to get the net result.
-			let s = base;
-			for (const call of (d.update as ReturnType<typeof vi.fn>).mock.calls) {
-				s = call[0](s);
-			}
-			return s;
-		}
-
-		it('sets isStreaming=true optimistically on a broadcast stream_start for the active session', () => {
-			deps = idleDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_start',
-				session_id: 'session-1',
-				data: { message_id: 'm-wake' },
-			});
-
-			const next = appliedState(deps, { ...mockState(), isStreaming: false });
-			expect(next.isStreaming).toBe(true);
-			expect(next.streamStartTime).not.toBeNull();
-		});
-
-		it('ignores a broadcast stream_start for a different session', () => {
-			deps = idleDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_start',
-				session_id: 'other-session',
-				data: { message_id: 'm-wake' },
-			});
-
-			const next = appliedState(deps, { ...mockState(), isStreaming: false });
-			expect(next.isStreaming).toBe(false);
-		});
-
-		it('leaves an already-streaming session untouched (no state churn)', () => {
-			deps = idleDeps({ isStreaming: true });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				event_type: 'stream_start',
-				session_id: 'session-1',
-				data: { message_id: 'm-wake' },
-			});
-
-			expect(deps.update).not.toHaveBeenCalled();
-		});
-
-		it('also engages on a direct type=stream_start message for the active session', () => {
-			deps = idleDeps();
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stream_start',
-				session_id: 'session-1',
-			});
-
-			const next = appliedState(deps, { ...mockState(), isStreaming: false });
-			expect(next.isStreaming).toBe(true);
-			expect(deps.sessionPoller.startStreaming).toHaveBeenCalledWith('session-1');
 		});
 	});
 });

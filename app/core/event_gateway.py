@@ -17,7 +17,7 @@ import json
 import logging
 import select
 import threading
-from typing import Dict, Set, Tuple
+from typing import Callable, Dict, List, Set, Tuple
 
 import psycopg2
 
@@ -34,6 +34,8 @@ class EventGateway:
     def __init__(self) -> None:
         # session_id -> set of (loop, queue) pairs.
         self._subscribers: Dict[str, Set[Tuple[object, object]]] = {}
+        # All-sessions listeners: fn(session_id) invoked on every notify tick.
+        self._global_listeners: List[Callable[[str], None]] = []
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -57,6 +59,19 @@ class EventGateway:
             self._subscribers.setdefault(session_id, set()).add((loop, queue))
         self._ensure_listener()
         return queue
+
+    def add_global_listener(self, fn: Callable[[str], None]) -> None:
+        """Register ``fn(session_id)`` invoked on EVERY notify tick.
+
+        Called from the listener thread, so ``fn`` must be cheap and
+        non-blocking (hand real work back to a loop). Idempotent per fn.
+        Lazily starts the listener thread (same as subscribe) so global
+        listeners tick even before the first SSE subscriber arrives.
+        """
+        with self._lock:
+            if fn not in self._global_listeners:
+                self._global_listeners.append(fn)
+        self._ensure_listener()
 
     def unsubscribe(self, session_id: str, queue) -> None:
         """Remove a subscriber; drop the session key once empty."""
@@ -174,6 +189,16 @@ class EventGateway:
         except (ValueError, TypeError, KeyError):
             logger.warning("event gateway: malformed notify payload: %r", payload)
             return
+        with self._lock:
+            listeners = list(self._global_listeners)
+        for fn in listeners:
+            try:
+                fn(session_id)
+            except Exception:  # noqa: BLE001 — a listener bug must not kill the loop
+                logger.warning(
+                    "event gateway: global listener failed for %s",
+                    session_id, exc_info=True,
+                )
         self._dispatch(session_id, max_seq)
 
     def _sleep(self, seconds: float) -> None:

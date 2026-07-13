@@ -158,17 +158,12 @@ def _drive_route_patches(stack: ExitStack, created: _RecordingCreateTask):
     sync.broadcast_message_added = AsyncMock()
     sync.broadcast_user_session_created = AsyncMock()
     sync.broadcast_session_updated = AsyncMock()
-    sync.clear_streaming_state = AsyncMock()
-    sync.get_user_streaming_sessions = MagicMock(return_value=[])
     # Disconnect-teardown bookkeeping (returns ints so the > 0 / == 0 checks work).
     sync.get_device_count = MagicMock(return_value=1)
 
-    store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
-    stack.enter_context(patch.object(cwh, "live_session_store", new=store))
-    store.get_session = MagicMock(return_value=None)
-    store.has_session = MagicMock(return_value=False)
-    store.is_streaming = MagicMock(return_value=False)
-    store.cleanup_session = AsyncMock()
+    # (V2: the live session store and sync_engine's streaming map are deleted —
+    # the connect-time streaming snapshot reads app.core.streaming_status
+    # against the test DB, which has no lease-valid runs.)
 
     db = stack.enter_context(patch.object(ws_mod, "database"))
     stack.enter_context(patch.object(cwh, "database", new=db))

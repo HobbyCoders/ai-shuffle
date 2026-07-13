@@ -50,17 +50,6 @@ function makeInit(persisted: PersistedSession | null) {
 		defaultState: () => baseState(),
 		setState: (s: ActiveSessionState) => { state = s; },
 		internal,
-		sessionPoller: {
-			onPollApplied: vi.fn(),
-			onStreamEnd: vi.fn(),
-			onPollError: vi.fn(),
-			setInterruptGuard: vi.fn(),
-			loadSession: vi.fn(async () => null),
-			startStreaming: vi.fn(),
-			stop: vi.fn(),
-			stopAll: vi.fn(),
-			isPolling: vi.fn(() => false),
-		},
 		wsConn: {
 			connect: vi.fn(),
 			disconnect: vi.fn(),

@@ -2,10 +2,9 @@
 
 The Claude Agent SDK persists some system messages into the session
 JSONL/DB even though they are NOT rendered as standalone system cards
-during live streaming. During live streaming (see
-`app/api/ws_event_handlers.py::handle_system`) these subtypes are routed
-into other UI elements and the handler returns *without* calling
-`add_system_message`, so no card is created:
+during live streaming. During live streaming these subtypes are routed
+into other UI elements (thinking-token counter, subagent progress) rather
+than rendered as system cards:
 
   - ``thinking_tokens`` — routed to the live thinking-block token counter
     via ``update_thinking_tokens`` (commit d30ed9c8).

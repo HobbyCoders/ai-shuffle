@@ -18,7 +18,6 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from app.core.sync_engine import sync_engine  # noqa: F401
-from app.core.live_session_store import live_session_store  # noqa: F401
 from app.core.config import settings  # noqa: F401
 from app.db import database  # noqa: F401
 from app.db.async_database import run_sync  # noqa: F401
@@ -78,28 +77,19 @@ async def chat_websocket(
     """
     Primary WebSocket endpoint for chat with multi-device sync support.
 
-    This is the ONLY streaming mechanism needed. Simple flow:
+    Control-plane flow (V2: render deltas ride the session event feed / SSE,
+    not this socket):
     1. Client connects (optionally provides device_id for multi-device sync)
     2. Client sends: {"type": "query", "prompt": "...", "session_id": "...", "profile": "..."}
-    3. Server streams response chunks directly
+    3. Server runs the turn; the recorder appends render events to the event log
     4. Server sends: {"type": "done", ...} when complete
-    5. Server broadcasts streaming events to other connected devices via SyncEngine
 
-    Message types FROM server:
+    Message types FROM server (control plane):
     - history: Full message history for session (on connect or session switch)
-      - Includes isStreaming for late-joining devices
-    - start: Query started, streaming will begin
-    - chunk: Text content chunk
-    - stream_delta: Real-time streaming delta (when include_partial_messages=True)
-    - tool_use: Tool being used
-    - tool_result: Tool result
-    - done: Query complete with metadata
-    - error: Error occurred
+    - start: Query started
+    - stream_start / done / stopped / error: turn lifecycle
+    - permission_request / user_question / queue_updated / etc.
     - ping: Keep-alive
-    - Sync events (from SyncEngine for other devices):
-      - stream_start: Another device started streaming
-      - stream_chunk: Streaming chunk from another device
-      - stream_end: Another device finished streaming
 
     Message types TO server:
     - query: Start a new query
@@ -110,8 +100,8 @@ async def chat_websocket(
 
     Multi-device sync features:
     - Automatic device registration with SyncEngine when session is used
-    - Broadcasts all streaming events to other devices watching same session
-    - Late-joining devices receive streaming state from LiveSessionStore
+    - Non-streaming broadcasts (message_added, session_updated, queue_updated)
+      still fan out to other devices watching the same session
     - Devices are automatically unregistered on disconnect or session switch
     """
     # Must accept connection first before we can send close with reason

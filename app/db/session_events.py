@@ -134,6 +134,86 @@ def append_events(
     return first_seq, last_seq
 
 
+def append_backfill_events(
+    session_id: str,
+    events: List[Dict[str, Any]],
+) -> Optional[Tuple[int, int]]:
+    """Append a legacy-history backfill batch under an exclusive-create gate.
+
+    Unlike :func:`append_events`, this is the ONE-TIME lazy backfill writer
+    (``app.core.history_backfill``). It is always unfenced (``run_id=None``) and
+    must only win when it is the FIRST writer to allocate this session's seqs —
+    otherwise a concurrent recorder append (or a second reader racing the same
+    backfill) would interleave a duplicate legacy prefix into the log.
+
+    The gate is the atomic counter INSERT itself: ``ON CONFLICT DO NOTHING
+    RETURNING next_seq`` yields the allocated row ONLY when this statement
+    created the counter. If the counter already exists (a recorder or a prior
+    backfill got there first) no row is returned and we abort without writing,
+    returning ``None``. On success returns the ``(first_seq, last_seq)`` range
+    (always starting at 1). Raises ``ValueError`` if ``events`` is empty.
+    """
+    if not events:
+        raise ValueError("events must be non-empty")
+
+    n = len(events)
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Exclusive-create gate: allocate the whole [1, n] range in one shot, but
+        # ONLY if this statement is the one that creates the counter row. A
+        # returned row proves we won; no row means another writer already
+        # allocated seqs for this session — abort silently (the log is no longer
+        # empty, so the backfill is unnecessary).
+        cursor.execute(
+            "INSERT INTO session_event_counters (session_id, next_seq) "
+            "VALUES (%s, %s) "
+            "ON CONFLICT (session_id) DO NOTHING "
+            "RETURNING next_seq",
+            (session_id, n),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        last_seq = int(row["next_seq"])
+        first_seq = last_seq - n + 1
+
+        # Insert one row per event — always unfenced (run_id=None).
+        params = [
+            (
+                str(uuid.uuid4()),
+                session_id,
+                first_seq + i,
+                None,
+                event.get("turn_id"),
+                event["type"],
+                json.dumps(event.get("payload", {})),
+                event.get("command_id"),
+            )
+            for i, event in enumerate(events)
+        ]
+        cursor.executemany(
+            "INSERT INTO session_events "
+            "(id, session_id, seq, run_id, turn_id, event_type, payload, command_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            params,
+        )
+
+        # Best-effort notify (guarded — absent on the SQLite shim).
+        try:
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (
+                    NOTIFY_CHANNEL,
+                    json.dumps({"session_id": session_id, "max_seq": last_seq}),
+                ),
+            )
+        except Exception:
+            logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
+
+    return first_seq, last_seq
+
+
 def get_events(
     session_id: str, from_seq: int = 0, limit: int = 500
 ) -> List[Dict[str, Any]]:

@@ -10,12 +10,13 @@
 		timestamp?: Date | string;
 		sessionId?: string | null;
 		messageUuid?: string | null;  // UUID from JSONL for direct rewind
+		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
 		streaming?: boolean;
 		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
 
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
@@ -56,6 +57,7 @@
 					messageContent={content}
 					messageRole="user"
 					{messageUuid}
+					{userPromptOccurrence}
 					{onRewindComplete}
 					{fileCheckpointingEnabled}
 					visible={showActions && !streaming}

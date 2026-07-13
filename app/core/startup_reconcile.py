@@ -1,19 +1,20 @@
 """Boot-time "reconcile from durable truth".
 
 After a crash or restart the in-memory control planes are empty — the session
-pool, the task registry, and the live session store hold nothing — but durable
-state written by the previous run can still claim sessions are mid-flight:
+pool and the task registry hold nothing — but durable state written by the
+previous run can still claim sessions are mid-flight:
 
 - ``sessions.parked_task_kind`` (v51) is set when a turn ends with live
   background work (a sub-agent or an SDK-backgrounded shell — see
-  ``live_session_store.end_streaming``). No background work survives a
+  ``turn_finalize.persist_turn_end_state``). No background work survives a
   restart, so any marker found at boot is stale: left in place it reads as a
   session forever "parked" awaiting an unpark that can never arrive.
 - ``sessions.status`` only ever holds idle/terminal values today (``active``,
-  ``archived``) — streaming/parked signals live in memory
-  (``live_session_store.is_streaming``, ``task_registry``) — but a row that
-  has drifted to a live-looking value (written by a different version, or by
-  hand) would render as stuck forever, so those are defensively reset too.
+  ``archived``) — busy truth is the durable runs table
+  (``app.core.streaming_status``); parked signals live in ``task_registry`` —
+  but a row that has drifted to a live-looking value (written by a different
+  version, or by hand) would render as stuck forever, so those are
+  defensively reset too.
 - CLI subprocesses are tracked in memory only (``app.core.session_pool``
   snapshots descendant trees per-eviction), so a mid-turn server death leaks
   them. Every spawn is env-marked with ``AI_SHUFFLE_MANAGED_BY=<instance id>``

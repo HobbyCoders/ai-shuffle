@@ -142,7 +142,7 @@ async def stop_session_background_shells(session_id: str) -> int:
     """Terminate + reap every Monitor shell spawned by a session (U2).
 
     Monitor shells deliberately do NOT pin a live session open (see
-    task_registry / live_session_store.cleanup_ended_session), so when the
+    task_registry — they are excluded from the background-work guard), so when the
     session is finally removed its shells would otherwise STRAND: the subprocess
     keeps running, its ``_reader`` task awaits ``readline()`` forever (for a
     long-running command like ``tail -f``), and the ``_background_tasks`` entry —
@@ -189,9 +189,9 @@ async def stop_session_background_shells(session_id: str) -> int:
 def reap_session_background_shells(session_id: str) -> None:
     """Schedule async reap of a session's Monitor shells (non-blocking).
 
-    Fire-and-forget so the caller — live_session_store.cleanup_ended_session,
-    which holds the store lock — is never blocked by the up-to-5s terminate/kill
-    escalation. A no-op when called with no running event loop.
+    Fire-and-forget so callers (session teardown/eviction paths, which may
+    hold locks) are never blocked by the up-to-5s terminate/kill escalation.
+    A no-op when called with no running event loop.
     """
     try:
         loop = asyncio.get_running_loop()

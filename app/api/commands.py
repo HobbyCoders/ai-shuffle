@@ -42,7 +42,6 @@ from app.core.rewind_db_sync import (
 )
 from app.core.jsonl_parser import invalidate_parse_cache
 from app.core.sync_engine import sync_engine
-from app.core.live_session_store import live_session_store
 from app.core.session_pool import get_session_pool
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
@@ -382,11 +381,23 @@ class CheckpointsResponseV2(BaseModel):
 
 class RewindRequestV2(BaseModel):
     """V2 Rewind request using message UUID instead of index"""
-    target_uuid: str  # UUID of the message to rewind to
+    target_uuid: str = ""  # UUID of the message to rewind to ("" when using target_content)
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
     restore_files: bool = False  # Restore files to checkpoint state (requires file checkpointing enabled)
     include_response: bool = True  # Keep Claude's response to target message
     target_role: str = "user"  # Role of target message ("user" or "assistant")
+    # v2 event-log affordance: a live v2 message rendered from the event log may
+    # have no transcript uuid yet. The client then sends the target's content
+    # plus its 0-based occurrence among the client's IDENTICAL-content user
+    # prompts; the server resolves the checkpoint uuid by content match against
+    # the JSONL checkpoint list and proceeds through the normal uuid flow.
+    # (Content anchoring, not a global ordinal: the SDK transcript contains
+    # user-role lines the client never renders — synthetic "[Request
+    # interrupted by user]" markers, task notifications, prompts retained
+    # after an empty-turn discard — so global positions skew in any session
+    # that has seen an interrupt.)
+    target_occurrence: Optional[int] = None
+    target_content: Optional[str] = None
 
 
 class RewindResponseV2(BaseModel):
@@ -528,6 +539,176 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
     )
 
 
+# ----------------------------------------------------------------------
+# v2 event-log rewind resolution (transcript.rewound)
+# ----------------------------------------------------------------------
+
+def _load_message_events(session_id: str) -> List[dict]:
+    """All message.user / message.assistant rows of the event log, seq order.
+
+    Rows logically erased by a later ``transcript.rewound`` (seq >= its
+    from_seq) are dropped, mirroring the client reducer — resolution must run
+    against the transcript the client actually renders.
+    """
+    from app.db import session_events as session_events_db
+
+    rows: List[dict] = []
+    cursor = 0
+    while True:
+        page = session_events_db.get_events(session_id, from_seq=cursor, limit=500)
+        if not page:
+            break
+        for row in page:
+            cursor = row["seq"]
+            if row["event_type"] in ("message.user", "message.assistant"):
+                rows.append(row)
+            elif row["event_type"] == "transcript.rewound":
+                from_seq = (row.get("payload") or {}).get("from_seq")
+                if isinstance(from_seq, int):
+                    rows = [r for r in rows if r["seq"] < from_seq]
+        if len(page) < 500:
+            break
+    return rows
+
+
+def _is_prompt_event(row: dict) -> bool:
+    """True for a message.user event that is a genuine typed prompt.
+
+    Command prompts (kind='command') are excluded because the JSONL checkpoint
+    list (`get_checkpoints`) skips command/meta entries, and ordinals must be
+    computed against the SAME population on both sides.
+    """
+    return (
+        row["event_type"] == "message.user"
+        and (row.get("payload") or {}).get("kind") != "command"
+    )
+
+
+def _resolve_checkpoint_uuid_from_content(
+    sdk_session_id: str,
+    working_dir: str,
+    target_content: Optional[str],
+    target_occurrence: int,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a checkpoint uuid from the target prompt's content.
+
+    Returns ``(uuid, error)`` — exactly one is non-None. The target is the
+    ``target_occurrence``-th user checkpoint whose (trimmed) text equals
+    ``target_content``. Content anchoring instead of a global ordinal: the
+    SDK transcript contains user-role lines the client never renders
+    (synthetic "[Request interrupted by user]" markers, task notifications,
+    prompts retained after an empty-turn discard), so global positions skew
+    in any session that has seen an interrupt — but those lines never equal
+    a real prompt's text. FAILS CLOSED when nothing matches (content guard).
+    """
+    want = (target_content or "").strip()
+    if not want:
+        return None, (
+            "Rewind refused: no target content supplied to resolve against "
+            "(content guard)"
+        )
+    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+    matches = [
+        cp for cp in checkpoints
+        if cp.role == "user" and (cp.full_message or "").strip() == want
+    ]
+    if target_occurrence < 0 or target_occurrence >= len(matches):
+        return None, (
+            f"Rewind refused: transcript has {len(matches)} user prompt(s) "
+            f"matching the target content, occurrence {target_occurrence} "
+            f"requested (content guard)"
+        )
+    cp = matches[target_occurrence]
+    if not cp.uuid:
+        return None, "Rewind refused: the matched checkpoint has no uuid"
+    return cp.uuid, None
+
+
+def _resolve_rewind_from_seq(
+    session_id: str,
+    sdk_session_id: str,
+    working_dir: str,
+    target_uuid: str,
+    include_response: bool,
+    target_role: str,
+) -> tuple[Optional[int], Optional[str]]:
+    """Resolve the event-log seq a chat rewind truncates from. FAIL CLOSED.
+
+    Returns ``(from_seq, error)``:
+    - ``(seq, None)``   — append ``transcript.rewound(from_seq=seq)`` on success.
+    - ``(None, None)``  — the target is already the transcript tail (nothing
+      after it to drop) — the rewind proceeds but no event is appended.
+    - ``(None, error)`` — resolution failed; the caller must refuse the ENTIRE
+      rewind before truncating anything, or the event log and the truncated
+      transcript would disagree forever.
+
+    Resolution order:
+    1. uuid short-circuit — a backfilled (or uuid-stamped) message.* event whose
+       payload uuid equals the target.
+    2. content + occurrence — the target checkpoint's text and its occurrence
+       among identical-text JSONL user checkpoints map to the matching
+       prompt-shaped message.user event. Content anchoring (not a global
+       ordinal) because the JSONL contains user-role lines the event log
+       never records — synthetic interrupt markers, retained discards.
+    """
+    events = _load_message_events(session_id)
+    if not events:
+        return None, (
+            "Rewind refused: the v2 event log has no message events to resolve "
+            "the target against"
+        )
+
+    target_idx: Optional[int] = None
+    for i, row in enumerate(events):
+        if (row.get("payload") or {}).get("uuid") == target_uuid:
+            target_idx = i
+            break
+
+    if target_idx is None:
+        if target_role != "user":
+            return None, (
+                f"Rewind refused: assistant target {target_uuid} not found in "
+                f"the event log (assistant targets resolve by uuid only)"
+            )
+        checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+        user_cps = [cp for cp in checkpoints if cp.role == "user"]
+        pos = next(
+            (k for k, cp in enumerate(user_cps) if cp.uuid == target_uuid), None
+        )
+        if pos is None:
+            return None, (
+                f"Rewind refused: target {target_uuid} not found among the "
+                f"transcript's user prompts"
+            )
+        want = (user_cps[pos].full_message or "").strip()
+        occurrence = sum(
+            1 for cp in user_cps[:pos]
+            if (cp.full_message or "").strip() == want
+        )
+        prompts = [
+            (i, row) for i, row in enumerate(events)
+            if _is_prompt_event(row)
+            and ((row.get("payload") or {}).get("content") or "").strip() == want
+        ]
+        if occurrence >= len(prompts):
+            return None, (
+                f"Rewind refused: event log has {len(prompts)} user prompt(s) "
+                f"matching the target's text but the transcript places it at "
+                f"occurrence {occurrence} (content guard)"
+            )
+        target_idx = prompts[occurrence][0]
+
+    if target_role == "assistant" or include_response:
+        # Keep the target (and its response); drop from the NEXT user prompt.
+        # Commands count as a boundary here — mirroring _next_real_user_index,
+        # which cuts at any genuine user entry.
+        for row in events[target_idx + 1:]:
+            if row["event_type"] == "message.user":
+                return int(row["seq"]), None
+        return None, None  # already the tail — nothing to drop
+    return int(events[target_idx]["seq"]), None
+
+
 @router.post("/rewind/execute/{session_id}")
 async def execute_rewind(session_id: str, request: RewindRequestV2, http_request: Request = None):
     """
@@ -577,8 +758,63 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
         f"target_uuid={request.target_uuid}, target_role={request.target_role}, "
         f"restore_chat={request.restore_chat}, restore_files={request.restore_files}, "
-        f"include_response={request.include_response}"
+        f"include_response={request.include_response}, "
+        f"target_occurrence={request.target_occurrence}"
     )
+
+    # --- v2 event log: resolve the transcript.rewound position UP FRONT ---
+    # For v2_stream sessions the append-only event log is a transcript replica;
+    # a chat rewind must append transcript.rewound(from_seq) or replays keep
+    # showing the rewound-away messages forever. Resolution is FAIL CLOSED and
+    # happens BEFORE anything is truncated: if we cannot place the target in
+    # the log, we refuse the whole rewind rather than desync the two stores.
+    v2_session = bool(session.get("v2_stream"))
+    rewound_from_seq: Optional[int] = None
+    if v2_session and request.restore_chat:
+        from app.core.history_backfill import ensure_backfilled
+        await ensure_backfilled(session_id)
+
+        if not request.target_uuid:
+            # Content affordance: a live v2 message has no transcript uuid yet.
+            if request.target_content is None or request.target_occurrence is None:
+                return RewindResponseV2(
+                    success=False,
+                    message="Cannot execute rewind",
+                    error=(
+                        "No rewind target: target_uuid or "
+                        "target_content+target_occurrence is required"
+                    ),
+                )
+            resolved_uuid, content_err = await asyncio.to_thread(
+                _resolve_checkpoint_uuid_from_content,
+                sdk_session_id, working_dir,
+                request.target_content, request.target_occurrence,
+            )
+            if resolved_uuid is None:
+                return RewindResponseV2(
+                    success=False,
+                    message="Rewind refused",
+                    error=content_err,
+                )
+            request.target_uuid = resolved_uuid
+
+        rewound_from_seq, resolve_err = await asyncio.to_thread(
+            _resolve_rewind_from_seq,
+            session_id, sdk_session_id, working_dir,
+            request.target_uuid, request.include_response, request.target_role,
+        )
+        if resolve_err is not None:
+            return RewindResponseV2(
+                success=False,
+                message="Rewind refused",
+                error=resolve_err,
+            )
+    elif not request.target_uuid:
+        return RewindResponseV2(
+            success=False,
+            message="Cannot execute rewind",
+            error="No rewind target: target_uuid is required",
+        )
 
     # Track what was rewound
     chat_rewound = False
@@ -714,6 +950,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         # then resurfaced through the empty-store legacy fallback after a full
         # rewind. Best-effort: a DB failure here does not invalidate a
         # successful transcript truncation.
+        # Memo for the SDK-transcript emptiness probe: the no-anchor purge
+        # below may already pay for it; the pointer-clear check reuses the
+        # answer instead of re-probing.
+        transcript_probe: Optional[bool] = None
         if jsonl_ok or store_truncated:
             db_removed = 0
             if anchor_id is not None:
@@ -741,7 +981,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 purged_legacy = False
                 if postgres_only and store_truncated:
                     try:
-                        if await main_transcript_is_empty(sdk_session_id):
+                        transcript_probe = await main_transcript_is_empty(
+                            sdk_session_id
+                        )
+                        if transcript_probe:
                             db_removed = await asyncio.to_thread(
                                 delete_all_session_rows, session_id
                             )
@@ -793,43 +1036,38 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             # spending a version probe. Also drops the mtime-validated JSONL
             # cache so filesystem-mode reads re-parse the truncated file.
             invalidate_parse_cache(sdk_session_id)
-            # Clear stale messages from live_session_store so the next
-            # load_session reads truncated data instead of serving pre-rewind
-            # data from memory. When cleanup is refused (streaming/team members/
-            # active background task — e.g. a parked session), the surviving
-            # in-memory snapshot still holds the post-checkpoint messages and
-            # would win the "longer wins" heal on reload, visually no-opping the
-            # rewind. Trim it in place at the same checkpoint instead.
-            cleaned = await live_session_store.cleanup_ended_session(session_id)
-            if not cleaned:
-                trimmed = await live_session_store.truncate_after_uuid(
-                    session_id=session_id,
-                    target_uuid=request.target_uuid,
-                    include_response=request.include_response,
-                    target_role=request.target_role,
-                )
-                if not trimmed:
-                    # The in-memory snapshot could not be trimmed — the target
-                    # uuid was not found in the live buffer (e.g. its
-                    # _backfill_message_uuids was skipped by the count-mismatch
-                    # guard, so the rewindable positions never got their transcript
-                    # uuids). The chat + store truncation already succeeded, so we
-                    # do NOT fail the rewind; but the surviving snapshot still holds
-                    # the trimmed messages and would win the "longer wins" heal on
-                    # reload, visually no-opping the rewind until the buffer expires.
-                    # Surface it so the outcome isn't silently reported as clean.
-                    logger.warning(
-                        "Rewind live-buffer trim missed: target %s not found in the "
-                        "live snapshot for session %s (cleanup was refused). The "
-                        "in-memory snapshot may shadow the truncated transcript until "
-                        "it expires.",
-                        request.target_uuid,
-                        session_id,
+            # V2: no in-memory live overlay to trim — reads serve the persisted
+            # transcript, so the truncation is visible on the very next load.
+
+            # A rewind that emptied the transcript leaves the CLI nothing to
+            # resume — the stale sdk_session_id makes the very next turn fail
+            # with "No conversation found". Clear the pointer (empty string →
+            # NULL) so the next message starts a fresh SDK session.
+            transcript_empty = jsonl_ok and result.remaining_user_turns == 0
+            if not transcript_empty and postgres_only and store_truncated:
+                if transcript_probe is not None:
+                    transcript_empty = transcript_probe
+                else:
+                    try:
+                        transcript_empty = await main_transcript_is_empty(
+                            sdk_session_id
+                        )
+                    except Exception:
+                        transcript_empty = False
+            if transcript_empty:
+                try:
+                    await asyncio.to_thread(
+                        database.update_session, session_id, sdk_session_id=""
+                    )
+                except Exception as clear_err:
+                    logger.error(
+                        f"Rewind sdk_session_id clear failed for session "
+                        f"{session_id}: {clear_err}",
+                        exc_info=True,
                     )
                     errors.append(
-                        "Live buffer trim skipped: rewind target not found in the "
-                        "in-memory snapshot; it may briefly reappear until the "
-                        "buffer expires"
+                        "Could not clear the SDK resume pointer; the next "
+                        "message may fail to start"
                     )
 
     # Determine overall success
@@ -861,6 +1099,33 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         message = f"Chat rewound (removed {messages_removed} messages), but file restore was unavailable"
     else:
         message = "Rewind failed"
+
+    # v2 event log: fold the successful chat rewind into the append-only log
+    # (unfenced — a rewind happens between turns, with no owning run). A
+    # resolved-but-tail target (rewound_from_seq is None) appends nothing.
+    if v2_session and chat_rewound and rewound_from_seq is not None:
+        try:
+            from app.contract import events as contract_events
+            from app.core.turn_recorder import _build_event
+            from app.db import session_events as session_events_db
+            await asyncio.to_thread(
+                session_events_db.append_events,
+                session_id,
+                [_build_event(
+                    contract_events.TranscriptRewound, session_id,
+                    from_seq=rewound_from_seq,
+                )],
+            )
+        except Exception as rewound_err:
+            logger.error(
+                f"Rewind transcript.rewound append failed for session "
+                f"{session_id} (from_seq={rewound_from_seq}): {rewound_err}",
+                exc_info=True,
+            )
+            errors.append(
+                "Event-log sync failed: v2 replicas may still show the "
+                "rewound messages"
+            )
 
     # Broadcast rewind event to all connected devices for this session
     if chat_rewound and messages_removed > 0:

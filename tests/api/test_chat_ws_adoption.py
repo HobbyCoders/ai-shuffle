@@ -71,21 +71,18 @@ def _run_query_patches(created):
     stack.enter_context(patch("app.core.query_engine.stream_to_websocket", new=_fake_stream([])))
     stack.enter_context(patch.object(cwh.asyncio, "create_task", new=created))
 
-    store = stack.enter_context(patch.object(cwh, "live_session_store"))
-    store.start_streaming = AsyncMock()
-    store.add_user_message = AsyncMock()
-    store.end_streaming = AsyncMock()
-    store.cleanup_session = AsyncMock()
-    store.get_session_dict = MagicMock(return_value=None)
-    store.has_session = MagicMock(return_value=False)
-    store.is_streaming = MagicMock(return_value=False)
+    # (V2: the live session store is deleted — turn events are recorded durably
+    # via turn_recorder.record_drained_event and turn-end state is persisted via
+    # turn_finalize.persist_turn_end_state.)
+    stack.enter_context(
+        patch("app.core.turn_recorder.record_drained_event", new=AsyncMock())
+    )
+    stack.enter_context(patch.object(cwh, "persist_turn_end_state", new=AsyncMock()))
 
     sync = stack.enter_context(patch.object(cwh, "sync_engine"))
     sync.unregister_device = AsyncMock()
     sync.broadcast_message_added = AsyncMock()
     sync.broadcast_queue_updated = AsyncMock()
-    sync.broadcast_stream_end = AsyncMock()
-    sync.is_session_streaming = MagicMock(return_value=False)
 
     conn = stack.enter_context(patch.object(cwh, "connector_manager"))
     conn.dispatch_event = AsyncMock()
@@ -105,7 +102,7 @@ def _run_query_patches(created):
     mr = stack.enter_context(patch.object(cwh, "message_resolver"))
     mr.resolve_for_streaming_init = MagicMock(return_value=[])
     stack.enter_context(patch.object(cwh, "resolve_working_dir", return_value="/tmp"))
-    stack.enter_context(patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()))
+    # (V2: the dispatch layer is deleted — run_query handles stream events inline.)
 
     import app.api.websocket as ws_mod
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new={}))

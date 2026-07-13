@@ -733,12 +733,12 @@ class AutomationManager:
 
         Mints ONE FRESH automation-badged session per fire (no shared
         session, so overlapping fires can never race each other's
-        history), persists the rendered prompt as a regular user message,
-        links the run row to the session, then submits the turn through
-        the headless streaming seam with ``deferred_delivery=True`` (the
-        server-initiated-turn contract) so the run streams live to any
+        history), links the run row to the session, then submits the turn
+        through the headless streaming seam with ``deferred_delivery=True``
+        (the server-initiated-turn contract) so the run streams live to any
         open tab, is openable on the sessions board, and persists normal
-        history — exactly like a user chat.
+        history — exactly like a user chat. The turn recorder persists the
+        rendered prompt as a ``message.user`` event at turn start.
         """
         from app.core import headless_query_runner
 
@@ -760,46 +760,28 @@ class AutomationManager:
             title=title,
             automation_id=automation_id,
         )
+        # Session starts empty until the recorder's first event: the turn
+        # recorder persists the prompt as a message.user event at turn start.
 
-        # 2. Persist the prompt as a normal user message so the session
-        #    reads like any chat from the very start (never "blank"
-        #    mid-turn, so no cleanup reaper can mistake it for empty).
-        database.add_session_message(
-            session_id=session_id,
-            role="user",
-            content=rendered_prompt,
-            profile_id=profile_id,
-            metadata={"automation_id": automation_id, "automation_run_id": run_id},
-        )
-
-        # 3. Link run → session BEFORE the turn starts: the session is the
+        # 2. Link run → session BEFORE the turn starts: the session is the
         #    primary artifact, the run row a thin index into it. Completion
         #    never re-writes the link, so the old completion-time
         #    FK-violation race is unrepresentable.
         database.update_automation_run(run_id, session_id=session_id)
 
-        # Best-effort: surface the new session + its prompt on connected
-        # devices immediately (scheduler-created sessions otherwise only
-        # appear on the next sidebar poll).
+        # Best-effort: surface the new session on connected devices immediately
+        # (scheduler-created sessions otherwise only appear on the next sidebar
+        # poll). The prompt itself is delivered by the SSE event log.
         try:
             from app.core import sync_engine as sync_engine_module
 
             await sync_engine_module.sync_engine.broadcast_user_session_created(
                 user_id="admin", session_id=session_id, source_device_id=None
             )
-            await sync_engine_module.sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": rendered_prompt,
-                    "profile_id": profile_id,
-                },
-                source_device_id=None,
-            )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Automation {automation_id}: session broadcast failed: {e}")
 
-        # 4. Submit the streaming turn. deferred_delivery=True marks it
+        # 3. Submit the streaming turn. deferred_delivery=True marks it
         #    server-initiated so run_query keeps watching devices
         #    registered with sync_engine — the turn streams live instead
         #    of only surfacing on reload.
@@ -814,7 +796,7 @@ class AutomationManager:
             deferred_delivery=True,
         )
 
-        # 5. Await turn completion under the automation timeout. A hand-off
+        # 4. Await turn completion under the automation timeout. A hand-off
         #    (account-failover retry, compact-boundary auto-continue) swaps
         #    handler.query_task for a successor task and lets the original
         #    return early — so keep re-awaiting the LATEST task until no new
@@ -863,34 +845,63 @@ class AutomationManager:
     @staticmethod
     def _extract_final_assistant_text(session_id: str) -> str:
         """Final assistant text of the turn — feeds output delivery and the
-        runs-list preview. Reads the live store first (freshest right at
-        turn end), falling back to persisted history."""
-        from app.core import live_session_store
+        runs-list preview. Derived from the V2 session event log: the turn
+        recorder streams assistant text as ``assistant.text_delta`` events and
+        the v2 path no longer dual-writes ``session_messages``, so this
+        concatenates the LAST completed turn's text-delta payloads in seq order
+        exactly as replay would render them. Never raises (returns "")."""
+        from app.db import session_events as session_events_db
 
-        messages: List[Dict[str, Any]] = []
+        events: List[Dict[str, Any]] = []
         try:
-            session = live_session_store.live_session_store.get_session_dict(session_id)
-            if session and isinstance(session.get("messages"), list):
-                messages = session["messages"]
+            from_seq = 0
+            while True:
+                batch = session_events_db.get_events(
+                    session_id, from_seq=from_seq, limit=500
+                )
+                if not batch:
+                    break
+                events.extend(batch)
+                if len(batch) < 500:
+                    break
+                from_seq = batch[-1].get("seq") or from_seq
         except Exception:  # noqa: BLE001
-            messages = []
-        if not messages:
-            try:
-                rows = database.get_session_messages(session_id)
-                if isinstance(rows, list):
-                    messages = rows
-            except Exception:  # noqa: BLE001
-                messages = []
+            return ""
 
-        for msg in reversed(messages):
-            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        # Target the LAST completed turn; if none completed (an aborted or
+        # interrupted run), fall back to the turn of the last assistant text
+        # event so a partial turn still surfaces its text.
+        target_turn_id = None
+        for ev in reversed(events):
+            if ev.get("event_type") == "turn.completed":
+                target_turn_id = ev.get("turn_id")
+                break
+        if target_turn_id is None:
+            for ev in reversed(events):
+                if ev.get("event_type") in ("assistant.text_delta", "message.assistant"):
+                    target_turn_id = ev.get("turn_id")
+                    break
+        if target_turn_id is None:
+            return ""
+
+        parts: List[str] = []
+        for ev in events:
+            if ev.get("turn_id") != target_turn_id:
                 continue
-            if msg.get("type") not in (None, "text"):
+            etype = ev.get("event_type")
+            payload = ev.get("payload") or {}
+            if etype == "assistant.text_delta":
+                text = payload.get("text")
+            elif etype == "message.assistant":
+                # Consolidated assistant event (history backfill) — text kind only.
+                if payload.get("kind") not in (None, "text"):
+                    continue
+                text = payload.get("content")
+            else:
                 continue
-            content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-        return ""
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts).strip()
 
     # ------------------------------------------------------------------
     # Action step execution

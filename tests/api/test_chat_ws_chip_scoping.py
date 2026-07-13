@@ -123,16 +123,20 @@ def _isolate():
 
 
 async def _run_pump(handler, messages):
-    """Run the REAL pump over scripted messages, capturing dispatched events."""
+    """Run the REAL pump over scripted messages, capturing recorded events.
+
+    V2: the pump records its events durably to the session event log via
+    ``turn_recorder.record_drained_event`` (the deleted dispatch layer's
+    replacement seam) — capture there."""
     captured = []
 
-    async def _capture(event, ectx, st):
+    async def _capture(sid, event):
         captured.append(event)
 
     client = _FakeClient(messages, hang=False)
     state = _fake_state(client)
     with _patch_pool(state), patch(
-        "app.api.ws_event_handlers.dispatch_event",
+        "app.core.turn_recorder.record_drained_event",
         new=AsyncMock(side_effect=_capture),
     ):
         await handler._drain_notifications(SESSION, "claude-code", None, None)

@@ -301,8 +301,10 @@ async def test_process_next_queued_late_preempt_requeues_at_front():
 def _unpark_patches(stack: ExitStack, registry: dict):
     sync = stack.enter_context(patch.object(cwh, "sync_engine"))
     sync.broadcast_message_added = AsyncMock()
-    store = stack.enter_context(patch.object(cwh, "live_session_store"))
-    store.end_streaming = AsyncMock()
+    # (V2: the live session store is deleted — the unpark's turn-END side effect
+    # is persist_turn_end_state; returned in the old ``store`` slot so tests can
+    # inject race side effects at the same delivery point.)
+    pts = stack.enter_context(patch.object(cwh, "persist_turn_end_state", new=AsyncMock()))
     db = stack.enter_context(patch.object(cwh, "database"))
 
     async def _fake_run_sync(fn, *a, **k):
@@ -312,7 +314,7 @@ def _unpark_patches(stack: ExitStack, registry: dict):
     reg = stack.enter_context(patch("app.core.task_registry.task_registry"))
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new=registry))
     stack.enter_context(patch.object(ws_mod, "_active_sessions_lock", new=asyncio.Lock()))
-    return sync, store, db, reg
+    return sync, pts, db, reg
 
 
 _PENDING = [{"task_id": "t1", "status": "completed", "description": "bg task", "output_tail": ""}]
@@ -327,7 +329,7 @@ async def test_deliver_unpark_yields_when_live_turn_owns_session():
     set_query_task = MagicMock()
 
     with ExitStack() as stack:
-        sync, store, db, reg = _unpark_patches(stack, registry)
+        sync, pts, db, reg = _unpark_patches(stack, registry)
         handed_off = await cwh._deliver_unpark_impl(
             pending=_PENDING,
             session_id="sess-1",
@@ -360,12 +362,15 @@ async def test_deliver_unpark_late_race_yields_and_clears_latch():
     set_query_task = MagicMock()
 
     with ExitStack() as stack:
-        sync, store, db, reg = _unpark_patches(stack, registry)
+        sync, pts, db, reg = _unpark_patches(stack, registry)
 
-        async def _inject_interloper(**kwargs):
+        async def _inject_interloper(*args, **kwargs):
             registry["sess-1"] = interloper
 
-        store.end_streaming = AsyncMock(side_effect=_inject_interloper)
+        # Inject at the turn-END side effect (V2: persist_turn_end_state) — the
+        # last await before the late lock re-check, same delivery point the old
+        # live-store end_streaming occupied.
+        pts.side_effect = _inject_interloper
 
         handed_off = await cwh._deliver_unpark_impl(
             pending=_PENDING,
@@ -398,7 +403,7 @@ async def test_deliver_unpark_no_race_hands_off():
         return None
 
     with ExitStack() as stack:
-        sync, store, db, reg = _unpark_patches(stack, registry)
+        sync, pts, db, reg = _unpark_patches(stack, registry)
         stack.enter_context(patch.object(cwh.asyncio, "create_task", new=created))
         handed_off = await cwh._deliver_unpark_impl(
             pending=_PENDING,
@@ -515,16 +520,12 @@ async def test_closure_query_busy_enqueues_and_never_cancels_live_turn():
             sync.unregister_device = AsyncMock()
             sync.broadcast_message_added = AsyncMock()
             sync.broadcast_queue_updated = AsyncMock()
-            sync.clear_streaming_state = AsyncMock()
-            sync.get_user_streaming_sessions = MagicMock(return_value=[])
             sync.get_device_count = MagicMock(return_value=1)
 
-            store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
-            stack.enter_context(patch.object(cwh, "live_session_store", new=store))
-            store.get_session = MagicMock(return_value=None)
-            store.has_session = MagicMock(return_value=False)
-            store.is_streaming = MagicMock(return_value=False)
-            store.cleanup_session = AsyncMock()
+            # (V2: the live session store and sync_engine's streaming map are
+            # deleted — the connect-time streaming snapshot reads
+            # app.core.streaming_status against the test DB, which has no
+            # lease-valid runs.)
 
             db = stack.enter_context(patch.object(ws_mod, "database"))
             stack.enter_context(patch.object(cwh, "database", new=db))

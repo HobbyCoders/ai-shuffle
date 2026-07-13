@@ -1118,10 +1118,7 @@ class TestExecuteRewindPostgresOnly:
             new=AsyncMock(return_value=2),
         ) as mock_store_trunc, patch(
             "app.api.commands.resolve_rewind_anchor", return_value=None
-        ), patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ):
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1143,8 +1140,6 @@ class TestExecuteRewindPostgresOnly:
         assert response.success is True
         assert response.chat_rewound is True
         assert response.messages_removed == 2
-        # Live store cleared so the reload reads truncated data, not stale memory.
-        mock_live_store.cleanup_ended_session.assert_awaited_once_with("session-1")
 
     @pytest.mark.asyncio
     async def test_postgres_only_store_target_not_found_fails_rewind(
@@ -1178,10 +1173,7 @@ class TestExecuteRewindPostgresOnly:
             new=AsyncMock(side_effect=RewindTargetNotFound("nope")),
         ), patch(
             "app.api.commands.resolve_rewind_anchor", return_value=None
-        ), patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ):
 
             request = RewindRequestV2(
                 target_uuid="missing",
@@ -1193,7 +1185,6 @@ class TestExecuteRewindPostgresOnly:
 
         assert response.success is False
         assert response.chat_rewound is False
-        mock_live_store.cleanup_ended_session.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_postgres_only_invalidates_parse_cache_after_rewind(
@@ -1234,11 +1225,8 @@ class TestExecuteRewindPostgresOnly:
         ), patch(
             "app.api.commands.resolve_rewind_anchor", return_value=None
         ), patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store, patch(
             "app.api.commands.invalidate_parse_cache"
         ) as mock_invalidate:
-            mock_live_store.cleanup_ended_session = AsyncMock()
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1287,11 +1275,8 @@ class TestExecuteRewindPostgresOnly:
         ), patch(
             "app.api.commands.resolve_rewind_anchor", return_value=None
         ), patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store, patch(
             "app.api.commands.invalidate_parse_cache"
         ) as mock_invalidate:
-            mock_live_store.cleanup_ended_session = AsyncMock()
 
             request = RewindRequestV2(
                 target_uuid="missing",
@@ -1348,10 +1333,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             "app.api.commands.resolve_rewind_anchor", return_value=42
         ), patch(
             "app.api.commands.apply_rewind_delete", return_value=2
-        ) as mock_delete, patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ) as mock_delete:
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1398,10 +1380,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             "app.api.commands.resolve_rewind_anchor", side_effect=anchor
         ), patch(
             "app.api.commands.apply_rewind_delete", return_value=1
-        ), patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ):
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1433,10 +1412,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             "app.api.commands.resolve_rewind_anchor", return_value=42
         ), patch(
             "app.api.commands.apply_rewind_delete", return_value=0
-        ) as mock_delete, patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ) as mock_delete:
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1471,10 +1447,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             "app.api.commands.resolve_rewind_anchor", return_value=42
         ), patch(
             "app.api.commands.apply_rewind_delete", return_value=2
-        ) as mock_delete, patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ) as mock_delete:
 
             request = RewindRequestV2(
                 target_uuid="uuid-target",
@@ -1514,10 +1487,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             "app.api.commands.delete_all_session_rows", return_value=5
         ) as mock_purge, patch(
             "app.api.commands.apply_rewind_delete", return_value=0
-        ) as mock_delete, patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
+        ) as mock_delete:
 
             request = RewindRequestV2(
                 target_uuid="uuid-first-message",
@@ -1555,11 +1525,7 @@ class TestExecuteRewindDbSyncWithoutJsonl:
             new=AsyncMock(return_value=False),
         ), patch(
             "app.api.commands.delete_all_session_rows", return_value=0
-        ) as mock_purge, patch(
-            "app.api.commands.live_session_store"
-        ) as mock_live_store:
-            mock_live_store.cleanup_ended_session = AsyncMock()
-
+        ) as mock_purge:
             request = RewindRequestV2(
                 target_uuid="uuid-target",
                 restore_chat=True,
@@ -1634,12 +1600,7 @@ class TestExecuteRewindInvalidatesParseCache:
                 new=AsyncMock(return_value=1),
             ), patch(
                 "app.api.commands.resolve_rewind_anchor", return_value=None
-            ), patch(
-                "app.api.commands.live_session_store"
-            ) as mock_live_store:
-                # Session fully removed → the RC3 in-place trim path is skipped.
-                mock_live_store.cleanup_ended_session = AsyncMock(return_value=True)
-
+            ):
                 request = RewindRequestV2(
                     target_uuid="uuid-m3",
                     restore_chat=True,
@@ -1657,158 +1618,33 @@ class TestExecuteRewindInvalidatesParseCache:
             jsonl_parser.invalidate_parse_cache(sdk_sid)
 
 
-class TestExecuteRewindTrimsRefusedLiveSession:
-    """RC3 regression: when ``cleanup_ended_session`` refuses to drop the live
-    session (streaming / active team members / parked-on-background-work), the
-    surviving in-memory snapshot still holds the post-checkpoint messages and
-    wins the "longer wins" heal on reload — visually no-opping the rewind.
-    ``execute_rewind`` must trim that snapshot in place at the checkpoint.
+class TestExecuteRewindLiveOverlayDeleted:
+    """RC3 hazard deleted at root (V2 Phase-1 deletion).
+
+    The old bug: ``cleanup_ended_session`` could REFUSE to drop the live
+    session (streaming / active team members / parked-on-background-work), and
+    the surviving in-memory snapshot — still holding the post-checkpoint
+    messages — won the "longer wins" heal on reload, visually no-opping the
+    rewind. ``execute_rewind`` therefore had to trim that snapshot in place
+    (and surface a warning when the trim missed).
+
+    V2 deleted the in-memory live overlay entirely: reads serve the persisted
+    transcript, so a rewind's truncation is visible on the very next load and
+    there is NO snapshot to trim, refuse, or miss. This tripwire pins that the
+    overlay (and with it the whole trim/refuse/miss surface) stays deleted from
+    the rewind path — reintroducing a live-store reference here would resurrect
+    the RC3 class of bugs without its compensating trim.
     """
 
-    @pytest.mark.asyncio
-    async def test_refused_cleanup_trims_live_snapshot_in_place(
-        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
-    ):
-        from app.api.commands import execute_rewind, RewindRequestV2
-        from app.core.live_session_store import live_session_store, LiveMessage, LiveSession
+    def test_rewind_path_has_no_live_overlay_to_trim(self):
+        import inspect
 
-        session_id = "session-trim"
-        sdk_sid = "sdk-session-trim"
-        # A live session that cleanup will refuse to drop: not streaming, no team
-        # members, but parked on active background work (patched below).
-        live = LiveSession(session_id=session_id, is_streaming=False)
-        live.messages = [
-            LiveMessage(id="m1", role="user", type="text", content="first", uuid="uuid-1"),
-            LiveMessage(id="m2", role="assistant", type="text", content="reply-1", uuid="uuid-a1"),
-            LiveMessage(id="m3", role="user", type="text", content="SECOND", uuid="uuid-target"),
-            LiveMessage(id="m4", role="assistant", type="text", content="reply-2", uuid="uuid-a2"),
-        ]
-        live_session_store._sessions[session_id] = live
+        import app.api.commands as commands
 
-        from app.core.task_registry import task_registry
-
-        mock_settings.session_store_mode = "postgres_only"
-        mock_database.get_session.return_value = {
-            "id": session_id,
-            "sdk_session_id": sdk_sid,
-            "project_id": None,
-            "turn_count": 2,
-        }
-        mock_database.get_project.return_value = None
-        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
-            success=False,
-            message="JSONL not found",
-            chat_rewound=False,
-            messages_removed=0,
-            error="JSONL file not found",
-            remaining_user_turns=None,
-        )
-
-        try:
-            with patch(
-                "app.api.commands.truncate_session_store_to_checkpoint",
-                new=AsyncMock(return_value=2),
-            ), patch(
-                "app.api.commands.resolve_rewind_anchor", return_value=None
-            ), patch.object(
-                task_registry, "has_active_background_work", return_value=True
-            ):
-                request = RewindRequestV2(
-                    target_uuid="uuid-target",
-                    restore_chat=True,
-                    include_response=False,
-                    target_role="user",
-                )
-                response = await execute_rewind(session_id, request)
-
-            assert response.success is True
-            # Cleanup was refused (parked on active background work), so the
-            # session survives — but its snapshot must be trimmed at the target.
-            surviving = live_session_store._sessions.get(session_id)
-            assert surviving is not None, "cleanup should have been refused, keeping the session"
-            remaining_uuids = [m.uuid for m in surviving.messages]
-            assert "uuid-target" not in remaining_uuids
-            assert "uuid-a2" not in remaining_uuids
-            assert remaining_uuids == ["uuid-1", "uuid-a1"]
-            assert surviving.needs_full_refresh is True
-        finally:
-            live_session_store._sessions.pop(session_id, None)
-            live_session_store._session_locks.pop(session_id, None)
-
-    @pytest.mark.asyncio
-    async def test_refused_cleanup_trim_miss_surfaces_warning(
-        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
-    ):
-        """BUG 3: when cleanup is refused AND the in-place trim MISSES (the target
-        uuid isn't in the live snapshot — e.g. _backfill_message_uuids was skipped
-        by its count-mismatch guard), the rewind must still SUCCEED (chat + store
-        truncation worked) but surface a warning instead of silently reporting a
-        clean rewind. The stale snapshot would otherwise win the "longer wins"
-        heal on reload and visually no-op the rewind."""
-        from app.api.commands import execute_rewind, RewindRequestV2
-        from app.core.live_session_store import live_session_store, LiveMessage, LiveSession
-
-        session_id = "session-trim-miss"
-        sdk_sid = "sdk-session-trim-miss"
-        # Live session whose messages carry NO transcript uuids — backfill never
-        # ran (count-mismatch guard), so truncate_after_uuid cannot find the target.
-        live = LiveSession(session_id=session_id, is_streaming=False)
-        live.messages = [
-            LiveMessage(id="m1", role="user", type="text", content="first"),
-            LiveMessage(id="m2", role="assistant", type="text", content="reply-1"),
-            LiveMessage(id="m3", role="user", type="text", content="SECOND"),
-        ]
-        live_session_store._sessions[session_id] = live
-
-        from app.core.task_registry import task_registry
-
-        mock_settings.session_store_mode = "postgres_only"
-        mock_database.get_session.return_value = {
-            "id": session_id,
-            "sdk_session_id": sdk_sid,
-            "project_id": None,
-            "turn_count": 2,
-        }
-        mock_database.get_project.return_value = None
-        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
-            success=False,
-            message="JSONL not found",
-            chat_rewound=False,
-            messages_removed=0,
-            error="JSONL file not found",
-            remaining_user_turns=None,
-        )
-
-        try:
-            with patch(
-                "app.api.commands.truncate_session_store_to_checkpoint",
-                new=AsyncMock(return_value=2),
-            ), patch(
-                "app.api.commands.resolve_rewind_anchor", return_value=None
-            ), patch.object(
-                task_registry, "has_active_background_work", return_value=True
-            ):
-                request = RewindRequestV2(
-                    target_uuid="uuid-not-in-buffer",
-                    restore_chat=True,
-                    include_response=False,
-                    target_role="user",
-                )
-                response = await execute_rewind(session_id, request)
-
-            # Rewind still succeeds — chat + store truncation worked.
-            assert response.success is True
-            assert response.chat_rewound is True
-            # ...but the trim miss is surfaced (not silently reported clean).
-            assert response.error is not None
-            assert "Live buffer trim skipped" in response.error
-            # The snapshot is UNCHANGED (the trim couldn't find the target).
-            surviving = live_session_store._sessions.get(session_id)
-            assert surviving is not None
-            assert len(surviving.messages) == 3
-        finally:
-            live_session_store._sessions.pop(session_id, None)
-            live_session_store._session_locks.pop(session_id, None)
+        assert not hasattr(commands, "live_session_store")
+        src = inspect.getsource(commands)
+        assert "cleanup_ended_session" not in src
+        assert "truncate_after_uuid" not in src
 
 
 # =============================================================================

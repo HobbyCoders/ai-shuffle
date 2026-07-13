@@ -213,6 +213,8 @@ def _should_skip(sql: str) -> bool:
         return True
     if "USING GIN" in up or "USING GIST" in up:        # GIN/GiST indexes
         return True
+    if "ALTER COLUMN" in up and "SET DEFAULT" in up:   # SQLite can't alter defaults
+        return True
     stripped = up.lstrip()
     return stripped.startswith((
         "CREATE EXTENSION",

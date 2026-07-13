@@ -48,8 +48,8 @@ os.environ["CORS_ORIGINS"] = "*"
 # effect AND permanently flipping the process-global
 # ``cli_interrupt_patch._PATCH_ACTIVE`` to True for the rest of the run (that
 # module deliberately never un-patches). Any later test asserting the exact
-# effective flag (e.g. tests/api/test_live_lifecycle_differential.py) then sees
-# a leaked True depending on suite ordering. Force the flag off for the whole
+# effective flag then sees a leaked True depending on suite ordering. Force
+# the flag off for the whole
 # test process; tests that need it True patch it explicitly and locally
 # (tests/api/test_chat_ws_stop_background.py, tests/core/test_config.py).
 os.environ["PRESERVE_BACKGROUND_ON_INTERRUPT"] = "false"
@@ -558,19 +558,13 @@ def reset_global_stores():
     """
     Reset process-wide singleton stores after every test.
 
-    ``live_session_store``, ``permission_handler`` and the ``session_pool`` are
+    ``task_registry``, ``permission_handler`` and the ``session_pool`` are
     module-level singletons. Any test that drives a real app endpoint populates
     them with per-session state, and nothing empties them between tests. Across
-    the full suite this grows monotonically — each ``LiveSession`` drags its
-    accumulated streamed-message buffers along — ballooning RSS until the
-    machine freezes. Clear them in teardown so each test starts clean.
+    the full suite this grows monotonically, ballooning RSS until the machine
+    freezes. Clear them in teardown so each test starts clean.
     """
     yield
-    try:
-        from app.core.live_session_store import live_session_store
-        live_session_store.reset_all()
-    except Exception:
-        pass
     try:
         from app.core.task_registry import task_registry
         task_registry.reset_all()

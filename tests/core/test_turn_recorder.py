@@ -1,6 +1,6 @@
 """Unit tests for app/core/turn_recorder.py — the V2 Phase 1 TurnRecorder.
 
-Covers: maybe_create gating, the full §3 pump→contract translation table
+Covers: maybe_create (un-gated), the full §3 pump→contract translation table
 (docs/V2_PHASE1_DESIGN.md), delta batching/coalescing, the fenced run lease,
 the crash-path terminal, the drain-pump module-level taps, and the
 never-propagate-exceptions invariant.
@@ -34,15 +34,9 @@ from app.db import sessions as sessions_db
 SID = "sess-v2"
 
 
-@pytest.fixture(autouse=True)
-def _reset_recorder_module_state():
-    tr._reset_flag_cache()
-    yield
-    tr._reset_flag_cache()
-
-
 def _mk_session(session_id: str = SID, v2: bool = True) -> None:
-    sessions_db.create_session(session_id, "default", v2_stream=v2)
+    # `v2` is vestigial — create_session always stamps v2_stream TRUE now.
+    sessions_db.create_session(session_id, "default")
 
 
 async def _recorder(session_id: str = SID, command_id=None) -> TurnRecorder:
@@ -60,16 +54,24 @@ def _types(session_id: str = SID):
 
 
 # ---------------------------------------------------------------------------
-# maybe_create gating
+# maybe_create — un-gated: a recorder is created for every session
 # ---------------------------------------------------------------------------
 
-async def test_maybe_create_none_when_flag_off(mock_db):
+async def test_maybe_create_recorder_regardless_of_flag(mock_db):
+    # The per-session v2 gate is gone (Commit 5): the recorder is created for
+    # any session regardless of the now-vestigial v2_stream column value.
     _mk_session(v2=False)
-    assert await TurnRecorder.maybe_create(SID) is None
+    rec = await TurnRecorder.maybe_create(SID)
+    assert rec is not None
+    await rec.close()
 
 
-async def test_maybe_create_none_when_session_missing(mock_db):
-    assert await TurnRecorder.maybe_create("no-such-session") is None
+async def test_maybe_create_recorder_when_session_missing(mock_db):
+    # No row read anymore: a session with no row still gets a recorder
+    # (ensure_backfilled no-ops on empty history, the run lease is claimed).
+    rec = await TurnRecorder.maybe_create("no-such-session")
+    assert rec is not None
+    await rec.close()
 
 
 async def test_maybe_create_recorder_when_flag_on(mock_db):
@@ -298,6 +300,36 @@ async def test_system_compaction_boundary_passthrough(mock_db):
     await rec.close()
 
 
+async def test_hook_event_maps_to_system_note(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "hook_event",
+        "hook_event_name": "PreToolUse",
+        "matcher": "Bash",
+        "decision": "block",
+        "reason": "denied by policy",
+        "system_message": "blocked",
+        "tool_name": "Bash",
+        "session_id": SID,
+        "timestamp": "2026-07-12T00:00:00Z",
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.note"
+    assert row["payload"]["subtype"] == "hook_event"
+    assert row["payload"]["data"] == {
+        "hook_event_name": "PreToolUse",
+        "matcher": "Bash",
+        "decision": "block",
+        "reason": "denied by policy",
+        "system_message": "blocked",
+        "tool_name": "Bash",
+        "session_id": SID,
+        "timestamp": "2026-07-12T00:00:00Z",
+    }
+    await rec.close()
+
+
 async def test_turn_usage_maps_to_turn_usage(mock_db):
     _mk_session()
     rec = await _recorder()
@@ -355,7 +387,6 @@ async def test_error_maps_to_turn_aborted_error_with_message(mock_db):
     {"type": "stream_block_stop", "index": 0},
     {"type": "stream_message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
     {"type": "rate_limit", "status": "allowed"},
-    {"type": "hook_event", "hook_event_name": "PreToolUse"},
     {"type": "plugin_message", "message": "hi"},
     {"type": "api_error", "status": 500},
     {"type": "init", "session_id": "sdk-1"},
@@ -557,12 +588,13 @@ async def test_record_drained_event_filters_other_types(mock_db):
     assert _rows() == []
 
 
-async def test_record_drained_event_noop_when_flag_off(mock_db):
+async def test_record_drained_event_records_regardless_of_flag(mock_db):
+    # Un-gated (Commit 5): drained events are recorded for any session.
     _mk_session(v2=False)
     await record_drained_event(SID, {
         "type": "subagent_chunk", "agent_id": "task_1", "content": "late",
     })
-    assert _rows() == []
+    assert _types() == ["subagent.progress"]
 
 
 async def test_record_parked_appends_turn_parked(mock_db):
@@ -581,11 +613,12 @@ async def test_record_interrupting_appends_turn_interrupting(mock_db):
     assert rows[0]["payload"]["mode"] == "stop"
 
 
-async def test_record_parked_noop_when_flag_off(mock_db):
+async def test_record_parked_and_interrupting_record_regardless_of_flag(mock_db):
+    # Un-gated (Commit 5): both taps append for any session.
     _mk_session(v2=False)
     await record_parked(SID, ["t1"])
     await record_interrupting(SID, "stop")
-    assert _rows() == []
+    assert _types() == ["turn.parked", "turn.interrupting"]
 
 
 # ---------------------------------------------------------------------------
@@ -619,3 +652,81 @@ async def test_on_event_with_garbage_input_does_not_raise(mock_db):
     await rec.on_event({"type": "tool_use"})  # missing every field
     assert "tool.use" in _types()  # defaults applied, still recorded
     await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# first-seq memory + record_empty_turn_discard (transcript.rewound)
+# ---------------------------------------------------------------------------
+
+async def test_first_seq_captured_on_first_append(mock_db):
+    _mk_session()
+    # A prior turn already occupies seqs 1-2.
+    se.append_events(SID, [{"type": "turn.started"}, {"type": "turn.completed"}])
+    rec = await _recorder()
+    assert rec._first_seq is None
+    await rec.start("hello")
+    assert rec._first_seq == 3  # this turn's turn.started
+    await rec.on_event({"type": "chunk", "content": "x"})
+    assert rec._first_seq == 3  # sticky — never moves after the first append
+    await rec.close()
+
+
+async def test_record_empty_turn_discard_appends_rewound(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("discard me")
+    first = rec._first_seq
+    await rec.close()
+    await rec.record_empty_turn_discard()
+    rows = _rows()
+    assert rows[-1]["event_type"] == "transcript.rewound"
+    assert rows[-1]["payload"]["from_seq"] == first
+    assert rows[-1]["run_id"] is None  # unfenced (lease already released)
+
+
+async def test_record_empty_turn_discard_noop_without_appends(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    # No events ever appended for this turn -> nothing to erase.
+    await rec.close()
+    # close() appends the crash-path terminal, so reset to the no-append case:
+    rec2 = await _recorder()
+    rec2._first_seq = None
+    await rec2.record_empty_turn_discard()
+    assert "transcript.rewound" not in _types()
+    await rec2.close()
+
+
+async def test_record_empty_turn_discard_never_raises(mock_db, monkeypatch):
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("hi")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tr.session_events_db, "append_events", _boom)
+    await rec.record_empty_turn_discard()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# pop_last_turn_recorder — session teardown drops the last-recorder entry
+# ---------------------------------------------------------------------------
+
+async def test_pop_last_turn_recorder_removes_entry(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    assert tr._last_turn_recorders.get(SID) is rec
+    await rec.close()
+    # close() intentionally leaves the entry (discard_empty_turn runs post-turn).
+    assert tr._last_turn_recorders.get(SID) is rec
+
+    tr.pop_last_turn_recorder(SID)
+    assert SID not in tr._last_turn_recorders
+    # discard after teardown is a clean no-op (no recorder to reach).
+    await tr.discard_empty_turn(SID)
+    assert "transcript.rewound" not in _types()
+
+
+def test_pop_last_turn_recorder_missing_session_never_raises():
+    tr.pop_last_turn_recorder("never-seen-session")  # must not raise

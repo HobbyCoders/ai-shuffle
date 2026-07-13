@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_auth
 from app.core.event_gateway import get_gateway
+from app.core.history_backfill import ensure_backfilled
 from app.db.session_events import get_events, get_max_seq
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,10 @@ async def event_stream(session_id: str, from_seq: int = 0):
     the stream directly — ASGI test transports buffer the whole response and
     cannot read a never-ending SSE body incrementally.
     """
+    # Seed the log from legacy history (idempotent, no-op once populated)
+    # BEFORE subscribing, so the backfill pass below already sees it.
+    await ensure_backfilled(session_id)
+
     gateway = get_gateway()
     # Subscribe FIRST so no event falls between backfill and the live tail.
     queue = gateway.subscribe(session_id)

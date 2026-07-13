@@ -243,13 +243,11 @@ async def adopt_session_endpoint(
         ``adopted=False`` so the caller just opens it.
       * Owned elsewhere and **actively streaming** → refuse with 409: two
         installs driving one live SDK session at once corrupts the transcript.
-        The user should stop it on that device first. Per-session streaming
-        state is fanned out across the cluster (``apply_remote_streaming_change``)
-        and stale remote entries are swept when the owner goes offline, so
-        ``is_session_streaming`` is authoritative even for a remote-owned
-        session — and, unlike the install-level "online" heartbeat, it does not
-        block adoption of an idle session just because the owning install
-        happens to run 24/7.
+        The user should stop it on that device first. Busy truth is the durable
+        ``runs`` table in the SHARED database (a lease-valid active run), so it
+        is authoritative even for a remote-owned session — and, unlike the
+        install-level "online" heartbeat, it does not block adoption of an idle
+        session just because the owning install happens to run 24/7.
       * Owned elsewhere but idle (not streaming) → adopt it.
 
     Worktree sessions keep working after adoption: only the owner column changes,
@@ -273,12 +271,13 @@ async def adopt_session_endpoint(
         )
 
     # Owned by another install: refuse only while the session is actually live
-    # (streaming) so we never wrestle an in-flight SDK turn away mid-stream. The
-    # install-level "online" heartbeat is the wrong granularity — a 24/7 install
-    # would make all of its idle sessions permanently unadoptable.
-    from app.core.sync_engine import sync_engine
+    # (a lease-valid active run in the shared runs table) so we never wrestle an
+    # in-flight SDK turn away mid-stream. The install-level "online" heartbeat
+    # is the wrong granularity — a 24/7 install would make all of its idle
+    # sessions permanently unadoptable.
+    from app.core import streaming_status
 
-    if sync_engine.is_session_streaming(session_id):
+    if streaming_status.has_active_run(session_id):
         device = await run_sync(_adopt_device_name, owner) or "another device"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -892,48 +891,6 @@ def _describe_relay_error(err: Exception) -> str:
     return "device is unreachable"
 
 
-def _overlay_subagent_progress(
-    store_messages: list, buffer_messages: list
-) -> None:
-    """Graft fresher sub-agent CARD fields from the in-memory buffer onto the
-    store-loaded transcript, matched by ``toolId``.
-
-    Used on the ``/live`` fresh-load path where the STORE transcript wins the
-    completeness heal (the in-memory buffer is otherwise discarded). Sub-agent
-    progress mutates a card IN PLACE — ``agentStatus``/``agentChildren``/
-    ``agentUsage`` advance without changing the message count — so for those
-    cards the buffer is strictly fresher than the store snapshot. This mutates
-    ``store_messages`` fields ONLY; it never adds/removes messages, so the heal's
-    count/tie-break semantics are untouched. ``content`` is grafted only when the
-    buffer's is non-empty (never blank out a persisted body).
-    """
-    if not buffer_messages or not store_messages:
-        return
-    buffer_by_tool = {}
-    for bm in buffer_messages:
-        if not isinstance(bm, dict) or bm.get("type") != "subagent":
-            continue
-        tid = bm.get("toolId")
-        if tid:
-            buffer_by_tool[tid] = bm
-    if not buffer_by_tool:
-        return
-    for sm in store_messages:
-        if not isinstance(sm, dict) or sm.get("type") != "subagent":
-            continue
-        bm = buffer_by_tool.get(sm.get("toolId"))
-        if bm is None:
-            continue
-        # to_dict()/db loader emit these keys only when present; graft on
-        # presence so a store value is preserved when the buffer lacks one.
-        for field in ("agentStatus", "agentChildren", "agentUsage"):
-            if field in bm:
-                sm[field] = bm[field]
-        buf_content = bm.get("content")
-        if buf_content:
-            sm["content"] = buf_content
-
-
 def _reconcile_subagent_status(store_messages: list, active_tasks: list) -> None:
     """Force ``agentStatus = "running"`` on store-loaded sub-agent cards whose
     ``toolId`` matches a still-running registry task.
@@ -966,28 +923,22 @@ def _reconcile_subagent_status(store_messages: list, active_tasks: list) -> None
 async def get_live_session(
     request: Request,
     session_id: str,
-    since_update_id: int = Query(0, description="Only return if updated since this ID (for efficient polling)"),
     token: str = Depends(require_auth)
 ):
     """
-    Get live session state for streaming sessions.
+    Get session state (persistent transcript + lifecycle fields).
 
-    This endpoint provides server-authoritative state during streaming.
-    Frontend polls this endpoint instead of maintaining local message state.
-
-    - If session is actively streaming: returns live state from memory
-    - If session is not streaming: returns historical state from JSONL
-    - If since_update_id provided and no updates: returns 304 Not Modified
+    V2: live render deltas ride the session event feed (SSE); this endpoint
+    serves the PERSISTED transcript plus lifecycle fields (activeTasks,
+    unpark_pending, is_streaming from the durable runs table) and the cloud
+    relay proxy for cross-install sessions.
 
     Response includes:
-    - messages: Current message state (including in-progress streaming)
-    - is_streaming: Whether session is currently streaming
-    - last_update_id: For efficient polling (only fetch if updated)
+    - messages: Persisted transcript
+    - is_streaming: Whether the session has an active run
     - usage: Token usage counts
     """
     from starlette.responses import Response
-    from app.core.live_session_store import live_session_store
-    from app.core.task_registry import task_registry
 
     # Check session exists and user has access
     session = await require_session(request, session_id)
@@ -996,18 +947,15 @@ async def get_live_session(
     # ``compute`` absorbed this endpoint's inline activeTasks / unpark_pending
     # logic VERBATIM — same reads, same order, same side effects — so the two
     # destructured values below are byte-identical to what was computed here
-    # before (pinned by tests/api/test_live_lifecycle_differential.py). It also
-    # reads the remaining lifecycle sources (pool, sync engine, drain pump,
+    # before. It also reads the remaining lifecycle sources (pool, drain pump,
     # parked marker) and logs any cross-source disagreement as
     # ``lifecycle-drift``; nothing else about this endpoint changes.
     #
     # active_tasks: SDK agent tasks + Monitor shell subprocesses PLUS any
     # recently-failed task still inside the retention window (``get_visible``,
     # the DISPLAY view — running-only control-flow predicates still use
-    # ``get_active``). Attached fresh to EVERY local response path (delta or
-    # full, streaming or not) — never routed through the live store's
-    # last_update_id delta logic, so a task finishing/failing is reflected on
-    # the very next poll. [] when none.
+    # ``get_active``). Attached fresh to EVERY local response, so a task
+    # finishing/failing is reflected on the very next poll. [] when none.
     #
     # unpark_pending: an unpark follow-up turn is committed but has NOT yet
     # flipped ``is_streaming`` true — OR undrained queued messages exist (the
@@ -1056,7 +1004,7 @@ async def get_live_session(
     relay_error: Optional[str] = None
     if cloud_relay.is_remote_session(session):
         try:
-            code, data = await cloud_relay.relay_live(session, since_update_id)
+            code, data = await cloud_relay.relay_live(session, 0)
         except cloud_relay.InstallOffline as e:
             # Owner is offline/unregistered/view-only per the registry — a clean,
             # expected "not reachable" state. The message is already user-safe
@@ -1147,78 +1095,10 @@ async def get_live_session(
         if relay_error:
             session_meta["relay_error"] = relay_error
 
-    # Check if session is in the live store.
-    #
-    # A session stays in the live store AFTER its turn ends: end_streaming() keeps
-    # it in memory with is_streaming=False as a fast-reconnect snapshot. That
-    # snapshot is normally the full transcript, but it can be LESS complete than
-    # the authoritative Postgres store when the turn that produced it crashed
-    # mid-stream (OOM/SIGKILL) or was seeded with empty history because the session
-    # had no sdk_session_id yet. Serving such a stale buffer renders the chat with
-    # missing messages — the orphaned-session symptom.
-    #
-    # Rule: while a turn is ACTIVELY streaming, the in-memory buffer is the source
-    # of truth (it holds in-progress deltas the mirror hasn't written yet) and we
-    # serve it directly. Once the turn has ENDED, on a fresh load (since_update_id
-    # == 0) we fall through to the store loader and serve whichever source is MORE
-    # complete (see the completeness check before the response is built). This
-    # heals stale/truncated buffers left by a crashed or empty-seeded turn while
-    # preserving the brief post-turn window where the buffer leads the not-yet-
-    # flushed mirror. Parked delta polls (since_update_id > 0) keep their existing
-    # 304/delta behavior — a fresh open always resets to 0, which is where the
-    # completeness check runs.
-    pending_live_full = None
-    if live_session_store.has_session(session_id):
-        streaming_now = live_session_store.is_streaming(session_id)
-        if since_update_id > 0:
-            live_data = live_session_store.get_session_since(session_id, since_update_id)
-            if live_data is None:
-                # No MESSAGE updates since last check. Tasks live outside the
-                # live store's update-id delta, so if any are running — OR an
-                # unpark follow-up is mid-handoff — we still return a lightweight
-                # body carrying the fresh activeTasks + unpark_pending rather than a
-                # 304 that would hide the state from the poller.
-                if active_tasks or unpark_pending:
-                    body = {
-                        "session_id": session_id,
-                        "is_streaming": live_session_store.is_streaming(session_id),
-                        "last_update_id": since_update_id,
-                        "messages": [],
-                        "initial_message_count": since_update_id,
-                        "activeTasks": active_tasks,
-                        "unpark_pending": unpark_pending,
-                        "preserve_background_on_interrupt": preserve_background_on_interrupt,
-                        "v2_stream": v2_stream,
-                    }
-                    if session_meta:
-                        body["session_meta"] = session_meta
-                    return body
-                return Response(status_code=304)
-            live_data["activeTasks"] = active_tasks
-            live_data["unpark_pending"] = unpark_pending
-            live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
-            live_data["v2_stream"] = v2_stream
-            if session_meta:
-                live_data["session_meta"] = session_meta
-            return live_data
-        elif streaming_now:
-            # Fresh load of an actively-streaming session — in-memory is authoritative.
-            live_data = live_session_store.get_session_dict(session_id)
-            if live_data:
-                live_data["activeTasks"] = active_tasks
-                live_data["unpark_pending"] = unpark_pending
-                live_data["preserve_background_on_interrupt"] = preserve_background_on_interrupt
-                live_data["v2_stream"] = v2_stream
-                if session_meta:
-                    live_data["session_meta"] = session_meta
-                return live_data
-        else:
-            # Fresh load of an ENDED session that still has an in-memory snapshot.
-            # Hold it as a candidate and fall through to the store loader; the
-            # completeness check below serves whichever is more complete.
-            pending_live_full = live_session_store.get_session_dict(session_id)
+    # V2: no in-memory live overlay — the persistent loader chain below is the
+    # single transcript source; live render deltas ride the event feed (SSE).
 
-    # Not streaming — load from DB first (fast path), fall back to JSONL
+    # Load from DB first (fast path), fall back to JSONL
     sdk_session_id = session.get("sdk_session_id")
     messages = []
     working_dir = "/workspace"
@@ -1353,54 +1233,6 @@ async def get_live_session(
         except Exception as e:
             logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
 
-    # Heal stale/truncated live-store snapshots. If a kept (non-streaming) buffer
-    # exists and is MORE complete than the store transcript we just loaded, prefer
-    # it — this covers the brief post-turn window before the Postgres mirror has
-    # flushed the final messages. Otherwise the store wins, which is what recovers
-    # a session whose in-memory buffer was left truncated/empty by a mid-stream
-    # crash (OOM/SIGKILL) or an empty history seed. Without this, that stale buffer
-    # shadows the full transcript and the chat renders with missing messages.
-    if pending_live_full is not None:
-        live_msgs = pending_live_full.get("messages") or []
-        # On a COUNT TIE while background tasks are still RUNNING (a parked
-        # session), the buffer wins: sub-agent progress mutates agentChildren
-        # IN PLACE on an existing live message, so the message COUNT never
-        # changes while the buffer is strictly fresher than the store
-        # transcript. Serving the store here would also echo last_update_id=0,
-        # pinning a re-attaching poller to since_update_id=0 fresh loads —
-        # locked out of the delta path that carries the progress — which froze
-        # the agent cards after a switch-away/switch-back. The snapshot carries
-        # the buffer's real last_update_id, putting the client back on deltas.
-        # A SHORTER buffer still loses, preserving the crash/empty-seed heal.
-        parked_running = bool(task_registry.get_active(session_id))
-        if len(live_msgs) > len(messages) or (
-            parked_running and live_msgs and len(live_msgs) == len(messages)
-        ):
-            logger.debug(
-                f"Live endpoint: serving in-memory snapshot for {session_id} "
-                f"({len(live_msgs)} msgs vs store {len(messages)} msgs, "
-                f"parked_running={parked_running})"
-            )
-            pending_live_full["activeTasks"] = active_tasks
-            pending_live_full["unpark_pending"] = unpark_pending
-            pending_live_full["preserve_background_on_interrupt"] = preserve_background_on_interrupt
-            pending_live_full["v2_stream"] = v2_stream
-            if session_meta:
-                pending_live_full["session_meta"] = session_meta
-            return pending_live_full
-        # STORE WINS: the buffer is discarded for completeness, but sub-agent
-        # cards mutate IN PLACE (progress advances agentChildren/agentStatus/
-        # agentUsage without changing counts), so the buffer is strictly fresher
-        # for THOSE cards. Graft them by toolId — fields only, never counts — so a
-        # parked session's live sub-agent progress isn't frozen to the store's
-        # snapshot on a fresh load.
-        _overlay_subagent_progress(messages, live_msgs)
-        logger.debug(
-            f"Live endpoint: store transcript for {session_id} is complete "
-            f"({len(messages)} msgs >= snapshot {len(live_msgs)} msgs) — "
-            f"healed any stale buffer"
-        )
-
     # Registry reconcile: even with the buffer gone (or never present), a
     # sub-agent still running in the task registry must not render "completed".
     # Force its card back to "running" by matching the launch tool_use id;
@@ -1418,9 +1250,8 @@ async def get_live_session(
     # Build response in live format
     # IMPORTANT: For context window calculation, the frontend needs per-turn
     # input tokens (last API call), NOT cumulative total_tokens_in across all turns.
-    # During streaming, the live store provides per-turn values from update_usage().
-    # For non-streaming (historical) sessions, use last_input_tokens from JSONL
-    # which is the last turn's input_tokens (= context window non-cached portion).
+    # Use last_input_tokens from the sessions row / JSONL, which is the last
+    # turn's input_tokens (= context window non-cached portion).
     output_tokens = session.get("total_tokens_out", 0)
     cache_creation = session.get("cache_creation_tokens", 0) or 0
     cache_read = session.get("cache_read_tokens", 0) or 0
@@ -1437,9 +1268,11 @@ async def get_live_session(
         cache_creation = usage_data.get("cache_creation_tokens", cache_creation)
         cache_read = usage_data.get("cache_read_tokens", cache_read)
 
+    from app.core import streaming_status
     result = {
         "session_id": session_id,
-        "is_streaming": False,
+        # V2 busy truth: the durable runs table (stale leases self-heal via TTL).
+        "is_streaming": await run_sync(streaming_status.has_active_run, session_id),
         "last_update_id": 0,
         "messages": messages,
         "usage": {
@@ -1465,10 +1298,9 @@ async def update_session(
     session_id: str,
     title: Optional[str] = None,
     session_status: Optional[str] = Query(None, alias="status"),
-    v2_stream: Optional[bool] = None,
     token: str = Depends(require_auth)
 ):
-    """Update session title, status, or v2_stream flag. API users can only modify their accessible sessions."""
+    """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
 
     # Sync title rename to Claude SDK session if available
@@ -1485,7 +1317,6 @@ async def update_session(
         session_id=session_id,
         title=title,
         status=session_status,
-        v2_stream=v2_stream,
     )
 
     return session
@@ -1808,16 +1639,15 @@ async def clear_session(
     """
     existing = await require_session(request, session_id)
 
-    from app.core.sync_engine import sync_engine
-    from app.core.live_session_store import live_session_store
+    from app.core import streaming_status
 
     # Refuse to clear a session that is actively streaming. Wiping the DB out
-    # from under an in-flight turn corrupts the transcript (the streaming buffer
-    # keeps appending and re-persists the old conversation on end_streaming) and
-    # races the live-overlay purge below. The frontend surfaces this 409 as a
-    # "stop the turn first" toast. Check both the local streaming buffer and the
-    # cross-device sync map (a turn may be live on another install).
-    if live_session_store.is_streaming(session_id) or sync_engine.is_session_streaming(session_id):
+    # from under an in-flight turn corrupts the transcript (the recorder keeps
+    # appending events for the old conversation) and races the reap below. The
+    # frontend surfaces this 409 as a "stop the turn first" toast. Busy truth
+    # is the durable runs table (shared database — covers a turn live on
+    # another install too).
+    if streaming_status.has_active_run(session_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -1830,21 +1660,23 @@ async def clear_session(
     # unlinked) so its subprocess + JSONL can be cleaned in the background.
     old_sdk_sid = await run_sync(database.clear_session_conversation, session_id)
 
-    # Purge the in-memory live overlay, or the clear silently "does nothing".
-    # end_streaming() keeps an ENDED session's full message buffer in the live
-    # store as a fast-reconnect snapshot, and the GET /{id}/messages read path
-    # serves that buffer whenever it is more complete than the store — both on
-    # delta polls (get_session_since) and via the completeness check on a fresh
-    # load. Since we just emptied the store, the stale buffer would SHADOW the
-    # cleared transcript and the old conversation would resurrect on the very
-    # next poll or reload. Dropping the overlay makes the read path fall through
-    # to the now-empty store. cleanup_session also reaps this session's task
-    # registry + Monitor shells (their conversation was just wiped).
-    if live_session_store.has_session(session_id):
-        await live_session_store.cleanup_session(session_id)
-    # Drop any lingering cross-device streaming-map remnant so the sync layer
-    # stops advertising this (now-empty) session as live.
-    await sync_engine.clear_streaming_state(session_id)
+    # Reap this session's background work (its conversation was just wiped, so
+    # any tracked task can never meaningfully complete): flip still-"running"
+    # task_registry rows to killed so the taskbar surfaces the failure instead
+    # of showing a phantom active task forever, drop the live bucket, and reap
+    # any Monitor shell subprocesses the old conversation spawned.
+    try:
+        from app.core.task_registry import task_registry
+        for rec in task_registry.get_active(session_id):
+            task_registry.complete_task(session_id, rec["id"], "killed")
+        task_registry.clear_session(session_id)
+    except Exception:
+        logger.debug("clear-session task reap failed", exc_info=True)
+    try:
+        from app.mcp.builtin_tools import reap_session_background_shells
+        reap_session_background_shells(session_id)
+    except Exception:
+        logger.debug("clear-session shell reap scheduling failed", exc_info=True)
 
     background_tasks.add_task(
         _cleanup_session_artifacts,
@@ -1952,9 +1784,11 @@ async def get_sync_changes(
     changes = await run_sync(database.get_sync_logs, session_id, since_id=since_id)
     latest_id = await run_sync(database.get_latest_sync_id, session_id)
 
-    # Check if streaming (import here to avoid circular import)
+    # Check if streaming — durable runs-table busy read (import here to avoid
+    # circular import)
     from app.core.sync_engine import sync_engine
-    is_streaming = sync_engine.is_session_streaming(session_id)
+    from app.core import streaming_status
+    is_streaming = streaming_status.has_active_run(session_id)
 
     return {
         "changes": changes,

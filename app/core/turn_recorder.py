@@ -1,13 +1,13 @@
 """V2 TurnRecorder — typed event-log appender tapped into the SDK pump (Phase 1).
 
-For sessions flagged ``sessions.v2_stream`` this module translates every legacy
+Every session streams on the V2 path, so this module translates every legacy
 pump event (``stream_to_websocket`` yields, plus the between-turns drain pump's
 re-dispatches) into typed contract events (`app.contract.events`) appended to
 the append-only ``session_events`` log (`app.db.session_events`) under a fenced
 run lease (`app.db.runs`). Design: ``docs/V2_PHASE1_DESIGN.md`` §2–§3.
 
 Invariants (program rules):
-- NEVER imports ``live_session_store``, ``ws_event_handlers`` or ``sync_engine``.
+- NEVER imports ``sync_engine`` or any WebSocket-layer module.
 - A recorder bug must never break streaming: every public method swallows and
   logs its own exceptions; all DB appends run off-loop via ``asyncio.to_thread``.
 - Recording never blocks a turn: if the run lease cannot be claimed, events are
@@ -28,13 +28,12 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.contract import events as contract
 from app.core.config import settings
 from app.db import runs as runs_db
 from app.db import session_events as session_events_db
-from app.db import sessions as sessions_db
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,6 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 RESULT_TRUNCATE_CHARS = 65536  # tool.result content / subagent result previews
 RUN_LEASE_TTL_SECONDS = 60
 RUN_LEASE_RENEW_SECONDS = 20
-V2_FLAG_CACHE_TTL_SECONDS = 60.0  # per-session v2_stream cache for drained events
 
 # Pump ``system`` subtypes recorded as system.compaction_boundary (passthrough).
 _COMPACTION_SUBTYPES = ("compact_boundary", "microcompact_boundary")
@@ -55,6 +53,23 @@ _ENVELOPE_FIELDS = {
     "id", "session_id", "seq", "run_id", "turn_id", "command_id",
     "created_at", "type",
 }
+
+
+def _notify_run_change(session_id: str) -> None:
+    """Run-lifecycle hook for the board spinner (streaming_status re-check).
+
+    Lazy import + never raises: a status/broadcast bug must never break
+    recording or the turn.
+    """
+    try:
+        from app.core import streaming_status
+
+        streaming_status.notify(session_id)
+    except Exception:
+        logger.debug(
+            "[TurnRecorder] streaming_status notify failed for %s",
+            session_id, exc_info=True,
+        )
 
 
 def _truncate(value: Any, limit: int = RESULT_TRUNCATE_CHARS) -> Optional[str]:
@@ -243,9 +258,28 @@ def _translate_shared(
             **kw,
         )]
 
+    if etype == "hook_event":
+        # Hook decisions render as system cards. Mirror the jsonl replay shape
+        # (jsonl_parser.py hook_event mapping) so live + reload look identical.
+        return [_build_event(
+            contract.SystemNote, session_id,
+            subtype="hook_event",
+            data={
+                "hook_event_name": event.get("hook_event_name"),
+                "matcher": event.get("matcher"),
+                "decision": event.get("decision"),
+                "reason": event.get("reason"),
+                "system_message": event.get("system_message"),
+                "tool_name": event.get("tool_name"),
+                "session_id": event.get("session_id"),
+                "timestamp": event.get("timestamp"),
+            },
+            **kw,
+        )]
+
     # Not-recorded row (§3): stream_block_start/stop, stream_message_delta
-    # (non-usage), rate_limit, hook_event, plugin_message, heartbeat,
-    # api_error — and anything unknown (forward compatibility).
+    # (non-usage), rate_limit, plugin_message, heartbeat, api_error — and
+    # anything unknown (forward compatibility).
     return []
 
 
@@ -279,6 +313,10 @@ class TurnRecorder:
 
         self._terminal_recorded = False
         self._closed = False
+        # seq of this turn's FIRST appended event — the truncation point for
+        # an empty-turn discard (record_empty_turn_discard, wired in a later
+        # commit).
+        self._first_seq: Optional[int] = None
         self._renew_task: Optional[asyncio.Task] = None
         # Serializes buffer mutation + appends (on_event vs. the flush timer)
         # so log order always reflects pump order.
@@ -292,21 +330,16 @@ class TurnRecorder:
     async def maybe_create(
         cls, session_id: str, command_id: Optional[str] = None
     ) -> Optional["TurnRecorder"]:
-        """Return a recorder iff the session row has ``v2_stream`` true.
+        """Return a recorder for this turn — every session records on the V2 path.
 
         Never raises and never blocks the turn: any failure (including a lost
         run-lease claim) degrades to ``None`` / unfenced recording.
         """
-        try:
-            row = await asyncio.to_thread(sessions_db.get_session, session_id)
-        except Exception:
-            logger.warning(
-                "[TurnRecorder] v2_stream flag read failed for %s — not recording",
-                session_id, exc_info=True,
-            )
-            return None
-        if not row or not bool(row.get("v2_stream")):
-            return None
+        # Seed the event log from legacy history BEFORE this turn's first
+        # append, so turn.started never lands on an unseeded log. Lazy import:
+        # history_backfill imports this module's builders.
+        from app.core.history_backfill import ensure_backfilled
+        await ensure_backfilled(session_id)
 
         runner_id = settings.effective_instance_id
         run_id: Optional[str] = None
@@ -324,6 +357,8 @@ class TurnRecorder:
         if run:
             run_id = run["id"]
             fence_token = run["fence_token"]
+            # Run went active — let the durable busy view re-check + broadcast.
+            _notify_run_change(session_id)
         else:
             logger.warning(
                 "[TurnRecorder] could not claim run lease for %s "
@@ -333,6 +368,11 @@ class TurnRecorder:
         recorder = cls(session_id, command_id, run_id, fence_token, runner_id)
         if run_id is not None:
             recorder._renew_task = asyncio.create_task(recorder._renew_loop())
+        # Registry of the LAST recorder per session so the post-turn
+        # empty-turn-discard path (``discard_empty_turn``) can reach it after
+        # the pump has closed it — the instance itself never escapes
+        # ``stream_to_websocket``.
+        _last_turn_recorders[session_id] = recorder
         return recorder
 
     async def start(self, user_message: str) -> None:
@@ -410,6 +450,31 @@ class TurnRecorder:
                         "[TurnRecorder] release_run failed for %s run %s",
                         self.session_id, self.run_id, exc_info=True,
                     )
+                # Run left active (released — or expired/transferred if the
+                # release lost). Either way, re-check + broadcast the diff.
+                _notify_run_change(self.session_id)
+
+    async def record_empty_turn_discard(self) -> None:
+        """Append ``transcript.rewound`` erasing this turn's events.
+
+        For turns whose user message is discarded end-to-end (stopped before
+        any output — see the interrupted-user-message poller). Truncates the
+        reduced transcript from this turn's FIRST appended event. Unfenced —
+        the discard decision lands after the turn's run lease is released.
+        Reached post-turn via module-level ``discard_empty_turn``. Never raises.
+        """
+        if self._first_seq is None:
+            return
+        try:
+            await _append_unfenced(self.session_id, [_build_event(
+                contract.TranscriptRewound, self.session_id,
+                from_seq=self._first_seq,
+            )])
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] record_empty_turn_discard failed for %s",
+                self.session_id, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # translation core (lock held)
@@ -582,15 +647,17 @@ class TurnRecorder:
             return
         try:
             if self.run_id is not None and self.fence_token is not None:
-                await asyncio.to_thread(
+                seqs = await asyncio.to_thread(
                     session_events_db.append_events,
                     self.session_id, events,
                     run_id=self.run_id, fence_token=self.fence_token,
                 )
             else:
-                await asyncio.to_thread(
+                seqs = await asyncio.to_thread(
                     session_events_db.append_events, self.session_id, events
                 )
+            if self._first_seq is None and seqs:
+                self._first_seq = seqs[0]
         except session_events_db.FenceViolation:
             logger.warning(
                 "[TurnRecorder] fence violation for %s run %s — %d event(s) "
@@ -640,32 +707,37 @@ class TurnRecorder:
 # Module-level taps (drain pump / stop / park) — all unfenced appends.
 # ----------------------------------------------------------------------
 
-# session_id -> (checked_at_monotonic, flag). 60s TTL so the drain pump does
-# not pay a DB read per drained event.
-_v2_flag_cache: Dict[str, Tuple[float, bool]] = {}
+# Last recorder per session (set by ``TurnRecorder.maybe_create``). Lets the
+# post-turn empty-turn-discard path reach the just-closed recorder — the
+# instance itself is encapsulated inside ``stream_to_websocket``. Overwritten
+# every turn; entries are tiny (buffers are drained on close).
+_last_turn_recorders: Dict[str, "TurnRecorder"] = {}
 
 
-def _reset_flag_cache() -> None:
-    """Test helper — drop the per-session v2_stream cache."""
-    _v2_flag_cache.clear()
+async def discard_empty_turn(session_id: str) -> None:
+    """Append ``transcript.rewound`` erasing the LAST recorded turn's events.
+
+    Caller: the #420 empty-turn discard in ``chat_ws_handler.run_query`` —
+    a turn stopped before ANY output whose user message is discarded
+    end-to-end. Delegates to the last recorder's
+    ``record_empty_turn_discard`` (no-op if the turn appended nothing or no
+    recorder exists). Never raises.
+    """
+    recorder = _last_turn_recorders.get(session_id)
+    if recorder is None:
+        return
+    await recorder.record_empty_turn_discard()
 
 
-async def _session_is_v2(session_id: str) -> bool:
-    now = time.monotonic()
-    cached = _v2_flag_cache.get(session_id)
-    if cached is not None and now - cached[0] < V2_FLAG_CACHE_TTL_SECONDS:
-        return cached[1]
-    try:
-        row = await asyncio.to_thread(sessions_db.get_session, session_id)
-        flag = bool(row and row.get("v2_stream"))
-    except Exception:
-        logger.warning(
-            "[TurnRecorder] v2_stream flag read failed for %s — treating as off",
-            session_id, exc_info=True,
-        )
-        flag = False
-    _v2_flag_cache[session_id] = (now, flag)
-    return flag
+def pop_last_turn_recorder(session_id: str) -> None:
+    """Drop the session's last-recorder entry (session teardown).
+
+    ``_last_turn_recorders`` is overwritten per turn but never emptied when a
+    session goes away, so a long-lived server leaks one (tiny) entry per dead
+    session. Called from the session teardown paths alongside
+    ``task_registry.clear_session``. Never raises.
+    """
+    _last_turn_recorders.pop(session_id, None)
 
 
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
@@ -690,8 +762,6 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
             or etype == "system"
         ):
             return
-        if not await _session_is_v2(session_id):
-            return
         await _append_unfenced(session_id, _translate_shared(event, session_id))
     except Exception:
         logger.warning(
@@ -703,8 +773,6 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
 async def record_parked(session_id: str, task_ids: List[str]) -> None:
     """Append ``turn.parked`` when the drain pump starts over active bg work."""
     try:
-        if not await _session_is_v2(session_id):
-            return
         await _append_unfenced(session_id, [_build_event(
             contract.TurnParked, session_id,
             task_ids=[t for t in (task_ids or []) if t],
@@ -719,8 +787,6 @@ async def record_parked(session_id: str, task_ids: List[str]) -> None:
 async def record_interrupting(session_id: str, mode: str) -> None:
     """Append ``turn.interrupting`` on a user stop / send-now intent."""
     try:
-        if not await _session_is_v2(session_id):
-            return
         await _append_unfenced(session_id, [_build_event(
             contract.TurnInterrupting, session_id, mode=mode,
         )])

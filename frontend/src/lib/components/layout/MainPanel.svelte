@@ -237,22 +237,17 @@
 	// Adaptive git polling (replaces event-driven three-layer system)
 	// =========================================================================
 	// Frontend-driven polling scoped to the active tab only:
-	// - 2s interval while the agent is actively streaming (or recently hinted)
+	// - 2s interval while the agent is actively streaming
 	// - 5s interval after 30s of inactivity
 	// - Paused entirely when the browser tab is hidden
-	// - Accelerated by `git_hint` flags piggybacked on tool_result WS chunks
-
-	import { sessionNotifier } from '$lib/stores/session/session-notifier';
 
 	const GIT_POLL_ACTIVE_MS = 2_000;
 	const GIT_POLL_IDLE_MS = 5_000;
 	const GIT_IDLE_THRESHOLD_MS = 30_000;
-	const GIT_HINT_DEBOUNCE_MS = 3_000; // Min time between hint-triggered polls
 
 	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let _gitPollProject: string | null = null;
-	let _gitLastActivity = 0; // timestamp of last git_hint or streaming event
-	let _lastHintPoll = 0; // timestamp of last hint-triggered immediate poll
+	let _gitLastActivity = 0; // timestamp of last streaming event
 
 	let _lastIdleDiffStatsPoll = 0;
 
@@ -299,8 +294,8 @@
 		stopGitPoll();
 		_gitPollProject = project;
 		// Don't reset _gitLastActivity — keep idle mode unless there's actual
-		// git activity (hint events, streaming). This prevents session/tab
-		// switches from spuriously triggering 30s of active polling.
+		// git activity (streaming). This prevents session/tab switches from
+		// spuriously triggering 30s of active polling.
 		scheduleGitPoll();
 	}
 
@@ -376,27 +371,6 @@
 		};
 	});
 
-	// Listen for git_hint on stream_chunk events to accelerate polling.
-	// Debounced: at most one immediate poll per GIT_HINT_DEBOUNCE_MS window.
-	$effect(() => {
-		const unsub = sessionNotifier.onEvent((event) => {
-			if (event.event_type === 'stream_chunk' || event.type === 'stream_chunk') {
-				const data = (event as Record<string, unknown>).data as Record<string, unknown> | undefined;
-				if (data?.git_hint === true) {
-					const now = Date.now();
-					_gitLastActivity = now;
-					// Only fire an immediate poll if enough time has passed since the last one
-					if (now - _lastHintPoll >= GIT_HINT_DEBOUNCE_MS) {
-						_lastHintPoll = now;
-						gitPollNow();
-					}
-					scheduleGitPoll(); // Reset timer to active interval
-				}
-			}
-		});
-		return unsub;
-	});
-
 	// PR detection: runs when the branch changes (event-driven via WebSocket state updates).
 	// Tracks previous branch to avoid redundant GitHub API calls.
 	let _lastCheckedPRKey: string | null = null;
@@ -417,7 +391,7 @@
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.
 	// Uses forceRefresh() to abort any in-flight poll requests whose responses
-	// may predate the session's final git operations (race with git_hint polls).
+	// may predate the session's final git operations.
 	let _wasStreaming = false;
 	$effect(() => {
 		const streaming = $gitControlsStreaming;

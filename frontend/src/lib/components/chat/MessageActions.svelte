@@ -12,6 +12,7 @@
 		messageContent: string;
 		messageRole: 'user' | 'assistant';
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
+		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		canRead?: boolean;
 		isStreaming?: boolean;
 		visible?: boolean;  // Controls button visibility without unmounting (keeps dialog alive)
@@ -27,6 +28,7 @@
 		messageContent,
 		messageRole,
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
+		userPromptOccurrence = null,
 		canRead = false,
 		isStreaming = false,
 		visible = true,
@@ -117,14 +119,16 @@
 	async function handleRewindConfirm() {
 		if (!sessionId) return;
 
-		// Rewind is strictly uuid-based. messageUuid is the message's JSONL entry
-		// uuid — the exact, unambiguous truncation target. We deliberately do NOT
-		// fall back to matching the checkpoint by message text: a content match can
-		// silently pick the WRONG message and truncate there, which is unrecoverable.
-		// A persisted message should always carry its uuid, so a missing one means a
-		// bug upstream (or a not-yet-flushed streaming message) — surface it instead
-		// of guessing.
-		if (!messageUuid) {
+		// Rewind prefers the message's JSONL entry uuid — the exact, unambiguous
+		// truncation target. Live v2 `message.user` events carry NO uuid, so a
+		// uuid-less USER prompt falls back to content anchoring: the backend
+		// resolves the checkpoint whose text equals this message (occurrence
+		// disambiguates duplicates) and FAILS CLOSED when nothing matches —
+		// worst case is a refusal, never a wrong truncation. Assistant messages
+		// have no content affordance (resolution spans user prompts only), so a
+		// missing uuid there still surfaces the refusal instead of guessing.
+		const useContent = !messageUuid && messageRole === 'user' && userPromptOccurrence != null;
+		if (!messageUuid && !useContent) {
 			console.error('[Rewind] Refusing to rewind: message has no JSONL uuid.', { messageRole });
 			rewindError = 'Cannot rewind: this message is missing its checkpoint id. Try reloading the conversation.';
 			return;
@@ -139,7 +143,9 @@
 			// For user messages: include_response=false removes this message and everything after.
 			// For assistant messages: keeps this message, removes everything after.
 			const includeResponse = messageRole === 'assistant';
-			const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
+			const result = useContent
+				? await executeRewind(sessionId, '', includeResponse, 'user', restoreFiles, userPromptOccurrence, messageContent)
+				: await executeRewind(sessionId, messageUuid!, includeResponse, messageRole, restoreFiles);
 
 			if (result.success || result.chat_rewound) {
 				showRewindDialog = false;

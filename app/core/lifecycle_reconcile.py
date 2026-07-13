@@ -19,9 +19,6 @@ classes:
                                  no drain pump and nothing streaming → clear
                                  the latch (frees the poller from a follow-up
                                  that will never stream).
-  R3 stale-sync-streaming      — ``sync_engine`` says streaming but the live
-                                 store says idle → ``clear_streaming_state``
-                                 (the stale git-lock / remote-pill leak).
   R4 bg-work-dead-client       — registry background work "running" while the
                                  pooled SDK client that owns its completion is
                                  gone/dead → ``complete_task(killed)``, which
@@ -29,12 +26,18 @@ classes:
                                  notification callback (the #514 hook), so the
                                  kill surfaces a durable chip instead of a
                                  forever-spinning task.
-  R5 livestore-streaming-no-client — live store streaming with NO pooled
-                                 client at all. WARN-ONLY (severity=high, no
-                                 auto-repair): a turn can legitimately stream
-                                 outside the pool briefly, and force-ending a
-                                 real turn is exactly the ResourceMonitor
-                                 incident Phase 1 must not repeat.
+  R5 livestore-streaming-no-client — the streaming authority (runs table /
+                                 pooled-client peek) reports a turn in flight
+                                 with NO pooled client at all. WARN-ONLY
+                                 (severity=high, no auto-repair): a turn can
+                                 legitimately stream outside the pool briefly,
+                                 and force-ending a real turn is exactly the
+                                 ResourceMonitor incident Phase 1 must not
+                                 repeat.
+
+(R3 stale-sync-streaming was retired with the legacy in-memory streaming maps
+— busy truth is the durable runs table now, so there is no sync-engine
+streaming cache left to drift.)
 
 SAFETY GATES. Every repair is age-gated and confirm-twice: a condition must be
 observed on at least two separate evaluations spanning the check's grace
@@ -86,7 +89,6 @@ ON_DEMAND_DEBOUNCE_SECONDS = 15.0
 CHECKS_ENABLED: Dict[str, bool] = {
     "parked_marker": True,      # R1
     "unpark_latch": True,       # R2
-    "sync_streaming": True,     # R3
     "dead_client_reap": True,   # R4
     "livestore_no_client": True,  # R5 (WARN-only)
 }
@@ -211,34 +213,6 @@ async def _check_unpark_latch(session_id: str, snap) -> bool:
     return True
 
 
-async def _check_sync_streaming(session_id: str, snap) -> bool:
-    """R3: sync_engine still says streaming while the live store says idle."""
-    if not CHECKS_ENABLED.get("sync_streaming"):
-        return False
-    if not (snap.sync_streaming and not snap.live_store_streaming):
-        _clear_observation("sync_streaming", session_id)
-        return False
-    if not _observe("sync_streaming", session_id, GRACE_SECONDS):
-        return False
-
-    from app.core.sync_engine import sync_engine
-
-    await sync_engine.clear_streaming_state(session_id)
-    _clear_observation("sync_streaming", session_id)
-    _log_repair("clear-sync-streaming", session_id, "")
-    record_error(
-        "backend",
-        f"Lifecycle reconcile: session {session_id} was marked streaming in "
-        f"the sync engine while the live store was idle for over "
-        f"{int(GRACE_SECONDS)}s; cleared the stale cross-device streaming "
-        "state.",
-        level="WARNING",
-        session_id=session_id,
-        context={"reconcile": "lifecycle.sync_streaming"},
-    )
-    return True
-
-
 async def _check_dead_client_reap(session_id: str, snap) -> bool:
     """R4: registry background work running with no live pooled SDK client.
 
@@ -295,7 +269,7 @@ async def _check_dead_client_reap(session_id: str, snap) -> bool:
 
 
 async def _check_livestore_no_client(session_id: str, snap) -> bool:
-    """R5: live store streaming with no pooled client — WARN-only, no repair.
+    """R5: streaming authority busy with no pooled client — WARN-only, no repair.
 
     Force-ending a possibly-real turn is the ResourceMonitor incident; Phase 1
     only makes the condition loudly visible.
@@ -311,15 +285,15 @@ async def _check_livestore_no_client(session_id: str, snap) -> bool:
     _clear_observation("livestore_no_client", session_id)
     logger.warning(
         "lifecycle-drift severity=high class=livestore-streaming-no-client "
-        "session=%s — live store reports streaming but no pooled SDK client "
-        "exists; NOT auto-repaired (Phase 1 policy)",
+        "session=%s — streaming authority reports a turn in flight but no "
+        "pooled SDK client exists; NOT auto-repaired (Phase 1 policy)",
         session_id,
     )
     record_error(
         "backend",
-        f"Lifecycle drift (high): session {session_id} reports streaming in "
-        "the live store but has no pooled SDK client. Not auto-repaired — "
-        "investigate (possible orphaned turn).",
+        f"Lifecycle drift (high): session {session_id} reports a turn in "
+        "flight (runs table) but has no pooled SDK client. Not auto-repaired "
+        "— investigate (possible orphaned turn).",
         level="WARNING",
         session_id=session_id,
         context={"reconcile": "lifecycle.livestore_no_client", "repaired": False},
@@ -360,7 +334,6 @@ async def reconcile_session(session_id: str, *, on_demand: bool = False) -> int:
     for check in (
         _check_parked_marker,
         _check_unpark_latch,
-        _check_sync_streaming,
         _check_dead_client_reap,
         _check_livestore_no_client,
     ):
@@ -434,22 +407,10 @@ async def _candidate_sessions() -> Set[str]:
     """
     candidates: Set[str] = set()
     try:
-        from app.core.live_session_store import live_session_store
-
-        candidates.update(live_session_store._sessions.keys())  # noqa: SLF001
-    except Exception:
-        pass
-    try:
         from app.core.task_registry import task_registry
 
         candidates.update(task_registry._tasks.keys())  # noqa: SLF001
         candidates.update(task_registry._unpark_pending)  # noqa: SLF001
-    except Exception:
-        pass
-    try:
-        from app.core.sync_engine import sync_engine
-
-        candidates.update(sync_engine._streaming_sessions)  # noqa: SLF001
     except Exception:
         pass
     try:

@@ -1,18 +1,15 @@
 /**
- * WebSocket Message Handlers — Notification-only dispatch for incoming WS messages.
+ * WebSocket Message Handlers — Notification + control dispatch for incoming WS messages.
  *
- * Architecture (polling-only):
- * - Handlers NEVER write session message state (_update with messages).
- * - Session state is written SOLELY by the session-poller via onPollApplied.
- *   Deliberate exception: 'start' and 'stream_start' optimistically flip
- *   isStreaming=true for the ACTIVE session (immediate engagement for
- *   server-side wake turns); /live remains the source of truth and the next
- *   poll confirms or corrects.
- * - WS handlers trigger polls (pollNow/startStreaming) when events arrive.
- * - WS handlers DO manage non-message state: permissions, questions, streaming
- *   sessions map, git state, and fire side-effect callbacks (notifications, etc).
- *
- * The 'history' handler is gone — session loading uses HTTP via sessionPoller.loadSession().
+ * Architecture (SSE-fed):
+ * - The SSE-fed reducer (feedController) owns the session transcript and its
+ *   streaming state — it is the sole writer of `messages` and isStreaming for
+ *   the active session. These handlers NEVER render stream content.
+ * - WS handlers DO manage non-transcript state: permissions, questions, the
+ *   cross-session streaming map, git state, session adoption (session_created/
+ *   start → start the feed), and fire side-effect callbacks (completion
+ *   notifications, error banners, etc).
+ * - Session history loads via the feed's from_seq=0 replay, not WS.
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
@@ -21,21 +18,8 @@ import { notify, type NotificationAction, type NotificationSeverity, type Notifi
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
 import { startFixChat } from '$lib/services/fix-with-ai';
-// V2 Phase 1: SSE-fed reducer store for v2_stream sessions.
+// The SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
-import { appData } from '../app-data.svelte';
-
-/**
- * Whether an incoming frame's session is a V2 (SSE-fed) session. Prefers an
- * explicit `v2_stream` field on the frame (forward-compatible with the backend
- * stamping it on session_created/start), falling back to the session-list row.
- */
-function frameIsV2(data: Record<string, unknown>): boolean {
-	if (typeof data.v2_stream === 'boolean') return data.v2_stream;
-	const sid = data.session_id as string | undefined;
-	if (!sid) return false;
-	return !!appData.current.sessions.find((x) => x.id === sid)?.v2_stream;
-}
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -97,19 +81,6 @@ export interface MessageHandlerDeps {
 	// WebSocket
 	wsSend: (data: Record<string, unknown>) => boolean;
 
-	// Session poller & notifier
-	sessionPoller: {
-		pollNow: (sessionId: string) => void;
-		pollFinal: (sessionId: string) => void;
-		startStreaming: (sessionId: string) => void;
-		stop: (sessionId: string) => void;
-		isPolling: (sessionId: string) => boolean;
-		loadSession: (sessionId: string) => Promise<unknown>;
-	};
-	sessionNotifier: {
-		handleMessage: (sessionId: string, data: Record<string, unknown>) => void;
-	};
-
 	// External store access
 	streamingSessions: {
 		update: (fn: (m: Map<string, StreamingSessionInfo>) => Map<string, StreamingSessionInfo>) => void;
@@ -159,7 +130,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 } {
 	const {
 		update, getState, wsSend,
-		sessionPoller, sessionNotifier,
 		streamingSessions, backgroundPermissions,
 		gitRefreshStatus, gitRefreshDiffStats, gitGetProjectId, gitGetLoading,
 		appLoadSessions, appLoadApiUserSessions,
@@ -213,15 +183,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function handleDone(data: Record<string, unknown>): void {
 		// During interrupt_for_query, the OLD query drains naturally and yields
 		// a 'done' event (SDK interrupt doesn't raise CancelledError, so the
-		// generator exits normally). If we process it, we'd clear interruptPending,
-		// trigger pollFinal (which returns isStreaming=false for the ended old query),
-		// and fire a premature completion notification — all of which clobber the
+		// generator exits normally). If we process it, we'd clear interruptPending
+		// and fire a premature completion notification — both of which clobber the
 		// new query that's about to start. Skip entirely, like handleStoppedOrInterrupted.
 		if (internal.interruptPending) { internal.pendingTools.clear(); return; }
 
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
-		// done event — poller will handle streaming→ended transition
+		// done event — the SSE feed folds the streaming→ended transition into
+		// the transcript; this handler only fires the completion notification
+		// and cleans cross-session bookkeeping.
 
 		internal.interruptPending = false;
 
@@ -229,32 +200,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const doneSessionId = sessionId || currentState.sessionId;
 
-		// Trigger a final authoritative poll. Uses pollFinal (not pollNow)
-		// because pollNow is debounced and its timer gets killed by stop()
-		// if the interval timer's in-flight poll detects streamingJustEnded
-		// first. pollFinal survives stop() so the post-end_streaming state
-		// is always fetched, even if the interval poll got stale data.
-		if (doneSessionId) sessionPoller.pollFinal(doneSessionId);
-
 		if (isActiveSession) {
 			clearStopTimeout();
 			internal.pendingTools.clear();
-			// Clear WS stream buffer — poller's final poll is authoritative
-			const preState = getState();
-			const preAssistantTexts = preState.messages.filter(
-				(m) => m.role === 'assistant' && m.type === 'text'
-			);
-			console.warn(
-				`[handleDone] clearing wsStreamContent`,
-				`\n  wsStreamContent len: ${preState.wsStreamContent.length}`,
-				`\n  isStreaming: ${preState.isStreaming}`,
-				`\n  msgs: ${preState.messages.length}`,
-				`\n  assistant texts: ${preAssistantTexts.length} [${preAssistantTexts.map(m => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`
-			);
-			update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
 
 			// Fire completion notification with metadata from the WS event.
-			// State (isStreaming, messages) will be updated by the poller.
+			// State (isStreaming, messages) is owned by the SSE feed.
 			const durationSeconds = currentState.streamStartTime
 				? (Date.now() - currentState.streamStartTime) / 1000
 				: undefined;
@@ -298,23 +249,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		// Route by the EVENT's session_id, not the active session — mirror
 		// handleDone. A stopped/interrupted event for a BACKGROUND session must
-		// not clobber the ACTIVE session's pendingTools / wsStreamContent or fire
-		// a spurious pollFinal on it. Pre-fix this handler ignored data.session_id
-		// entirely and always mutated whatever session was in view.
+		// not clobber the ACTIVE session's pendingTools. Pre-fix this handler
+		// ignored data.session_id entirely and always mutated whatever session
+		// was in view.
 		const sessionId = data.session_id as string | undefined;
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const stoppedSessionId = sessionId || currentState.sessionId;
 
-		// Trigger a final authoritative poll for the session that actually
-		// stopped (survives stop(), see handleDone).
-		if (stoppedSessionId) sessionPoller.pollFinal(stoppedSessionId);
-
 		if (isActiveSession) {
 			clearStopTimeout();
 			internal.pendingTools.clear();
-			// Clear WS stream buffer
-			update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
 		}
 
 		// Clean up streamingSessions (cross-session/cross-device safe — keyed by
@@ -341,72 +286,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		// Lifecycle events logged only on error path (see 'error' case below)
 
-		// Forward to notification system (triggers poller via pollNow/startStreaming).
-		//
-		// CRITICAL: Use the event's actual session_id for routing, NOT the active
-		// session's ID. Events from background/old sessions must not trigger polls
-		// for the active session — that causes ghost polls that refresh context
-		// values from JSONL, producing phantom token count jumps (16% → 99%).
-		//
-		// Only forward events that belong to the active session (or new sessions
-		// we're awaiting). Events for other sessions are handled by handleDone/
-		// handleStoppedOrInterrupted directly — the notifier doesn't need them.
 		const state = getState();
 		const eventSessionId = data.session_id as string | undefined;
-		const isForActiveSession = !eventSessionId ||
-			eventSessionId === state.sessionId ||
-			(!state.sessionId && internal.awaitingNewSession);
-
-		if (state.sessionId && isForActiveSession) {
-			const isInterruptTransition = internal.interruptPending &&
-				(msgType === 'interrupted' || msgType === 'stopped' || msgType === 'done');
-			const shouldNotify = state.isStreaming ||
-				internal.awaitingNewSession ||
-				msgType === 'start' ||
-				msgType === 'stream_start' ||
-				msgType === 'done' ||
-				msgType === 'stopped' ||
-				msgType === 'interrupted' ||
-				// PARKED-WATCHER RECOVERY (Bug 2): when a watched session parks on a
-				// long-running background task and later UNPARKS, the follow-up turn
-				// streams server-side and `sync_engine` broadcasts it as an
-				// `event_type` ('stream_start'/'stream_end'/'stream_chunk') — NOT a
-				// `type`. A parked watcher has `isStreaming=false` and no other
-				// condition above matches an event_type, so without these the
-				// notifier was never reached, the stopped poller never restarted, and
-				// the UI showed stale state until a manual reload. We're already
-				// inside the `isForActiveSession` guard, so this only ever fires for
-				// the session in view — no cross-session ghost polls. The notifier
-				// maps stream_start→startStreaming, stream_end→final poll, and has a
-				// stream_chunk fallback that restarts a dropped poller mid-stream.
-				eventType === 'stream_start' ||
-				eventType === 'stream_end' ||
-				eventType === 'stream_chunk';
-			// V2 Phase 1: v2 sessions are fed by the SSE reducer, not the poller —
-			// suppress notifier-driven poll triggers for them (session-notifier's
-			// sole caller is here, so this fully gates it without touching it).
-			if (!isInterruptTransition && shouldNotify && !feedController.isFeeding(state.sessionId)) {
-				sessionNotifier.handleMessage(state.sessionId, data);
-			}
-		}
 
 		// Handle sync events from other devices / server-originated broadcasts
 		if (eventType) {
-			// OPTIMISTIC WAKE ENGAGEMENT (lifecycle batch, item 6b): a broadcast
-			// stream_start for the session IN VIEW means a turn is starting NOW —
-			// including a server-side CLI-owned wake turn forwarded by the drain
-			// pump while this client sits idle-parked. The notifier (above)
-			// already restarts the poller, but the UI stayed "idle" until the
-			// next poll landed. Flip isStreaming immediately; /live remains the
-			// source of truth (the poll confirms or corrects within a cycle).
-			if (
-				eventType === 'stream_start' &&
-				eventSessionId &&
-				eventSessionId === state.sessionId &&
-				!state.isStreaming
-			) {
-				update(s => (s.isStreaming ? s : { ...s, isStreaming: true, streamStartTime: Date.now() }));
-			}
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
 			// Scope to the active session: a late/cross-session event (e.g. a
@@ -439,15 +323,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 			}
 
-			// message_added from server-side queue processing (_process_next_queued).
-			// The notifier gate above may skip this event when not streaming, so
-			// handle it directly: trigger a poll so the user message appears in chat.
-			if (eventType === 'message_added') {
-				const addedSessionId = data.session_id as string | undefined;
-				if (addedSessionId && addedSessionId === state.sessionId) {
-					sessionPoller.pollNow(addedSessionId);
-				}
-			}
+			// message_added from server-side queue processing (_process_next_queued)
+			// needs no handling here: the SSE feed delivers the queued user message
+			// to the transcript.
 
 			return;
 		}
@@ -579,10 +457,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// ── Per-session message switch ────────────────────────────────
 
 		switch (msgType) {
-			// ── Session lifecycle: notification-only ──────────────────
-			// The poller is the sole authority for session state.
-			// These handlers only need to accept the sessionId and ensure
-			// polling is started.
+			// ── Session lifecycle ─────────────────────────────────────
+			// These handlers accept the sessionId and start the SSE feed,
+			// which owns the transcript and streaming state from there on.
 
 			case 'session_created': {
 				if (!data.session_id) break;
@@ -606,7 +483,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// session title immediately (not stale 'New Chat'). Reset
 					// activeTasks to [] on session commit (mirrors PR #448) so a
 					// prior/foreign session's running-task strip can't flash on the
-					// freshly-adopted session before the first poll settles.
+					// freshly-adopted session before the feed settles.
 					update(s => ({ ...s, sessionId, activeTasks: [], ...(title ? { title } : {}) }));
 					// Deliver a Stop the user clicked before the id existed (see
 					// stopRequestedBeforeSession). Now that we have the id, the
@@ -616,10 +493,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
 						internal.stopBackgroundRequested = false;
 					}
-					// V2 Phase 1: adopt a freshly-minted v2 session by starting the
-					// SSE feed (idempotent - start() no-ops if already feeding this
-					// id). The feed's replay renders the turn; the poller stays off.
-					if (frameIsV2(data) && !feedController.isFeeding(sessionId)) {
+					// Adopt a freshly-minted session by starting the SSE feed
+					// (idempotent — start() no-ops if already feeding this id).
+					// The feed's replay renders the turn.
+					if (!feedController.isFeeding(sessionId)) {
 						feedController.start(sessionId);
 					}
 					onPersistSession();
@@ -630,8 +507,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			// Cloud sessions run on a second install: the backend acks a forwarded
 			// prompt with 'cloud_forwarded' (no local stream). Treat it exactly
-			// like 'start' so the streaming indicator shows and the poller runs —
-			// the proxied /live endpoint then mirrors the remote stream.
+			// like 'start' — the SSE feed mirrors the remote stream.
 			case 'cloud_forwarded':
 			case 'start': {
 				if (!data.session_id) break;
@@ -663,272 +539,27 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
 						internal.stopBackgroundRequested = false;
 					}
-					// V2 Phase 1: for v2_stream sessions the SSE feed owns the transcript
-					// and streaming state. Adopt the sessionId and start the feed; do
-					// NOT inject a synthetic streaming assistant message or start the
-					// poller (the feed's replay renders the turn).
-					if (frameIsV2(data)) {
-						update(s => ({
-							...s,
-							sessionId,
-							isStreaming: true,
-							streamStartTime: Date.now(),
-							...(startAdoptsNewSession ? { activeTasks: [] } : {}),
-						}));
-						if (!feedController.isFeeding(sessionId)) {
-							feedController.start(sessionId);
-						}
-						onPersistSession();
-						break;
+					// The SSE feed owns the transcript and streaming state. Adopt the
+					// sessionId and start the feed; the feed's replay renders the turn.
+					update(s => ({
+						...s,
+						sessionId,
+						isStreaming: true,
+						streamStartTime: Date.now(),
+						...(startAdoptsNewSession ? { activeTasks: [] } : {}),
+					}));
+					if (!feedController.isFeeding(sessionId)) {
+						feedController.start(sessionId);
 					}
-
-					// Set sessionId, streamStartTime, and inject a synthetic streaming
-					// assistant message so the streaming indicator appears immediately
-					// (don't wait for the poller to deliver the first assistant message).
-					// Also explicitly set isStreaming: true — during interrupt_for_query,
-					// a stale poll from the old streaming session can clobber isStreaming
-					// to false between the interrupt and this start event.
-					const messageId = data.message_id as string || `ws-stream-${Date.now()}`;
-					update(s => {
-						// Only inject if there isn't already a streaming assistant message
-						const hasStreamingAssistant = s.messages.some(
-							m => m.role === 'assistant' && m.streaming
-						);
-						if (hasStreamingAssistant) {
-							return { ...s, sessionId, isStreaming: true, streamStartTime: Date.now(), wsStreamContent: '', ...(startAdoptsNewSession ? { activeTasks: [] } : {}) };
-						}
-						return {
-							...s,
-							sessionId,
-							isStreaming: true,
-							streamStartTime: Date.now(),
-							wsStreamContent: '',
-							...(startAdoptsNewSession ? { activeTasks: [] } : {}),
-							messages: [...s.messages, {
-								id: messageId,
-								role: 'assistant' as const,
-								type: 'text' as const,
-								content: '',
-								streaming: true,
-								// Stamp the in-flight turn's profile so the bubble is
-								// labelled by the profile that produced it, not the
-								// session's live selection. Left unset for adopted
-								// streams (no local query profile) — the poller then
-								// backfills it from the server's per-message profile.
-								profileId: s.currentQueryProfileId ?? undefined,
-								timestamp: new Date().toISOString(),
-							}],
-						};
-					});
-					// Ensure poller is running
-					sessionPoller.startStreaming(sessionId);
 					onPersistSession();
 				}
 				break;
 			}
 
-			// Notification-only events — poller handles state via sessionNotifier
-			case 'history':
-				// History is now loaded via HTTP (sessionPoller.loadSession).
-				// If we receive a WS history message, just trigger a poll to sync.
-				if (data.session_id && state.sessionId === data.session_id) {
-					const historySessionId = data.session_id as string;
-					sessionPoller.pollNow(historySessionId);
-					const historyPendingPermissions = mapPermissionRequests(
-						(data.pendingPermissions as PermissionRequestType[] | undefined) ?? [],
-						historySessionId
-					);
-					const historyPendingQuestions = mapUserQuestions(
-						(data.pendingQuestions as UserQuestionRequest[] | undefined) ?? [],
-						historySessionId
-					);
-					// Populate server-side queue state from history response
-					const historyQueued = data.queuedMessages as Array<{ id: string; content: string; created_at: string }> | undefined;
-					setNeedsAttention(historySessionId, 0);
-					update(s => ({
-						...s,
-						pendingPermissions: historyPendingPermissions,
-						pendingQuestions: historyPendingQuestions,
-						queuedMessages: historyQueued
-							? historyQueued.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() }))
-							: [],
-					}));
-				}
-				break;
-
-			case 'stream_delta': {
-				// Accumulate text content from WS into wsStreamContent buffer.
-				// Do NOT modify messages here — the poller's onPollApplied callback
-				// is the SOLE writer of message state. It merges wsStreamContent into
-				// the streaming message when WS is ahead of the server. Modifying
-				// messages here caused flickering: after the poller cleared
-				// wsStreamContent, the next delta would set message content to just
-				// the delta text (losing the base), then the poller would restore
-				// full content — causing the UI to alternate between partial and
-				// full content every poll cycle.
-				//
-				// Session guard: only accept deltas for the active session.
-				// Without this, late-arriving deltas from a previous session
-				// (in-flight when the user switched) contaminate the buffer
-				// and bleed into the new session's messages.
-				const deltaSessionId = data.session_id as string | undefined;
-				const deltaState = getState();
-				// Reject if session_id missing OR doesn't match active session.
-				// Previously only rejected on mismatch, letting events without
-				// session_id through — root cause of cross-session bleed.
-				if (!deltaSessionId || deltaSessionId !== deltaState.sessionId) break;
-					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
-					if (feedController.isFeeding(deltaSessionId)) break;
-
-				const deltaType = data.delta_type as string;
-				if (deltaType === 'text') {
-					const content = data.content as string;
-					if (content) {
-						update(s => ({ ...s, wsStreamContent: s.wsStreamContent + content }));
-					}
-				}
-				// Ensure polling is started
-				if (deltaState.isStreaming && deltaState.sessionId && !sessionPoller.isPolling(deltaState.sessionId)) {
-					sessionPoller.startStreaming(deltaState.sessionId);
-				}
-				break;
-			}
-			case 'chunk': {
-				// Legacy chunk (include_partial_messages=false) — accumulate into
-				// wsStreamContent only. Same rationale as stream_delta: the poller's
-				// onPollApplied is the sole message writer to prevent flickering.
-				//
-				// Session guard: same as stream_delta — reject chunks from
-				// non-active sessions to prevent cross-session bleed.
-				const chunkSessionId = data.session_id as string | undefined;
-				const chunkState = getState();
-				// Reject if session_id missing OR doesn't match (same fix as stream_delta)
-				if (!chunkSessionId || chunkSessionId !== chunkState.sessionId) break;
-					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
-					if (feedController.isFeeding(chunkSessionId)) break;
-
-				const chunkContent = data.content as string;
-				if (chunkContent) {
-					update(s => ({ ...s, wsStreamContent: s.wsStreamContent + chunkContent }));
-				}
-				if (chunkState.isStreaming && chunkState.sessionId && !sessionPoller.isPolling(chunkState.sessionId)) {
-					sessionPoller.startStreaming(chunkState.sessionId);
-				}
-				break;
-			}
-			case 'stream_block_stop': {
-				// End of ONE content block. Session guard: reject non-active sessions.
-				const blockSessionId = data.session_id as string | undefined;
-				const blockState = getState();
-				if (!blockSessionId || blockSessionId !== blockState.sessionId) break;
-					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
-					if (feedController.isFeeding(blockSessionId)) break;
-				// Clear the WS text buffer at the block boundary — the principled fix
-				// for the "mega-blob" incident. `wsStreamContent` accumulates every
-				// stream_delta with no separator and is otherwise cleared ONLY at turn
-				// boundaries (done / stopped / start). When a text block finalizes
-				// mid-turn into a tool call, nothing clears the buffer at the source,
-				// so cross-block deltas pile up and the poll-time staleness drop in
-				// mergeWsStreamBuffer is the sole guard — which failed the moment an
-				// upstream bug split one block into two finalized messages (the last
-				// finalized short tail can never startsWith the long buffer). Clearing
-				// here makes cross-block accumulation impossible: the next block refills
-				// from empty (the documented intent, see session-init.ts merge notes).
-				// Non-text blocks (tool_use/thinking) never wrote to the buffer, so this
-				// clears an already-empty buffer — harmless. The `s.wsStreamContent ?`
-				// guard keeps the state reference stable when nothing to clear.
-				update(s => (s.wsStreamContent ? { ...s, wsStreamContent: '' } : s));
-				// Ensure polling is started if we're streaming but poller isn't running.
-				if (blockState.isStreaming && !sessionPoller.isPolling(blockState.sessionId)) {
-					sessionPoller.startStreaming(blockState.sessionId);
-				}
-				break;
-			}
-			case 'stream_start': {
-				// Session guard: reject events not targeting the active session
-				const ssSessionId = data.session_id as string | undefined;
-				const ssState = getState();
-				if (!ssSessionId || ssSessionId !== ssState.sessionId) break;
-					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
-					if (feedController.isFeeding(ssSessionId)) break;
-				// OPTIMISTIC WAKE ENGAGEMENT (item 6b): a stream_start for the
-				// active session means a turn is starting NOW — engage
-				// immediately instead of waiting a poll cycle. /live stays the
-				// source of truth (the next poll confirms or corrects).
-				if (!ssState.isStreaming) {
-					update(s => (s.isStreaming ? s : { ...s, isStreaming: true, streamStartTime: Date.now() }));
-				}
-				if (!sessionPoller.isPolling(ssSessionId)) {
-					sessionPoller.startStreaming(ssSessionId);
-				}
-				break;
-			}
-			case 'stream_block_start':
-			case 'system': {
-				// Session guard: reject events not targeting the active session
-				const sysSessionId = data.session_id as string | undefined;
-				const sysState = getState();
-				if (!sysSessionId || sysSessionId !== sysState.sessionId) break;
-					// V2 Phase 1: the SSE feed owns this session's transcript + streaming state - skip WS buffering + poller.
-					if (feedController.isFeeding(sysSessionId)) break;
-				// Ensure polling is started if we're streaming but poller isn't running.
-				// This handles slash commands that don't trigger a 'start' event.
-				if (sysState.isStreaming && !sessionPoller.isPolling(sysState.sessionId)) {
-					sessionPoller.startStreaming(sysState.sessionId);
-				}
-				break;
-			}
-			case 'hook_event': {
-				// SDK 0.1.81 hook pipeline event. Append as a collapsed system
-				// message so users can see what hooks fire (with optional
-				// allow/deny/defer decisions) without spamming the chat. The
-				// poller never replays these — they're WS-only — so we write
-				// directly to `messages` (mirrors `draft-manager.addSystemMessage`).
-				const hookSessionId = data.session_id as string | undefined;
-				const hookState = getState();
-				if (!hookSessionId || hookSessionId !== hookState.sessionId) break;
-
-				type HookEventPayload = {
-					hook_event_name: string | null;
-					matcher: string | null;
-					decision: string | null;
-					reason: string | null;
-					system_message: string | null;
-					tool_name: string | null;
-					timestamp: string;
-				};
-				const hookData: HookEventPayload = {
-					hook_event_name: (data.hook_event_name as string | null) ?? null,
-					matcher: (data.matcher as string | null) ?? null,
-					decision: (data.decision as string | null) ?? null,
-					reason: (data.reason as string | null) ?? null,
-					system_message: (data.system_message as string | null) ?? null,
-					tool_name: (data.tool_name as string | null) ?? null,
-					timestamp: (data.timestamp as string) ?? new Date().toISOString(),
-				};
-
-				const hookLabel =
-					hookData.hook_event_name ||
-					hookData.tool_name ||
-					'hook_event';
-
-				update(s => ({
-					...s,
-					messages: [
-						...s.messages,
-						{
-							id: `hook-${hookData.timestamp}-${s.messages.length}`,
-							role: 'system' as const,
-							content: hookLabel,
-							type: 'system' as const,
-							systemSubtype: 'hook_event',
-							systemData: hookData as unknown as Record<string, unknown>,
-						},
-					],
-				}));
-				break;
-			}
-
+			// hook_event: the ungated WS append was removed — the SSE feed replays
+			// hook events from the session's event log, so appending here would
+			// double-render. Folded into the no-op group below.
+			case 'hook_event':
 			case 'subagent_start':
 			case 'subagent_chunk':
 			case 'subagent_done':
@@ -1009,15 +640,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// turn isn't shown as a saved-but-empty exchange) and sent its
 				// text back so we can restore it to the input box for editing or
 				// resending. Set pendingInterruptPrompt (ChatInput watches it and
-				// repopulates the editor) and run a final poll so the poller —
-				// the sole authority for the chat view — drops the now-removed
-				// user message.
+				// repopulates the editor); the SSE feed drops the now-removed user
+				// message from the transcript.
 				const discardedSessionId = data.session_id as string | undefined;
 				const prompt = typeof data.prompt === 'string' ? data.prompt : '';
 				const discardState = getState();
 				if (discardedSessionId && discardedSessionId === discardState.sessionId) {
 					update(s => ({ ...s, pendingInterruptPrompt: prompt }));
-					sessionPoller.pollFinal(discardedSessionId);
 				}
 				break;
 			}
@@ -1025,10 +654,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'error': {
 				// Route by the EVENT's session_id, not the active session — mirror
 				// handleDone / handleStoppedOrInterrupted. A BACKGROUND session's
-				// error must never stop the ACTIVE session's poller, reset its
-				// isStreaming, blow away its wsStreamContent, or unwind its
-				// interrupt-and-query promise. The backend now stamps session_id on
-				// error events (interactive + headless paths); fall back to the
+				// error must never reset the ACTIVE session's isStreaming or unwind
+				// its interrupt-and-query promise. The backend now stamps session_id
+				// on error events (interactive + headless paths); fall back to the
 				// active session only when the id is absent (e.g. a synchronous
 				// pre-stream command error like an empty prompt).
 				const errSessionId = data.session_id as string | undefined;
@@ -1037,10 +665,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const erroredSessionId = errSessionId || errState.sessionId;
 				const errMessage = data.message as string;
 
-				// Cross-session safe: stop the errored session's poller and drop its
-				// streaming pill regardless of which session is in view.
+				// Cross-session safe: drop the errored session's streaming pill
+				// regardless of which session is in view.
 				if (erroredSessionId) {
-					sessionPoller.stop(erroredSessionId);
 					streamingSessions.update(map => {
 						if (!map.has(erroredSessionId)) return map;
 						const newMap = new Map(map);
@@ -1066,7 +693,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						internal.interruptConfirmResolve(false);
 						internal.interruptConfirmResolve = null;
 					}
-					update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+					update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null }));
 				}
 				break;
 			}
@@ -1094,11 +721,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// (the queue chip is driven by the separate queue_updated broadcast).
 				//
 				// Without this handler interruptPending stays latched and isStreaming
-				// stays optimistically true, so session-init's poll callback discards
-				// every idle (isStreaming=false) poll as a stale interrupt poll → the
-				// spinner never clears. Release the latch, drop the optimistic streaming
-				// state, clean the streaming-session map (mirrors the done/stopped
-				// terminal frames), and poll so the poller truth-ups from /live.
+				// stays optimistically true → the spinner never clears. Release the
+				// latch, drop the optimistic streaming state, and clean the
+				// streaming-session map (mirrors the done/stopped terminal frames).
+				// The SSE feed truth-ups the transcript.
 				const queuedSessionId = data.session_id as string | undefined;
 				const queuedState = getState();
 				if (!queuedSessionId || queuedSessionId !== queuedState.sessionId) break;
@@ -1106,14 +732,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				internal.interruptPending = false;
 				internal.pendingTools.clear();
 				clearStopTimeout();
-				update(s => ({ ...s, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+				update(s => ({ ...s, isStreaming: false, streamStartTime: null }));
 				streamingSessions.update(map => {
 					if (!map.has(queuedSessionId)) return map;
 					const newMap = new Map(map);
 					newMap.delete(queuedSessionId);
 					return newMap;
 				});
-				sessionPoller.pollNow(queuedSessionId);
 				break;
 			}
 

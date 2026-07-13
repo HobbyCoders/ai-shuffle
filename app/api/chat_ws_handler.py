@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi.websockets import WebSocketState
@@ -20,11 +21,11 @@ from app.core import account_failover
 from app.core import compact_continue
 from app.core.config import settings
 from app.core.connectors.manager import connector_manager
-from app.core.live_session_store import live_session_store
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
+from app.core.turn_finalize import persist_turn_end_state
 from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
@@ -43,6 +44,54 @@ logger = logging.getLogger(__name__)
 _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
+
+
+@dataclass
+class _TurnStreamState:
+    """Minimal per-turn stream bookkeeping for ``run_query``.
+
+    Replaces the deleted legacy event-dispatch state object (V2 Phase 1
+    deletion). ``stream_started`` flips True on the first stream_start or
+    content event (stream_delta / chunk / tool_use / system) — the SDK
+    ``init`` does NOT flip it; ``final_metadata`` is captured from the
+    ``done`` event.
+    """
+
+    stream_started: bool = False
+    connection_lost_logged: bool = False
+    final_metadata: Dict[str, Any] = field(default_factory=dict)
+    query_start_time: float = field(default_factory=time.time)
+
+
+# V2 Phase 1 (deletion sweep): raw RENDER frames are no longer sent over the
+# chat WS — the session event feed (SSE) is the sole render path. Frames the
+# frontend still meaningfully consumes for NON-render purposes stay on the
+# wire until Commit 7: tool_use / tool_result / subagent_tool_use /
+# subagent_tool_result feed the FE's pendingTools set, which selects the
+# WS connection-health timeout tier (ws-connection.ts).
+_WS_TRIMMED_RENDER_FRAMES = frozenset({
+    "chunk",
+    "stream_delta",
+    "stream_block_start",
+    "stream_block_stop",
+    "stream_message_delta",
+    "task_progress",
+    "system",
+    "usage_update",
+})
+_WS_KEPT_SUBAGENT_FRAMES = frozenset({"subagent_tool_use", "subagent_tool_result"})
+
+
+def _is_trimmed_render_frame(event_type: Optional[str]) -> bool:
+    """True if this frame type is render-only and must not hit the chat WS."""
+    if not event_type:
+        return False
+    if event_type in _WS_TRIMMED_RENDER_FRAMES:
+        return True
+    return (
+        event_type.startswith("subagent_")
+        and event_type not in _WS_KEPT_SUBAGENT_FRAMES
+    )
 
 
 def _log_unpark_decision(
@@ -124,7 +173,6 @@ def _normalize_relay_remember(remember: Any) -> Optional[str]:
 from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
     _interrupt_pending_sessions,
     _stopped_sessions,
-    superseded_by_successor,
 )
 
 
@@ -502,7 +550,7 @@ async def _deliver_unpark_impl(
     only path that delivers task notifications app-side; a task that comes to
     rest mid-turn is delivered to the model by the CLI itself (see
     ``_latch_terminal_notification``). Modeled EXACTLY on the queue-handoff
-    pattern (persist user msg → broadcast → end_streaming →
+    pattern (persist user msg → broadcast → turn-END side effects →
     create_task(run_query)) so streaming tears down + re-inits without a race.
 
     The caller owns any stopped/interrupting guards and dedup via
@@ -577,24 +625,20 @@ async def _deliver_unpark_impl(
         source_device_id=None,
     )
 
-    # End current streaming state so the follow-up query can re-init.
+    # Persist end-of-turn state so the follow-up query can re-init.
     # (Between-turns pump path: streaming already ended for this turn, so this is
-    # an idempotent re-end.)
-    await live_session_store.end_streaming(
-        session_id=session_id,
-        metadata=final_metadata or {},
-        interrupted=False,
-    )
+    # an idempotent re-end — durable parked marker + latch backstop only.)
+    await persist_turn_end_state(session_id)
 
     # Latch "unpark pending" BEFORE handing off, so a polling client never sees a
     # transient (is_streaming=false, activeTasks=[]) and STOPS in the gap between
     # the background task completing (already dropped from ``get_active`` above via
     # ``complete_task``) and the follow-up turn flipping ``is_streaming`` true. The
-    # follow-up's ``live_session_store.start_streaming`` clears it (it flips with
-    # ``is_streaming``); ``end_streaming`` / ``clear_session`` clear it as
+    # follow-up turn's start clears it (it flips with ``is_streaming``);
+    # ``persist_turn_end_state`` / session cleanup clear it as
     # backstops; the ``except`` below clears it if the hand-off never happens. Set
-    # AFTER the ``end_streaming`` above (which also clears the latch) so it isn't
-    # immediately wiped. See ``/live`` (``unpark_pending``) and the session poller.
+    # AFTER the ``persist_turn_end_state`` above (which also clears the latch) so it
+    # isn't immediately wiped. See ``/live`` (``unpark_pending``) and the session poller.
     task_registry.mark_unpark_pending(session_id)
 
     try:
@@ -602,8 +646,8 @@ async def _deliver_unpark_impl(
         # by the drain pump (or in-stream stash), often AFTER the user navigated
         # away or reconnected — so this handler's origin socket may already be
         # dead. Marking it deferred makes ``run_query`` fall through a failed
-        # ``start`` frame and stream via the live store + ``sync_engine``
-        # broadcasts + polling instead of aborting. Without this, a parked
+        # ``start`` frame and stream via the event log (SSE feed) + polling
+        # instead of aborting. Without this, a parked
         # session's unpark turn silently tore itself down on the dead socket and
         # the parent's response never surfaced until a full reload (same
         # dead-socket failure mode as the "Send later" queue-drain bug).
@@ -699,15 +743,18 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
         data["reason"] = task.get("reason")
 
     # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
+    # V2: append the chip to the session event log so the SSE feed renders it.
     if task_registry.mark_chipped(session_id, task_id, "terminal"):
         task_registry.mark_chipped(session_id, task_id, "start")
         try:
-            await live_session_store.add_system_message(
-                session_id,
-                content=summary or "",
-                subtype="task_updated",
-                data=data,
-            )
+            from app.core.turn_recorder import record_drained_event
+
+            await record_drained_event(session_id, {
+                "type": "system",
+                "subtype": "task_updated",
+                "content": summary or "",
+                "data": data,
+            })
         except Exception:
             logger.debug(
                 "terminal-surface live chip failed for %s/%s",
@@ -836,10 +883,10 @@ async def _drain_notifications_impl(
       autonomously injects its own ``<task-notification>`` user-lane turn that
       the model answers, so the app delivers NOTHING (``decision=cli-owned-wake``;
       the app's synthesized unpark here was the duplicate). The pump instead
-      attaches-and-streams: it forwards that CLI-driven turn's top-level
-      assistant/tool events through ``dispatch_event`` into the live store
-      (``_cli_turn_events_from_message``) and finalizes at its ResultMessage, so
-      park-pollers render the CLI's wake live.
+      attaches-and-streams: it records that CLI-driven turn's top-level
+      assistant/tool events to the session event log
+      (``_cli_turn_events_from_message`` → ``record_drained_event``) and
+      finalizes at its ResultMessage, so park-pollers render the CLI's wake.
     - Backgrounded SHELLS (``is_sdk_background_task`` / local_bash) and
       killed/stopped TaskUpdatedMessage-alone terminals: classes the CLI does
       NOT reliably self-wake — dedupe + deliver ONE app unpark follow-up turn,
@@ -867,11 +914,6 @@ async def _drain_notifications_impl(
         ResultMessage,
         TaskNotificationMessage,
         TaskUpdatedMessage,
-    )
-    from app.api.ws_event_handlers import (
-        dispatch_event,
-        EventContext,
-        MutableStreamState,
     )
 
     ctx = StreamingContext(
@@ -932,21 +974,6 @@ async def _drain_notifications_impl(
             "Drain pump: started reading pooled client between turns [session=%s]",
             session_id,
         )
-
-        # Re-dispatch context for SLOW background sub-agent inner activity. The
-        # subagent node already lives in the live_session_store (created in-stream
-        # at launch); these handlers locate it by agent_id/tool_use_id, so the
-        # message_id here is immaterial (the FE renders agent_children via the
-        # /live park-poll, not the WS broadcast).
-        sub_ectx = EventContext(
-            ctx=ctx,
-            session_id=session_id,
-            message_id=ctx.message_id,
-            user_id=user_id,
-            project_id=project_id,
-            worktree_id=worktree_id,
-        )
-        sub_state = MutableStreamState()
 
         agen = client.receive_messages()
         batch_deadline: Optional[float] = None
@@ -1093,21 +1120,17 @@ async def _drain_notifications_impl(
                         session_id, _inner_parent_tuid
                     ):
                         for _sub_ev in _subagent_events_from_message(message):
-                            await dispatch_event(_sub_ev, sub_ectx, sub_state)
-                            # V2 recording tap (no-op unless sessions.v2_stream)
+                            # V2: the session event log is the sole render path.
                             await record_drained_event(session_id, _sub_ev)
                 except Exception as _exc:
                     ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
                 # RC2: deliver a PARKED-state "Task Updated" chip. In-stream a
                 # TaskUpdatedMessage (a SystemMessage subclass) yields a
-                # {"type": "system", ...} event → handle_system → add_system_message
-                # → live-store update_id bump → the chip renders. The pump had no
+                # {"type": "system", ...} event that the turn recorder appends to
+                # the session event log → the chip renders. The pump had no
                 # equivalent, so a status patch that arrives while parked was
-                # structurally undeliverable (the park-poller keys on update_id and
-                # had nothing to fetch). Convert + dispatch through the SAME handler
-                # chain here. If the live store has no session (cleanup raced),
-                # add_system_message logs + drops it — must not crash the pump.
+                # structurally undeliverable. Convert + record it here.
                 try:
                     _status_evs = _task_status_events_from_message(message)
                     if _status_evs:
@@ -1141,8 +1164,7 @@ async def _drain_notifications_impl(
                                 )
                         if _chip_ok:
                             for _status_ev in _status_evs:
-                                await dispatch_event(_status_ev, sub_ectx, sub_state)
-                                # V2 recording tap (no-op unless v2_stream)
+                                # V2: record to the session event log.
                                 await record_drained_event(session_id, _status_ev)
                             if _tu_terminal:
                                 # A TERMINAL TaskUpdated chip rendered — record it
@@ -1157,80 +1179,18 @@ async def _drain_notifications_impl(
                 # backgrounded Task/Agent coming to rest while the parent is
                 # parked makes the CLI start its OWN follow-up turn on the pooled
                 # client — an injected user-lane string plus the model's answer.
-                # This pump is the only reader, and it used to drop all top-level
-                # user/assistant content, so that answer reached only the durable
-                # SDK transcript mirror (visible after refresh) but never the live
-                # store — the actively-watched UI showed nothing. Forward the
-                # CLI-driven turn's top-level events through the SAME dispatch
-                # pipeline a normal turn uses (live-store append + update_id bump
-                # + broadcasts) so park-pollers render it live. NOT while winding
-                # down a force-cancelled turn: the killed turn's residual output
-                # must stay dropped (the user stopped it).
+                # This pump is the only reader. Record the CLI-driven turn's
+                # top-level events to the session event log (record_drained_event
+                # filters to subagent_*/task_*/system types; the rest of the wake
+                # turn surfaces via the durable SDK transcript on the next load).
+                # NOT while winding down a force-cancelled turn: the killed
+                # turn's residual output must stay dropped (the user stopped it).
                 if not _stale_flag_set():
                     try:
                         _cli_evs = _cli_turn_events_from_message(
                             session_id, message, _cli_tool_names
                         )
                         if _cli_evs and not _cli_turn_forwarded:
-                            # FIRST forwarded event of a CLI-owned wake turn —
-                            # emit the client-facing engagement signal a normal
-                            # turn's run_query emits at start. A connected but
-                            # IDLE viewing client's poller went idle when the
-                            # parent turn ended (the #502 bounded park poll only
-                            # covers fresh loads / time-bounded windows); its
-                            # ONLY rescue is the WS parked-watcher, which restarts
-                            # polling on a stream_start/chunk/end broadcast.
-                            # dispatch_event below DOES broadcast stream_start via
-                            # the handler chain — but ONLY once, gated behind the
-                            # pump's shared ``sub_state.stream_started`` latch that
-                            # never resets across the pump's lifetime, so the
-                            # SECOND+ CLI wake turn lands silently (content in the
-                            # live store, update_id bumped, but no WS signal) and
-                            # an idle client renders nothing until a manual
-                            # refresh — the observed bug. Broadcast stream_start
-                            # explicitly for EVERY wake turn's first forwarded
-                            # event so any connected client re-engages its poller.
-                            try:
-                                await sync_engine.broadcast_stream_start(
-                                    session_id=session_id,
-                                    message_id=ctx.message_id,
-                                    source_device_id=None,
-                                    usage=None,
-                                    user_id=user_id,
-                                    project_id=project_id,
-                                    worktree_id=worktree_id,
-                                )
-                            except Exception as _bexc:
-                                ctx.debug(
-                                    logger,
-                                    "Drain pump: CLI-wake stream_start broadcast "
-                                    f"failed: {_bexc}",
-                                )
-                            # WAKE-TURN STREAMING STATE (Half 1): the CLI's own
-                            # wake turn is now streaming content into the live
-                            # store — reflect it on the live session so /live
-                            # reports is_streaming=true and clients treat it
-                            # like a real turn (composer locks, pollers
-                            # upshift). set_streaming mutates the EXISTING
-                            # LiveSession in place — NEVER start_streaming here
-                            # (it rebuilds the session and wipes the parked
-                            # message buffer the wake turn appends to). The
-                            # pump's own start gate reads the POOL
-                            # SessionState.is_streaming, a distinct flag this
-                            # never touches. Cleared by the finalize's
-                            # end_streaming below and by every pump exit path
-                            # (leak guard: a stranded True freezes the
-                            # composer with no turn left to ever end it).
-                            try:
-                                await live_session_store.set_streaming(
-                                    session_id, True
-                                )
-                            except Exception as _sexc:
-                                ctx.debug(
-                                    logger,
-                                    "Drain pump: wake set_streaming(True) "
-                                    f"failed: {_sexc}",
-                                )
                             # Belt-and-braces for a park-poller mid-cycle: keep the
                             # unpark_pending latch UP while this wake turn is being
                             # forwarded so a poll that samples between complete_task
@@ -1242,17 +1202,12 @@ async def _drain_notifications_impl(
                             _cli_wake_latched = True
                         for _cli_ev in _cli_evs:
                             if _cli_ev.get("type") == "thinking_block":
-                                # No dispatchable thinking event type exists —
-                                # append + finalize directly (complete blocks).
-                                await live_session_store.append_thinking(
-                                    session_id, _cli_ev.get("content") or ""
-                                )
-                                await live_session_store.finalize_thinking(session_id)
-                            else:
-                                await dispatch_event(_cli_ev, sub_ectx, sub_state)
-                                # V2 recording tap (record_drained_event itself
-                                # filters to subagent_*/task_*/system types)
-                                await record_drained_event(session_id, _cli_ev)
+                                # Not a recordable drained type — dropped (the
+                                # durable SDK transcript keeps the thinking).
+                                continue
+                            # V2: record to the session event log (the recorder
+                            # filters to subagent_*/task_*/system types).
+                            await record_drained_event(session_id, _cli_ev)
                         if _cli_evs:
                             _cli_turn_forwarded = True
                     except Exception as _exc:
@@ -1324,17 +1279,15 @@ async def _drain_notifications_impl(
                         continue
                     # CLI-DRIVEN TURN CAME TO REST: this ResultMessage closes a
                     # turn the CLI started on its own (content was forwarded
-                    # above). Finalize the live view exactly like a normal turn
-                    # end: end_streaming marks the forwarded messages
-                    # non-streaming, filters the hidden <task-notification>
-                    # user rows, flags a full refresh + bumps update_id, and
-                    # clears the unpark_pending latch we armed at the wake (its
-                    # job — keeping the park-poller alive through the CLI turn —
-                    # is done; activeTasks keeps the poller up if other
-                    # background work remains). Skipped when an app unpark
+                    # above). Finalize exactly like a normal turn end: persist
+                    # the durable end-of-turn state (parked marker + latch
+                    # backstop) and clear the unpark_pending latch we armed at
+                    # the wake (its job — keeping the park-poller alive through
+                    # the CLI turn — is done; activeTasks keeps the poller up if
+                    # other background work remains). Skipped when an app unpark
                     # delivery is pending: _deliver_unpark_impl runs its own
-                    # end_streaming + re-latch, and an early clear here would
-                    # reopen the #473 poller-strand gap mid-window.
+                    # end-of-turn persist + re-latch, and an early clear here
+                    # would reopen the #473 poller-strand gap mid-window.
                     if _cli_turn_forwarded:
                         _cli_turn_forwarded = False
                         _cli_wake_latched = False
@@ -1369,37 +1322,10 @@ async def _drain_notifications_impl(
                             batch_deadline = None
                         if not pending:
                             try:
-                                await live_session_store.end_streaming(
-                                    session_id=session_id,
-                                    metadata={},
-                                    interrupted=_wake_interrupted,
-                                )
-                                # Matching engagement-END signal for the
-                                # stream_start we broadcast when this wake turn's
-                                # first event was forwarded. ``end_streaming``
-                                # above only MUTATES the live store (marks the
-                                # forwarded messages non-streaming + bumps
-                                # update_id) — it does NOT broadcast over the WS,
-                                # so without this a client that engaged on the
-                                # stream_start never sees the turn close (and the
-                                # parked-watcher's stream_end restart is lost).
-                                try:
-                                    await sync_engine.broadcast_stream_end(
-                                        session_id=session_id,
-                                        message_id=ctx.message_id,
-                                        metadata={},
-                                        interrupted=_wake_interrupted,
-                                        source_device_id=None,
-                                    )
-                                except Exception as _bexc:
-                                    ctx.debug(
-                                        logger,
-                                        "Drain pump: CLI-wake stream_end "
-                                        f"broadcast failed: {_bexc}",
-                                    )
+                                await persist_turn_end_state(session_id)
                                 logger.info(
-                                    "Drain pump: CLI-driven turn finalized in "
-                                    "live view (interrupted=%s) [session=%s]",
+                                    "Drain pump: CLI-driven turn finalized "
+                                    "(interrupted=%s) [session=%s]",
                                     _wake_interrupted,
                                     session_id,
                                 )
@@ -1413,8 +1339,8 @@ async def _drain_notifications_impl(
                             # CLI-owned wake, so consume the stop latch here —
                             # a stranded entry suppresses every later queue
                             # kick — and drop the unpark-pending latch
-                            # (end_streaming above also clears it; this covers
-                            # the finalize paths that skipped it).
+                            # (persist_turn_end_state above also clears it; this
+                            # covers the finalize paths that skipped it).
                             _stopped_sessions.discard(session_id)
                             task_registry.clear_unpark_pending(session_id)
                     continue
@@ -1551,24 +1477,20 @@ async def _drain_notifications_impl(
                 # Complete the matching subagent node (keyed by tool_use_id). The node
                 # was kept RUNNING at launch (the launch-ACK no longer completes it), so
                 # the terminal notification is what marks it done/errored — mirrors the
-                # in-stream task_notification path for FAST sub-agents. Idempotent:
-                # no-ops if the node was already completed in-stream or isn't a subagent.
+                # in-stream task_notification path for FAST sub-agents. V2: record to
+                # the session event log (task_* types pass the drained-event filter).
                 _notif_tool_use_id = frame.get("tool_use_id")
                 if _notif_tool_use_id:
                     try:
-                        await dispatch_event(
-                            {
-                                "type": "task_notification",
-                                "tool_use_id": _notif_tool_use_id,
-                                "status": status,
-                                "usage": frame.get("usage"),
-                                "summary": frame.get("summary"),
-                            },
-                            sub_ectx,
-                            sub_state,
-                        )
+                        await record_drained_event(session_id, {
+                            "type": "task_notification",
+                            "tool_use_id": _notif_tool_use_id,
+                            "status": status,
+                            "usage": frame.get("usage"),
+                            "summary": frame.get("summary"),
+                        })
                     except Exception as _exc:
-                        ctx.debug(logger, f"Drain pump: subagent completion dispatch failed: {_exc}")
+                        ctx.debug(logger, f"Drain pump: subagent completion record failed: {_exc}")
 
                 # Optional best-effort FE nudge; registry + poll already clear the
                 # indicator, so failure here is harmless.
@@ -1691,7 +1613,8 @@ async def _drain_notifications_impl(
                             task_registry.mark_chipped(session_id, task_id, "start")
                             try:
                                 for _chip_ev in _task_status_event_from_notification(message):
-                                    await dispatch_event(_chip_ev, sub_ectx, sub_state)
+                                    # V2: record to the session event log.
+                                    await record_drained_event(session_id, _chip_ev)
                                 _chipped_task_ids.add(task_id)
                             except Exception as _exc:
                                 ctx.debug(logger, f"Drain pump: notification chip synth failed: {_exc}")
@@ -1700,56 +1623,10 @@ async def _drain_notifications_impl(
                         # emptied activeTasks, so /live would otherwise read as
                         # idle and the poller would stop before the CLI turn's
                         # content lands). Released by the CLI turn's
-                        # ResultMessage (end_streaming above), a new turn's
-                        # start_streaming, or the pump exit paths.
+                        # ResultMessage finalize (persist_turn_end_state above),
+                        # a new turn's start, or the pump exit paths.
                         task_registry.mark_unpark_pending(session_id)
                         _cli_wake_latched = True
-                        # STUCK-ACTIVE SUBAGENT CARD FIX: re-engage an IDLE
-                        # watcher's poller so it fetches the just-completed
-                        # subagent card. The terminal task_notification dispatch
-                        # above marked the subagent node done in the live store,
-                        # but a background (run_in_background) subagent's card +
-                        # "N/M tools" counter is rendered SOLELY from the /live
-                        # park-poll — never from the direct WS frame — so it only
-                        # flips active→done once the poller polls AFTER the node
-                        # completes. mark_unpark_pending (above) keeps /live
-                        # reporting busy, but that only helps a poller that is
-                        # STILL polling: a watcher whose bounded park-poll (#502)
-                        # already expired when the parent turn ended has a STOPPED
-                        # poller, and the node-completion + chip broadcasts
-                        # (subagent_*/system event_types) are dropped by the FE's
-                        # idle-watcher shouldNotify gate (ws-message-handlers.ts —
-                        # only stream_start/chunk/end pass while isStreaming=false).
-                        # So the card froze one short (M-1) + spinning until a full
-                        # reload read the persisted terminal state. The CLI-owned
-                        # wake path's own re-engagement broadcast (broadcast_stream_
-                        # start) only fires WHEN the CLI's injection turn is
-                        # forwarded (which lands +6ms…+5.8s later, or never for a
-                        # completion the model does not answer). Emit a neutral
-                        # stream_chunk nudge NOW so the stopped poller restarts
-                        # (notifier → startStreaming, self-limiting on the next
-                        # idle /live tick) and renders the completed card
-                        # immediately. Distinct seam from #543 (that fix keeps the
-                        # origin device registered for deferred run_query WAKE
-                        # turns — the app-unpark "deliver" branch below; this pump
-                        # branch never starts a run_query). stream_chunk (not
-                        # stream_start) avoids a spurious streaming-indicator flip
-                        # (no _streaming_sessions mutation, no optimistic
-                        # isStreaming=true on the FE) — it is a pure "re-fetch".
-                        try:
-                            await sync_engine.broadcast_stream_chunk(
-                                session_id=session_id,
-                                message_id=ctx.message_id,
-                                chunk_type="subagent_tool_result",
-                                chunk_data={"task_id": task_id, "status": status},
-                                source_device_id=None,
-                            )
-                        except Exception as _bexc:
-                            ctx.debug(
-                                logger,
-                                "Drain pump: stuck-card re-engagement broadcast "
-                                f"failed: {_bexc}",
-                            )
                     continue
 
                 # Dedup keyed on task_id ALONE (Bug 1, policy #2): one unpark per task
@@ -1786,15 +1663,14 @@ async def _drain_notifications_impl(
                 # task_updated patch), so the generic converter above yielded
                 # nothing and — while PARKED — no completion card ever rendered.
                 # Synthesize the SAME {"type":"system","subtype":"task_updated"}
-                # chip the in-stream loop renders and dispatch it through the
-                # identical handle_system -> add_system_message chain (live-store
-                # update_id bump -> park-poller renders it). Only on the DELIVER
-                # path: suppress-foreground (synchronous sub-agent) and dedup
-                # notifications continue'd out above, so — like in-stream — a
-                # foreground/duplicate completion drops no card. Guard against a
-                # task_updated chip already emitted for this task this run, AND
-                # against a terminal chip already latched for its lifetime
-                # (mark_chipped — the cross-run cap).
+                # chip the in-stream loop renders and record it to the session
+                # event log. Only on the DELIVER path: suppress-foreground
+                # (synchronous sub-agent) and dedup notifications continue'd out
+                # above, so — like in-stream — a foreground/duplicate completion
+                # drops no card. Guard against a task_updated chip already
+                # emitted for this task this run, AND against a terminal chip
+                # already latched for its lifetime (mark_chipped — the cross-run
+                # cap).
                 if (
                     task_id
                     and task_id not in _chipped_task_ids
@@ -1803,7 +1679,8 @@ async def _drain_notifications_impl(
                     task_registry.mark_chipped(session_id, task_id, "start")
                     try:
                         for _chip_ev in _task_status_event_from_notification(message):
-                            await dispatch_event(_chip_ev, sub_ectx, sub_state)
+                            # V2: record to the session event log.
+                            await record_drained_event(session_id, _chip_ev)
                         _chipped_task_ids.add(task_id)
                     except Exception as _exc:
                         ctx.debug(logger, f"Drain pump: notification chip synth failed: {_exc}")
@@ -1819,7 +1696,7 @@ async def _drain_notifications_impl(
                 # Latch unpark-pending the MOMENT the completion is consumed.
                 # ``complete_task`` (via ``_record_task_message`` above) already
                 # dropped the task from ``get_active``, so from here until the
-                # follow-up's ``start_streaming`` a /live poll would read
+                # follow-up turn starts a /live poll would read
                 # (is_streaming=false, activeTasks=[]) — indistinguishable from
                 # idle. Latching only inside ``_deliver_unpark_impl`` (after the
                 # consolidation window + its DB writes) left that gap >= the whole
@@ -1828,7 +1705,7 @@ async def _drain_notifications_impl(
                 # poller, and the follow-up streamed into a stranded UI (stuck
                 # showing parked + a stale running task). Idempotent with the
                 # deliver-time latch, which stays as the last-line re-assert after
-                # its own ``end_streaming`` (that call clears the latch).
+                # its own ``persist_turn_end_state`` (that call clears the latch).
                 task_registry.mark_unpark_pending(session_id)
                 # Consolidate (Bug 1, policy #3): keep draining within the batch window
                 # instead of breaking, so completions landing close together fold into
@@ -1859,32 +1736,19 @@ async def _drain_notifications_impl(
     except asyncio.CancelledError:
         # Stopped by stop_drain_pump (a new turn is starting) — exit without
         # firing. Drop our early latch (if any): no follow-up will stream for the
-        # pending we collected, and the new turn's own start_streaming would only
+        # pending we collected, and the new turn's own start would only
         # clear it if that turn actually starts. A CLI-owned-wake latch is dropped
         # for the same reason — this pump can no longer forward the CLI's turn,
-        # and the new turn's start_streaming re-covers poller liveness. Re-raise
+        # and the new turn's start re-covers poller liveness. Re-raise
         # so the awaiter sees the cancellation.
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
-        # Leak guard (Half 1): a wake turn was mid-forward — drop the live
-        # store's streaming flag or it strands True forever (frozen composer).
-        if _cli_wake_latched:
-            try:
-                await live_session_store.set_streaming(session_id, False)
-            except Exception:
-                pass
         _drop_drain_pump_self(session_id, _drain_pumps)
         raise
     except Exception as exc:
         ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
         if pending or _cli_wake_latched:
             task_registry.clear_unpark_pending(session_id)
-        # Leak guard (Half 1): same stranded-True hazard as the cancel path.
-        if _cli_wake_latched:
-            try:
-                await live_session_store.set_streaming(session_id, False)
-            except Exception:
-                pass
         # If we were winding down a force-cancelled turn when the read stream died,
         # evict: a dead read loop makes the client broken by definition — its stale
         # frame will never be consumed, so it must not stay pooled behind the
@@ -1921,17 +1785,6 @@ async def _drain_notifications_impl(
     if _cli_wake_latched and not pending:
         task_registry.clear_unpark_pending(session_id)
 
-    # Leak guard (Half 1): a wake still latched at a normal exit means its
-    # ResultMessage never arrived through this pump — drop the live store's
-    # streaming flag or it strands True forever (frozen composer). When
-    # ``pending`` will be delivered below, the delivery's own end_streaming /
-    # start_streaming supersedes this; clearing first is an idempotent no-op.
-    if _cli_wake_latched:
-        try:
-            await live_session_store.set_streaming(session_id, False)
-        except Exception:
-            pass
-
     if pending:
         # Re-check guards before delivering — a stop/interrupt may have raced.
         if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
@@ -1944,12 +1797,6 @@ async def _drain_notifications_impl(
             # Drop the early latch: no follow-up will stream, so a polling client
             # must not be held in park-poll waiting for one.
             task_registry.clear_unpark_pending(session_id)
-            # And the wake-turn streaming flag: a finalize-with-pending left it
-            # to this delivery, which is now suppressed (idempotent if clear).
-            try:
-                await live_session_store.set_streaming(session_id, False)
-            except Exception:
-                pass
             return
         logger.info(
             "Drain pump: delivering unpark follow-up [pending=%d, session=%s]",
@@ -1996,7 +1843,7 @@ def _start_drain_pump_impl(
     logger.info("Drain pump: task created [session=%s]", session_id)
 
     # V2 recording tap: the session is now parked awaiting background work —
-    # append turn.parked to the event log (no-op unless sessions.v2_stream).
+    # append turn.parked to the event log unconditionally.
     # Fire-and-forget: recording must never delay or fail the pump start.
     try:
         from app.core.task_registry import task_registry
@@ -2178,7 +2025,12 @@ class ChatWebSocketHandler:
         # reconcile stale entries from before a disconnect.  Previously this was
         # only sent when there *were* streaming sessions, which meant stale
         # entries from a missed `done` event would persist indefinitely.
-        user_streaming = sync_engine.get_user_streaming_sessions(self.user_id)
+        # Sourced from the durable runs table (v2 core): one lease-valid-runs ⋈
+        # sessions query, same outgoing frame/shape as the legacy in-memory map.
+        from app.core import streaming_status
+        user_streaming = await asyncio.to_thread(
+            streaming_status.get_user_streaming_sessions, self.user_id
+        )
         await self.send_json({
             "type": "user_streaming_sessions",
             "sessions": user_streaming or [],
@@ -2260,16 +2112,10 @@ class ChatWebSocketHandler:
                             _active_chat_sessions.pop(self.current_session_id, None)
 
                     if remaining_devices == 0 and is_task_done:
-                        # No more devices watching and no active query
-                        # Only cleanup sessions still in streaming state (abnormal);
-                        # ended sessions age out via pool eviction (LRU/idle)
+                        # No more devices watching and no active query — nothing
+                        # to tear down here (V2: busy truth lives in the runs
+                        # table; sessions age out via pool eviction).
                         logger.debug(f"Last device disconnected from session {self.current_session_id}")
-                        if live_session_store.has_session(self.current_session_id) and live_session_store.is_streaming(self.current_session_id):
-                            await live_session_store.cleanup_session(self.current_session_id)
-                            logger.debug(f"Cleaned up stuck streaming session {self.current_session_id}")
-
-                        # Clear streaming state in sync engine (no need to broadcast - no devices left)
-                        await sync_engine.clear_streaming_state(self.current_session_id)
 
                     elif remaining_devices > 0:
                         logger.debug(f"Session {self.current_session_id} still has {remaining_devices} device(s) connected")
@@ -2478,7 +2324,6 @@ class ChatWebSocketHandler:
                         worktree_id=worktree_id,
                         worktree_branch=wt_branch,
                         worktree_path=wt_path,
-                        v2_stream=settings.v2_stream_default,
                         _conn=txn
                     )
                     _msg_role = "user"
@@ -2509,9 +2354,9 @@ class ChatWebSocketHandler:
                 "session_id": session_id,
                 "title": title,
                 "worktree_id": worktree_id,  # Include worktree_id in response
-                # V2: the session was just created with this flag — echo it so
-                # the client knows whether to attach the typed event feed.
-                "v2_stream": settings.v2_stream_default
+                # V2: the session was just created on the V2 streaming path —
+                # echo it so the client attaches the typed event feed.
+                "v2_stream": True
             }
             if request_id:
                 session_created_frame["request_id"] = request_id
@@ -2572,8 +2417,8 @@ class ChatWebSocketHandler:
         # this check-and-register (below): persisting first meant a preempted
         # query enqueued an already-persisted prompt, and the queue drain later
         # persisted it a second time (duplicate user-message row).
-        # Note: broadcast_stream_start is called inside run_query when actual
-        # streaming begins. This prevents stuck streaming state if query fails early.
+        # Note: streaming/busy state flips when the turn's run lease is claimed
+        # inside run_query. This prevents stuck streaming state if query fails early.
         # Pass the adoption token ONLY for a brand-new session so the first `start`
         # frame echoes it (authenticating adoption). An existing-session query needs
         # no token — the frontend already routes its start by the known session_id.
@@ -2622,8 +2467,8 @@ class ChatWebSocketHandler:
         # turn (existing sessions only — a new session persisted its first
         # message atomically at creation and cannot be preempted: nothing else
         # knows its freshly minted id). The running turn never misses the
-        # prompt: run_query hands it to the SDK directly and the live store
-        # carries it via add_user_message; session_messages is not on the
+        # prompt: run_query hands it to the SDK directly and the recorder
+        # logs it to the event feed; session_messages is not on the
         # streaming-init read path. A failure here must not tear down the
         # already-running turn — log and continue.
         try:
@@ -2716,8 +2561,8 @@ class ChatWebSocketHandler:
             _stopped_sessions.add(session_id)
 
             # V2 recording tap: append turn.interrupting to the event log
-            # (no-op unless sessions.v2_stream). Fire-and-forget — recording
-            # must never delay the actual interrupt below.
+            # unconditionally. Fire-and-forget — recording must never delay
+            # the actual interrupt below.
             from app.core.turn_recorder import record_interrupting
             _ri_task = asyncio.create_task(record_interrupting(session_id, "stop"))
             _ri_task.add_done_callback(
@@ -2959,22 +2804,16 @@ class ChatWebSocketHandler:
         await sync_engine.register_device(self.device_id, session_id, self.websocket)
         self.current_session_id = session_id
 
-        # Unified message resolution: LiveSessionStore -> JSONL -> PostgreSQL
-        # The force_jsonl flag bypasses the live store cache (used after
-        # rewind to ensure we read the truncated JSONL, not stale data).
+        # Unified message resolution: DB -> JSONL -> SDK (V2: no live tier).
         sdk_session_id = session.get("sdk_session_id")
-        force_jsonl = data.get("force_jsonl", False)
         working_dir = resolve_working_dir(dict(session))
 
-        resolved = message_resolver.resolve(
-            session_id, sdk_session_id, working_dir,
-            force_jsonl=force_jsonl,
-        )
+        resolved = message_resolver.resolve(session_id, sdk_session_id, working_dir)
         messages = resolved.messages
         logger.debug(f"Loaded {len(messages)} messages from {resolved.source} for session {session_id}")
 
         # Post-processing: merge profile_id for JSONL-sourced messages
-        # (DB and live_store messages already include profile_id). Consume the
+        # (DB messages already include profile_id). Consume the
         # ordered per-content queue so each user message gets its own profile even
         # when the same prompt repeats under a changed profile, and carry that
         # turn's profile onto its assistant/thinking rows (JSONL stores none) so
@@ -3006,8 +2845,10 @@ class ChatWebSocketHandler:
         from app.core.cost_utils import attach_cost_metadata
         attach_cost_metadata(messages, session_id)
 
-        # Check if session is currently streaming (late-joining device)
-        is_streaming = sync_engine.is_session_streaming(session_id)
+        # Check if session is currently streaming (late-joining device) — busy
+        # truth from the durable runs table (v2 core).
+        from app.core import streaming_status
+        is_streaming = streaming_status.has_active_run(session_id)
         logger.debug(f"Session {session_id} streaming status: {is_streaming}")
 
         # Also check for queries that are about to stream but haven't
@@ -3020,41 +2861,10 @@ class ChatWebSocketHandler:
                 is_streaming = True
                 logger.debug(f"Session {session_id} has pending query task, marking as streaming")
 
-        # Validate streaming state - if marked streaming but no active task, it's stale
-        streaming_usage = None
-        active_block_type = None
-        if is_streaming:
-            active_task = _active_chat_sessions.get(session_id)
-            if active_task is None or active_task.done():
-                # Stale streaming state - clean it up silently
-                # Don't broadcast interrupted=True as the stream completed normally,
-                # the client just missed the completion event while disconnected.
-                # Use interrupted=False to avoid showing "[Stopped]" incorrectly.
-                logger.warning(f"Session {session_id} marked as streaming but no active task - clearing stale state (stream completed normally)")
-                await sync_engine.broadcast_stream_end(
-                    session_id=session_id,
-                    message_id="stale-cleanup",
-                    metadata={},
-                    interrupted=False,  # Changed from True - stream completed, not interrupted
-                    source_device_id=self.device_id  # Exclude self from broadcast
-                )
-                is_streaming = False
-            else:
-                # Use live_session_store for complete, authoritative state.
-                # This provides ALL messages with ALL fields (subagent, tool, etc.)
-                live_data = live_session_store.get_session_dict(session_id)
-                if live_data:
-                    messages = live_data["messages"]
-                    streaming_usage = live_data.get("usage")
-                    active_block_type = live_data.get("active_block_type")
-                    logger.debug(f"Session {session_id} is streaming, using live_session_store with {len(messages)} messages, usage: {streaming_usage}")
-                else:
-                    # LiveSessionStore should always have data for streaming sessions now.
-                    # If not, log a warning and return empty state.
-                    logger.warning(f"[WS] LiveSessionStore missing for streaming session {session_id}")
-                    messages = []
-                    streaming_usage = None
-                    active_block_type = None
+        # V2: no live-buffer override for streaming sessions — the persistent
+        # chain above is the history, and a late joiner picks up the live tail
+        # from the session event feed (SSE). Stale busy state self-heals via
+        # the run-lease TTL in the runs table.
 
         # Add worktree info if session is linked to a worktree. Worktree sessions
         # are always reopenable — we never null worktree_id; worktree_deleted only
@@ -3068,7 +2878,7 @@ class ChatWebSocketHandler:
             session["worktree_path"] = wt_meta["worktree_path"]
             session["worktree_deleted"] = wt_meta["worktree_deleted"]
 
-        # Build response with optional streamingUsage and activeBlockType for late-joiners
+        # Build response for late-joiners
         history_response = {
             "type": "history",
             "session_id": session_id,
@@ -3076,10 +2886,6 @@ class ChatWebSocketHandler:
             "messages": messages,
             "isStreaming": is_streaming,
         }
-        if streaming_usage:
-            history_response["streamingUsage"] = streaming_usage
-        if active_block_type:
-            history_response["activeBlockType"] = active_block_type
         # Include pending permissions/questions for reconnecting clients
         # When user disconnects and reconnects, they need to see any
         # pending permission requests or user questions that are still
@@ -3117,8 +2923,8 @@ class ChatWebSocketHandler:
         # class's equivalent of the closure's _draining_sessions
         # reservation — so a load racing a turn start can never double-run
         # the message. Like the closure's drain, this is deliberately
-        # socket-independent (the drained turn streams via the live store +
-        # sync_engine + polling), so it needs no headless websocket-None
+        # socket-independent (the drained turn streams via the event feed +
+        # polling), so it needs no headless websocket-None
         # guard; HeadlessChatHandler never issues load_session anyway
         # (headless_query_runner / cluster relay only reach run_query and
         # handle_queue_message).
@@ -3918,7 +3724,7 @@ class ChatWebSocketHandler:
             # re-queued an already-persisted message, and the next drain
             # persisted it a second time (duplicate user-message row). The
             # running turn never misses the prompt — run_query hands it to the
-            # SDK directly and the live store carries it via add_user_message;
+            # SDK directly and the recorder logs it to the event feed;
             # session_messages is not on the streaming-init read path. A
             # failure here must NOT re-queue (the turn is already running —
             # re-queuing would run the message twice) — log and continue.
@@ -4127,7 +3933,7 @@ class ChatWebSocketHandler:
 
         ``is_failover_retry`` marks a successor turn spawned by the account
         auto-switch-on-limit seam: the ORIGINAL turn already persisted the user
-        message (DB + live store) and the resumed stream seed already replays it,
+        message and the resumed stream seed already replays it,
         so this retry must NOT re-add the user message. ``failover_attempted``
         carries the per-turn set of account ids already tried (and 429'd on) so a
         chain of retries terminates once every account has been attempted.
@@ -4135,9 +3941,9 @@ class ChatWebSocketHandler:
         ``deferred_delivery`` marks a server-initiated turn (a queued "Send later"
         drain or a background sub-agent's unpark follow-up) whose delivery does not
         depend on this handler's own socket. When set, a failed ``start`` frame is
-        non-fatal: the turn streams via the live store + ``sync_engine`` broadcasts
-        + polling instead of tearing itself down (see the live ``/ws/chat`` route's
-        ``run_query`` for the matching contract).
+        non-fatal: the turn streams via the event feed + polling instead of
+        tearing itself down (see the live ``/ws/chat`` route's ``run_query`` for
+        the matching contract).
 
         ``request_id`` is the client's new-session adoption token (see
         ``handle_query``). It is echoed in the first ``start`` frame so the awaiting
@@ -4165,7 +3971,6 @@ class ChatWebSocketHandler:
         from app.api.websocket import (
             _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
         )
-        from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
         from app.core.task_registry import task_registry
@@ -4197,16 +4002,8 @@ class ChatWebSocketHandler:
             user_id=self.user_id,
         )
 
-        # Event dispatch context and mutable state
-        event_ctx = EventContext(
-            ctx=ctx,
-            session_id=session_id,
-            message_id=message_id,
-            user_id=self.user_id,
-            project_id=project_id,
-            worktree_id=worktree_id,
-        )
-        stream_state = MutableStreamState()
+        # Per-turn stream bookkeeping (first-output latch, final metadata).
+        stream_state = _TurnStreamState()
 
         # Unregister this device from SyncEngine while streaming.
         # This prevents duplicate events (we get direct events via send_json)
@@ -4216,63 +4013,22 @@ class ChatWebSocketHandler:
         #
         # EXCEPTION — server-initiated wake turns (``deferred_delivery=True``): a
         # follow-up turn started by the drain pump / unpark path is NOT owned by
-        # the client that is watching the session. Its only delivery channel is the
-        # sync_engine broadcast (dispatch_event → broadcast_event, source_device_id
-        # =None) to REGISTERED devices — direct ``send_json`` goes to this handler's
-        # (often dead or headless-None) origin socket. Unregistering here can empty
-        # ``sync_engine._connections[session_id]`` (broadcast_event silently no-ops
-        # on an empty map), so every stream_start/chunk/end of the wake turn goes
-        # nowhere live and the turn only surfaces on a full reload. KEEP the device
-        # registered for deferred turns so the turn streams to it via broadcast.
-        # A duplicate direct+broadcast edge on a still-alive origin socket is
-        # harmless: the FE applies the direct ``chunk`` (type=…) as content but
-        # treats the broadcast ``stream_chunk`` (event_type=…) only as a poller/
-        # notifier trigger (disjoint code paths — see ws-message-handlers.ts), so
-        # text is never double-appended. Mirrors how the CLI-owned wake pump path
-        # already forwards to registered devices via sync_engine.
+        # the client that is watching the session. Direct ``send_json`` goes to
+        # this handler's (often dead or headless-None) origin socket, so the wake
+        # turn's live delivery rides the session event feed (SSE) + polling. KEEP
+        # the device registered for deferred turns so non-render frames
+        # (message_added etc.) still reach it via sync_engine broadcast.
         if not deferred_delivery:
             await sync_engine.unregister_device(self.device_id, session_id, self.websocket)
             ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
         else:
             ctx.debug(logger, "Deferred-delivery wake turn — keeping device registered so it streams via sync_engine broadcast")
 
-        # Initialize LiveSessionStore for server-authoritative state
-        # Uses MessageResolver: checks ended live store first (for interrupt transitions),
-        # then JSONL. No DB fallback (DB message IDs conflict with JSONL-based sessions).
-        session_data = database.get_session(session_id)
-        sdk_sid = session_data.get("sdk_session_id") if session_data else None
-        w_dir = resolve_working_dir(session_data) if session_data else str(settings.workspace_dir)
-        # Offload the (potentially uncached) seed transcript parse to a thread:
-        # resolve_for_streaming_init can do a full synchronous Postgres store read in
-        # postgres_only mode, which would otherwise block the event loop on every turn.
-        initial_messages = await run_sync(
-            message_resolver.resolve_for_streaming_init, session_id, sdk_sid, w_dir
-        )
-        ctx.debug(logger, f"Loaded {len(initial_messages)} initial messages via MessageResolver")
-
-        # Start live session with existing messages
-        await live_session_store.start_streaming(
-            session_id, initial_messages, profile_id=profile_id
-        )
-
-        # Add user message to live store. On a failover retry this is normally
-        # skipped: the resumed stream seed already contains the original user
-        # message and the DB row was persisted by the original turn, so re-adding
-        # would duplicate it. BUT if the ended live-store snapshot was cleaned up
-        # in the hand-off window (no-devices cleanup / eviction), the seed can
-        # LACK the user message — dropping the add then makes the prompt vanish
-        # from the live view. So on a retry, skip only when the resolved seed
-        # already carries this exact user prompt; default to ADDING otherwise.
-        user_message_id = f"user-{uuid.uuid4()}"
-        seed_has_user_prompt = any(
-            isinstance(m, dict)
-            and m.get("role") == "user"
-            and isinstance(m.get("content"), str)
-            and m.get("content") == prompt
-            for m in (initial_messages or [])
-        )
-        if not (is_failover_retry and seed_has_user_prompt):
-            await live_session_store.add_user_message(session_id, prompt, user_message_id)
+        # Capture the session's sdk_session_id at the START of this turn — the
+        # orphan-discard path (finally) uses it to tell a brand-new session's
+        # first turn from a follow-up.
+        _session_row = database.get_session(session_id)
+        sdk_sid = _session_row.get("sdk_session_id") if _session_row else None
 
         # Heartbeat task to keep WebSocket alive during long operations (tool execution, subagents)
         # The streaming loop blocks when SDK is waiting for tool results, so we send periodic
@@ -4282,12 +4038,10 @@ class ChatWebSocketHandler:
 
         # Set to True when pre-close queue processing spawned a successor
         # run_query task for the next queued message. When True, the finally
-        # block below MUST NOT touch live_session_store, sync_engine streaming
-        # state, or the SyncEngine device registration for this session — the
-        # successor task now owns all of that. Touching them here would race
-        # with the successor's start_streaming/unregister_device calls and
-        # leave the session in a frozen "locked" state with no stream events
-        # reaching the client.
+        # block below MUST NOT touch the SyncEngine device registration for
+        # this session — the successor task now owns it. Touching it here
+        # would race with the successor's unregister_device call and leave
+        # the session with no stream events reaching the client.
         handed_off_to_queued = False
 
         async def send_heartbeats():
@@ -4334,12 +4088,11 @@ class ChatWebSocketHandler:
                 ctx.warning(logger, "Connection lost before query could start")
                 if deferred_delivery:
                     # Server-initiated turn (queue drain / unpark follow-up) on a
-                    # dead origin socket: fall through and stream via the live
-                    # store + sync_engine + polling rather than aborting (which
-                    # stranded parked-session unpark turns until a full reload).
-                    ctx.info(logger, "start frame undeliverable on origin socket — streaming via sync_engine + polling")
+                    # dead origin socket: fall through and stream via the event
+                    # feed + polling rather than aborting (which stranded
+                    # parked-session unpark turns until a full reload).
+                    ctx.info(logger, "start frame undeliverable on origin socket — streaming via the event feed + polling")
                 else:
-                    await live_session_store.cleanup_session(session_id)
                     return  # Exit early - connection is dead
 
             # NOTE: Don't call start_assistant_message here!
@@ -4390,20 +4143,31 @@ class ChatWebSocketHandler:
                 else:
                     ctx.debug(logger, f"Streaming event: {event_type}")
 
-                # Send to this websocket - may fail if connection died
-                # Important: Do NOT skip store updates if WebSocket fails!
-                # The live_session_store must be updated regardless of WebSocket state
-                # so that polling clients can receive updates.
                 # Tag every event with session_id so the frontend can reject
                 # late-arriving events from a previous session (cross-session guard).
                 event["session_id"] = session_id
-                ws_connected = await self.send_json(event)
-                if not ws_connected and not stream_state.connection_lost_logged:
-                    stream_state.connection_lost_logged = True
-                    ctx.debug(logger, "WebSocket disconnected during streaming, updates continue via sync_engine + polling")
 
-                # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
-                await dispatch_event(event, event_ctx, stream_state)
+                # V2 render-frame trim: render frames ride the session event
+                # feed (SSE) — only lifecycle/permission/etc. frames still go
+                # to the socket. Send may fail if the connection died; the
+                # recorder keeps appending regardless, so polling/SSE clients
+                # continue to receive updates.
+                if not _is_trimmed_render_frame(event_type):
+                    ws_connected = await self.send_json(event)
+                    if not ws_connected and not stream_state.connection_lost_logged:
+                        stream_state.connection_lost_logged = True
+                        ctx.debug(logger, "WebSocket disconnected during streaming, updates continue via the event feed + polling")
+
+                # Per-turn bookkeeping (replaces the deleted event-dispatch
+                # chain): capture the done metadata and flip the first-output
+                # latch. The SDK 'init' system message does NOT count as output.
+                if event_type == "done":
+                    stream_state.final_metadata = event.get("metadata", {}) or {}
+                if not stream_state.stream_started and (
+                    event_type in ("stream_start", "stream_delta", "chunk", "tool_use")
+                    or (event_type == "system" and event.get("subtype") != "init")
+                ):
+                    stream_state.stream_started = True
 
                 # --- Background-task terminal latch (in-stream completions) ---
                 # If a background task finishes BEFORE the parent's ResultMessage,
@@ -4432,6 +4196,11 @@ class ChatWebSocketHandler:
                 # query.
 
             ctx.debug(logger, "Query completed")
+
+            # V2 turn-END: persist the durable parked marker and clear the
+            # unpark-pending latch (these writes used to piggyback on the old
+            # in-memory store's turn teardown). Idempotent and never raises.
+            await persist_turn_end_state(session_id)
 
             # --- Account auto-switch-on-limit (failover) ---
             # If this turn ended on a usage-limit 429 and auto-switch is enabled,
@@ -4468,12 +4237,8 @@ class ChatWebSocketHandler:
                         f"Failover: retrying turn on account "
                         f"{decision.account_name} (switched={decision.switched})",
                     )
-                    # End current streaming state so the successor can re-init.
-                    await live_session_store.end_streaming(
-                        session_id=session_id,
-                        metadata=stream_state.final_metadata,
-                        interrupted=False,
-                    )
+                    # Turn-END side effects before the successor re-inits.
+                    await persist_turn_end_state(session_id)
                     try:
                         task = asyncio.create_task(
                             self.run_query(
@@ -4543,12 +4308,8 @@ class ChatWebSocketHandler:
                         source_device_id=None,
                     )
 
-                    # End current streaming state so the new query can re-init
-                    await live_session_store.end_streaming(
-                        session_id=session_id,
-                        metadata=stream_state.final_metadata,
-                        interrupted=False,
-                    )
+                    # Turn-END side effects before the new query re-inits.
+                    await persist_turn_end_state(session_id)
 
                     # Start new query inline — session stays active, no gap.
                     # Mark it a queue-drain successor: msg1 is already committed,
@@ -4568,9 +4329,8 @@ class ChatWebSocketHandler:
                             _active_chat_sessions[session_id] = task
                         self.query_task = task
                         # Mark that ownership passed to the successor task. The
-                        # finally block will skip live_session_store cleanup,
-                        # sync_engine streaming teardown, and device re-register
-                        # to avoid racing with the successor's setup.
+                        # finally block will skip turn teardown and device
+                        # re-register to avoid racing with the successor's setup.
                         handed_off_to_queued = True
                         ctx.debug(logger, "Queue: new query started for queued message (handed off)")
                         return  # Exit this run_query — the new task continues streaming
@@ -4652,12 +4412,8 @@ class ChatWebSocketHandler:
                             },
                             source_device_id=None,
                         )
-                        # End current streaming state so the successor re-inits.
-                        await live_session_store.end_streaming(
-                            session_id=session_id,
-                            metadata=stream_state.final_metadata,
-                            interrupted=False,
-                        )
+                        # Turn-END side effects before the successor re-inits.
+                        await persist_turn_end_state(session_id)
                         task = asyncio.create_task(
                             self.run_query(
                                 compact_continue.AUTO_CONTINUE_PROMPT,
@@ -4695,9 +4451,8 @@ class ChatWebSocketHandler:
             # still-alive SDK client (after this turn's receive_response() already
             # returned at the parent ResultMessage). Start a between-turns drain pump
             # to catch it and unpark the parent. By here stream_to_websocket's finally
-            # has set state.is_streaming False and handle_done has called
-            # live_session_store.end_streaming, so the pump sees the client idle and
-            # not owned by a turn.
+            # has set state.is_streaming False and the run lease is closed, so the
+            # pump sees the client idle and not owned by a turn.
             if (
                 session_id not in _stopped_sessions
                 and session_id not in _interrupt_pending_sessions
@@ -4765,28 +4520,8 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "stopped", "session_id": session_id})
             ctx.debug(logger, "Query cancelled")
 
-            # End live session store with interrupted flag
-            # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
-            await live_session_store.end_streaming(
-                session_id=session_id,
-                metadata={},
-                interrupted=True
-            )
-
-            # Cleanup of the in-memory buffer is now driven by pool eviction
-            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
-            # not a standalone timer. The buffer stays warm for reconnecting
-            # clients until the session ages out of the pool.
-
-            # Broadcast stream end with interrupted flag
-            if stream_state.stream_started:
-                await sync_engine.broadcast_stream_end(
-                    session_id=session_id,
-                    message_id=message_id,
-                    metadata={},
-                    interrupted=True,
-                    source_device_id=None
-                )
+            # V2 turn-END side effects (an interrupted turn still ends the turn).
+            await persist_turn_end_state(session_id)
 
         except Exception as e:
             ctx.error(logger, f"Query error: {e}", exc_info=True)
@@ -4796,27 +4531,8 @@ class ChatWebSocketHandler:
             # block) so the frontend routes the error to the right session.
             await self.send_json({"type": "error", "message": f"Error: {error_detail}", "session_id": session_id})
 
-            # End live session store on error
-            # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
-            await live_session_store.end_streaming(
-                session_id=session_id,
-                metadata={"error": str(e)},
-                interrupted=True
-            )
-
-            # Cleanup of the in-memory buffer is now driven by pool eviction
-            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
-            # not a standalone timer.
-
-            # Broadcast stream end on error
-            if stream_state.stream_started:
-                await sync_engine.broadcast_stream_end(
-                    session_id=session_id,
-                    message_id=message_id,
-                    metadata={"error": error_detail},
-                    interrupted=True,
-                    source_device_id=None
-                )
+            # V2 turn-END side effects (an errored turn still ends the turn).
+            await persist_turn_end_state(session_id)
 
             # --- Background "unpark" drain pump (ERROR path; Bug C) ---
             # Mirror of the success-branch pump start above. This turn ERRORED rather
@@ -4827,11 +4543,11 @@ class ChatWebSocketHandler:
             # exact SLOW-path race the success branch starts a pump for. Without this
             # mirror, an error that did NOT kill the client (a transient handler/
             # processing error) permanently strands the parent: the registry task
-            # stays "running" and the parent never unparks. end_streaming(interrupted)
-            # above already cleared is_streaming, so the pump sees an idle client; its
-            # own liveness guard (peek → not alive / is_streaming → return) makes this
-            # a safe no-op when the error DID tear the client down (that case is reaped
-            # by force-eviction cleanup instead — see live_session_store force path).
+            # stays "running" and the parent never unparks. The run lease is closed
+            # by here, so the pump sees an idle client; its own liveness guard
+            # (peek → not alive / is_streaming → return) makes this a safe no-op
+            # when the error DID tear the client down (that case is reaped by
+            # pool force-eviction cleanup instead).
             # A user Stop takes the CancelledError branch above, which intentionally
             # does NOT pump (the user explicitly stopped — don't resurrect the turn).
             if (
@@ -4899,35 +4615,10 @@ class ChatWebSocketHandler:
                     del _active_chat_sessions[session_id]
                 ctx.debug(logger, "run_query finally: handed off to queued successor — skipping cleanup")
             else:
-                # Only cleanup live session store if end_streaming was never called
-                # (i.e., an exception occurred before the normal done/error/cancel paths ran).
-                # If end_streaming WAS called, the session is kept in memory intentionally
-                # for ~30 seconds so reconnecting clients can retrieve messages.
-                # Ownership guard: a still-streaming store can also mean the drain
-                # pump handed this session to an unpark follow-up turn while this
-                # finally was unwinding — see ws_cleanup.superseded_by_successor.
-                # Cleaning up then would wipe the live session + task registry out
-                # from under the running follow-up.
-                if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                    if await superseded_by_successor(session_id):
-                        ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping cleanup")
-                    else:
-                        ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
-                        await live_session_store.cleanup_session(session_id)
-
-                # ALWAYS ensure streaming state is cleared, even if stream_started was never set
-                # This prevents stuck streaming state after errors or early termination
-                if sync_engine.is_session_streaming(session_id):
-                    if not stream_state.stream_started:
-                        # Stream was marked but never actually started - clean up silently
-                        ctx.debug(logger, "Cleaning up streaming state (never started)")
-                        await sync_engine.broadcast_stream_end(
-                            session_id=session_id,
-                            message_id=message_id,
-                            metadata={},
-                            interrupted=True,
-                            source_device_id=None
-                        )
+                # V2: no in-memory streaming state to tear down here. Busy truth
+                # comes from the durable runs table (the run lease is closed by
+                # stream_to_websocket's finally; a crashed writer self-heals via
+                # the lease TTL), so an abnormal unwind needs no explicit cleanup.
 
                 # Re-register device with SyncEngine now that streaming is complete,
                 # but ONLY if:
@@ -4963,26 +4654,14 @@ class ChatWebSocketHandler:
                 if _active_chat_sessions.get(session_id) is current_task:
                     del _active_chat_sessions[session_id]
 
-                # If no devices are connected after query finished, schedule cleanup
-                # (don't destroy immediately — user may reopen within 30s)
-                remaining_devices = sync_engine.get_device_count(session_id)
-                if remaining_devices == 0:
-                    ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
-                    if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                        # Only force-cleanup if still marked as streaming (abnormal state).
-                        # Ownership guard (same as the cleanup above): "no devices +
-                        # still streaming" is exactly the signature of an unpark
-                        # follow-up that started while this finally was unwinding —
-                        # that state belongs to the successor, not us.
-                        if await superseded_by_successor(session_id):
-                            ctx.debug(logger, "run_query finally: successor turn owns the live session — skipping no-device cleanup")
-                        else:
-                            await live_session_store.cleanup_session(session_id)
-                            ctx.debug(logger, "Cleaned up stuck streaming session")
+                # V2: no per-connection cleanup needed when the last device
+                # leaves — stale busy state self-heals via the run-lease TTL.
+                if sync_engine.get_device_count(session_id) == 0:
+                    ctx.debug(logger, "Query finished but no devices connected")
 
                 # Fallback queue processing for error/cancel paths.
                 # The normal completion path handles queued messages pre-close
-                # (before end_streaming), so this only fires when:
+                # (before teardown), so this only fires when:
                 #  - Query was cancelled (CancelledError) or errored
                 #  - A queued message arrived during the cancel/error teardown
 
@@ -5089,13 +4768,14 @@ class ChatWebSocketHandler:
                     # store teardown. The SESSION ROW IS KEPT: deleting it would
                     # orphan a worktree session's worktree link.
                     if not stream_state.stream_started:
-                        # Best-effort live-store cleanup: a fast force-cancel can
-                        # tear the live session down before end_streaming runs, so
-                        # this may already be a no-op by the time we get here.
+                        # V2: erase this turn's events from the session event log
+                        # (transcript.rewound from the turn's first seq). Best
+                        # effort — never blocks the discard decision.
                         try:
-                            await live_session_store.discard_empty_user_turn(session_id)
+                            from app.core.turn_recorder import discard_empty_turn
+                            await discard_empty_turn(session_id)
                         except Exception as discard_err:
-                            ctx.warning(logger, f"discard_empty_user_turn (live) failed: {discard_err}")
+                            ctx.warning(logger, f"empty-turn event-log discard failed: {discard_err}")
 
                         if drain_source_requeued:
                             # This "empty" turn is a server-initiated queue-drain

@@ -1,20 +1,24 @@
 """Wake-turn interrupt finalize, Half 2 (lifecycle batch, item 6a).
 
 Stopping a CLI-owned wake turn (the follow-up turn the CLI starts on its own
-after a backgrounded task rests, forwarded live by the drain pump) used to
-finalize as a NORMAL turn end: the pump's finalize hardcoded
-``interrupted=False`` into ``end_streaming``/``broadcast_stream_end``, and —
-because a wake turn has no ``run_query`` finally to consume them — the
-``_stopped_sessions`` latch and the ``unpark_pending`` latch LEAKED, silently
-suppressing every later queue kick for the session.
+after a backgrounded task rests, forwarded by the drain pump) used to finalize
+as a NORMAL turn end — and, because a wake turn has no ``run_query`` finally to
+consume them, the ``_stopped_sessions`` latch and the ``unpark_pending`` latch
+LEAKED, silently suppressing every later queue kick for the session.
 
-These tests drive the REAL pump reader with real SDK messages and pin:
+V2 (Phase-1 deletion): the live store and ``broadcast_stream_end`` are deleted;
+the wake finalize's observable contract is now durable/registry-level, pinned
+here by driving the REAL pump reader with real SDK messages:
 
 1. A wake ResultMessage landing with the session in ``_stopped_sessions``
-   finalizes ``interrupted=True`` (live store [Stopped] marker + stream_end
-   broadcast) and CLears both leaked latches.
-2. An error-shaped wake ResultMessage finalizes interrupted too.
-3. ``handle_stop`` during a CLI wake: ``interrupt_session`` is called, there
+   finalizes via ``persist_turn_end_state`` AND consumes both leaked latches
+   (``_stopped_sessions`` entry + ``unpark_pending``).
+2. An error-shaped wake ResultMessage counts as interrupted too: any app
+   unparks HELD in the pump's batch window are DROPPED (a stopped/errored wake
+   episode must not auto-start a follow-up turn), and the latches clear.
+3. A CLEAN wake finalize still delivers a held unpark (the complement proving
+   the drop in (2) is interrupt-specific).
+4. ``handle_stop`` during a CLI wake: ``interrupt_session`` is called, there
    is no foreground ``_active_chat_sessions`` task to cancel (correctly
    skipped, nothing raises), and a plain Stop with the preserve-background
    patch active does NOT call ``stop_all_background_tasks``.
@@ -28,9 +32,13 @@ import pytest
 import app.api.chat_ws_handler as cwh
 import app.api.ws_cleanup as ws_cleanup
 from app.api.ws_cleanup import _stopped_sessions
-from app.core.live_session_store import live_session_store
 from app.core.task_registry import task_registry
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TaskNotificationMessage,
+    TextBlock,
+)
 
 
 SESSION = "sess-wake-stop"
@@ -47,6 +55,22 @@ def _result(*, is_error=False, subtype="success"):
         duration_api_ms=5,
         is_error=is_error,
         num_turns=1,
+        session_id=SESSION,
+    )
+
+
+def _notif(task_id, *, status="completed", uuid="u-1", tool_use_id="tu-1",
+           summary="done"):
+    """A real SDK TaskNotificationMessage (so isinstance checks match)."""
+    return TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id=task_id,
+        status=status,
+        uuid=uuid,
+        tool_use_id=tool_use_id,
+        output_file="",
+        summary=summary,
         session_id=SESSION,
     )
 
@@ -95,8 +119,15 @@ def _patch_pool(state):
     return patch("app.core.session_pool.get_session_pool", return_value=pool)
 
 
+def _patch_recorder():
+    """Keep the pump's recorder hand-off out of the DB for these tests."""
+    return patch(
+        "app.core.turn_recorder.record_drained_event", new=AsyncMock()
+    )
+
+
 @pytest.fixture(autouse=True)
-async def _isolate():
+def _isolate():
     task_registry.reset_all()
     ws_cleanup._drain_pumps.clear()
     _stopped_sessions.discard(SESSION)
@@ -107,90 +138,81 @@ async def _isolate():
     ws_cleanup._drain_pumps.clear()
     _stopped_sessions.discard(SESSION)
     task_registry.reset_all()
-    await live_session_store.cleanup_ended_session(SESSION, force=True)
 
 
-async def _seed_parked_live_session():
-    await live_session_store.start_streaming(SESSION, initial_messages=[])
-    await live_session_store.end_streaming(SESSION, metadata={})
+def _seed_held_shell_unpark():
+    """A shell-kind background task whose terminal notification the pump HOLDS
+    in its batch window (app-owned unpark class — agents are cli-owned)."""
+    task_registry.start_task(SESSION, "task-1", "shell", "long build")
+    task_registry.mark_sdk_background_task(SESSION, "task-1")
+    task_registry.mark_background_launch(SESSION, "tu-1")
 
 
-async def test_stop_latched_wake_finalizes_interrupted_and_clears_latches():
-    await _seed_parked_live_session()
+async def test_stop_latched_wake_finalizes_and_clears_latches():
     # Simulate handle_stop landing mid-wake: latch BEFORE the ResultMessage.
     _stopped_sessions.add(SESSION)
 
-    client = _FakeClient([_assistant_text(), _result()], hang=True)
+    client = _FakeClient([_assistant_text(), _result()])
     state = _fake_state(client)
     handler = _make_handler()
 
-    end_bcast = AsyncMock()
-    with _patch_pool(state), \
-         patch.object(cwh.sync_engine, "broadcast_stream_end", end_bcast):
-        handler._start_drain_pump(SESSION, "claude-code", None, None)
-        for _ in range(40):
-            await asyncio.sleep(0.01)
-            if end_bcast.await_count:
-                break
-        await ws_cleanup.stop_drain_pump(SESSION)
+    with _patch_pool(state), _patch_recorder(), \
+         patch.object(cwh, "persist_turn_end_state", new=AsyncMock()) as finalize:
+        await handler._drain_notifications(SESSION, "claude-code", None, None)
 
-    # (a) finalize marked the wake turn interrupted, not a clean end.
-    end_bcast.assert_awaited_once()
-    assert end_bcast.await_args.kwargs["interrupted"] is True
-    data = live_session_store.get_session_dict(SESSION)
-    wake_msgs = [m for m in data["messages"] if "wake answer" in m["content"]]
-    assert wake_msgs and wake_msgs[-1]["content"].endswith("[Stopped]")
-    # (b) leaked latches cleared: a stranded _stopped_sessions entry would
-    # suppress every later queue kick; a stranded unpark_pending strands the
-    # park-poller.
+    # (a) the wake still ran the durable turn-end finalize.
+    finalize.assert_awaited_once_with(SESSION)
+    # (b) leaked latches consumed by the INTERRUPTED branch: a stranded
+    # _stopped_sessions entry would suppress every later queue kick (a wake has
+    # no run_query finally to consume it); a stranded unpark_pending strands
+    # the park-poller. The latch consumption is what proves the finalize took
+    # the interrupted path — a clean finalize never touches _stopped_sessions.
     assert SESSION not in _stopped_sessions
     assert task_registry.is_unpark_pending(SESSION) is False
-    assert live_session_store.is_streaming(SESSION) is False
 
 
-async def test_error_result_wake_finalizes_interrupted():
-    await _seed_parked_live_session()
-    client = _FakeClient(
-        [_assistant_text(), _result(is_error=True, subtype="error_during_execution")],
-        hang=True,
-    )
+async def test_error_result_wake_drops_held_unparks():
+    """An error-shaped wake ResultMessage counts as interrupted: app unparks
+    HELD in the batch window are dropped (the episode must not auto-start a
+    follow-up turn), and the poller latch clears."""
+    _seed_held_shell_unpark()
+
+    client = _FakeClient([
+        _notif("task-1"),  # held: batch window (0.05s) can't expire between
+        _assistant_text(),  # synchronous yields, so it is still pending at the
+        _result(is_error=True, subtype="error_during_execution"),  # finalize
+    ])
     state = _fake_state(client)
     handler = _make_handler()
 
-    end_bcast = AsyncMock()
-    with _patch_pool(state), \
-         patch.object(cwh.sync_engine, "broadcast_stream_end", end_bcast):
-        handler._start_drain_pump(SESSION, "claude-code", None, None)
-        for _ in range(40):
-            await asyncio.sleep(0.01)
-            if end_bcast.await_count:
-                break
-        await ws_cleanup.stop_drain_pump(SESSION)
+    with _patch_pool(state), _patch_recorder(), \
+         patch.object(cwh, "persist_turn_end_state", new=AsyncMock()) as finalize:
+        await handler._drain_notifications(SESSION, "claude-code", None, None)
 
-    end_bcast.assert_awaited_once()
-    assert end_bcast.await_args.kwargs["interrupted"] is True
+    # The held unpark was DROPPED, not delivered after the errored wake.
+    handler._deliver_unpark.assert_not_awaited()
+    # Latches consumed; the turn-end finalize still ran (pending was cleared
+    # before the finalize gate, so the durable parked state is re-written).
+    assert task_registry.is_unpark_pending(SESSION) is False
+    finalize.assert_awaited_once_with(SESSION)
 
 
-async def test_clean_wake_finalize_still_not_interrupted():
-    await _seed_parked_live_session()
-    client = _FakeClient([_assistant_text(), _result()], hang=True)
+async def test_clean_wake_finalize_still_delivers_held_unpark():
+    """Complement of the drop above: a CLEAN wake finalize keeps the held
+    unpark alive and it is delivered — proving the drop is interrupt-specific,
+    not a general behavior of wakes with pending work."""
+    _seed_held_shell_unpark()
+
+    client = _FakeClient([_notif("task-1"), _assistant_text(), _result()])
     state = _fake_state(client)
     handler = _make_handler()
 
-    end_bcast = AsyncMock()
-    with _patch_pool(state), \
-         patch.object(cwh.sync_engine, "broadcast_stream_end", end_bcast):
-        handler._start_drain_pump(SESSION, "claude-code", None, None)
-        for _ in range(40):
-            await asyncio.sleep(0.01)
-            if end_bcast.await_count:
-                break
-        await ws_cleanup.stop_drain_pump(SESSION)
+    with _patch_pool(state), _patch_recorder(), \
+         patch.object(cwh, "persist_turn_end_state", new=AsyncMock()):
+        await handler._drain_notifications(SESSION, "claude-code", None, None)
 
-    end_bcast.assert_awaited_once()
-    assert end_bcast.await_args.kwargs["interrupted"] is False
-    data = live_session_store.get_session_dict(SESSION)
-    assert not any(m["content"].endswith("[Stopped]") for m in data["messages"])
+    handler._deliver_unpark.assert_awaited_once()
+    assert SESSION not in _stopped_sessions
 
 
 async def test_handle_stop_during_wake_interrupts_without_foreground_cancel():

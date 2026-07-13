@@ -9,7 +9,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Any
 
 from fastapi import WebSocket
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SyncEvent:
     """Represents a synchronization event to broadcast"""
-    event_type: str  # 'message_added', 'message_chunk', 'stream_start', 'stream_end', 'session_updated'
+    event_type: str  # 'message_added', 'queue_updated', 'session_updated', 'session_rewound', ...
     session_id: str
     data: Dict[str, Any]
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -81,14 +81,13 @@ class SyncEngine:
 
     Key features:
     - Track device connections per session
-    - Broadcast events to all devices watching a session
-    - Support for streaming events (message chunks)
+    - Broadcast non-render events to all devices watching a session
     - Exclude source device from broadcasts (to avoid echo)
     - Enforce single active device per session (session locking)
 
-    Late-joining devices get streaming state from LiveSessionStore, not from
-    this engine. SyncEngine only tracks whether a session is streaming and
-    broadcasts real-time events to already-connected devices.
+    V2: this engine carries NO streaming state. Render frames ride the
+    session event feed (SSE); busy truth is the durable runs table
+    (``app.core.streaming_status``).
     """
 
     def __init__(self):
@@ -96,41 +95,12 @@ class SyncEngine:
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
-        # Streaming NOTIFICATION cache — NOT the streaming authority.
-        #
-        # Populated by ``broadcast_stream_start`` (local turns) and
-        # ``apply_remote_streaming_change`` (peer-install turns fanned out across
-        # the cluster), cleared by the matching stream_end. It drives device/tab
-        # streaming indicators, the connect-time snapshot, and remote-owner
-        # sweeps. It is IN-MEMORY (wiped on restart) and best-effort: it can lag
-        # the live turn during the CLI-wake / pre-first-event windows.
-        #
-        # The streaming AUTHORITY is ``live_session_store.is_streaming`` (see
-        # docs/lifecycle-states.md). Consumers deciding LOCAL session safety must
-        # read the authority (and may add this cache as a hint); the only place
-        # this cache is authoritative is the CROSS-INSTALL adopt gate, where a
-        # remote session's turn is not in this install's live store at all and
-        # the peer fan-out is the sole signal. The lifecycle drift sensor flags a
-        # ``sync-vs-livestore`` disagreement ONLY in the stale direction (this
-        # cache claims streaming while the authority says idle).
-        self._streaming_sessions: Set[str] = set()
         # Session locks: session_id -> device_id that owns the lock
         self._session_locks: Dict[str, str] = {}
         # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
         self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
         # Lock for user connection management
         self._user_lock = asyncio.Lock()
-        # Map streaming session_id -> user_id for user-level broadcasts
-        self._session_user_map: Dict[str, str] = {}
-        # Map streaming session_id -> project_id for workspace-level streaming awareness
-        self._session_project_map: Dict[str, Optional[str]] = {}
-        # Map streaming session_id -> worktree_id for worktree-aware streaming locks
-        self._session_worktree_map: Dict[str, Optional[str]] = {}
-        # Cross-install: streaming session_id -> owning install's instance_id, for
-        # sessions whose stream originates on a PEER install (applied via
-        # apply_remote_streaming_change). Lets the heartbeat sweep clear a stale
-        # spinner if that owner goes offline mid-stream.
-        self._remote_streaming_owner: Dict[str, str] = {}
 
     async def register_device(
         self,
@@ -205,70 +175,43 @@ class SyncEngine:
         """
         return device_id in self._connections.get(session_id, {})
 
-    def is_session_streaming(self, session_id: str) -> bool:
-        """Check if a session is currently streaming"""
-        return session_id in self._streaming_sessions
-
-    async def clear_streaming_state(self, session_id: str) -> None:
-        """Clear streaming state for a session without broadcasting.
-
-        Used during cleanup when no devices are connected to receive broadcasts.
-        """
-        async with self._lock:
-            self._streaming_sessions.discard(session_id)
-            self._session_user_map.pop(session_id, None)
-            self._session_project_map.pop(session_id, None)
-            self._session_worktree_map.pop(session_id, None)
-
     async def sweep_stale_maps(self) -> int:
-        """Remove session map entries that are no longer in _streaming_sessions.
+        """Sweep orphaned session locks.
 
-        Handles cases where a stream ended abnormally (SDK crash, forced
-        disconnect) and broadcast_stream_end was never called, leaving
-        stale entries in _session_user_map, _session_project_map, and
-        _session_worktree_map.
+        A lock becomes orphaned when its owning device disconnects abnormally
+        without releasing it: with no device left connected, nothing can ever
+        release the lock. Sessions with an ACTIVE run (durable runs table) are
+        spared — their device may reconnect mid-turn.
 
         Returns:
-            Number of stale entries removed.
+            Number of orphaned locks removed.
         """
+        from app.core import streaming_status
+
         async with self._lock:
-            stale_ids = set()
-            for sid in self._session_user_map:
-                if sid not in self._streaming_sessions:
-                    stale_ids.add(sid)
-            for sid in self._session_project_map:
-                if sid not in self._streaming_sessions:
-                    stale_ids.add(sid)
-            for sid in self._session_worktree_map:
-                if sid not in self._streaming_sessions:
-                    stale_ids.add(sid)
+            candidates = [
+                sid for sid in self._session_locks
+                if sid not in self._connections
+            ]
+        stale_lock_ids = [
+            sid for sid in candidates
+            if not await asyncio.to_thread(streaming_status.has_active_run, sid)
+        ]
 
-            for sid in stale_ids:
-                self._session_user_map.pop(sid, None)
-                self._session_project_map.pop(sid, None)
-                self._session_worktree_map.pop(sid, None)
-
-            # Also clean up session locks for sessions with no connected devices
-            # and not currently streaming. Locks can become orphaned when a device
-            # disconnects abnormally without releasing its lock.
-            stale_lock_ids = []
-            for sid in list(self._session_locks.keys()):
-                if sid not in self._streaming_sessions and sid not in self._connections:
-                    stale_lock_ids.append(sid)
+        removed = 0
+        async with self._lock:
             for sid in stale_lock_ids:
-                del self._session_locks[sid]
-                stale_ids.add(sid)
-
-            if stale_ids:
-                logger.info(
-                    f"Swept {len(stale_ids)} stale entries "
-                    f"(locks={len(stale_lock_ids)}). "
-                    f"Remaining: user_map={len(self._session_user_map)} "
-                    f"project_map={len(self._session_project_map)} "
-                    f"worktree_map={len(self._session_worktree_map)} "
-                    f"session_locks={len(self._session_locks)}"
-                )
-            return len(stale_ids)
+                # Re-check: a device may have (re)connected while we were
+                # checking the runs table off-lock.
+                if sid in self._session_locks and sid not in self._connections:
+                    del self._session_locks[sid]
+                    removed += 1
+        if removed:
+            logger.info(
+                f"Swept {removed} orphaned session lock(s). "
+                f"Remaining: session_locks={len(self._session_locks)}"
+            )
+        return removed
 
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.
@@ -389,182 +332,6 @@ class SyncEngine:
                     if session_id in self._connections:
                         self._connections[session_id].pop(device_id, None)
 
-    async def broadcast_stream_start(
-        self,
-        session_id: str,
-        message_id: str,
-        source_device_id: Optional[str] = None,
-        usage: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
-        project_id: Optional[str] = None,
-        worktree_id: Optional[str] = None
-    ):
-        """Notify all devices that streaming has started for a session.
-
-        This method is idempotent - calling it multiple times for the same session
-        is safe.
-
-        Args:
-            session_id: The session ID
-            message_id: The assistant message ID
-            source_device_id: Device that originated the event (will be excluded from broadcast)
-            usage: Token usage data from message_start event (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-            user_id: Optional user ID for user-level broadcast (notifies all user devices)
-            project_id: Optional project ID for workspace-level streaming awareness
-            worktree_id: Optional worktree ID — worktree sessions have independent working
-                directories and should not lock git controls for project-mode sessions
-        """
-        # Mark session as streaming (idempotent) — acquire lock to protect
-        # shared streaming maps from concurrent broadcast_stream_start/end calls.
-        async with self._lock:
-            self._streaming_sessions.add(session_id)
-
-            # Store user_id mapping so broadcast_stream_end can look it up
-            if user_id:
-                self._session_user_map[session_id] = user_id
-            # Store project_id mapping for workspace-level streaming awareness
-            if project_id is not None:
-                self._session_project_map[session_id] = project_id
-            # Store worktree_id mapping for worktree-aware git control locking
-            if worktree_id is not None:
-                self._session_worktree_map[session_id] = worktree_id
-
-        data = {"message_id": message_id}
-        if usage:
-            data["usage"] = usage
-
-        event = SyncEvent(
-            event_type="stream_start",
-            session_id=session_id,
-            data=data,
-            source_device_id=source_device_id
-        )
-        await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-        # Broadcast to all user devices so side panels update streaming indicators
-        stored_user_id = self._session_user_map.get(session_id)
-        if stored_user_id:
-            await self._broadcast_user_message(
-                user_id=stored_user_id,
-                message={
-                    "type": "user_streaming_changed",
-                    "session_id": session_id,
-                    "is_streaming": True,
-                    "project_id": self._session_project_map.get(session_id),
-                    "worktree_id": self._session_worktree_map.get(session_id),
-                },
-                source_device_id=source_device_id
-            )
-            # Cross-install: tell peer installs so a user driving this session from
-            # a device on another install sees the same streaming indicator.
-            self._schedule_streaming_fanout(
-                user_id=stored_user_id,
-                session_id=session_id,
-                is_streaming=True,
-                project_id=self._session_project_map.get(session_id),
-                worktree_id=self._session_worktree_map.get(session_id),
-            )
-
-    async def broadcast_usage_update(
-        self,
-        session_id: str,
-        usage: Dict[str, Any],
-        source_device_id: Optional[str] = None
-    ):
-        """Broadcast a usage update during streaming (for agentic loops with multiple turns).
-
-        This is called when subsequent stream_start events occur during a single query,
-        such as when Claude uses tools and continues responding. Each new assistant turn
-        has updated token usage that synced devices need to know about.
-
-        Args:
-            session_id: The session ID
-            usage: Token usage data (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-            source_device_id: Device that originated the event (will be excluded from broadcast)
-        """
-        event = SyncEvent(
-            event_type="usage_update",
-            session_id=session_id,
-            data={"usage": usage},
-            source_device_id=source_device_id
-        )
-        await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-    async def broadcast_stream_chunk(
-        self,
-        session_id: str,
-        message_id: str,
-        chunk_type: str,  # 'text', 'tool_use', 'tool_result', 'subagent_*'
-        chunk_data: Dict[str, Any],
-        source_device_id: Optional[str] = None
-    ):
-        """Broadcast a streaming chunk to all watching devices"""
-        event = SyncEvent(
-            event_type="stream_chunk",
-            session_id=session_id,
-            data={
-                "message_id": message_id,
-                "chunk_type": chunk_type,
-                **chunk_data
-            },
-            source_device_id=source_device_id
-        )
-        await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-    async def broadcast_stream_end(
-        self,
-        session_id: str,
-        message_id: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        interrupted: bool = False,
-        source_device_id: Optional[str] = None
-    ):
-        """Notify all devices that streaming has ended"""
-        # Acquire lock to protect shared streaming maps from concurrent access.
-        async with self._lock:
-            self._streaming_sessions.discard(session_id)
-            # Pop user_id mapping (used for user-level broadcast below)
-            stored_user_id = self._session_user_map.pop(session_id, None)
-            # Pop project_id mapping (used for user-level broadcast below)
-            stored_project_id = self._session_project_map.pop(session_id, None)
-            # Pop worktree_id mapping
-            stored_worktree_id = self._session_worktree_map.pop(session_id, None)
-
-        event = SyncEvent(
-            event_type="stream_end",
-            session_id=session_id,
-            data={
-                "message_id": message_id,
-                "metadata": metadata or {},
-                "interrupted": interrupted
-            },
-            source_device_id=source_device_id
-        )
-        await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-        # Broadcast to all user devices so side panels update streaming indicators
-        if stored_user_id:
-            await self._broadcast_user_message(
-                user_id=stored_user_id,
-                message={
-                    "type": "user_streaming_changed",
-                    "session_id": session_id,
-                    "is_streaming": False,
-                    "project_id": stored_project_id,
-                    "worktree_id": stored_worktree_id,
-                },
-                source_device_id=source_device_id
-            )
-            # Cross-install: tell peer installs the stream ended so their devices
-            # clear the indicator too.
-            self._schedule_streaming_fanout(
-                user_id=stored_user_id,
-                session_id=session_id,
-                is_streaming=False,
-                project_id=stored_project_id,
-                worktree_id=stored_worktree_id,
-            )
-
     async def broadcast_message_added(
         self,
         session_id: str,
@@ -668,10 +435,16 @@ class SyncEngine:
         await self.broadcast_event(event, exclude_device_id=device_id)
 
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
-        """Get current state of a session for new device joining"""
+        """Get current state of a session for new device joining.
+
+        ``is_streaming`` comes from the durable runs table (V2 busy truth).
+        """
+        from app.core import streaming_status
         return {
             "session_id": session_id,
-            "is_streaming": self.is_session_streaming(session_id),
+            "is_streaming": await asyncio.to_thread(
+                streaming_status.has_active_run, session_id
+            ),
             "connected_devices": self.get_device_count(session_id)
         }
 
@@ -982,153 +755,6 @@ class SyncEngine:
                 "branch_name": branch_name,
             }
         )
-
-    def _schedule_streaming_fanout(
-        self,
-        *,
-        user_id: str,
-        session_id: str,
-        is_streaming: bool,
-        project_id: Optional[str],
-        worktree_id: Optional[str],
-    ) -> None:
-        """Fire-and-forget: notify peer installs of a LOCAL streaming transition.
-
-        Best-effort and non-blocking — a slow or offline peer must never affect
-        the local stream. Only called from broadcast_stream_start/end (local
-        origins); the peer receive path (apply_remote_streaming_change) does NOT
-        call this, so streaming changes never loop between installs.
-        """
-        try:
-            from app.core import cluster_streaming
-        except Exception:  # noqa: BLE001 — defensive; never break local streaming
-            return
-        cluster_streaming.schedule_fanout(
-            user_id=user_id,
-            session_id=session_id,
-            is_streaming=is_streaming,
-            project_id=project_id,
-            worktree_id=worktree_id,
-        )
-
-    async def apply_remote_streaming_change(
-        self,
-        user_id: str,
-        session_id: str,
-        is_streaming: bool,
-        owner_instance_id: Optional[str] = None,
-        project_id: Optional[str] = None,
-        worktree_id: Optional[str] = None,
-    ) -> None:
-        """Apply a streaming transition that originated on a PEER install.
-
-        Records the remote session's streaming state in this install's maps (so
-        the connect-time snapshot from get_user_streaming_sessions includes it)
-        and notifies this install's connected devices via the same
-        ``user_streaming_changed`` message a local stream uses — WITHOUT fanning
-        the change back out to peers (avoids cross-install loops).
-        """
-        async with self._lock:
-            if is_streaming:
-                self._streaming_sessions.add(session_id)
-                self._session_user_map[session_id] = user_id
-                if project_id is not None:
-                    self._session_project_map[session_id] = project_id
-                if worktree_id is not None:
-                    self._session_worktree_map[session_id] = worktree_id
-                if owner_instance_id:
-                    self._remote_streaming_owner[session_id] = owner_instance_id
-            else:
-                self._streaming_sessions.discard(session_id)
-                self._session_user_map.pop(session_id, None)
-                stored_project_id = self._session_project_map.pop(session_id, None)
-                stored_worktree_id = self._session_worktree_map.pop(session_id, None)
-                self._remote_streaming_owner.pop(session_id, None)
-                if project_id is None:
-                    project_id = stored_project_id
-                if worktree_id is None:
-                    worktree_id = stored_worktree_id
-
-        await self._broadcast_user_message(
-            user_id=user_id,
-            message={
-                "type": "user_streaming_changed",
-                "session_id": session_id,
-                "is_streaming": is_streaming,
-                "project_id": project_id,
-                "worktree_id": worktree_id,
-            },
-        )
-
-    async def sweep_offline_remote_streaming(self) -> int:
-        """Clear remote streaming entries whose owning install went offline.
-
-        A peer that crashes mid-stream never sends its stream_end fan-out, which
-        would leave a stale spinner on the board forever. The heartbeat loop calls
-        this periodically to reconcile: any remote-owned streaming session whose
-        owner is no longer online is cleared and a stream-end is broadcast locally.
-
-        Returns the number of stale sessions cleared.
-        """
-        async with self._lock:
-            owners = dict(self._remote_streaming_owner)
-        if not owners:
-            return 0
-
-        from app.db import database  # lazy import to avoid cycles
-        stale_ids = []
-        for sid, owner in owners.items():
-            install = database.get_install(owner)
-            if not install or not install.get("online"):
-                stale_ids.append(sid)
-
-        if not stale_ids:
-            return 0
-
-        cleared = []
-        async with self._lock:
-            for sid in stale_ids:
-                self._streaming_sessions.discard(sid)
-                user_id = self._session_user_map.pop(sid, None)
-                project_id = self._session_project_map.pop(sid, None)
-                worktree_id = self._session_worktree_map.pop(sid, None)
-                self._remote_streaming_owner.pop(sid, None)
-                if user_id:
-                    cleared.append((sid, user_id, project_id, worktree_id))
-
-        for sid, user_id, project_id, worktree_id in cleared:
-            await self._broadcast_user_message(
-                user_id=user_id,
-                message={
-                    "type": "user_streaming_changed",
-                    "session_id": sid,
-                    "is_streaming": False,
-                    "project_id": project_id,
-                    "worktree_id": worktree_id,
-                },
-            )
-        if cleared:
-            logger.info(
-                "Swept %d stale remote streaming session(s) from offline peers",
-                len(cleared),
-            )
-        return len(cleared)
-
-    def get_user_streaming_sessions(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all currently streaming sessions for a user with their project/worktree IDs.
-
-        Used to send an initial snapshot when a device connects.
-        Returns list of dicts with session_id, project_id, and worktree_id.
-        """
-        return [
-            {
-                "session_id": sid,
-                "project_id": self._session_project_map.get(sid),
-                "worktree_id": self._session_worktree_map.get(sid),
-            }
-            for sid in self._streaming_sessions
-            if self._session_user_map.get(sid) == user_id
-        ]
 
 
 # Global sync engine instance

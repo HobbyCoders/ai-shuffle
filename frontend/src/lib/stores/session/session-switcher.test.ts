@@ -16,6 +16,27 @@ vi.mock('../app-data.svelte', () => ({
 	},
 }));
 
+// switchSession fetches a one-shot `/live` metadata snapshot (usage totals,
+// controllability, worktree/cloud fields). Stub it out so the isolation tests
+// exercise only the switch-in reset logic; a null reply is the "no metadata"
+// path and leaves the reset fields untouched.
+vi.mock('$lib/api/client', () => ({
+	api: { get: vi.fn(async () => null), put: vi.fn(async () => null) },
+}));
+
+// The SSE-fed reducer is the transcript authority; switchSession stops the
+// leaving feed and starts the target's. Mock the singleton so no real feed /
+// EventSource is created during these unit tests.
+vi.mock('./v2/feed-controller', () => ({
+	feedController: {
+		attach: vi.fn(),
+		start: vi.fn(),
+		stop: vi.fn(),
+		isFeeding: vi.fn(() => false),
+		currentSessionId: vi.fn(() => null),
+	},
+}));
+
 /**
  * Regression tests for cross-session state bleed on switch.
  *
@@ -71,7 +92,6 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 		remoteControllable: true,
 		relayError: undefined,
@@ -81,7 +101,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 	};
 }
 
-function makeSwitcher(initial: ActiveSessionState, opts: { loadSessionNull?: boolean } = {}) {
+function makeSwitcher(initial: ActiveSessionState) {
 	let state = initial;
 	const update = (fn: (s: ActiveSessionState) => ActiveSessionState) => { state = fn(state); };
 	const getState = () => state;
@@ -109,24 +129,6 @@ function makeSwitcher(initial: ActiveSessionState, opts: { loadSessionNull?: boo
 			save: (id, e) => { ephemeralStore.set(id, e); },
 			restore: (id) => ephemeralStore.get(id) ?? null,
 		},
-		sessionPoller: {
-			stop: vi.fn(),
-			// Return a non-null, non-streaming poll result so switchSession does
-			// not fall into its error branch — unless the test asks for the null
-			// (load-failed) path via opts.loadSessionNull.
-			loadSession: vi.fn(async () =>
-				opts.loadSessionNull
-					? null
-					: {
-						messages: [],
-						isStreaming: false,
-						lastUpdateId: 0,
-						usage: { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, contextUsed: 0 },
-					}
-			) as unknown as SessionSwitcherDeps['sessionPoller']['loadSession'],
-			startStreaming: vi.fn(),
-		},
-		sessionState: { removeSession: vi.fn() },
 		onPersistTimerChanged: vi.fn(),
 	};
 
@@ -237,7 +239,6 @@ describe('session-switcher · switchSession isolation', () => {
 		// Gating the resync on isStreaming (the old bug) hid the modal on switch. The
 		// resync must fire unconditionally so the parked prompt surfaces immediately.
 		const { switcher, deps } = makeSwitcher(fullState());
-		// makeSwitcher's loadSession already returns isStreaming: false.
 
 		await switcher.switchSession('session-B');
 		switcher.destroy();
@@ -248,42 +249,6 @@ describe('session-switcher · switchSession isolation', () => {
 		expect(deps.wsSend).toHaveBeenCalledWith(
 			expect.objectContaining({ type: 'get_pending_permissions' })
 		);
-	});
-});
-
-describe('session-switcher · load-failure error message (B4)', () => {
-	beforeEach(() => {
-		_mockSessions.current = [];
-	});
-
-	it('shows the generic "start a new chat" message for a LOCAL session that fails to load', async () => {
-		_mockSessions.current = [{ id: 'session-B', is_remote: false }];
-		const { switcher, getState } = makeSwitcher(fullState(), { loadSessionNull: true });
-
-		await switcher.switchSession('session-B');
-		switcher.destroy();
-
-		expect(getState().error).toBe('Failed to load session. Try starting a new chat.');
-	});
-
-	it('shows a "could not reach the owning device" message when a REMOTE session fails to load', async () => {
-		_mockSessions.current = [{ id: 'session-B', is_remote: true }];
-		const { switcher, getState } = makeSwitcher(fullState(), { loadSessionNull: true });
-
-		await switcher.switchSession('session-B');
-		switcher.destroy();
-
-		expect(getState().error).toBe('Could not reach the owning device — try again');
-	});
-
-	it('names the owning device in the reach-error when device_name is known', async () => {
-		_mockSessions.current = [{ id: 'session-B', is_remote: true, device_name: 'Studio Mac' }];
-		const { switcher, getState } = makeSwitcher(fullState(), { loadSessionNull: true });
-
-		await switcher.switchSession('session-B');
-		switcher.destroy();
-
-		expect(getState().error).toBe('Could not reach Studio Mac — try again');
 	});
 });
 

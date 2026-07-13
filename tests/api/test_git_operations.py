@@ -241,8 +241,6 @@ class TestExecuteFinish:
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(session_id="me")
 
-        mock_sync = MagicMock()
-        mock_sync.is_session_streaming.side_effect = lambda sid: sid == "other"
         mock_db = MagicMock()
         mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
 
@@ -251,8 +249,10 @@ class TestExecuteFinish:
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
-        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
-             patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
+        ), patch(
+            "app.core.streaming_status.has_active_run",
+            side_effect=lambda sid: sid == "other",
+        ), patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
             await _execute_finish(
                 op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
                 pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
@@ -268,13 +268,11 @@ class TestExecuteFinish:
     ):
         """A PARKED sibling session (not streaming) with live background work
         must still block worktree cleanup — the liveness guard counts
-        task_registry.has_active_background_work, not just is_session_streaming.
+        task_registry.has_active_background_work, not just the streaming read.
         """
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(session_id="me")
 
-        mock_sync = MagicMock()
-        mock_sync.is_session_streaming.return_value = False  # nobody is streaming
         mock_reg = MagicMock()
         mock_reg.has_active_background_work.side_effect = lambda sid: sid == "other"
         mock_db = MagicMock()
@@ -285,8 +283,10 @@ class TestExecuteFinish:
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
-        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
-             patch("app.core.task_registry.task_registry", mock_reg), \
+        ), patch(
+            "app.core.streaming_status.has_active_run",
+            return_value=False,  # nobody is streaming
+        ), patch("app.core.task_registry.task_registry", mock_reg), \
              patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
             await _execute_finish(
                 op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
@@ -299,27 +299,20 @@ class TestExecuteFinish:
         assert _step_status(op, "cleanup") == "warning"
         mock_worktree_manager.cleanup_worktree.assert_not_called()
 
-    async def test_cleanup_guard_other_session_live_store_streaming_only(
+    async def test_cleanup_guard_other_session_active_run_only(
         self, mock_git_service, mock_github_service, mock_worktree_manager
     ):
-        """A sibling session actively streaming a LOCAL turn must block worktree
-        cleanup even when the sync engine has no record of it (in-memory
-        ``_streaming_sessions`` is wiped on restart / lags the authority during
-        CLI-wake and pre-first-event windows). ``live_session_store.is_streaming``
-        is the documented streaming authority, so the liveness guard must consult
-        it — otherwise cleanup would delete the worktree out from under a live
-        local turn.
+        """A sibling session with a lease-valid active run must block worktree
+        cleanup even with NO live background work: the durable ``runs`` table
+        is the single streaming truth (durable across restarts, shared across
+        installs), so the liveness guard must consult it — otherwise cleanup
+        would delete the worktree out from under a live turn.
         """
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(session_id="me")
 
-        mock_sync = MagicMock()
-        mock_sync.is_session_streaming.return_value = False  # sync engine is blind
         mock_reg = MagicMock()
-        mock_reg.has_active_background_work.return_value = False  # no bg work either
-        mock_live = MagicMock()
-        # Only the live store (the authority) knows "other" is streaming.
-        mock_live.is_streaming.side_effect = lambda sid: sid == "other"
+        mock_reg.has_active_background_work.return_value = False  # no bg work
         mock_db = MagicMock()
         mock_db.get_sessions_for_worktree.return_value = [{"id": "me"}, {"id": "other"}]
 
@@ -328,9 +321,11 @@ class TestExecuteFinish:
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
-        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
-             patch("app.core.task_registry.task_registry", mock_reg), \
-             patch("app.core.live_session_store.live_session_store", mock_live), \
+        ), patch(
+            "app.core.streaming_status.has_active_run",
+            # Only "other" has a lease-valid active run.
+            side_effect=lambda sid: sid == "other",
+        ), patch("app.core.task_registry.task_registry", mock_reg), \
              patch("app.db.database.get_sessions_for_worktree", mock_db.get_sessions_for_worktree):
             await _execute_finish(
                 op, working_dir="/wd", worktree_id="wt-1", repo="o/r",
@@ -352,8 +347,6 @@ class TestExecuteFinish:
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(project_id="p1", session_id="me")
 
-        mock_sync = MagicMock()
-        mock_sync.is_session_streaming.side_effect = lambda sid: sid == "other"
         mock_reg = MagicMock()
         mock_reg.has_active_background_work.return_value = False
         mock_db = MagicMock()
@@ -364,8 +357,10 @@ class TestExecuteFinish:
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
-        ), patch("app.core.sync_engine.sync_engine", mock_sync), \
-             patch("app.core.task_registry.task_registry", mock_reg), \
+        ), patch(
+            "app.core.streaming_status.has_active_run",
+            side_effect=lambda sid: sid == "other",
+        ), patch("app.core.task_registry.task_registry", mock_reg), \
              patch("app.db.database.get_sessions", mock_db.get_sessions):
             await _execute_finish(
                 op, working_dir="/wd", worktree_id=None, repo="o/r",

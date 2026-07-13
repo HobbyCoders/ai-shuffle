@@ -12,17 +12,14 @@ import { describe, it, expect } from 'vitest';
 import {
 	computeGitControlsStreaming,
 	type GitControlsStreamingInput,
-	type CrossDeviceStreamingInfo,
-	type SessionStreamingFlag
+	type CrossDeviceStreamingInfo
 } from './git-controls-streaming';
 
 function input(overrides: Partial<GitControlsStreamingInput> = {}): GitControlsStreamingInput {
 	return {
 		activeIsStreaming: false,
-		activeSessionId: 'sess-1',
 		activeExecutionMode: 'local',
 		activeProject: 'proj-1',
-		sessionStreaming: new Map<string, SessionStreamingFlag>(),
 		crossDeviceStreaming: new Map<string, CrossDeviceStreamingInfo>(),
 		...overrides
 	};
@@ -38,23 +35,6 @@ describe('computeGitControlsStreaming', () => {
 		expect(
 			computeGitControlsStreaming(input({ activeExecutionMode: 'worktree', activeIsStreaming: true }))
 		).toBe(true);
-	});
-
-	it('locks when the per-session map reports the active session streaming', () => {
-		// Backstop signal: store-level flag is false but sessionState says streaming.
-		expect(
-			computeGitControlsStreaming(
-				input({ sessionStreaming: new Map([['sess-1', { isStreaming: true }]]) })
-			)
-		).toBe(true);
-	});
-
-	it('does not lock when only a *different* session is streaming in the per-session map', () => {
-		expect(
-			computeGitControlsStreaming(
-				input({ sessionStreaming: new Map([['sess-2', { isStreaming: true }]]) })
-			)
-		).toBe(false);
 	});
 
 	it('is idle when nothing is streaming', () => {

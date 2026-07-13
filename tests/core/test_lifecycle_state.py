@@ -1,14 +1,19 @@
 """Unit tests for the derived lifecycle view (app.core.lifecycle_state).
 
-Every scenario is produced by REAL writer sequences — the live store's
-start/end_streaming, the task registry's start/complete/clear, the sync
-engine's broadcast_stream_start, real sessions/queued_messages rows — never
-by planting dicts into private state. The one direct-assignment exception is
-the drain-pump registration, because production itself registers pumps by
-direct dict assignment (chat_ws_handler -> ws_cleanup._drain_pumps).
+Every scenario is produced by REAL writer sequences — a claimed run in the
+durable ``runs`` table (the streaming authority since the v2 cutover), the
+task registry's start/complete/clear, the durable parked marker written by
+``turn_finalize.persist_turn_end_state`` (V2: the live store and its
+end_streaming marker write are deleted), real sessions/queued_messages rows —
+never by planting dicts into private state. Two narrow exceptions: the
+drain-pump registration (production itself registers pumps by direct dict
+assignment, chat_ws_handler -> ws_cleanup._drain_pumps) and the pool-peek
+union test (the pooled SDK client cannot be spawned in a unit test).
 """
 
 import asyncio
+
+import pytest
 
 from app.core import lifecycle_state
 from app.core.lifecycle_state import (
@@ -18,10 +23,20 @@ from app.core.lifecycle_state import (
     STATE_WAKING,
     compute,
 )
-from app.core.live_session_store import live_session_store
-from app.core.sync_engine import sync_engine
 from app.core.task_registry import task_registry
+from app.core.turn_finalize import persist_turn_end_state
 from app.db import database
+from app.db import runs
+
+
+@pytest.fixture(autouse=True)
+def _fresh_streaming_status():
+    """The runs-backed busy view keeps a module-global TTL cache — isolate it."""
+    from app.core import streaming_status
+
+    streaming_status._reset_state()
+    yield
+    streaming_status._reset_state()
 
 
 def _drift_classes(snap):
@@ -42,39 +57,67 @@ async def test_idle_state(mock_db):
 
 async def test_streaming_state(mock_db):
     sid = "lstate-streaming"
-    await live_session_store.start_streaming(sid)
-    # Real turn also flips the sync engine (stream_to_websocket does both), so
-    # a coherent streaming session shows no drift.
-    await sync_engine.broadcast_stream_start(sid, "m1")
-    try:
-        snap = await compute(sid)
-    finally:
-        await sync_engine.broadcast_stream_end(sid, "m1")
-        await live_session_store.end_streaming(sid)
-        live_session_store.reset_all()
+    # A real turn's busy truth: a lease-valid active run in the durable runs
+    # table (claimed by the TurnRecorder at turn start).
+    runs.claim_run(sid, "runner-1", 60)
+
+    snap = await compute(sid)
 
     assert snap.state == STATE_STREAMING
     assert snap.live_store_streaming is True
-    assert snap.sync_streaming is True
-    assert "class=sync-vs-livestore" not in _drift_classes(snap)
+
+
+async def test_expired_lease_reads_idle(mock_db):
+    """An active run whose lease lapsed (crashed runner) is NOT streaming."""
+    sid = "lstate-expired-lease"
+    runs.claim_run(sid, "runner-1", -1)  # lease already expired on insert
+
+    snap = await compute(sid)
+
+    assert snap.live_store_streaming is False
+    assert snap.state == STATE_IDLE
+
+
+async def test_pool_peek_unions_into_streaming(mock_db, monkeypatch):
+    """Belt-and-braces: a turn whose run claim FAILED records unfenced and reads
+    idle from the runs table, but the pooled client's is_streaming peek still
+    knows a turn is in flight — the union must classify it as streaming."""
+    from app.core import session_pool as session_pool_module
+
+    class _State:
+        is_connected = True
+        is_streaming = True
+
+    class _Pool:
+        def peek(self, sid):
+            return _State()
+
+    monkeypatch.setattr(
+        session_pool_module, "get_session_pool", lambda: _Pool()
+    )
+
+    snap = await compute("lstate-pool-union")  # no run row at all
+
+    assert snap.pool_streaming is True
+    assert snap.state == STATE_STREAMING
 
 
 async def test_parked_with_work_state(mock_db):
     sid = "lstate-parked"
     database.create_session(session_id=sid, profile_id="default")
-    await live_session_store.start_streaming(sid)
     task_registry.start_task(sid, "t1", "agent", "bg work")
-    await live_session_store.end_streaming(sid)
+    # V2: the turn-end finalize persists the durable parked marker for the
+    # live background work (the live store's end_streaming write is deleted).
+    await persist_turn_end_state(sid)
     try:
         snap = await compute(sid)
     finally:
-        live_session_store.reset_all()
         task_registry.clear_session(sid)
 
     assert snap.state == STATE_PARKED_WITH_WORK
     assert [t["id"] for t in snap.active_tasks] == ["t1"]
     assert [t["id"] for t in snap.background_work] == ["t1"]
-    # end_streaming persisted the durable parked marker for the live bg work.
+    # The finalize persisted the durable parked marker for the live bg work.
     assert snap.parked_task_kind == "agent"
     # Marker + parked state agree: no parked-marker drift.
     assert "class=parked-marker-while-idle" not in _drift_classes(snap)
@@ -127,7 +170,7 @@ async def test_waking_outranks_parked_with_work(mock_db):
 
 async def test_streaming_outranks_everything(mock_db):
     sid = "lstate-stream-precedence"
-    await live_session_store.start_streaming(sid)
+    runs.claim_run(sid, "runner-1", 60)
     task_registry.start_task(sid, "t1", "agent", "bg work")
     task_registry.mark_unpark_pending(sid)
     try:
@@ -135,8 +178,6 @@ async def test_streaming_outranks_everything(mock_db):
     finally:
         task_registry.clear_unpark_pending(sid)
         task_registry.clear_session(sid)
-        await live_session_store.end_streaming(sid)
-        live_session_store.reset_all()
 
     assert snap.state == STATE_STREAMING
 
@@ -145,57 +186,40 @@ async def test_streaming_outranks_everything(mock_db):
 # Drift sensor
 # =============================================================================
 
-async def test_drift_sync_vs_livestore(mock_db):
-    """sync_engine says streaming, live store says idle — the classic stale
-    _streaming_sessions leak after a crashed turn."""
-    sid = "lstate-drift-sync"
-    await sync_engine.broadcast_stream_start(sid, "m1")
-    try:
-        snap = await compute(sid)
-    finally:
-        await sync_engine.clear_streaming_state(sid)
+def test_sync_vs_livestore_sensor_stays_deleted():
+    """V2 Phase-1 deletion tripwire: the legacy busy sources (sync_engine's
+    ``_streaming_sessions`` map, the live store) are deleted, and with them the
+    ``class=sync-vs-livestore`` drift sensor and the snapshot's
+    ``sync_streaming`` field. The runs table (unioned with the pool peek) is
+    the ONE busy truth — reintroducing a second source here would resurrect
+    the split-brain the sensor existed to catch, without the sensor."""
+    import inspect
 
-    assert snap.sync_streaming is True
-    assert snap.live_store_streaming is False
-    assert "class=sync-vs-livestore" in _drift_classes(snap)
+    src = inspect.getsource(lifecycle_state)
+    assert "sync-vs-livestore" not in src
+    assert "sync_streaming" not in src
+    assert "sync_engine" not in src
+    from app.core.lifecycle_state import LifecycleSnapshot
 
-
-async def test_no_sync_drift_when_live_streams_but_sync_lags(mock_db):
-    """The benign direction — live store (the authority) says streaming, the
-    sync engine's in-memory cache has no record (wiped on restart / lagging
-    during a CLI-wake turn). This is NOT actionable drift: no consumer depends
-    on the sync cache for LOCAL streaming truth (the git-ops guard reads the
-    live authority; the adopt gate is cross-install), and the reconciler's R3
-    only repairs the opposite (stale) direction. It must not be flagged."""
-    sid = "lstate-sync-lag"
-    await live_session_store.start_streaming(sid)
-    # Note: NO broadcast_stream_start — the sync cache is deliberately blind.
-    try:
-        snap = await compute(sid)
-    finally:
-        await live_session_store.end_streaming(sid)
-        live_session_store.reset_all()
-
-    assert snap.live_store_streaming is True
-    assert snap.sync_streaming is False
-    assert snap.state == STATE_STREAMING
-    assert "class=sync-vs-livestore" not in _drift_classes(snap)
+    assert "sync_streaming" not in LifecycleSnapshot.__dataclass_fields__
 
 
 async def test_drift_logs_once_per_transition(mock_db, caplog):
     """Drift logs fire on TRANSITION (newly-appears), not per poll: a persistent
     drift condition sampled repeatedly emits exactly one ``lifecycle-drift``
-    line until it clears or the hourly re-log window elapses."""
+    line until it clears or the hourly re-log window elapses. (Exercised via
+    ``class=unpark-no-pump`` — the sync-vs-livestore class is quiesced by the
+    runs-table cutover.)"""
     import logging
 
     lifecycle_state.reset_drift_log_state()
     sid = "lstate-drift-transition"
-    await sync_engine.broadcast_stream_start(sid, "m1")  # sync=True, live idle
+    task_registry.mark_unpark_pending(sid)  # latch, no pump, nothing streaming
     try:
         with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
             for _ in range(5):
                 snap = await compute(sid)
-        assert "class=sync-vs-livestore" in _drift_classes(snap)
+        assert "class=unpark-no-pump" in _drift_classes(snap)
         drift_lines = [
             r for r in caplog.records
             if r.getMessage().startswith("lifecycle-drift session=" + sid)
@@ -205,7 +229,7 @@ async def test_drift_logs_once_per_transition(mock_db, caplog):
             f"{[r.getMessage() for r in drift_lines]}"
         )
     finally:
-        await sync_engine.clear_streaming_state(sid)
+        task_registry.clear_unpark_pending(sid)
         lifecycle_state.reset_drift_log_state()
 
 
@@ -218,12 +242,12 @@ async def test_drift_relogs_after_clearing(mock_db, caplog):
     sid = "lstate-drift-reappear"
     try:
         with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
-            await sync_engine.broadcast_stream_start(sid, "m1")
+            task_registry.mark_unpark_pending(sid)
             await compute(sid)          # transition 1: appears -> logs
             await compute(sid)          # still standing -> suppressed
-            await sync_engine.clear_streaming_state(sid)
+            task_registry.clear_unpark_pending(sid)
             await compute(sid)          # cleared -> forgotten, no drift
-            await sync_engine.broadcast_stream_start(sid, "m2")
+            task_registry.mark_unpark_pending(sid)
             await compute(sid)          # transition 2: reappears -> logs
         drift_lines = [
             r for r in caplog.records
@@ -231,20 +255,18 @@ async def test_drift_relogs_after_clearing(mock_db, caplog):
         ]
         assert len(drift_lines) == 2, [r.getMessage() for r in drift_lines]
     finally:
-        await sync_engine.clear_streaming_state(sid)
+        task_registry.clear_unpark_pending(sid)
         lifecycle_state.reset_drift_log_state()
 
 
 async def test_drift_parked_marker_while_idle(mock_db):
-    """end_streaming wrote the durable parked marker, then force-cleanup wiped
-    the registry (clear_session) without the marker ever being cleared."""
+    """The turn-end finalize wrote the durable parked marker, then force-cleanup
+    wiped the registry (clear_session) without the marker ever being cleared."""
     sid = "lstate-drift-marker"
     database.create_session(session_id=sid, profile_id="default")
-    await live_session_store.start_streaming(sid)
     task_registry.start_task(sid, "t1", "agent", "bg work")
-    await live_session_store.end_streaming(sid)  # writes parked_task_kind
+    await persist_turn_end_state(sid)  # writes parked_task_kind="agent"
     task_registry.clear_session(sid)  # force-cleanup wipe: marker now orphaned
-    live_session_store.reset_all()
 
     snap = await compute(sid)
 

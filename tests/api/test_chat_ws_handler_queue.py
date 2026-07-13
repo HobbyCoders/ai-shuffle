@@ -19,7 +19,8 @@ closure's exact gating, pinned here against the oracle
   load (a user Stop must not be un-done by a reload),
 * drain failures are swallowed (the load itself already succeeded),
 * like the closure's drain, delivery is socket-independent — a dead origin
-  socket still drains (the turn streams via live store + sync_engine).
+  socket still drains (V2: the turn records durably to the session event log
+  via ``turn_recorder.record_drained_event`` + sync_engine broadcasts).
 
 Conscious class-model difference vs the closure's ``_drain_reserved``: the
 closure ALSO direct-sends a ``sync``/``queue_updated`` frame on the origin
@@ -85,7 +86,7 @@ class _Harness:
 
     Exposes the same surface as the sibling harnesses so assertions mirror the
     closure oracle 1:1:
-      .sync / .db / .store / .perm / .uq / .resolver
+      .sync / .db / .perm / .uq / .resolver / .has_active_run
       .registry / .stopped / .interrupt_pending    (control-plane sets)
       .queue / .popped                             (in-memory queued-message DB)
     """
@@ -103,14 +104,12 @@ class _Harness:
         # --- sync engine ------------------------------------------------------
         self.sync = s.enter_context(patch.object(cwh, "sync_engine"))
         self.sync.is_device_watching_session = MagicMock(return_value=False)
-        self.sync.is_session_streaming = MagicMock(return_value=False)
         self.sync.get_device_count = MagicMock(return_value=1)
         self.sync._connections = {}
         for name in (
             "register_device",
             "unregister_device",
             "broadcast_session_opened",
-            "broadcast_stream_end",
             "broadcast_queue_updated",
             "broadcast_message_added",
             "broadcast_session_updated",
@@ -180,7 +179,6 @@ class _Harness:
         self.resolver.resolve = MagicMock(
             return_value=SimpleNamespace(messages=[], source="db", usage=None)
         )
-        self.resolver.resolve_for_streaming_init = MagicMock(return_value=[])
         s.enter_context(patch.object(cwh, "resolve_working_dir", return_value="/tmp"))
         s.enter_context(
             patch.object(cwh, "enrich_session_worktree_meta", MagicMock(return_value=None))
@@ -190,19 +188,20 @@ class _Harness:
             patch("app.core.cost_utils.get_cached_profile_map", MagicMock(return_value={}))
         )
 
-        # --- live session store -------------------------------------------------
-        self.store = s.enter_context(patch.object(cwh, "live_session_store"))
-        self.store.get_session_dict = MagicMock(return_value=None)
-        self.store.has_session = MagicMock(return_value=False)
-        self.store.is_streaming = MagicMock(return_value=False)
-        for name in (
-            "start_streaming",
-            "add_user_message",
-            "end_streaming",
-            "cleanup_session",
-            "discard_empty_user_turn",
-        ):
-            setattr(self.store, name, AsyncMock())
+        # --- V2 busy truth + turn recording/finalize seams ------------------------
+        # (V2: the live session store is deleted — history is served from the
+        # persisted transcript, busy truth comes from
+        # app.core.streaming_status.has_active_run, turn events are recorded
+        # durably via turn_recorder.record_drained_event, and turn-end state is
+        # persisted via turn_finalize.persist_turn_end_state.)
+        self.has_active_run = MagicMock(return_value=False)
+        s.enter_context(
+            patch("app.core.streaming_status.has_active_run", new=self.has_active_run)
+        )
+        s.enter_context(
+            patch("app.core.turn_recorder.record_drained_event", new=AsyncMock())
+        )
+        s.enter_context(patch.object(cwh, "persist_turn_end_state", new=AsyncMock()))
 
         # --- permission / question handlers -------------------------------------
         self.perm = s.enter_context(patch.object(cwh, "permission_handler"))
@@ -341,18 +340,18 @@ async def test_load_session_empty_queue_drain_is_noop():
 
 
 async def test_load_session_streaming_turn_skips_drain():
-    """Oracle parity (test_load_session_streaming_uses_live_store_and_skips_drain):
+    """Oracle parity (test_load_session_streaming_late_join_serves_persisted_history):
     a live turn owns the session — the drain-on-load recovery must NOT fire,
-    and the message stays queued for the turn-end drain."""
+    and the message stays queued for the turn-end drain. V2: the late-join
+    history is the PERSISTED transcript (no live-buffer tier); busy truth is
+    the durable run lease (streaming_status.has_active_run)."""
     with _Harness() as h:
         handler = h.make_load_handler()
         h.queue.append(_queued("later msg"))
-        h.registry["sess-1"] = _FakeLiveTask()
-        h.store.get_session_dict.return_value = {
-            "messages": [{"role": "assistant", "content": "partial"}],
-            "usage": {"input_tokens": 5},
-            "active_block_type": "text",
-        }
+        h.has_active_run.return_value = True  # lease-valid active run
+        h.resolver.resolve.return_value = SimpleNamespace(
+            messages=[{"role": "assistant", "content": "partial"}], source="db", usage=None
+        )
         await handler.handle_load_session(dict(LOAD))
 
     hist = _frames(h.ws, "history")[0]
@@ -411,8 +410,8 @@ async def test_load_session_drain_failure_is_swallowed():
 async def test_load_session_drain_is_socket_independent():
     """Closure parity (drain_next_queued_if_idle's documented contract): the
     drain intentionally does NOT bail on an unhealthy socket — delivery rides
-    on the live store + sync_engine broadcasts. A load whose history send
-    already failed still drains the leftover message."""
+    on the durable session event log + sync_engine broadcasts. A load whose
+    history send already failed still drains the leftover message."""
     with _Harness() as h:
         handler = h.make_load_handler()
         h.queue.append(_queued("later msg"))
@@ -493,19 +492,28 @@ async def test_load_drain_preempted_by_new_turn_requeues_not_double_runs():
 
 
 def _gated_stream(*turns):
-    """A stream_to_websocket stand-in. Each call consumes the next
-    ``(mid_stream, gate)`` pair from ``turns``: first chunk, signal
-    ``mid_stream`` (so the test can interleave), hold the turn open until
-    ``gate`` is set, then finish. Extra calls beyond ``turns`` complete
+    """A stream_to_websocket stand-in. Each call consumes the next turn spec
+    from ``turns``. A ``(mid_stream, gate)`` pair streams one chunk first; a
+    ``(mid_stream, gate, "pre_output")`` triple parks BEFORE emitting any
+    content — V2's run_query flips ``stream_state.stream_started`` inline on
+    the first chunk (the deleted dispatch layer used to own that latch), so
+    the pre-output-teardown tests must hold their turn open with NOTHING
+    streamed yet (the terminal ``done`` never flips the latch). Either way:
+    signal ``mid_stream`` (so the test can interleave), hold the turn open
+    until ``gate`` is set, then finish. Extra calls beyond ``turns`` complete
     immediately."""
     pending = list(turns)
 
     async def _gen(*args, **kwargs):
-        yield {"type": "chunk", "content": "hi"}
         if pending:
-            mid_stream, gate = pending.pop(0)
+            spec = pending.pop(0)
+            mid_stream, gate = spec[0], spec[1]
+            if len(spec) == 2:  # normal turn: one chunk streams before the park
+                yield {"type": "chunk", "content": "hi"}
             mid_stream.set()
             await gate.wait()
+        else:
+            yield {"type": "chunk", "content": "hi"}
         yield {"type": "done", "metadata": {}}
     return _gen
 
@@ -533,7 +541,7 @@ async def test_message_queued_mid_stream_drains_exactly_once_at_turn_end():
         with patch(
             "app.core.query_engine.stream_to_websocket",
             new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+        ):
             # Turn 1 starts (registered exactly like handle_query registers it).
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
@@ -594,8 +602,7 @@ async def test_load_session_drain_recovers_orphaned_send_later_end_to_end():
         h.queue.append(_queued("orphaned send-later"))
 
         # no mid-stream interleaving needed — the stream runs straight through
-        with patch("app.core.query_engine.stream_to_websocket", new=_gated_stream()), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+        with patch("app.core.query_engine.stream_to_websocket", new=_gated_stream()):
             await handler.handle_load_session(dict(LOAD))
             # the drain registered the recovery turn — let it run to completion
             task = h.registry.get("sess-1")
@@ -648,8 +655,8 @@ async def test_stop_before_output_on_queue_drain_successor_requeues_not_discards
 
         with patch(
             "app.core.query_engine.stream_to_websocket",
-            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2, "pre_output")),
+        ):
             # Turn A starts and streams.
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
@@ -710,7 +717,7 @@ async def test_stop_stranding_nonempty_queue_emits_durable_log(caplog):
         with patch(
             "app.core.query_engine.stream_to_websocket",
             new=_gated_stream((mid_stream, gate)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+        ):
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
             )
@@ -744,8 +751,8 @@ async def test_genuine_first_turn_stop_still_orphan_discards(caplog):
 
         with patch(
             "app.core.query_engine.stream_to_websocket",
-            new=_gated_stream((mid_stream, gate)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            new=_gated_stream((mid_stream, gate, "pre_output")),
+        ):
             outer = asyncio.create_task(
                 handler.run_query("my draft", "sess-1", "claude-code", None, None, None)
             )
@@ -787,8 +794,8 @@ async def test_stop_before_output_on_followup_queue_drain_requeues_and_cleans_le
 
         with patch(
             "app.core.query_engine.stream_to_websocket",
-            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2, "pre_output")),
+        ):
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
             )
@@ -864,8 +871,8 @@ async def test_interrupt_pending_teardown_of_queue_drain_successor_requeues_not_
 
         with patch(
             "app.core.query_engine.stream_to_websocket",
-            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2, "pre_output")),
+        ):
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
             )
@@ -927,8 +934,8 @@ async def test_interrupt_pending_teardown_followup_requeues_and_cleans_legacy_ro
 
         with patch(
             "app.core.query_engine.stream_to_websocket",
-            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2)),
-        ), patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()):
+            new=_gated_stream((mid_stream, gate), (mid_stream2, gate2, "pre_output")),
+        ):
             outer = asyncio.create_task(
                 handler.run_query("hello", "sess-1", "claude-code", None, None, None)
             )

@@ -60,16 +60,12 @@ def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_
     sync.register_device = AsyncMock()
     sync.unregister_device = AsyncMock()
     sync.is_device_watching_session = MagicMock(return_value=False)
-    sync.get_user_streaming_sessions = MagicMock(return_value=[])
     sync.get_device_count = MagicMock(return_value=1)
     sync._connections = {}
 
-    store = stack.enter_context(patch.object(ws_mod, "live_session_store"))
-    stack.enter_context(patch.object(cwh, "live_session_store", new=store))
-    store.get_session = MagicMock(return_value=None)
-    store.has_session = MagicMock(return_value=False)
-    store.is_streaming = MagicMock(return_value=False)
-    store.cleanup_session = AsyncMock()
+    # (V2: the live session store and sync_engine's streaming map are deleted —
+    # the connect-time snapshot reads app.core.streaming_status against the
+    # test DB, which has no lease-valid runs.)
 
     uqh = stack.enter_context(patch.object(ws_mod, "user_question_handler"))
     stack.enter_context(patch.object(cwh, "user_question_handler", new=uqh))

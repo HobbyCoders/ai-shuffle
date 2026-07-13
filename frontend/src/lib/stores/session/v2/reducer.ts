@@ -9,13 +9,13 @@
  *   - No I/O, no `Date.now()`, no randomness. Every timestamp is derived from
  *     the event's `created_at`, every id from event fields. Reducing the same
  *     log twice from `initialState()` yields deeply-equal state.
- *   - The message shapes produced here MUST match what `convertServerMessage`
- *     (session-poller.ts:1139) produces so `MessageArea.svelte` renders them
- *     unchanged. See the per-event handlers below for the exact field mapping.
+ *   - The message shapes produced here MUST match the `ChatMessage` contract
+ *     that `MessageArea.svelte` renders. See the per-event handlers below for
+ *     the exact field mapping.
  *   - Unknown event types are ignored (forward compatibility).
  */
 
-import type { ChatMessage, SubagentChildMessage, Task } from '../../types';
+import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '../../types';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -54,6 +54,14 @@ export interface V2SessionState {
 	 *  from the event order, so replay is idempotent. */
 	openTextId: string | null;
 	openThinkingId: string | null;
+	/** `transcript.rewound` bookkeeping: message id → seq of the event that
+	 *  CREATED it. A message absent from this map is optimistic (seeded outside
+	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
+	 *  removal. Kept off the rendered ChatMessage so the shape stays byte-parity
+	 *  with `convertServerMessage`. */
+	messageOriginSeq: Record<string, number>;
+	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
+	taskOriginSeq: Record<string, number>;
 }
 
 export function initialState(): V2SessionState {
@@ -66,6 +74,8 @@ export function initialState(): V2SessionState {
 		lastSeq: 0,
 		openTextId: null,
 		openThinkingId: null,
+		messageOriginSeq: {},
+		taskOriginSeq: {},
 	};
 }
 
@@ -110,6 +120,101 @@ function closeOpen(state: V2SessionState): V2SessionState {
 
 function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
+}
+
+/** Append a message and record its origin seq (for `transcript.rewound`). */
+function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2SessionState {
+	return {
+		...state,
+		messages: [...state.messages, msg],
+		messageOriginSeq: { ...state.messageOriginSeq, [msg.id]: seq },
+	};
+}
+
+/** Record an origin seq once — the earliest (creation) seq wins on replay. */
+function withOrigin(map: Record<string, number>, id: string, seq: number): Record<string, number> {
+	return map[id] !== undefined ? map : { ...map, [id]: seq };
+}
+
+/** Prefer an event payload `timestamp` over the envelope `created_at`. */
+function stampTs(event: WireEvent, createdAt: string): string {
+	return str(event.timestamp) || createdAt;
+}
+
+/**
+ * Fold a subagent/team progress child into the accumulated children list,
+ * mirroring the `subagent.progress` handler exactly. Returns the SAME array
+ * reference (no-op) for an empty `chunk` so the caller can skip a re-render.
+ */
+function accumulateProgressChild(
+	children: SubagentChildMessage[],
+	event: WireEvent,
+	kind: string,
+	payload: Record<string, unknown>
+): SubagentChildMessage[] {
+	if (kind === 'tool_use') {
+		return [
+			...children,
+			{
+				id: event.id,
+				type: 'tool_use',
+				content: '',
+				toolName: str(payload.name ?? payload.tool_name),
+				toolId: str(payload.tool_use_id ?? payload.id) || undefined,
+				toolInput: obj(payload.input),
+				toolStatus: 'running',
+			},
+		];
+	}
+	if (kind === 'tool_result') {
+		const resultText = str(payload.output ?? payload.content ?? event.note);
+		const targetToolId = str(payload.tool_use_id ?? payload.id);
+		const out = [...children];
+		if (targetToolId) {
+			for (let i = out.length - 1; i >= 0; i--) {
+				if (out[i].type === 'tool_use' && out[i].toolId === targetToolId) {
+					out[i] = {
+						...out[i],
+						toolResult: resultText,
+						toolStatus: payload.is_error ? 'error' : 'complete',
+					};
+					return out;
+				}
+			}
+		}
+		out.push({
+			id: event.id,
+			type: 'tool_result',
+			content: resultText,
+			toolName: str(payload.name ?? payload.tool_name) || undefined,
+		});
+		return out;
+	}
+	// chunk (or unknown): accumulate streamed text into a trailing text child.
+	const text = str(event.note ?? payload.text ?? payload.content);
+	if (!text) return children; // no-op (same ref)
+	const out = [...children];
+	const last = out[out.length - 1];
+	if (last && last.type === 'text' && last.streaming) {
+		out[out.length - 1] = { ...last, content: last.content + text };
+	} else {
+		out.push({ id: event.id, type: 'text', content: text, streaming: true });
+	}
+	return out;
+}
+
+function teamMemberId(teamName: string, teammateName: string): string {
+	return `team-${teamName}::${teammateName}`;
+}
+
+function findTeamMember(
+	messages: ChatMessage[],
+	teamName: string,
+	teammateName: string
+): ChatMessage | undefined {
+	return messages.find(
+		(m) => m.type === 'team_member' && m.teamName === teamName && m.teammateName === teammateName
+	);
 }
 
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -178,6 +283,29 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 								: m
 					),
 				};
+				// Append the "[Stopped]" marker to the truncated assistant text
+				// (mirrors the legacy end_streaming(interrupted=True) append).
+				// Only mark output produced by THIS turn — scan back no further
+				// than the last user message so a stop-before-first-output never
+				// stamps a previous turn's response.
+				const msgs = next.messages;
+				let target = -1;
+				for (let i = msgs.length - 1; i >= 0; i--) {
+					const m = msgs[i];
+					if (m.role === 'user') break;
+					if (m.role === 'assistant' && m.type === 'text' && m.content.trim()) {
+						target = i;
+						break;
+					}
+				}
+				if (target !== -1 && !msgs[target].content.endsWith('[Stopped]')) {
+					const marked = [...msgs];
+					marked[target] = {
+						...marked[target],
+						content: marked[target].content + '\n\n[Stopped]',
+					};
+					next = { ...next, messages: marked };
+				}
 			}
 			return { ...next, isStreaming: false, parked: false };
 		}
@@ -207,22 +335,25 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					return Math.abs(eventMs - ms) <= 30_000;
 				});
 			}
+			const stamp = stampTs(event, createdAt);
 			const userMsg = (id: string): ChatMessage => ({
 				id,
 				role: 'user',
 				type: 'text',
 				content,
-				timestamp: createdAt || undefined,
+				timestamp: stamp || undefined,
 				...(commandId ? { commandId } : {}),
 			});
 			if (idx >= 0) {
 				// Replace in place — keep the optimistic id for stable Svelte keying.
+				// The reconciled message now has an origin seq (it is no longer a
+				// pending optimistic message), so it participates in rewinds.
 				const keepId = state.messages[idx].id;
 				const messages = [...state.messages];
 				messages[idx] = userMsg(keepId);
-				return { ...state, messages };
+				return { ...state, messages, messageOriginSeq: withOrigin(state.messageOriginSeq, keepId, seq) };
 			}
-			return { ...state, messages: [...state.messages, userMsg(event.id)] };
+			return appendMessage(state, userMsg(event.id), seq);
 		}
 
 		// ── Assistant text / thinking deltas ────────────────────────────
@@ -247,7 +378,30 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				streaming: true,
 				timestamp: createdAt || undefined,
 			};
-			return { ...next, messages: [...next.messages, msg], openTextId: id };
+			return { ...appendMessage(next, msg, seq), openTextId: id };
+		}
+
+		// ── Closed assistant message (never merges/opens a stream) ───────
+		case 'message.assistant': {
+			const content = str(event.content);
+			const kind = str(event.kind) === 'thinking' ? 'thinking' : 'text';
+			// Always a CLOSED bubble: close any open stream first, then append.
+			// It must never merge into or reopen a streaming text/thinking msg.
+			const next = closeOpen(state);
+			const metadata: Record<string, unknown> = {};
+			if (str(event.model)) metadata.model = str(event.model);
+			const msg: ChatMessage = {
+				id: event.id,
+				role: 'assistant',
+				type: kind,
+				content,
+				streaming: false,
+				timestamp: stampTs(event, createdAt) || undefined,
+				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
+				...(str(event.profile_id) ? { profileId: str(event.profile_id) } : {}),
+				...(Object.keys(metadata).length ? { metadata } : {}),
+			};
+			return appendMessage(next, msg, seq);
 		}
 
 		case 'assistant.thinking_delta': {
@@ -271,7 +425,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				streaming: true,
 				timestamp: createdAt || undefined,
 			};
-			return { ...next, messages: [...next.messages, msg], openThinkingId: id };
+			return { ...appendMessage(next, msg, seq), openThinkingId: id };
 		}
 
 		// ── Tool cards ──────────────────────────────────────────────────
@@ -280,6 +434,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!toolUseId) return state;
 			let next = closeOpen(state);
 			const input = obj(event.input);
+			const screenshot = str(event.screenshot);
 			const existing = findByToolId(next.messages, toolUseId);
 			if (existing) {
 				// Card already created by an earlier input_delta — fill in name/input.
@@ -288,6 +443,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					messages: replaceById(next.messages, existing.id, {
 						toolName: str(event.name),
 						...(input ? { toolInput: input } : {}),
+						...(screenshot ? { toolScreenshot: screenshot } : {}),
 					}),
 				};
 			}
@@ -300,10 +456,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				toolId: toolUseId,
 				toolStatus: 'running',
 				streaming: true,
-				timestamp: createdAt || undefined,
+				timestamp: stampTs(event, createdAt) || undefined,
 				...(input ? { toolInput: input } : {}),
+				...(screenshot ? { toolScreenshot: screenshot } : {}),
 			};
-			return { ...next, messages: [...next.messages, msg] };
+			return appendMessage(next, msg, seq);
 		}
 
 		case 'tool.input_delta': {
@@ -333,7 +490,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				partialToolInput: partial,
 				timestamp: createdAt || undefined,
 			};
-			return { ...next, messages: [...next.messages, msg] };
+			return appendMessage(next, msg, seq);
 		}
 
 		case 'tool.result': {
@@ -371,7 +528,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				agentChildren: [],
 				timestamp: createdAt || undefined,
 			};
-			return { ...next, messages: [...next.messages, msg] };
+			return appendMessage(next, msg, seq);
 		}
 
 		case 'subagent.progress': {
@@ -451,6 +608,57 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			};
 		}
 
+		// ── Team-member card (correlated by team_name + teammate_name) ──
+		case 'team.member_started': {
+			const teamName = str(event.team_name);
+			const teammateName = str(event.teammate_name);
+			if (!teamName || !teammateName) return state;
+			const next = closeOpen(state);
+			if (findTeamMember(next.messages, teamName, teammateName)) return next; // idempotent
+			const msg: ChatMessage = {
+				id: teamMemberId(teamName, teammateName),
+				role: 'assistant',
+				type: 'team_member',
+				content: '',
+				teamName,
+				teammateName,
+				teammateStatus: 'running',
+				agentChildren: [],
+				...(str(event.description) ? { agentDescription: str(event.description) } : {}),
+				...(str(event.prompt) ? { agentPrompt: str(event.prompt) } : {}),
+				timestamp: stampTs(event, createdAt) || undefined,
+			};
+			return appendMessage(next, msg, seq);
+		}
+
+		case 'team.member_progress': {
+			const teamName = str(event.team_name);
+			const teammateName = str(event.teammate_name);
+			const card = findTeamMember(state.messages, teamName, teammateName);
+			if (!card) return state;
+			const before = card.agentChildren ?? [];
+			const children = accumulateProgressChild(before, event, str(event.kind), obj(event.payload) ?? {});
+			if (children === before) return state; // empty chunk: no-op
+			return { ...state, messages: replaceById(state.messages, card.id, { agentChildren: children }) };
+		}
+
+		case 'team.member_completed': {
+			const teamName = str(event.team_name);
+			const teammateName = str(event.teammate_name);
+			const card = findTeamMember(state.messages, teamName, teammateName);
+			if (!card) return state;
+			const status = str(event.status);
+			const teammateStatus: TeammateStatus =
+				status === 'completed' ? 'completed' : status === 'killed' ? 'killed' : 'error';
+			const children = (card.agentChildren ?? []).map((c) => (c.streaming ? { ...c, streaming: false } : c));
+			const patch: Partial<ChatMessage> = { teammateStatus, agentChildren: children };
+			const resultPreview = str(event.result_preview);
+			if (resultPreview) patch.content = resultPreview;
+			const usage = obj(event.usage);
+			if (usage) patch.agentUsage = usage as ChatMessage['agentUsage'];
+			return { ...state, messages: replaceById(state.messages, card.id, patch) };
+		}
+
 		// ── Background task summaries (parked visibility / tasks panel) ──
 		case 'task.updated': {
 			const taskId = str(event.task_id);
@@ -472,6 +680,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const activeTaskSummaries = existing
 				? state.activeTaskSummaries.map((t) => (t.id === taskId ? summary : t))
 				: [...state.activeTaskSummaries, summary];
+			const taskOriginSeq = withOrigin(state.taskOriginSeq, taskId, seq);
 			let messages = state.messages;
 			// A background subagent finishing BETWEEN turns reports only via this
 			// chip (the drain pump dispatches no subagent.completed), so a
@@ -493,7 +702,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					});
 				}
 			}
-			return { ...state, messages, activeTaskSummaries };
+			return { ...state, messages, activeTaskSummaries, taskOriginSeq };
 		}
 
 		// ── System messages ─────────────────────────────────────────────
@@ -506,9 +715,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: str(data?.content ?? data?.text),
 				systemSubtype: str(event.subtype),
 				...(data ? { systemData: data } : {}),
-				timestamp: createdAt || undefined,
+				timestamp: stampTs(event, createdAt) || undefined,
 			};
-			return closeOpen({ ...state, messages: [...state.messages, msg] });
+			return appendMessage(closeOpen(state), msg, seq);
 		}
 
 		case 'system.compaction_boundary': {
@@ -520,19 +729,58 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				systemSubtype: 'compaction_boundary',
 				timestamp: createdAt || undefined,
 			};
-			return closeOpen({ ...state, messages: [...state.messages, msg] });
+			return appendMessage(closeOpen(state), msg, seq);
+		}
+
+		// ── Transcript rewind (replay-deterministic truncation) ─────────
+		case 'transcript.rewound': {
+			const fromSeq = typeof event.from_seq === 'number' ? event.from_seq : NaN;
+			if (Number.isNaN(fromSeq)) return state; // malformed: no-op
+			// Drop every message/task CREATED at seq >= fromSeq. Optimistic
+			// messages (absent from messageOriginSeq) are exempt. Reducing the
+			// full log from seq 0 reproduces the same truncation → determinism.
+			const keptMessages = state.messages.filter((m) => {
+				const origin = state.messageOriginSeq[m.id];
+				return origin === undefined || origin < fromSeq;
+			});
+			const messageOriginSeq: Record<string, number> = {};
+			for (const [id, origin] of Object.entries(state.messageOriginSeq)) {
+				if (origin < fromSeq) messageOriginSeq[id] = origin;
+			}
+			const taskOriginSeq: Record<string, number> = {};
+			const activeTaskSummaries = state.activeTaskSummaries.filter((t) => {
+				const origin = state.taskOriginSeq[t.id];
+				if (origin === undefined || origin < fromSeq) {
+					if (origin !== undefined) taskOriginSeq[t.id] = origin;
+					return true;
+				}
+				return false;
+			});
+			// Clear open pointers if their target message was truncated away.
+			const liveIds = new Set(keptMessages.map((m) => m.id));
+			const openTextId = state.openTextId && liveIds.has(state.openTextId) ? state.openTextId : null;
+			const openThinkingId =
+				state.openThinkingId && liveIds.has(state.openThinkingId) ? state.openThinkingId : null;
+			return {
+				...state,
+				messages: keptMessages,
+				messageOriginSeq,
+				taskOriginSeq,
+				activeTaskSummaries,
+				openTextId,
+				openThinkingId,
+			};
 		}
 
 		// ── Phase-1 non-goals (stay on legacy WS) / envelope-only ───────
-		// Queue UI, interrupt affordance, permissions/questions, rewind and
-		// artifacts are handled by the legacy WS path or deferred; they do not
-		// mutate the rendered transcript here.
+		// Queue UI, interrupt affordance, permissions/questions and artifacts
+		// are handled by the legacy WS path or deferred; they do not mutate the
+		// rendered transcript here.
 		case 'turn.queued':
 		case 'turn.interrupting':
 		case 'interaction.requested':
 		case 'interaction.answered':
 		case 'interaction.expired':
-		case 'transcript.rewound':
 		case 'artifact.created':
 			return state;
 

@@ -1,28 +1,24 @@
 /**
  * Session Switcher — Session switching, caching, and persistence logic.
  *
- * Architecture (polling-only):
- * - Session loading uses HTTP via sessionPoller.loadSession() — NOT WS messages.
- * - No more waitingForHistory, expectedSessionId, or __reject_all__ sentinels.
- * - All session state (messages, isStreaming, etc.) comes from the poller.
+ * Architecture (SSE-fed reducer):
+ * - The transcript + streaming state load via the SSE feed (feed-controller),
+ *   which replays the session event log from_seq=0 on switch-in.
+ * - A one-shot `/live` snapshot fills the metadata the feed does not carry
+ *   (preserve_background_on_interrupt, remote controllability, usage totals,
+ *   worktree/cloud fields).
  */
 
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ExecutionMode } from '../types';
-import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
-// V2 Phase 1: SSE-fed reducer store for v2_stream sessions.
+// V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
-
-/** Whether a session opts into the V2 SSE-fed reducer path (from the list row). */
-function targetIsV2(sessionId: string): boolean {
-	return !!appData.current.sessions.find((x) => x.id === sessionId)?.v2_stream;
-}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -47,17 +43,30 @@ export interface SessionSwitcherDeps {
 		save: (sessionId: string, ephemeral: SessionEphemeral) => void;
 		restore: (sessionId: string) => SessionEphemeral | null;
 	};
-	sessionPoller: {
-		stop: (sessionId: string) => void;
-		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
-		startStreaming: (sessionId: string) => void;
-	};
-	sessionState?: {
-		removeSession: (sessionId: string) => void;
-	};
 
 	// Callbacks
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
+}
+
+/** Minimal shape of the one-shot `/live` metadata snapshot used on switch-in. */
+interface LiveSnapshot {
+	usage?: {
+		input_tokens?: number;
+		output_tokens?: number;
+		cache_creation_tokens?: number;
+		cache_read_tokens?: number;
+	};
+	preserve_background_on_interrupt?: boolean;
+	session_meta?: {
+		title?: string;
+		worktree_id?: string | null;
+		worktree_branch?: string | null;
+		worktree_deleted?: boolean;
+		execution_mode?: string;
+		cloud_branch?: string | null;
+		controllable?: boolean;
+		relay_error?: string;
+	};
 }
 
 /** Worktree metadata from the session list, used to restore worktree state
@@ -145,7 +154,7 @@ async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; se
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
-	const { update, getState, wsSend, internal, sessionEphemeralCache, sessionPoller, onPersistTimerChanged } = deps;
+	const { update, getState, wsSend, internal, sessionEphemeralCache, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
@@ -307,14 +316,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] switchSession CALLED gen=${generation} from=${state.sessionId} to=${sessionId} visibility=${typeof document !== 'undefined' ? document.visibilityState : 'n/a'}`);
 
-		// Stop polling and clean up session state for the session we're leaving.
-		// Without removeSession, the old session lingers in sessionState with
-		// isStreaming: true, causing stale streaming detection if a late poll arrives.
-		if (state.sessionId) {
-			sessionPoller.stop(state.sessionId);
-			deps.sessionState?.removeSession(state.sessionId);
-		}
-		// V2 Phase 1: tear down any active SSE feed for the leaving session.
+		// Tear down the active SSE feed for the session we're leaving so a late
+		// event can't write into the target session's state.
 		if (feedController.isFeeding()) {
 			feedController.stop();
 		}
@@ -360,9 +363,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionId,
 			title: resolvedTitle,
 			project: targetProject,
-			// Start empty; the authoritative messages load from the server via
-			// sessionPoller.loadSession() below. No cache-first render — showing a
-			// stale snapshot first caused a visible flash before the real history.
+			// Start empty; the authoritative messages load from the SSE feed
+			// (full replay from_seq=0) started below. No cache-first render —
+			// showing a stale snapshot first caused a visible flash before history.
 			messages: [],
 			error: null,
 			// Explicit navigation supersedes any pending boot restore — the user
@@ -371,32 +374,31 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// History fetch for this target is in flight below. messages=[] is
 			// transient during this window, so ChatView must not read the empty
 			// state as a cleared/new conversation and flash the cleared hint for a
-			// session that turns out to have messages. Cleared once loadSession
-			// settles (below). Unlike isRestoringSession, sendMessage ignores this.
+			// session that turns out to have messages. Cleared once the feed starts
+			// (below). Unlike isRestoringSession, sendMessage ignores this.
 			isLoadingSession: true,
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],
 			isStreaming: false,
-			wsStreamContent: '',
 			pendingInterruptPrompt: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
-			// Reset to controllable; the first poll (onPollApplied) flips it false
+			// Reset to controllable; the /live metadata snapshot flips it false
 				// only if the target is a remote session whose owner is offline.
 				remoteControllable: true,
 				// Clear any stale relay-error reason from the leaving session; the
-				// first poll re-stamps it if the target's owner is unreachable.
+				// metadata snapshot re-stamps it if the target's owner is unreachable.
 				relayError: undefined,
 				// Per-session runtime state — MUST be reset on every switch so the
 			// leaving session's values never bleed into the target. These mirror
 			// the resets in newChat()/defaultState(); omitting them caused e.g. the
 			// previous session's profile (sessionProfileId), next-query profile
 			// (currentQueryProfileId — used by queued/auto-worktree sends), token
-			// totals, and stream timer to carry over until a poll happened to
-			// overwrite them. The poller (onPollApplied) repopulates the usage
+			// totals, and stream timer to carry over until a later update happened
+			// to overwrite them. The /live metadata snapshot repopulates the usage
 			// fields with the target session's real values.
 			sessionProfileId: null,
 			currentQueryProfileId: null,
@@ -406,16 +408,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			totalCacheReadTokens: 0,
 			contextMax: 200_000,
 			streamStartTime: null,
-			// Background tasks are per-session and written only by the poller's
-			// onPollApplied for the CURRENT session. Without this reset the leaving
-			// session's running tasks (e.g. another worktree's sub-agents) stay in
-			// the shared store and flash in the ActiveTasks strip until the target
-			// session's first /live poll overwrites them.
+			// Background tasks are per-session and written only by the SSE feed for
+			// the CURRENT session. Without this reset the leaving session's running
+			// tasks (e.g. another worktree's sub-agents) stay in the shared store and
+			// flash in the ActiveTasks strip until the target session's feed replays.
 			activeTasks: [],
 			worktreeCreateNewBranch: false,
 			// Mark context as pending — null signals "not yet loaded" so the
-			// context bar holds its last value instead of flashing to 0%.
-			// loadSession → onPollApplied will populate with correct values.
+			// context bar holds its last value instead of flashing to 0%. The feed
+			// / metadata snapshot will populate with correct values.
 			contextUsed: null,
 			// Merge ephemeral state in the same update
 			draft: ephemeral?.draft || '',
@@ -441,81 +442,94 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 
-		// V2 Phase 1: for v2_stream sessions the SSE-fed reducer is the transcript
-		// authority (full replay from_seq=0 = history load). Start the feed instead
-		// of the poller; permissions/questions still flow over legacy WS.
-		if (targetIsV2(sessionId)) {
-			if (generation !== _switchGeneration) return;
-			update(s => (s.sessionId === sessionId ? { ...s, isLoadingSession: false } : s));
-			wsSend({ type: 'watch_session', session_id: sessionId });
-			wsSend({ type: 'get_pending_permissions' });
-			wsSend({ type: 'get_pending_questions' });
-			feedController.start(sessionId);
-			persistSession();
-			return;
-		}
-
-		// Load full session state via HTTP — sole authority for session data.
-		// This replaces the old WS load_session → history flow.
-		const pollData = await sessionPoller.loadSession(sessionId);
-
-		// A newer switchSession/newChat call was made while we were awaiting — bail out.
-		// Stop the poller for this now-stale session to avoid leaking resources.
-		// Leave isLoadingSession alone here: the newer navigation owns it now and
-		// has already set its own value (clearing it would lie about that fetch).
-		if (generation !== _switchGeneration) {
-			sessionPoller.stop(sessionId);
-			return;
-		}
-
-		// History fetch settled and we're still on this session — end the loading
-		// window. loadSession() has already applied the messages via onPollApplied,
-		// so if messages are still empty the session is genuinely cleared/empty and
-		// ChatView may now present the cleared-conversation hero.
+		// The SSE-fed reducer is the transcript authority (full replay from_seq=0 =
+		// history load). Start the feed; permissions/questions flow over legacy WS.
+		if (generation !== _switchGeneration) return;
 		update(s => (s.sessionId === sessionId ? { ...s, isLoadingSession: false } : s));
-
-		// Register with SyncEngine to receive broadcast events from other devices.
-		// Session state is loaded via HTTP, but real-time sync (streaming from
-		// other devices) requires WS registration.
+		// Register with SyncEngine so cross-device broadcast events reach this tab.
 		wsSend({ type: 'watch_session', session_id: sessionId });
+		// Request pending permissions/questions UNCONDITIONALLY (not gated on
+		// streaming): a session parked on a permission/question reports
+		// isStreaming=false, so gating would hide the modal until a reconnect. The
+		// pending_* replies REPLACE by request_id, so re-requesting is idempotent.
+		wsSend({ type: 'get_pending_permissions' });
+		wsSend({ type: 'get_pending_questions' });
+		feedController.start(sessionId);
+		persistSession();
 
-		if (pollData) {
-			// If session is streaming, start the poller for ongoing updates
-			if (pollData.isStreaming) {
-				sessionPoller.startStreaming(sessionId);
-			}
-			// Request pending permissions/questions via WS UNCONDITIONALLY (not gated
-			// on isStreaming): a session parked on a permission/question reports
-			// isStreaming=false, so gating on it would hide the modal on switch until
-			// a reconnect. Mirrors active-session onConnected. The pending_* replies
-			// REPLACE by request_id, so re-requesting never double-shows a modal.
-			wsSend({ type: 'get_pending_permissions' });
-			wsSend({ type: 'get_pending_questions' });
-		} else {
-			// loadSession failed (HTTP error, timeout, network error).
-			// Set error state so the UI shows an error banner instead of
-			// appearing frozen in a loading limbo.
-			//
-			// A REMOTE session (owned by another install) failing to load almost
-			// always means the owning device is unreachable — the shared-DB history
-			// path normally keeps it openable, so a hard null here is a reach
-			// failure, NOT "start a new chat". Tailor the message so the user knows
-			// to retry rather than abandon the (cluster-shared) session.
-			const row = appData.current.sessions.find((x) => x.id === sessionId);
-			const isRemote = !!(row && row.is_remote);
-			const deviceName = row?.device_name;
-			const errorMsg = isRemote
-				? deviceName
-					? `Could not reach ${deviceName} — try again`
-					: 'Could not reach the owning device — try again'
-				: 'Failed to load session. Try starting a new chat.';
-			update(s => ({
-				...s,
-				error: errorMsg,
-				contextUsed: 0,
-			}));
+		// One-shot metadata snapshot: the feed carries the transcript, streaming
+		// flag, tasks and usage, but NOT the lifecycle/control metadata. Fetch it
+		// once from /live so preserve_background_on_interrupt, remote
+		// controllability, and worktree/cloud fields are correct on switch-in.
+		void applyMetadataSnapshot(sessionId, generation);
+	}
+
+	/**
+	 * Fetch the `/live` snapshot once and fold the metadata the SSE feed does not
+	 * carry into activeSession — closing the v2 metadata gap
+	 * (preserve_background_on_interrupt, remoteControllable/relayError, usage
+	 * totals, and server-authoritative worktree/cloud fields). Never touches
+	 * messages / isStreaming / activeTasks (the feed owns those). Guarded on the
+	 * switch generation + active sessionId so a stale response can't write into a
+	 * session the user already left.
+	 */
+	async function applyMetadataSnapshot(sessionId: string, generation: number) {
+		let snap: LiveSnapshot | null;
+		try {
+			snap = await api.get<LiveSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0`);
+		} catch (e) {
+			console.warn('[ActiveSession] metadata snapshot failed:', e);
+			return;
+		}
+		if (!snap) return;
+		if (generation !== _switchGeneration) return;
+		if (getState().sessionId !== sessionId) return;
+
+		const patch: Partial<ActiveSessionState> = {};
+
+		// Usage totals + a best-effort context gauge (input + cache tokens), so the
+		// context bar shows a value before the feed's first usage event lands.
+		const usage = snap.usage;
+		if (usage) {
+			const inTok = usage.input_tokens ?? 0;
+			const cacheCreate = usage.cache_creation_tokens ?? 0;
+			const cacheRead = usage.cache_read_tokens ?? 0;
+			patch.totalTokensIn = inTok;
+			patch.totalTokensOut = usage.output_tokens ?? 0;
+			patch.totalCacheCreationTokens = cacheCreate;
+			patch.totalCacheReadTokens = cacheRead;
+			patch.contextUsed = inTok + cacheCreate + cacheRead;
 		}
 
+		// "Plain Stop spares background sub-agents" — the feed never sets this.
+		patch.preserveBackgroundOnInterrupt = snap.preserve_background_on_interrupt ?? false;
+
+		const meta = snap.session_meta;
+		if (meta) {
+			if (meta.title) patch.title = meta.title;
+			if (meta.worktree_deleted !== undefined) patch.worktreeDeleted = meta.worktree_deleted;
+			if (meta.worktree_id !== undefined) patch.worktreeId = meta.worktree_id;
+			if (meta.worktree_branch !== undefined && meta.worktree_branch !== null) {
+				patch.worktreeBranch = meta.worktree_branch;
+			}
+			if (meta.execution_mode !== undefined) {
+				patch.executionMode = meta.execution_mode as ExecutionMode;
+			}
+			if (meta.cloud_branch !== undefined && meta.cloud_branch !== null) {
+				patch.cloudBranch = meta.cloud_branch;
+			}
+			// Cross-install control reachability: absent for local sessions → true.
+			const controllable = meta.controllable !== false;
+			patch.remoteControllable = controllable;
+			patch.relayError = controllable ? undefined : meta.relay_error;
+		} else {
+			// Local session with no meta block — always controllable.
+			patch.remoteControllable = true;
+			patch.relayError = undefined;
+		}
+
+		update(s => (s.sessionId === sessionId ? { ...s, ...patch } : s));
+		// Persist any server-authoritative worktree/cloud correction.
 		persistSession();
 	}
 
@@ -525,14 +539,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const leavingSessionId = state.sessionId;
 		// newChat: leaving sessionId=${leavingSessionId}
 
-		// Stop polling and clean up session state for the session we're leaving.
-		// Without removeSession, the old session lingers with isStreaming: true,
-		// causing stale streaming detection if a late poll arrives.
-		if (leavingSessionId) {
-			sessionPoller.stop(leavingSessionId);
-			deps.sessionState?.removeSession(leavingSessionId);
-		}
-		// V2 Phase 1: tear down any active SSE feed for the leaving session.
+		// Tear down the active SSE feed for the session we're leaving.
 		if (feedController.isFeeding()) {
 			feedController.stop();
 		}
@@ -580,7 +587,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			project: getPersistedProject() || s.project,
 			messages: [],
 			isStreaming: false,
-			wsStreamContent: '',
 			pendingInterruptPrompt: null,
 			error: null,
 			title: 'New Chat',

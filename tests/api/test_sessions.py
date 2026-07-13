@@ -1278,85 +1278,40 @@ class TestClearSession:
         assert response.status_code == 403
         mock_database.clear_session_conversation.assert_not_called()
 
-    def test_clear_session_purges_live_overlay(self, client, mock_database, sample_session):
-        """The clear MUST purge the in-memory live overlay.
-
-        A recently-open session lingers in ``live_session_store`` after its turn
-        ends (end_streaming keeps its buffer as a fast-reconnect snapshot). The
-        GET /{id}/messages read path serves that buffer whenever it out-completes
-        the store (delta polls AND the fresh-load completeness check). If the
-        clear only wipes the DB, that stale buffer SHADOWS the now-empty store and
-        the old conversation resurrects on the next poll/reload — the reported
-        "clear does nothing" bug. So the endpoint must drop the overlay and the
-        sync-layer streaming remnant.
-        """
+    # DELETED (V2 Phase-1 deletion): test_clear_session_purges_live_overlay and
+    # test_clear_session_skips_overlay_purge_when_absent. Their entire subject —
+    # the in-memory live_session_store overlay purge + the sync_engine
+    # clear_streaming_state remnant — is deleted with the live store: the chat
+    # is served from the persisted transcript (nothing can shadow the cleared
+    # DB), and busy truth is the durable runs table (has_active_run gates the
+    # clear — see test_clear_session_blocked_while_streaming below).
+    def test_clear_session_succeeds_without_live_state(self, client, mock_database, sample_session):
+        """V2 success path: with no active run, the clear resets the DB and
+        returns 200 — no live overlay exists to purge."""
         mock_database.get_session.return_value = sample_session
         mock_database.clear_session_conversation.return_value = "sdk-123"
 
-        with patch("app.core.live_session_store.live_session_store") as mock_store, \
-                patch("app.core.sync_engine.sync_engine") as mock_sync:
-            mock_store.is_streaming.return_value = False
-            mock_store.has_session.return_value = True
-            mock_store.cleanup_session = AsyncMock()
-            mock_sync.is_session_streaming.return_value = False
-            mock_sync.clear_streaming_state = AsyncMock()
-
+        with patch("app.core.streaming_status.has_active_run", return_value=False):
             response = client.post("/api/v1/sessions/test-session-id/clear")
 
         assert response.status_code == 200
         mock_database.clear_session_conversation.assert_called_once_with("test-session-id")
-        mock_store.cleanup_session.assert_awaited_once_with("test-session-id")
-        mock_sync.clear_streaming_state.assert_awaited_once_with("test-session-id")
-
-    def test_clear_session_skips_overlay_purge_when_absent(self, client, mock_database, sample_session):
-        """When the session is NOT in the live store, skip cleanup_session (there
-        is nothing to purge) but still clear the sync streaming remnant."""
-        mock_database.get_session.return_value = sample_session
-        mock_database.clear_session_conversation.return_value = None
-
-        with patch("app.core.live_session_store.live_session_store") as mock_store, \
-                patch("app.core.sync_engine.sync_engine") as mock_sync:
-            mock_store.is_streaming.return_value = False
-            mock_store.has_session.return_value = False
-            mock_store.cleanup_session = AsyncMock()
-            mock_sync.is_session_streaming.return_value = False
-            mock_sync.clear_streaming_state = AsyncMock()
-
-            response = client.post("/api/v1/sessions/test-session-id/clear")
-
-        assert response.status_code == 200
-        mock_store.cleanup_session.assert_not_awaited()
-        mock_sync.clear_streaming_state.assert_awaited_once_with("test-session-id")
 
     def test_clear_session_blocked_while_streaming(self, client, mock_database, sample_session):
-        """Never wipe a session mid-stream: the local streaming buffer is live.
+        """Never wipe a session mid-stream: an in-flight turn is live.
 
         Returns 409 and does NOT touch the DB — clearing under an in-flight turn
-        corrupts the transcript (the buffer keeps appending and re-persists the
-        old conversation on end_streaming).
+        corrupts the transcript (the streaming buffer keeps appending and
+        re-persists the old conversation on end_streaming). Busy truth is a
+        lease-valid active run in the durable ``runs`` table; because that
+        table lives in the SHARED database, the same read also blocks a turn
+        live on another install.
         """
         mock_database.get_session.return_value = sample_session
 
-        with patch("app.core.live_session_store.live_session_store") as mock_store, \
-                patch("app.core.sync_engine.sync_engine") as mock_sync:
-            mock_store.is_streaming.return_value = True
-            mock_sync.is_session_streaming.return_value = False
-
-            response = client.post("/api/v1/sessions/test-session-id/clear")
-
-        assert response.status_code == 409
-        mock_database.clear_session_conversation.assert_not_called()
-
-    def test_clear_session_blocked_while_streaming_cross_device(self, client, mock_database, sample_session):
-        """A turn live on ANOTHER install (sync_engine streaming map) also blocks
-        the clear with a 409 — same corruption risk across the sync layer."""
-        mock_database.get_session.return_value = sample_session
-
-        with patch("app.core.live_session_store.live_session_store") as mock_store, \
-                patch("app.core.sync_engine.sync_engine") as mock_sync:
-            mock_store.is_streaming.return_value = False
-            mock_sync.is_session_streaming.return_value = True
-
+        with patch(
+            "app.core.streaming_status.has_active_run", return_value=True
+        ):
             response = client.post("/api/v1/sessions/test-session-id/clear")
 
         assert response.status_code == 409
@@ -1543,8 +1498,11 @@ class TestGetSyncChanges:
         ]
         mock_database.get_latest_sync_id.return_value = 5
 
-        with patch("app.core.sync_engine.sync_engine") as mock_sync:
-            mock_sync.is_session_streaming.return_value = True
+        with patch("app.core.sync_engine.sync_engine") as mock_sync, \
+                patch(
+                    "app.core.streaming_status.has_active_run",
+                    return_value=True,
+                ):
             mock_sync.get_device_count.return_value = 2
 
             response = client.get("/api/v1/sessions/test-session-id/sync?since_id=0")
@@ -2004,7 +1962,7 @@ class TestAdoptSession:
         adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
         mock_database.adopt_session.return_value = adopted_row
 
-        # Not streaming (real sync_engine has an empty streaming set) → adopt.
+        # Not streaming (no active run in the runs table) → adopt.
         response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 200
@@ -2033,9 +1991,9 @@ class TestAdoptSession:
         adopted_row = {**sample_session, "instance_id": settings.effective_instance_id}
         mock_database.adopt_session.return_value = adopted_row
 
-        # Owner online, but is_session_streaming() is False for this idle session.
+        # Owner online, but this idle session has no lease-valid active run.
         with patch(
-            "app.core.sync_engine.sync_engine.is_session_streaming",
+            "app.core.streaming_status.has_active_run",
             return_value=False,
         ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
@@ -2059,7 +2017,7 @@ class TestAdoptSession:
         }
 
         with patch(
-            "app.core.sync_engine.sync_engine.is_session_streaming",
+            "app.core.streaming_status.has_active_run",
             return_value=True,
         ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
@@ -2075,7 +2033,7 @@ class TestAdoptSession:
         mock_database.get_install.return_value = None
 
         with patch(
-            "app.core.sync_engine.sync_engine.is_session_streaming",
+            "app.core.streaming_status.has_active_run",
             return_value=True,
         ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")

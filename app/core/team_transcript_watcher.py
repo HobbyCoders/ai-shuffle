@@ -11,7 +11,8 @@ For each known teammate the watcher:
   1. Opens the JSONL file and seeks to the last known byte offset.
   2. Parses new lines (one JSON event per line).
   3. Maps assistant content blocks (text / tool_use / tool_result) into
-     `team_member` updates on the parent session's LiveSession.
+     `team.member_*` contract events appended (unfenced) to the parent
+     session's event log — teammates run outside any turn's run lease.
   4. Tracks usage (tokens) from the last assistant message.
   5. Detects completion when the JSONL file stops growing for a quiet window
      *and* the teammate PID is no longer running.
@@ -28,11 +29,11 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.core.live_session_store import live_session_store
-from app.core.sync_engine import sync_engine
+from app.contract import events as contract
 from app.core.team_registry import TeammateRecord, team_registry
+from app.core.turn_recorder import _append_unfenced, _build_event
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,41 @@ POLL_INTERVAL_S = 0.5
 # If no new bytes appear within this window AND the PID is dead, the teammate
 # is considered finished.
 IDLE_COMPLETE_S = 3.0
+
+
+async def _append_team_event(
+    session_id: str, model_cls: type, **fields: Any
+) -> None:
+    """Append one team.member_* contract event to the parent session's log.
+
+    Unfenced (run_id=None) — teammate transcripts are tailed between/across
+    turns with no owning run lease. Never raises: a recording bug must never
+    break the tailer loop.
+    """
+    try:
+        await _append_unfenced(
+            session_id, [_build_event(model_cls, session_id, **fields)]
+        )
+    except Exception:
+        logger.warning(
+            "team event append failed for %s (%s)",
+            session_id, getattr(model_cls, "__name__", model_cls), exc_info=True,
+        )
+
+
+def _completed_status(status: Optional[str]) -> str:
+    """Map a registry/watcher status onto the TeamMemberCompleted enum.
+
+    The contract enum is {completed, failed, killed}; the watcher's internal
+    "error" (crash) maps to "failed" — same convention as
+    history_backfill._terminal_status.
+    """
+    s = (status or "").lower()
+    if s in ("error", "failed"):
+        return "failed"
+    if s in ("killed", "cancelled", "canceled"):
+        return "killed"
+    return "completed"
 
 
 class TeamTranscriptWatcher:
@@ -105,15 +141,14 @@ class TeamTranscriptWatcher:
             f"teammate={teammate_name} jsonl={path}"
         )
 
-        # Seed the live_session_store with an initial team_member message
-        # so the UI renders the teammate immediately, before any transcript
-        # lines are available.
-        await live_session_store.start_team_member(
-            session_id=parent_session_id,
+        # Record the teammate immediately so the UI renders the card before
+        # any transcript lines are available.
+        await _append_team_event(
+            parent_session_id,
+            contract.TeamMemberStarted,
             team_name=team_name,
             teammate_name=teammate_name,
-            teammate_session_id=rec.teammate_session_id,
-            pid=rec.pid,
+            description=None,
             prompt=rec.last_prompt,
         )
 
@@ -137,11 +172,13 @@ class TeamTranscriptWatcher:
                 await asyncio.sleep(POLL_INTERVAL_S)
         except asyncio.CancelledError:
             # Mark teammate killed if cancellation came from stop_all.
-            await live_session_store.update_team_member_status(
-                session_id=parent_session_id,
+            await _append_team_event(
+                parent_session_id,
+                contract.TeamMemberCompleted,
                 team_name=team_name,
                 teammate_name=teammate_name,
                 status="killed",
+                usage=rec.usage or None,
             )
             raise
         except Exception:
@@ -149,11 +186,13 @@ class TeamTranscriptWatcher:
                 f"team-watch crashed parent={parent_session_id} "
                 f"team={team_name} teammate={teammate_name}"
             )
-            await live_session_store.update_team_member_status(
-                session_id=parent_session_id,
+            await _append_team_event(
+                parent_session_id,
+                contract.TeamMemberCompleted,
                 team_name=team_name,
                 teammate_name=teammate_name,
-                status="error",
+                status="failed",
+                usage=rec.usage or None,
             )
 
     async def _consume_new_lines(
@@ -206,17 +245,6 @@ class TeamTranscriptWatcher:
                 continue
             await self._dispatch_event(parent_session_id, rec, ev, seen_tool_ids)
 
-        # Tick the parent session so polling delivers updates immediately.
-        await sync_engine.broadcast_stream_chunk(
-            session_id=parent_session_id,
-            message_id=f"team:{rec.team_name}:{rec.teammate_name}",
-            chunk_type="team_member_update",
-            chunk_data={
-                "team_name": rec.team_name,
-                "teammate_name": rec.teammate_name,
-            },
-            source_device_id=None,
-        )
         return True
 
     async def _dispatch_event(
@@ -247,22 +275,27 @@ class TeamTranscriptWatcher:
                     "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
                     "cache_read_tokens": usage.get("cache_read_input_tokens"),
                 }
-                await live_session_store.update_team_member_status(
-                    session_id=parent_session_id,
+                await _append_team_event(
+                    parent_session_id,
+                    contract.TeamMemberProgress,
                     team_name=rec.team_name,
                     teammate_name=rec.teammate_name,
-                    usage=rec.usage,
+                    kind=None,
+                    payload={"usage": rec.usage},
+                    tokens=rec.usage.get("total_tokens"),
                 )
 
         # `content` can be a plain string (user) or a list of blocks (assistant
         # or tool_result-bearing user).
         if isinstance(content, str):
             if etype == "assistant" and content.strip():
-                await live_session_store.append_team_member_text(
-                    session_id=parent_session_id,
+                await _append_team_event(
+                    parent_session_id,
+                    contract.TeamMemberProgress,
                     team_name=rec.team_name,
                     teammate_name=rec.teammate_name,
-                    content=content,
+                    kind="chunk",
+                    payload={"content": content},
                 )
             return
 
@@ -277,11 +310,13 @@ class TeamTranscriptWatcher:
             if btype == "text":
                 txt = block.get("text") or ""
                 if txt:
-                    await live_session_store.append_team_member_text(
-                        session_id=parent_session_id,
+                    await _append_team_event(
+                        parent_session_id,
+                        contract.TeamMemberProgress,
                         team_name=rec.team_name,
                         teammate_name=rec.teammate_name,
-                        content=txt,
+                        kind="chunk",
+                        payload={"content": txt},
                     )
 
             elif btype == "tool_use":
@@ -289,13 +324,17 @@ class TeamTranscriptWatcher:
                 if not tool_id or tool_id in seen_tool_ids:
                     continue
                 seen_tool_ids.add(tool_id)
-                await live_session_store.add_team_member_tool_use(
-                    session_id=parent_session_id,
+                await _append_team_event(
+                    parent_session_id,
+                    contract.TeamMemberProgress,
                     team_name=rec.team_name,
                     teammate_name=rec.teammate_name,
-                    tool_id=tool_id,
-                    tool_name=block.get("name") or "unknown",
-                    tool_input=block.get("input") or {},
+                    kind="tool_use",
+                    payload={
+                        "id": tool_id,
+                        "name": block.get("name") or "unknown",
+                        "input": block.get("input") or {},
+                    },
                 )
 
             elif btype == "tool_result":
@@ -316,13 +355,17 @@ class TeamTranscriptWatcher:
                     result_text = str(result_content or "")
 
                 is_error = bool(block.get("is_error"))
-                await live_session_store.add_team_member_tool_result(
-                    session_id=parent_session_id,
+                await _append_team_event(
+                    parent_session_id,
+                    contract.TeamMemberProgress,
                     team_name=rec.team_name,
                     teammate_name=rec.teammate_name,
-                    tool_id=tool_id,
-                    result=result_text,
-                    is_error=is_error,
+                    kind="tool_result",
+                    payload={
+                        "tool_use_id": tool_id,
+                        "output": result_text,
+                        "is_error": is_error,
+                    },
                 )
 
     async def _finalize(self, parent_session_id: str, rec: TeammateRecord) -> None:
@@ -337,56 +380,149 @@ class TeamTranscriptWatcher:
             rec.teammate_name,
             status=status,
         )
-        await live_session_store.update_team_member_status(
-            session_id=parent_session_id,
+        contract_status = _completed_status(status)
+        await _append_team_event(
+            parent_session_id,
+            contract.TeamMemberCompleted,
             team_name=rec.team_name,
             teammate_name=rec.teammate_name,
-            status=status,
-            usage=rec.usage,
+            status=contract_status,
+            usage=rec.usage or None,
         )
-        await _persist_team_member(parent_session_id, rec.team_name, rec.teammate_name)
+        await _persist_team_member(parent_session_id, rec, status)
 
 
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
-async def _persist_team_member(
-    parent_session_id: str,
+def _children_from_events(
     team_name: str,
     teammate_name: str,
+    progress_payloads: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Rebuild the persisted child list from team.member_progress payloads.
+
+    Produces the same camelCase child dict shape SubagentChild.to_dict()
+    writes for subagents, so db_message_loader renders team members
+    identically: consecutive chunks coalesce into one text child; tool_use
+    opens a tool child; tool_result closes the matching tool child.
+    """
+    prefix = f"{team_name}-{teammate_name}"
+    children: List[Dict[str, Any]] = []
+    seen_tool_ids: Set[str] = set()
+    text_idx = 0
+
+    for payload in progress_payloads:
+        kind = payload.get("kind")
+        inner = payload.get("payload") or {}
+        if not isinstance(inner, dict):
+            continue
+
+        if kind == "chunk":
+            txt = inner.get("content") or ""
+            if not txt:
+                continue
+            last = children[-1] if children else None
+            if last is not None and last.get("type") == "text":
+                last["content"] = (last.get("content") or "") + txt
+            else:
+                text_idx += 1
+                children.append({
+                    "id": f"{prefix}-text-{text_idx}",
+                    "type": "text",
+                    "content": txt,
+                    "streaming": False,
+                })
+
+        elif kind == "tool_use":
+            tool_id = inner.get("id") or ""
+            if not tool_id or tool_id in seen_tool_ids:
+                continue
+            seen_tool_ids.add(tool_id)
+            children.append({
+                "id": f"{prefix}-tool-{tool_id}",
+                "type": "tool_use",
+                "content": "",
+                "streaming": False,
+                "toolName": inner.get("name") or "unknown",
+                "toolId": tool_id,
+                "toolInput": inner.get("input") or {},
+                "toolStatus": "running",
+            })
+
+        elif kind == "tool_result":
+            tool_id = inner.get("tool_use_id") or ""
+            if not tool_id:
+                continue
+            for child in children:
+                if child.get("toolId") == tool_id:
+                    child["toolResult"] = inner.get("output") or ""
+                    child["toolStatus"] = (
+                        "error" if inner.get("is_error") else "complete"
+                    )
+                    break
+
+    return children
+
+
+async def _persist_team_member(
+    parent_session_id: str,
+    rec: TeammateRecord,
+    status: str,
 ) -> None:
-    """Flush the current team_member LiveMessage to the session_messages table."""
+    """Flush the teammate's transcript to the session_messages table.
+
+    Re-sourced from the session EVENT LOG (the watcher's own team.member_*
+    appends) now that the live store no longer holds team state: the
+    teammate's progress events are replayed into the same persisted child
+    shape the old LiveMessage serialization produced.
+    """
     from app.db import database
+    from app.db import session_events as session_events_db
     from app.db.async_database import run_sync
 
-    session = live_session_store.get_session(parent_session_id)
-    if not session:
-        return
-    msg = None
-    for m in session.messages:
-        if (
-            m.type == "team_member"
-            and m.team_name == team_name
-            and m.teammate_name == teammate_name
-        ):
-            msg = m
-            break
-    if msg is None:
+    team_name = rec.team_name
+    teammate_name = rec.teammate_name
+
+    # Page through the parent session's log collecting this teammate's
+    # progress payloads (reads run off-loop via run_sync).
+    progress_payloads: List[Dict[str, Any]] = []
+    from_seq = 0
+    try:
+        while True:
+            rows = await run_sync(
+                session_events_db.get_events, parent_session_id, from_seq, 500
+            )
+            if not rows:
+                break
+            for row in rows:
+                if row.get("event_type") != "team.member_progress":
+                    continue
+                payload = row.get("payload") or {}
+                if (
+                    payload.get("team_name") == team_name
+                    and payload.get("teammate_name") == teammate_name
+                ):
+                    progress_payloads.append(payload)
+            from_seq = rows[-1]["seq"]
+    except Exception:
+        logger.exception("persist team_member: event log read failed")
         return
 
-    # Serialize children using the same shape db_message_loader understands
-    # for subagents, plus the teammate-specific fields.
-    children = [c.to_dict() for c in (msg.agent_children or [])]
+    children = _children_from_events(team_name, teammate_name, progress_payloads)
+
+    # Serialize using the same shape db_message_loader understands for
+    # subagents, plus the teammate-specific fields.
     metadata = {
         "team_name": team_name,
         "teammate_name": teammate_name,
-        "teammate_session_id": msg.teammate_session_id,
-        "teammate_pid": msg.teammate_pid,
-        "teammate_status": msg.teammate_status,
-        "agent_prompt": msg.agent_prompt,
+        "teammate_session_id": rec.teammate_session_id,
+        "teammate_pid": rec.pid,
+        "teammate_status": status,
+        "agent_prompt": rec.last_prompt,
         "agent_children": children,
-        "agent_usage": msg.agent_usage,
+        "agent_usage": rec.usage or None,
     }
     try:
         await run_sync(
@@ -394,7 +530,7 @@ async def _persist_team_member(
             session_id=parent_session_id,
             team_name=team_name,
             teammate_name=teammate_name,
-            content=msg.content or "",
+            content="",
             metadata=metadata,
         )
     except Exception:

@@ -55,11 +55,9 @@ def _staged_stream(*stages):
     return _gen
 
 
-async def _dispatch_setmeta(event, ectx, state):
-    """dispatch_event stand-in: mirrors handle_done's final_metadata capture so
-    the auto-continue decision sees the real turn-end stop_reason."""
-    if event.get("type") in ("done", "interrupted"):
-        state.final_metadata = event.get("metadata", {})
+# (V2: the deleted dispatch layer's final_metadata capture now lives inline in
+# run_query — the terminal ``done`` frame's metadata is captured by the stream
+# loop itself, so no dispatch_event stand-in is needed.)
 
 
 def _run_query_spy(handler):
@@ -92,7 +90,6 @@ async def test_boundary_cut_over_threshold_spawns_single_continuation():
         )
 
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(True, 150000))):
             outer = asyncio.create_task(
@@ -134,7 +131,6 @@ async def test_natural_end_turn_no_continuation():
 
         stream = _staged_stream({"metadata": {"stop_reason": "end_turn"}})
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(True, 150000))) as over:
             await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
@@ -154,7 +150,6 @@ async def test_setting_off_no_continuation():
 
         stream = _staged_stream({"metadata": {"stop_reason": "tool_use"}})
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cwh.settings, "auto_continue_on_compact", False), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(True, 150000))):
@@ -172,7 +167,6 @@ async def test_below_threshold_no_continuation():
 
         stream = _staged_stream({"metadata": {"stop_reason": "tool_use"}})
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(False, 90000))):
             await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
@@ -198,7 +192,6 @@ async def test_queued_message_no_continuation():
             {"metadata": {"stop_reason": "end_turn"}, "mid": mid2, "gate": gate2},
         )
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(True, 150000))):
             outer = asyncio.create_task(
@@ -237,7 +230,6 @@ async def test_continuation_cut_again_does_not_rechain(caplog):
             {"metadata": {"stop_reason": "tool_use"}, "mid": mid2, "gate": gate2},
         )
         with patch("app.core.query_engine.stream_to_websocket", new=stream), \
-             patch("app.api.ws_event_handlers.dispatch_event", new=_dispatch_setmeta), \
              patch.object(cc, "context_over_threshold",
                           new=AsyncMock(return_value=(True, 150000))):
             outer = asyncio.create_task(

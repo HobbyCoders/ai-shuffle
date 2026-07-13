@@ -233,6 +233,27 @@
 		| { kind: 'tool_group'; tools: ChatMessage[]; indices: number[] }
 		| { kind: 'system_group'; messages: ChatMessage[]; indices: number[] };
 
+	// Rewind fallback occurrence: 0-based index of a user PROMPT among the
+	// PRIOR user prompts with IDENTICAL (trimmed) content — usually 0. The
+	// backend resolves the target by content match against the SDK transcript,
+	// so this only disambiguates duplicate prompts. Content anchoring instead
+	// of a global ordinal because the SDK transcript contains user-role lines
+	// we never render (synthetic "[Request interrupted by user]" markers, task
+	// notifications, prompts retained after an empty-turn discard) — global
+	// positions skew in any session that has seen an interrupt. No-match still
+	// fails closed server-side (content guard).
+	function userPromptOccurrence(messages: ChatMessage[], index: number): number {
+		const want = (messages[index]?.content ?? '').trim();
+		let occurrence = 0;
+		for (let k = 0; k < index; k++) {
+			const m = messages[k];
+			if (m.role === 'user' && m.type !== 'command' && (m.content ?? '').trim() === want) {
+				occurrence++;
+			}
+		}
+		return occurrence;
+	}
+
 	function isGroupableTool(msg: ChatMessage): boolean {
 		return msg.type === 'tool_use'
 			&& msg.toolName !== 'TodoWrite'
@@ -262,14 +283,14 @@
 	}
 
 	// Memoize the grouped display list by (messages, isStreaming) identity.
-	// The active-session store emits a fresh state object on every WS stream
-	// delta (it updates `wsStreamContent`, which the streaming bubble reads via
-	// its own prop). Those deltas arrive faster than the 150ms poll and do NOT
-	// change the `messages` array reference — yet without this guard the derived
-	// rebuilt the entire O(N) grouped list and returned a new array each time,
-	// forcing the {#each} to re-diff every message. That made streaming get
-	// progressively choppier as a session grew. A plain object (not $state)
-	// avoids Svelte 5 compiling these into reactive signals inside the derived.
+	// The active-session store emits a fresh state object on every SSE stream
+	// delta (the reducer coalesces deltas into `messages` via rAF). Many of
+	// those emissions do NOT change the `messages` array reference — yet without
+	// this guard the derived rebuilt the entire O(N) grouped list and returned a
+	// new array each time, forcing the {#each} to re-diff every message. That
+	// made streaming get progressively choppier as a session grew. A plain
+	// object (not $state) avoids Svelte 5 compiling these into reactive signals
+	// inside the derived.
 	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; groupingEnabled: boolean; items: DisplayItem[] } =
 		{ messages: null, isStreaming: false, groupingEnabled: true, items: [] };
 
@@ -1036,6 +1057,7 @@
 							timestamp={message.timestamp}
 							sessionId={$activeSession.sessionId}
 							messageUuid={message.jsonlUuid}
+							userPromptOccurrence={userPromptOccurrence($activeSession.messages, messageIndex)}
 							{fileCheckpointingEnabled}
 							onRewindComplete={handleRewindComplete}
 						/>
@@ -1060,7 +1082,6 @@
 							<AssistantMessage
 								content={message.content}
 								timestamp={message.timestamp}
-								wsContent={isStreamAnchor ? $activeSession.wsStreamContent : undefined}
 								messageIndex={messageIndex}
 								messageId={message.id}
 								messageUuid={message.jsonlUuid}

@@ -401,10 +401,12 @@ def create_session(
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
     automation_id: Optional[str] = None,
-    v2_stream: bool = False,
     _conn=None
 ) -> SessionRow:
     """Create a new session
+
+    Every session is created v2_stream=TRUE: the V2 event log is the only
+    streaming path, so there is no non-V2 creation mode to distinguish.
 
     Args:
         session_id: Unique session identifier
@@ -418,9 +420,6 @@ def create_session(
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         automation_id: Automation that created this session (NULL = user/API session)
-        v2_stream: Opt-in to the V2 streaming path (stamped at chat-session
-            creation from settings.v2_stream_default; defaults False for all
-            other creation paths)
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
@@ -430,7 +429,7 @@ def create_session(
     _phs15 = ", ".join([_ph] * 15)
     sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, v2_stream, created_at, updated_at)
                VALUES ({_phs15})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, bool(v2_stream), now, now)
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, True, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -512,6 +511,7 @@ def update_session(
     """Update a session with usage stats
 
     Args:
+        sdk_session_id: Set to an SDK session ID, or empty string "" to clear (NULL)
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
         last_input_tokens / cache_creation_tokens / cache_read_tokens: absolute
             per-turn context-window values for the latest turn. These overwrite
@@ -526,7 +526,10 @@ def update_session(
 
     if sdk_session_id is not None:
         updates.append(f"sdk_session_id = {_ph}")
-        values.append(sdk_session_id)
+        # Empty string means clear (set to NULL) — used after a full rewind
+        # empties the transcript, so the next turn starts a fresh SDK session
+        # instead of resuming a conversation that no longer exists.
+        values.append(sdk_session_id if sdk_session_id else None)
     if title is not None:
         updates.append(f"title = {_ph}")
         values.append(title)
@@ -651,8 +654,8 @@ def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     Non-NULL means the parent turn ended while background work was still
     running — the session is "parked" awaiting an unpark follow-up (``kind``
     is the task kind pinning it, e.g. ``"agent"`` or ``"shell"``). Written at
-    turn end by ``live_session_store.end_streaming``, cleared on the next
-    ``start_streaming``, and force-cleared at boot by
+    turn end by ``turn_finalize.persist_turn_end_state``, cleared at the next
+    turn start, and force-cleared at boot by
     ``app.core.startup_reconcile`` since no background work survives a server
     restart. Deliberately does NOT touch ``updated_at`` — a park/unpark marker
     write must not reorder the sessions list. Returns True if a row was

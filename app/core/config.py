@@ -306,13 +306,6 @@ class Settings(BaseSettings):
     # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
     auto_continue_on_compact: bool = True
 
-    # Default value stamped onto sessions.v2_stream at chat/REST session
-    # creation (V2 Phase 1). When True, newly created chat sessions opt into
-    # the V2 streaming path; existing sessions and the per-session PATCH flag
-    # override this. Phase-1 cutover: ON by default — set V2_STREAM_DEFAULT=false
-    # to fall new sessions back to the legacy streaming path.
-    v2_stream_default: bool = True
-
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks
     # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget

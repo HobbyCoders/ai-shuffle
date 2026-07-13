@@ -151,7 +151,7 @@ class TeamRegistry:
             return out
 
     # ------------------------------------------------------------------
-    # Event ingestion from ws_event_handlers
+    # Event ingestion (team tool_use / tool_result from the parent stream)
     # ------------------------------------------------------------------
 
     async def handle_team_tool_use(
@@ -215,7 +215,7 @@ class TeamRegistry:
         """Called on tool_result for a team tool.
 
         Returns the list of teammates that are newly discovered or updated
-        so the caller (ws_event_handlers) can spin up transcript watchers.
+        so the caller can spin up transcript watchers.
         """
         if tool_name not in TEAM_TOOLS:
             return []

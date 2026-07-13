@@ -5,21 +5,26 @@
     reason="server_shutdown" so a task killed by a server restart is not
     presented as a mysterious failure. Gated on ``startup.is_shutting_down`` at
     every kill site that cannot otherwise know the reap's origin:
-    ``stop_session_task``'s ghost reaps, ``cleanup_ended_session``'s force
-    reap, and the drain pump's killed-pending payload.
+    ``stop_session_task``'s ghost reaps, the force-eviction reap, and the
+    drain pump's killed-pending payload.
 
 (b) GUARANTEE: ``task_registry.set_terminal_notification_callback`` +
     ``complete_task`` fire a callback EXACTLY ONCE per task (new
     ``mark_terminal_notified`` latch) when the parent's OWN background work
     transitions to error/killed. The chat layer registers the callback once at
-    startup; it synthesizes the durable terminal chip (live store + persisted
+    startup; it synthesizes the durable terminal chip (persisted
     ``add_session_message``) and hands off ONE consolidated unpark via
     ``_deliver_unpark_impl`` ONLY when a live pooled client exists and the
     server is not shutting down (durable-chip-only during shutdown).
 
+V2 (Phase-1 deletion): ``LiveSessionStore.cleanup_ended_session`` — the old
+force-reap entry point — is deleted with the live store; the force reap now
+lives in ``resource_monitor._cleanup_evicted_sessions`` (reason "lru_force" /
+"dead"), and that is what the force-reap tests here drive.
+
 Tests drive the REAL paths: real ``complete_task`` transitions, the real
-``cleanup_ended_session`` force reap, the real ``stop_session_task`` reap
-branches, and the real drain pump reader.
+force-eviction reap, the real ``stop_session_task`` reap branches, and the
+real drain pump reader.
 """
 
 import asyncio
@@ -31,8 +36,8 @@ import pytest
 import app.api.chat_ws_handler as cwh
 import app.api.ws_cleanup as ws_cleanup
 import app.core.startup as startup
+from app.core import resource_monitor
 from app.core import task_persistence
-from app.core.live_session_store import live_session_store
 from app.core.task_registry import (
     task_registry,
     SERVER_SHUTDOWN_SUMMARY,
@@ -82,7 +87,6 @@ async def _isolate():
         startup.is_shutting_down = False
         task_registry.reset_all()
         ws_cleanup._drain_pumps.clear()
-        await live_session_store.cleanup_ended_session(SESSION, force=True)
 
 
 def _make_db_session():
@@ -203,15 +207,13 @@ async def test_force_eviction_reap_surfaces_exactly_one_terminal_row():
     _make_db_session()
     cwh.register_terminal_notification_callback()
 
-    # A REAL parked live session with an owned background agent running.
-    await live_session_store.start_streaming(SESSION, initial_messages=[])
-    await live_session_store.end_streaming(SESSION, metadata={})
+    # A parked session with an owned background agent running.
     _own_task("t-reaped", "tu-reaped")
 
     # Hard-cap force eviction: the pooled client is gone, the reap kills the
-    # in-flight agent.
-    removed = await live_session_store.cleanup_ended_session(SESSION, force=True)
-    assert removed is True
+    # in-flight agent. (V2: resource_monitor._cleanup_evicted_sessions is the
+    # force-reap entry point — reason "dead" = subprocess destroyed.)
+    await resource_monitor._cleanup_evicted_sessions([SESSION], {}, "dead")
 
     # Await the scheduled surface coroutine rather than guessing a fixed sleep.
     await _drain_terminal_surface()
@@ -329,12 +331,10 @@ async def test_stop_session_task_reap_unstamped_when_not_shutting_down():
 
 
 async def test_force_cleanup_reap_stamps_server_shutdown():
-    await live_session_store.start_streaming(SESSION, initial_messages=[])
-    await live_session_store.end_streaming(SESSION, metadata={})
     _own_task("t-fc", "tu-fc")
 
     startup.is_shutting_down = True
-    await live_session_store.cleanup_ended_session(SESSION, force=True)
+    await resource_monitor._cleanup_evicted_sessions([SESSION], {}, "dead")
 
     # clear_session already ran, but the retention snapshot (get_visible)
     # carries the reaped task's wire — attribution must ride it.

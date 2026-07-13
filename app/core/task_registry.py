@@ -9,11 +9,11 @@ the agent can query what it has running and the UI can surface it on every poll:
 2. App shell subprocesses — the ``Monitor`` tool family in
    ``app/mcp/builtin_tools.py``.
 
-Key principles (mirrors ``app/core/live_session_store.py``):
+Key principles:
 1. In-memory only — no DB table, no migration. State is rebuilt on restart.
 2. Keyed by AI Shuffle ``session_id`` then ``task_id``.
 3. Tasks intentionally OUTLIVE a single turn — the registry is only cleared when
-   the live session is finally removed (see ``cleanup_ended_session``).
+   the session itself is torn down (clear, eviction, worktree termination).
 4. One wire shape (``to_wire``) is shared by the ``TaskList`` MCP tool result and
    the ``/live`` poll response so the frontend has a single contract.
 
@@ -164,8 +164,8 @@ class TaskRegistry:
         # session_ids with an "unpark" follow-up turn COMMITTED but not yet
         # streaming. Set the instant the drain pump (or in-stream stash) hands a
         # background sub-agent's completion off to a follow-up ``run_query``, and
-        # cleared the moment that turn calls ``live_session_store.start_streaming``
-        # (or it tears down). It bridges the gap between a background task
+        # cleared the moment that turn starts streaming (or it tears down).
+        # It bridges the gap between a background task
         # completing — ``complete_task`` removes it from ``get_active`` so the poll
         # reports ``activeTasks=[]`` — and the follow-up turn flipping
         # ``is_streaming`` back to ``true``. ``/live`` surfaces it so a polling

@@ -178,9 +178,7 @@ _ASYNC_SYNC_ENGINE_METHODS = (
     "broadcast_queue_updated",
     "broadcast_session_opened",
     "broadcast_session_closed",
-    "broadcast_stream_end",
     "broadcast_tabs_updated",
-    "clear_streaming_state",
 )
 
 
@@ -197,7 +195,8 @@ class _ClosureHarness:
     Exposes the mocks so tests configure inputs and assert on side effects:
       .auth            authenticate_websocket (AsyncMock -> (ok, api_user))
       .sync            sync_engine (broadcast_* are AsyncMocks)
-      .store           live_session_store
+      .has_active_run / .user_streaming_sessions
+                       app.core.streaming_status (durable runs-table busy view)
       .db              app.db.database as seen by the route
       .session_row     template row db.get_session returns (None => not found)
       .cloud           cloud_relay boundary (is_remote_session + relay_*)
@@ -247,19 +246,28 @@ class _ClosureHarness:
         s.enter_context(patch.object(cwh_mod, "sync_engine", new=self.sync))
         for name in _ASYNC_SYNC_ENGINE_METHODS:
             setattr(self.sync, name, AsyncMock())
-        self.sync.get_user_streaming_sessions = MagicMock(return_value=[])
         self.sync.get_device_count = MagicMock(return_value=1)
         self.sync.is_device_watching_session = MagicMock(return_value=False)
-        self.sync.is_session_streaming = MagicMock(return_value=False)
         self.sync._connections = {}
 
-        # --- live session store ----------------------------------------------
-        self.store = s.enter_context(patch.object(ws_mod, "live_session_store"))
-        s.enter_context(patch.object(cwh_mod, "live_session_store", new=self.store))
-        self.store.get_session_dict = MagicMock(return_value=None)
-        self.store.has_session = MagicMock(return_value=False)
-        self.store.is_streaming = MagicMock(return_value=False)
-        self.store.cleanup_session = AsyncMock()
+        # --- durable runs-table busy view (v2 core streaming truth) -----------
+        # The route reads busy truth via ``app.core.streaming_status`` (module-
+        # attribute access at call time), so patching the source module covers
+        # every flipped site. Defaults mirror an idle runs table.
+        self.has_active_run = MagicMock(return_value=False)
+        s.enter_context(
+            patch("app.core.streaming_status.has_active_run", new=self.has_active_run)
+        )
+        self.user_streaming_sessions = MagicMock(return_value=[])
+        s.enter_context(
+            patch(
+                "app.core.streaming_status.get_user_streaming_sessions",
+                new=self.user_streaming_sessions,
+            )
+        )
+
+        # (V2: the live session store is deleted — history is served from the
+        # persisted transcript and busy truth from app.core.streaming_status.)
 
         # --- database ---------------------------------------------------------
         self.session_row = {
@@ -441,7 +449,8 @@ async def test_auth_success_sends_streaming_snapshot_first():
 
 async def test_streaming_snapshot_carries_sessions_and_ids():
     with _ClosureHarness() as h:
-        h.sync.get_user_streaming_sessions.return_value = [
+        # Connect-time snapshot is sourced from the durable runs-table join.
+        h.user_streaming_sessions.return_value = [
             {"session_id": "s1", "profile": "p"}
         ]
         ws = await h.run([])
@@ -516,8 +525,8 @@ async def test_query_new_session_mints_session_and_spawns_run_query():
 
     CONSCIOUS flip edit (V2 Phase 1): session_created now also carries
     ``v2_stream`` (the flag the session was just created with) so the client
-    knows whether to attach the typed event feed. The Phase-1 cutover flipped
-    v2_stream_default ON, so a plain new session now stamps True."""
+    knows whether to attach the typed event feed. The Phase-1 deletion forces
+    every new chat session onto the V2 path, so this always stamps True."""
     with _ClosureHarness() as h:
         ws = await h.run([{
             "type": "query",
@@ -870,41 +879,40 @@ async def test_load_session_drains_queued_message_on_load():
     assert _queue_frames(ws) == []
 
 
-async def test_load_session_streaming_uses_live_store_and_skips_drain():
-    """Late-joining device on a live turn: history carries isStreaming=True,
-    live-store messages, streamingUsage and activeBlockType — and the
-    drain-on-load recovery must NOT fire."""
+async def test_load_session_streaming_late_join_serves_persisted_history():
+    """Late-joining device on a live turn (V2): busy truth is the durable runs
+    table; history is the PERSISTED transcript (the live tail arrives via the
+    session event feed — the live-store message override, streamingUsage and
+    activeBlockType keys are deleted with the store) — and the drain-on-load
+    recovery must NOT fire while streaming."""
     with _ClosureHarness() as h:
-        h.sync.is_session_streaming.return_value = True
-        h.registry["sess-1"] = _FakeLiveTask()
-        h.store.get_session_dict.return_value = {
-            "messages": [{"role": "assistant", "content": "partial"}],
-            "usage": {"input_tokens": 5},
-            "active_block_type": "text",
-        }
+        h.has_active_run.return_value = True  # lease-valid active run
+        h.load_messages_from_db.return_value = (
+            [{"role": "assistant", "content": "partial"}], True
+        )
         ws = await h.run([{"type": "load_session", "session_id": "sess-1"}])
 
     hist = _frames(ws, "history")[0]
     assert hist["isStreaming"] is True
     assert hist["messages"] == [{"role": "assistant", "content": "partial"}]
-    assert hist["streamingUsage"] == {"input_tokens": 5}
-    assert hist["activeBlockType"] == "text"
+    assert set(hist.keys()) == {
+        "type", "session_id", "session", "messages", "isStreaming"
+    }, "no live-store override keys (streamingUsage/activeBlockType) in V2"
     h.db.pop_next_queued_message.assert_not_called()
 
 
-async def test_load_session_stale_streaming_cleared_via_stream_end():
-    """Marked streaming but no active task: the closure clears the stale state
-    with a broadcast_stream_end(message_id="stale-cleanup", interrupted=False)
-    and reports the session as NOT streaming."""
+async def test_load_session_pending_task_gap_reports_streaming():
+    """A spawned turn that has not claimed its run yet (SDK init gap): the
+    _active_chat_sessions pending task still marks the session streaming.
+    (The old stale-streaming broadcast_stream_end cleanup is deleted with the
+    legacy maps — a stale runs-table claim self-heals via the run-lease TTL,
+    so load reports busy truth as-is and never force-clears it.)"""
     with _ClosureHarness() as h:
-        h.sync.is_session_streaming.return_value = True
+        h.registry["sess-1"] = _FakeLiveTask()
         ws = await h.run([{"type": "load_session", "session_id": "sess-1"}])
 
-    kw = h.sync.broadcast_stream_end.await_args.kwargs
-    assert kw["session_id"] == "sess-1"
-    assert kw["message_id"] == "stale-cleanup"
-    assert kw["interrupted"] is False, "completed-not-interrupted (no false [Stopped])"
-    assert _frames(ws, "history")[0]["isStreaming"] is False
+    assert _frames(ws, "history")[0]["isStreaming"] is True
+    h.db.pop_next_queued_message.assert_not_called()
 
 
 async def test_load_session_includes_pending_permissions_and_questions():

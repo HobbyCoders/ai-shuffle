@@ -1,14 +1,14 @@
 """Derived session-lifecycle view + drift sensor (Phase 1 of the lifecycle
 unification).
 
-A session's lifecycle is currently spread across FIVE independent sources of
-truth, each written by a different subsystem:
+A session's lifecycle is spread across FOUR independent sources of truth,
+each written by a different subsystem:
 
-  1. ``live_session_store``     — in-memory message buffer + ``is_streaming``
+  1. durable ``runs`` rows      — lease-valid active run = a turn in flight
+                                  (``app.core.streaming_status``)
   2. ``session_pool``           — pooled SDK client state (``SessionState``)
-  3. ``sync_engine``            — cross-device ``_streaming_sessions`` set
-  4. ``task_registry``          — background tasks + the ``unpark_pending`` latch
-  5. durable ``sessions`` rows  — ``parked_task_kind`` (v51)
+  3. ``task_registry``          — background tasks + the ``unpark_pending`` latch
+  4. durable ``sessions`` rows  — ``parked_task_kind`` (v51)
 
 plus two adjacent signals: the between-turns drain pump
 (``app.api.ws_cleanup._drain_pumps``) and undrained ``queued_messages`` rows.
@@ -18,15 +18,16 @@ those sources and derives one coherent snapshot; it flips no readers and
 changes no writers. ``get_live_session`` destructures ``active_tasks`` /
 ``unpark_pending`` from the snapshot — the values (and the exact side-effect
 ordering that produces them) are byte-identical to what it computed inline
-before (see tests/api/test_live_lifecycle_differential.py). Disagreements
-between the sources are reported as DRIFT (log-only, stable prefix
-``lifecycle-drift``); repairs live in ``app.core.lifecycle_reconcile``.
+before. Disagreements between the sources are reported as DRIFT (log-only,
+stable prefix ``lifecycle-drift``); repairs live in
+``app.core.lifecycle_reconcile``.
 
 State model (see docs/lifecycle-states.md):
 
   streaming        — a turn is actively producing output
-                     (authority: ``live_session_store.is_streaming`` — the same
-                     authority ordering /live uses today)
+                     (authority: a lease-valid active run in the durable
+                     ``runs`` table — ``app.core.streaming_status`` — unioned
+                     with the pooled client's ``is_streaming`` peek)
   waking           — not streaming, but a follow-up turn is imminent: the
                      ``unpark_pending`` latch is set OR undrained queued
                      messages exist (the queued-messages keep-alive absorbed
@@ -71,12 +72,13 @@ class LifecycleSnapshot:
     session_id: str
     state: str
 
-    # Raw inputs
+    # Raw inputs. ``live_store_streaming`` is the busy AUTHORITY: a lease-valid
+    # active run in the durable runs table, unioned with the pooled client's
+    # is_streaming peek (the name is historical — there is no live store).
     live_store_streaming: bool = False
     pool_present: bool = False
     pool_connected: bool = False
     pool_streaming: bool = False
-    sync_streaming: bool = False
     active_tasks: List[Dict[str, Any]] = field(default_factory=list)
     background_work: List[Dict[str, Any]] = field(default_factory=list)
     unpark_pending: bool = False       # composed wire value (latch OR queue)
@@ -167,37 +169,19 @@ def _detect_drift(snap: LifecycleSnapshot) -> List[str]:
     """
     drift: List[str] = []
 
-    # (1) sync_engine claims streaming while the live store — the streaming
-    # AUTHORITY (see docs/lifecycle-states.md) — says it is not. This is the
-    # actionable, one-directional disagreement: a stale ``_streaming_sessions``
-    # entry left by a crashed turn (stale git-lock / remote-pill leak), which
-    # reconciler R3 repairs. The OPPOSITE direction (live streaming while the
-    # sync cache lags — its in-memory set is wiped on restart and trails the
-    # authority during CLI-wake / pre-first-event windows) is BENIGN: no
-    # consumer relies on the sync cache for LOCAL streaming truth (the git-ops
-    # liveness guard reads the live authority; the adopt gate is cross-install,
-    # where the sync cache — fed by peer fan-out — is the right source), so it
-    # is deliberately NOT flagged. See ``sync_engine._streaming_sessions``.
-    if snap.sync_streaming and not snap.live_store_streaming:
-        drift.append(
-            "class=sync-vs-livestore "
-            f"sync_streaming={snap.sync_streaming} "
-            f"live_store_streaming={snap.live_store_streaming}"
-        )
-
-    # (2) durable parked marker set while the derived state is idle.
+    # (1) durable parked marker set while the derived state is idle.
     if snap.parked_task_kind and snap.state == STATE_IDLE:
         drift.append(
             f"class=parked-marker-while-idle parked_task_kind={snap.parked_task_kind}"
         )
 
-    # (3) unpark latch with no pump and nothing streaming: the committed
+    # (2) unpark latch with no pump and nothing streaming: the committed
     # follow-up has neither a between-turns reader nor a live turn. Legal for
     # the brief latch -> follow-up-start hand-off; stale beyond that.
     if snap.unpark_latch and not snap.pump_running and not snap.live_store_streaming:
         drift.append("class=unpark-no-pump")
 
-    # (4) registry says background work is running but the pooled SDK client
+    # (3) registry says background work is running but the pooled SDK client
     # that owns its completion notification is gone/dead.
     if snap.background_work and (not snap.pool_present or not snap.pool_connected):
         drift.append(
@@ -228,7 +212,6 @@ async def compute(
     store), so destructuring this snapshot is byte-identical to the inline
     code it replaced. New raw inputs are read strictly AFTER them.
     """
-    from app.core.live_session_store import live_session_store
     from app.core.task_registry import task_registry
 
     # --- absorbed verbatim from get_live_session (order matters) -----------
@@ -261,10 +244,6 @@ async def compute(
             )
     # --- end verbatim block -------------------------------------------------
 
-    # Streaming authority: the live store — the same authority /live serves
-    # today (per-path wire values keep reading it directly).
-    live_store_streaming = live_session_store.is_streaming(session_id)
-
     # Remaining raw inputs (read-only; no side effects).
     background_work = task_registry.get_active_background_work(session_id)
 
@@ -282,13 +261,18 @@ async def compute(
     except Exception:
         logger.debug("session pool peek failed for %s", session_id, exc_info=True)
 
-    sync_streaming = False
+    # Streaming authority: the durable runs table (v2 core — a lease-valid
+    # active run means a turn is in flight), unioned with the pooled client's
+    # is_streaming peek (belt-and-braces: a turn whose run claim failed records
+    # UNFENCED and reads idle from runs, but the pooled client still knows).
+    runs_streaming = False
     try:
-        from app.core.sync_engine import sync_engine
+        from app.core import streaming_status
 
-        sync_streaming = sync_engine.is_session_streaming(session_id)
+        runs_streaming = streaming_status.has_active_run(session_id)
     except Exception:
-        logger.debug("sync_engine streaming read failed for %s", session_id, exc_info=True)
+        logger.debug("runs busy read failed for %s", session_id, exc_info=True)
+    live_store_streaming = runs_streaming or pool_streaming
 
     parked_task_kind: Optional[str] = None
     try:
@@ -321,7 +305,6 @@ async def compute(
         pool_present=pool_present,
         pool_connected=pool_connected,
         pool_streaming=pool_streaming,
-        sync_streaming=sync_streaming,
         active_tasks=active_tasks,
         background_work=background_work,
         unpark_pending=unpark_pending,

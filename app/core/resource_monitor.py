@@ -47,25 +47,6 @@ async def _collect_metrics() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect websocket metrics: {e}")
 
-    # --- Live Session Store ---
-    try:
-        from app.core.live_session_store import live_session_store
-        metrics["live_sessions"] = len(live_session_store._sessions)
-        metrics["live_session_locks"] = len(live_session_store._session_locks)
-        # Count streaming vs ended sessions
-        streaming = sum(1 for s in live_session_store._sessions.values() if s.is_streaming)
-        ended = len(live_session_store._sessions) - streaming
-        metrics["live_sessions_streaming"] = streaming
-        metrics["live_sessions_ended"] = ended
-        # Count total messages across all sessions
-        total_msgs = sum(len(s.messages) for s in live_session_store._sessions.values())
-        metrics["live_total_messages"] = total_msgs
-        # Orphaned locks (locks without a corresponding session)
-        orphaned_locks = len(live_session_store._session_locks) - len(live_session_store._sessions)
-        metrics["live_orphaned_locks"] = max(0, orphaned_locks)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to collect live session metrics: {e}")
-
     # --- Session Pool ---
     try:
         from app.core.session_pool import get_session_pool, _session_pool, is_subprocess_alive
@@ -120,7 +101,6 @@ async def _collect_metrics() -> dict:
         )
         metrics["sync_user_connections"] = len(sync_engine._user_connections)
         metrics["sync_session_locks"] = len(sync_engine._session_locks)
-        metrics["sync_streaming_sessions"] = len(sync_engine._streaming_sessions)
         metrics["sync_session_user_map"] = len(sync_engine._session_user_map)
         metrics["sync_session_project_map"] = len(sync_engine._session_project_map)
         metrics["sync_session_worktree_map"] = len(sync_engine._session_worktree_map)
@@ -288,11 +268,6 @@ def _check_warnings(metrics: dict) -> list[str]:
     """Check metrics for concerning values and return warning messages."""
     warnings = []
 
-    # Orphaned locks indicate cleanup failures
-    orphaned = metrics.get("live_orphaned_locks", 0)
-    if orphaned > 0:
-        warnings.append(f"live_session_store has {orphaned} orphaned locks (sessions cleaned but locks remain)")
-
     # Done cleanup tasks indicate cleanup tasks that completed but weren't removed from dict
     done_cleanups = metrics.get("ws_done_cleanup_tasks", 0)
     if done_cleanups > 0:
@@ -334,12 +309,6 @@ def _check_warnings(metrics: dict) -> list[str]:
             f"DB connection pool near capacity ({db_in_use}/{db_max}) - "
             f"possible slot leak or insufficient db_pool_max"
         )
-
-    # Large message accumulation in live sessions
-    total_msgs = metrics.get("live_total_messages", 0)
-    live_sessions = metrics.get("live_sessions", 0)
-    if live_sessions > 0 and total_msgs / max(1, live_sessions) > 500:
-        warnings.append(f"Average {total_msgs // max(1, live_sessions)} messages per live session - possible message accumulation")
 
     # Dead subprocesses in pool (connected flag but process gone)
     pool_dead = metrics.get("pool_dead_subprocesses", 0)
@@ -384,11 +353,13 @@ def _check_warnings(metrics: dict) -> list[str]:
 
 
 async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reason: str) -> None:
-    """Clean up live_session_store and sync_engine state for evicted pool sessions.
+    """Tear down per-session registry/shell/handler state for evicted pool sessions.
 
-    When session pool evicts a session (dead subprocess or idle), the
-    corresponding in-memory state in LiveSessionStore and SyncEngine must also
-    be cleaned. Without this, message buffers and streaming flags accumulate.
+    When the session pool evicts a session (dead subprocess or idle), the
+    per-session task registry and Monitor shells must also be cleaned up.
+    Without this, registry rows and shell subprocesses accumulate. (V2: there
+    is no in-memory message buffer to purge — render state lives in the
+    durable event log, and busy truth is the runs table.)
 
     NOTE: this is NEVER called for live/streaming sessions — the monitor no
     longer force-evicts streaming sessions on a timer (see report_long_streaming).
@@ -397,32 +368,88 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
     # died) are the only reasons that can remove a session PARKED on in-flight
     # background work — normal ``lru``/``idle`` eviction skip parked sessions. In
     # those two cases the pooled SDK client was just destroyed, so the parked
-    # work can never deliver its terminal notification: cleanup_ended_session's
-    # background-work guard would refuse cleanup FOREVER, leaking the buffer +
-    # registry and stranding the UI's task strip. Force the teardown so the
-    # session is actually reclaimed and the orphaned tasks are reaped to killed.
+    # work can never deliver its terminal notification: the background-work
+    # guard below would refuse teardown FOREVER, leaking the registry and
+    # stranding the UI's task strip. Force the teardown so the orphaned tasks
+    # are reaped to killed.
     force = reason in ("lru_force", "dead")
     for session_id in session_ids:
         try:
-            from app.core.live_session_store import live_session_store
-            if live_session_store.has_session(session_id):
-                # End streaming first if still marked as streaming
-                if live_session_store.is_streaming(session_id):
-                    await live_session_store.end_streaming(
-                        session_id, metadata={"cleanup_reason": reason}, interrupted=True
+            from app.core import streaming_status
+            from app.core.turn_finalize import persist_turn_end_state
+            from app.core.task_registry import task_registry
+
+            # Durable end-of-turn writes first if still busy (runs-table read) —
+            # replaces the old in-memory end_streaming call. The stale run
+            # lease itself self-heals via TTL.
+            if streaming_status.has_active_run(session_id):
+                await persist_turn_end_state(session_id)
+
+            if force:
+                # The SDK client is gone — in-flight background work can never
+                # finish on its own. Reap it to "killed" so the taskbar shows
+                # the failure (the registry retains killed rows for a short
+                # window past clear_session — see task_registry.get_visible).
+                # Shutdown-origin attribution: a force reap during server
+                # teardown is a restart consequence, not a task failure.
+                from app.core import startup as _startup
+                from app.core.task_registry import (
+                    SERVER_SHUTDOWN_SUMMARY,
+                    SERVER_SHUTDOWN_REASON,
+                )
+                _shutdown_reap = getattr(_startup, "is_shutting_down", False)
+                reaped = 0
+                for rec in task_registry.get_active(session_id):
+                    if _shutdown_reap:
+                        task_registry.complete_task(
+                            session_id, rec["id"], "killed",
+                            summary=SERVER_SHUTDOWN_SUMMARY,
+                            reason=SERVER_SHUTDOWN_REASON,
+                        )
+                    else:
+                        task_registry.complete_task(session_id, rec["id"], "killed")
+                    reaped += 1
+                if reaped:
+                    logger.warning(
+                        f"{_PREFIX} Force-cleanup of session {session_id}: reaped "
+                        f"{reaped} orphaned background task(s) to killed "
+                        f"(SDK client destroyed; work cannot complete)"
                     )
-                # Then clean up the session from memory
-                await live_session_store.cleanup_ended_session(session_id, force=force)
-                cleaned_key = f"live_store_cleaned_{reason}"
+            if not force and task_registry.has_active_background_work(session_id):
+                # A session parked on SDK background work keeps its registry
+                # until the work completes (a later turn end, eviction, or
+                # sweep clears it) — this only DEFERS removal, never blocks it.
+                logger.info(
+                    f"{_PREFIX} Skipping registry teardown of session "
+                    f"{session_id}: active background task(s)"
+                )
+            else:
+                # Drop the registry bucket, then reap any Monitor shell
+                # subprocesses this session spawned (they are excluded from the
+                # background-work guard, so without an explicit reap they
+                # strand: the subprocess keeps running and its reader leaks).
+                task_registry.clear_session(session_id)
+                # Drop the session's last-turn-recorder entry too — otherwise
+                # _last_turn_recorders grows one entry per dead session.
+                try:
+                    from app.core.turn_recorder import pop_last_turn_recorder
+                    pop_last_turn_recorder(session_id)
+                except Exception:
+                    logger.debug(
+                        f"{_PREFIX} last-turn-recorder pop failed", exc_info=True,
+                    )
+                try:
+                    from app.mcp.builtin_tools import reap_session_background_shells
+                    reap_session_background_shells(session_id)
+                except Exception:
+                    logger.debug(
+                        f"{_PREFIX} background shell reap scheduling failed",
+                        exc_info=True,
+                    )
+                cleaned_key = f"registry_cleaned_{reason}"
                 cleaned[cleaned_key] = cleaned.get(cleaned_key, 0) + 1
         except Exception as e:
-            logger.debug(f"{_PREFIX} Failed to clean live session {session_id}: {e}")
-
-        try:
-            from app.core.sync_engine import sync_engine
-            await sync_engine.clear_streaming_state(session_id)
-        except Exception as e:
-            logger.debug(f"{_PREFIX} Failed to clear sync engine state for {session_id}: {e}")
+            logger.debug(f"{_PREFIX} Failed to clean evicted session {session_id}: {e}")
 
         try:
             from app.api.ws_cleanup import cleanup_session_handlers
@@ -435,11 +462,10 @@ async def _on_pool_eviction(session_id: str, reason: str) -> None:
     """Eviction callback registered on the session pool (see set_eviction_callback).
 
     Fired from SessionPool._do_evict the moment an LRU or idle eviction removes a
-    session, so the live-store message buffer + task registry are torn down on the
-    SAME event that ends the pooled SDK client — one lifecycle, no separate timer.
-    This is what replaced the standalone 30s delayed-cleanup task: buffer lifetime
-    is now bound to pool membership. Dead-eviction does NOT route here (it bypasses
-    _do_evict); the periodic sweep cleans those via _cleanup_evicted_sessions.
+    session, so the task registry + Monitor shells are torn down on the SAME
+    event that ends the pooled SDK client — one lifecycle, no separate timer.
+    Dead-eviction does NOT route here (it bypasses _do_evict); the periodic
+    sweep cleans those via _cleanup_evicted_sessions.
     """
     await _cleanup_evicted_sessions([session_id], {}, reason)
 
@@ -450,15 +476,6 @@ async def _periodic_cleanup() -> dict:
     Returns a dict of cleanup actions taken (for logging).
     """
     cleaned = {}
-
-    # Sweep orphaned session locks
-    try:
-        from app.core.live_session_store import live_session_store
-        count = await live_session_store.sweep_orphaned_locks()
-        if count:
-            cleaned["orphaned_locks"] = count
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to sweep orphaned locks: {e}")
 
     # Sweep stale sync engine maps
     try:
@@ -489,9 +506,8 @@ async def _periodic_cleanup() -> dict:
             dead = await pool.evict_dead()
             if dead:
                 cleaned["dead_pool_sessions"] = len(dead)
-                # Also clean up live session store and sync engine state
-                # for dead sessions — these hold in-memory message buffers
-                # and streaming flags that won't be cleaned automatically
+                # Also tear down registry/shell/handler state for dead
+                # sessions — it won't be cleaned automatically
                 await _cleanup_evicted_sessions(dead, cleaned, "dead")
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict dead pool sessions: {e}")
@@ -674,10 +690,10 @@ async def start_resource_monitor(interval_seconds: int = 300) -> asyncio.Task:
     Returns:
         The background task (for cancellation in shutdown)
     """
-    # Wire pool eviction → live-store/registry cleanup. This makes LRU + idle
-    # eviction (both funnel through SessionPool._do_evict) tear down the per-session
-    # message buffer and task registry on the same event that ends the pooled SDK
-    # client — the single lifecycle that replaced the standalone 30s cleanup timer.
+    # Wire pool eviction → registry/shell cleanup. This makes LRU + idle
+    # eviction (both funnel through SessionPool._do_evict) tear down the
+    # per-session task registry and Monitor shells on the same event that ends
+    # the pooled SDK client — one lifecycle, no separate timer.
     try:
         from app.core.session_pool import get_session_pool
         get_session_pool().set_eviction_callback(_on_pool_eviction)

@@ -64,10 +64,9 @@ def _is_background_ack_result(tool_msg: Dict[str, Any], output: str) -> bool:
     """True if a tool_result is merely the acknowledgement for a *backgrounded*
     command that is still executing — not a real completion.
 
-    Mirrors ``LiveSessionStore._is_background_ack`` so the persisted/reload path
-    keeps the same RUNNING status the live store showed. Without this, once the
-    live store is cleaned up (~30s after stream end) a reload from JSONL would
-    flip a still-running backgrounded Bash to "complete" — the reported bug.
+    Keeps the persisted/reload path showing the same RUNNING status the live
+    render showed. Without this, a reload from JSONL would flip a still-running
+    backgrounded Bash to "complete" — the reported bug.
 
     Backgrounded Bash (``run_in_background: true``) returns control to the model
     immediately with a "Command running in the background ... ID: bash_xxx"
@@ -916,11 +915,11 @@ def pre_seed_parse_cache(
     expected_store_version=None,
 ) -> bool:
     """
-    Pre-seed the parse cache with messages from the live session store.
+    Pre-seed the parse cache with an in-memory transcript snapshot.
 
-    Called after end_streaming() to avoid JSONL re-parsing on the next load.
-    Instead of invalidating the cache (forcing an expensive JSONL re-parse),
-    we update it with the messages already in memory.
+    Historically called at turn end to avoid JSONL re-parsing on the next
+    load. Instead of invalidating the cache (forcing an expensive JSONL
+    re-parse), we update it with the messages already in memory.
 
     The cache entry is stored with the current JSONL file's mtime/size so it
     will be treated as valid on the next read. If the JSONL file changes again
@@ -929,7 +928,7 @@ def pre_seed_parse_cache(
 
     Args:
         sdk_session_id: The Claude SDK session ID
-        messages: Final messages from live_session_store
+        messages: Final messages for the completed turn
         usage_data: Usage data dict
         working_dir: Working directory for finding the JSONL file
         store_version_loader: Optional ``loader(session_id) -> (count, max_id)``

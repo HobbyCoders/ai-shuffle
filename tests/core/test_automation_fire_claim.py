@@ -381,12 +381,11 @@ class TestAtomicRunAccounting:
         with patch("app.core.automation_manager.database") as db, patch(
             "app.core.headless_query_runner.launch_headless_query",
             new=AsyncMock(return_value=handler),
-        ), patch("app.core.sync_engine.sync_engine", new=AsyncMock()), patch(
-            "app.core.live_session_store.live_session_store"
-        ) as store:
-            store.get_session_dict.return_value = {
-                "messages": [{"role": "assistant", "type": "text", "content": "done"}],
-            }
+        ), patch("app.core.sync_engine.sync_engine", new=AsyncMock()):
+            # V2: response text is read from the persisted message rows.
+            db.get_session_messages.return_value = [
+                {"role": "assistant", "type": "text", "content": "done"},
+            ]
             db.update_automation_run.return_value = {}
             db.update_automation.return_value = {}
             await manager._execute_run(automation, "run-at", "do it", {})

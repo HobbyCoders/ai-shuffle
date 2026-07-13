@@ -11,7 +11,7 @@
  *     `parked` is surfaced through the existing UI convention (isStreaming=false
  *     with a non-empty activeTasks strip), so no new activeSession field is added.
  *
- * Wiring: this is a module singleton (like `sessionPoller`). `attach()` injects
+ * Wiring: this is a module singleton. `attach()` injects
  * the private `update`/`getState` from active-session.ts once at boot; the gating
  * modules (session-switcher, ws-message-handlers) import the singleton directly.
  */
@@ -72,8 +72,8 @@ function seedOptimistic(): void {
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
 
 function deriveActiveTasks(summaries: Task[]): Task[] {
-	// Only currently-running tasks drive the strip / parked indicator (matches the
-	// poller's activeTasks contract: running work only).
+	// Only currently-running tasks drive the strip / parked indicator
+	// (activeTasks contract: running work only).
 	return summaries.filter((t) => t.status === 'running');
 }
 

@@ -70,8 +70,6 @@ function makeSwitcher() {
 		wsSend: vi.fn(() => true),
 		internal,
 		sessionEphemeralCache: { save: vi.fn(), restore: () => null } as unknown as SessionSwitcherDeps['sessionEphemeralCache'],
-		sessionPoller: { stop: vi.fn(), loadSession: vi.fn(), startStreaming: vi.fn() } as unknown as SessionSwitcherDeps['sessionPoller'],
-		sessionState: { removeSession: vi.fn() },
 		onPersistTimerChanged: vi.fn()
 	};
 	return createSessionSwitcher(deps);

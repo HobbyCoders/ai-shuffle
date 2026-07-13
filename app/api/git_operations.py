@@ -209,32 +209,20 @@ def _session_is_busy(session_id: Optional[str]) -> bool:
     as busy — the cleanup step must not yank its worktree/branch out from under
     that work, even though the session itself is not actively streaming.
 
-    Streaming is checked against BOTH the live session store (the documented
-    streaming AUTHORITY — see docs/lifecycle-states.md) and the sync engine's
-    ``_streaming_sessions`` cache. The sync cache alone is not sufficient here:
-    it is in-memory (wiped on restart) and trails the authority during CLI-wake
-    and pre-first-event windows, so a sibling session actively streaming a local
-    turn can be invisible to it (observed live: 269 ``sync-vs-livestore`` drift
-    lines for one such session). Reading the authority too makes the guard
-    strictly more conservative — worst case cleanup is skipped (a warning; the
-    merge already landed), never a worktree deleted out from under a live turn.
+    Streaming is checked against the durable ``runs`` table (v2 core): a
+    lease-valid active run means a turn is in flight — durable across restarts
+    and shared across installs, unlike the retired in-memory maps.
     """
     if not session_id:
         return False
-    from app.core.live_session_store import live_session_store
-    from app.core.sync_engine import sync_engine
+    from app.core import streaming_status
     from app.core.task_registry import task_registry
 
     try:
-        if live_session_store.is_streaming(session_id):
+        if streaming_status.has_active_run(session_id):
             return True
     except Exception:
-        logger.exception("liveness: live_store is_streaming failed for %s", session_id)
-    try:
-        if sync_engine.is_session_streaming(session_id):
-            return True
-    except Exception:
-        logger.exception("liveness: is_session_streaming failed for %s", session_id)
+        logger.exception("liveness: has_active_run failed for %s", session_id)
     try:
         if task_registry.has_active_background_work(session_id):
             return True

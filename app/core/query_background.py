@@ -36,8 +36,6 @@ from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
-from app.core.live_session_store import live_session_store
-from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.provider.claude_adapter import ClaudeAgentAdapter
 from app.core.session_context import set_current_session_id
 
@@ -50,6 +48,7 @@ from app.core.query_persistence import (
 from app.core.query_streaming import truncate_large_payload
 from app.core.query_options import build_options_from_profile
 from app.core.memory_sync import reconcile_memory, push_memory
+from app.core.turn_finalize import persist_turn_end_state
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,48 @@ async def _run_background_query(
     resume_id: Optional[str],
     device_id: Optional[str],
     api_user_id: Optional[str],
-    message_id: Optional[str] = None
+):
+    """Recording tap around ``_run_background_query_impl`` (V2 Phase 1).
+
+    Mirrors ``query_engine.stream_to_websocket``: for sessions flagged
+    ``sessions.v2_stream`` a ``TurnRecorder`` records the initial user message
+    and every pump-shaped event the impl produces into the typed session event
+    log; ``close()`` runs in the ``finally`` so the crash/abandonment path
+    still records a terminal ``turn.aborted``. For all other sessions
+    (recorder is None) this wrapper is a pure passthrough.
+    """
+    from app.core.turn_recorder import TurnRecorder
+
+    recorder = await TurnRecorder.maybe_create(session_id)
+    if recorder:
+        await recorder.start(prompt)
+    try:
+        await _run_background_query_impl(
+            session_id=session_id,
+            prompt=prompt,
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_id=resume_id,
+            device_id=device_id,
+            api_user_id=api_user_id,
+            recorder=recorder,
+        )
+    finally:
+        if recorder:
+            await recorder.close()
+
+
+async def _run_background_query_impl(
+    session_id: str,
+    prompt: str,
+    profile: Dict[str, Any],
+    project: Optional[Dict[str, Any]],
+    overrides: Optional[Dict[str, Any]],
+    resume_id: Optional[str],
+    device_id: Optional[str],
+    api_user_id: Optional[str],
+    recorder=None,
 ):
     """
     Run a streaming query in the background, independent of HTTP connection.
@@ -88,7 +128,8 @@ async def _run_background_query(
     - Browser tab is backgrounded
     - HTTP connection is interrupted
 
-    All events are broadcast via sync_engine for WebSocket delivery.
+    Events are recorded to the v2 session event log via the TurnRecorder
+    created by the ``_run_background_query`` wrapper.
     """
     # Extract profile_id for per-query tracking
     profile_id = profile.get("id")
@@ -162,13 +203,8 @@ async def _run_background_query(
             f"down a cancelled response — refusing early, drain pump left "
             f"running (stale-turn guard)"
         )
-        await sync_engine.broadcast_stream_end(
-            session_id=session_id,
-            message_id=message_id or f"error-{session_id}",
-            metadata={"error": error_msg},
-            interrupted=True,
-            source_device_id=device_id
-        )
+        if recorder:
+            await recorder.on_event({"type": "error", "message": error_msg})
         return
 
     # --- Single-reader invariant (Bug D) ---
@@ -203,13 +239,8 @@ async def _run_background_query(
                 f"[Background] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent background query (busy-write guard)"
             )
-            await sync_engine.broadcast_stream_end(
-                session_id=session_id,
-                message_id=message_id or f"error-{session_id}",
-                metadata={"error": error_msg},
-                interrupted=True,
-                source_device_id=device_id
-            )
+            if recorder:
+                await recorder.on_event({"type": "error", "message": error_msg})
             return
         if existing_state.stale_turn_undrained:
             # A force-cancelled turn's terminal ResultMessage is still buffered on
@@ -224,13 +255,8 @@ async def _run_background_query(
                 f"[Background] Pooled client for session {session_id} is winding "
                 f"down a cancelled response — refusing (stale-turn guard)"
             )
-            await sync_engine.broadcast_stream_end(
-                session_id=session_id,
-                message_id=message_id or f"error-{session_id}",
-                metadata={"error": error_msg},
-                interrupted=True,
-                source_device_id=device_id
-            )
+            if recorder:
+                await recorder.on_event({"type": "error", "message": error_msg})
             return
         if not requires_reconnect(existing_state, options):
             state = existing_state
@@ -297,18 +323,8 @@ async def _run_background_query(
         except Exception as e:
             error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
-            # Clean up LiveSessionStore on connect failure
-            try:
-                await live_session_store.cleanup_session(session_id)
-            except Exception:
-                pass
-            await sync_engine.broadcast_stream_end(
-                session_id=session_id,
-                message_id=f"error-{session_id}",
-                metadata={"error": error_msg},
-                interrupted=True,
-                source_device_id=device_id
-            )
+            if recorder:
+                await recorder.on_event({"type": "error", "message": error_msg})
             return
 
         state = SessionState(
@@ -327,36 +343,11 @@ async def _run_background_query(
     state.last_activity = datetime.now(timezone.utc)
 
     # Claim-to-try guard: is_streaming is claimed but the protective
-    # try/finally hasn't started yet — any exit here (the broadcast/sync-log
-    # awaits can raise or be cancelled) must clear the flag or the pooled
-    # client is bricked (busy error forever, never idle-evicted).
+    # try/finally hasn't started yet — any exit here must clear the flag or
+    # the pooled client is bricked (busy error forever, never idle-evicted).
     try:
         # Store pending background task reference now that pool entry exists
         _store_background_task(session_id)
-
-        # Use provided message_id or generate a new one
-        # If message_id is provided, stream_start was already broadcast by start_background_query
-        assistant_msg_id = message_id or f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
-
-        # Only broadcast stream_start if we generated a new message_id
-        # (i.e., if message_id wasn't provided by start_background_query)
-        if not message_id:
-            await sync_engine.broadcast_stream_start(
-                session_id=session_id,
-                message_id=assistant_msg_id,
-                source_device_id=None,  # Don't exclude any device - all should see it
-                user_id=api_user_id
-            )
-
-        # Log stream start for polling fallback
-        await run_sync(
-            database.add_sync_log,
-            session_id=session_id,
-            event_type="stream_start",
-            entity_type="message",
-            entity_id=assistant_msg_id,
-            data={"message_id": assistant_msg_id}
-        )
 
         # Execute query
         response_text = []
@@ -384,20 +375,11 @@ async def _run_background_query(
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
 
-                        # Update LiveSessionStore for late-joining devices
-                        try:
-                            await live_session_store.append_text(session_id, block.text)
-                        except Exception as e:
-                            logger.warning(f"[Background] Failed to append text to live store for {session_id}: {e}")
-
-                        # Broadcast text chunk to all devices
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="text",
-                            chunk_data={"content": block.text},
-                            source_device_id=None
-                        )
+                        if recorder:
+                            await recorder.on_event({
+                                "type": "chunk",
+                                "content": block.text,
+                            })
 
                     elif isinstance(block, ToolUseBlock):
                         # Collect tool use for storage
@@ -408,25 +390,13 @@ async def _run_background_query(
                             "input": block.input
                         })
 
-                        # Update LiveSessionStore for late-joining devices
-                        try:
-                            tool_id = getattr(block, 'id', None) or f"tool-{uuid.uuid4().hex[:12]}"
-                            tool_input = block.input if isinstance(block.input, dict) else {}
-                            await live_session_store.add_tool_use(session_id, tool_id, block.name, tool_input)
-                        except Exception as e:
-                            logger.warning(f"[Background] Failed to add tool_use to live store for {session_id}: {e}")
-
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_use",
-                            chunk_data={
+                        if recorder:
+                            await recorder.on_event({
+                                "type": "tool_use",
                                 "name": block.name,
                                 "id": getattr(block, 'id', None),
-                                "input": block.input
-                            },
-                            source_device_id=None
-                        )
+                                "input": block.input if isinstance(block.input, dict) else {},
+                            })
 
                     elif isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content)
@@ -439,28 +409,14 @@ async def _run_background_query(
                             "output": output
                         })
 
-                        # Update LiveSessionStore for late-joining devices
-                        try:
-                            result_tool_id = getattr(block, 'tool_use_id', None) or ""
-                            output_text = str(output) if output else ""
-                            await live_session_store.add_tool_result(
-                                session_id, result_tool_id, output_text,
-                                is_error=getattr(block, 'is_error', False)
-                            )
-                        except Exception as e:
-                            logger.warning(f"[Background] Failed to add tool_result to live store for {session_id}: {e}")
-
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_result",
-                            chunk_data={
+                        if recorder:
+                            await recorder.on_event({
+                                "type": "tool_result",
                                 "name": getattr(block, 'name', 'unknown'),
                                 "tool_use_id": getattr(block, 'tool_use_id', None),
-                                "output": output
-                            },
-                            source_device_id=None
-                        )
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False),
+                            })
 
                 metadata["model"] = message.model
 
@@ -471,18 +427,11 @@ async def _run_background_query(
                     metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                     metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
-                    # Keep live store in sync on each API call so late-joining
-                    # devices and pre_seed_parse_cache see correct values.
-                    try:
-                        await live_session_store.update_usage(
-                            session_id,
-                            input_tokens=message.usage.get("input_tokens", 0),
-                            output_tokens=message.usage.get("output_tokens", 0),
-                            cache_creation_tokens=message.usage.get("cache_creation_input_tokens", 0),
-                            cache_read_tokens=message.usage.get("cache_read_input_tokens", 0),
-                        )
-                    except Exception as e:
-                        logger.warning(f"[Background] Failed to update per-call usage in live store for {session_id}: {e}")
+                    if recorder:
+                        await recorder.on_event({
+                            "type": "turn_usage",
+                            "usage": message.usage,
+                        })
 
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
@@ -499,38 +448,23 @@ async def _run_background_query(
                             "output": output
                         })
 
-                        # Update LiveSessionStore for late-joining devices
-                        try:
-                            output_text = str(output) if output else ""
-                            await live_session_store.add_tool_result(
-                                session_id, block.tool_use_id or "", output_text,
-                                is_error=getattr(block, 'is_error', False)
-                            )
-                        except Exception as e:
-                            logger.warning(f"[Background] Failed to add UserMessage tool_result to live store for {session_id}: {e}")
-
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_result",
-                            chunk_data={
+                        if recorder:
+                            await recorder.on_event({
+                                "type": "tool_result",
                                 "name": "unknown",
                                 "tool_use_id": block.tool_use_id,
-                                "output": output
-                            },
-                            source_device_id=None
-                        )
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False),
+                            })
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"[Background] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
 
             elif isinstance(message, HookEventMessage):
                 logger.debug(f"[Background] Hook event: {getattr(message, 'hook_event_name', None)}")
-                await live_session_store.add_system_message(
-                    session_id,
-                    content="",
-                    subtype="hook_event",
-                    data={
+                if recorder:
+                    await recorder.on_event({
+                        "type": "hook_event",
                         "hook_event_name": getattr(message, "hook_event_name", None),
                         "matcher": getattr(message, "matcher", None),
                         "decision": getattr(message, "decision", None),
@@ -539,8 +473,7 @@ async def _run_background_query(
                         "tool_name": getattr(message, "tool_name", None),
                         "session_id": session_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                    },
-                )
+                    })
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -592,20 +525,29 @@ async def _run_background_query(
         if not state.is_connected:
             await pool.remove_dead(session_id)
 
-        # End LiveSessionStore streaming BEFORE broadcast_stream_end
-        try:
-            await live_session_store.end_streaming(session_id, metadata=metadata, interrupted=interrupted)
-        except Exception as e:
-            logger.warning(f"[Background] Failed to end live session store streaming for {session_id}: {e}")
+        # Record the terminal event so the turn closes cleanly in the event
+        # log (the wrapper's recorder.close() only appends a crash-path
+        # turn.aborted when NO terminal was recorded).
+        if recorder:
+            if interrupted:
+                await recorder.on_event({
+                    "type": "interrupted",
+                    "message": "Query was interrupted",
+                })
+            elif metadata.get("error"):
+                await recorder.on_event({
+                    "type": "error",
+                    "message": metadata["error"],
+                })
+            else:
+                await recorder.on_event({
+                    "type": "done",
+                    "session_id": session_id,
+                    "metadata": metadata,
+                })
 
-        # Broadcast stream end to all devices
-        await sync_engine.broadcast_stream_end(
-            session_id=session_id,
-            message_id=assistant_msg_id,
-            metadata=metadata,
-            interrupted=interrupted,
-            source_device_id=None
-        )
+        # Durable end-of-turn writes (parked marker + unpark latch).
+        await persist_turn_end_state(session_id)
 
         # Clean up per-session state that is no longer needed.
         # Permission rules and pending requests accumulate per session and are
@@ -618,13 +560,6 @@ async def _run_background_query(
         # there's no device_id, so directly pop under the lock.
         async with sync_engine._lock:
             sync_engine._session_locks.pop(session_id, None)  # noqa: SLF001
-
-        # Schedule delayed cleanup of live store data (keep for 30s for late joiners)
-        async def _delayed_cleanup():
-            await asyncio.sleep(30)
-            await live_session_store.cleanup_ended_session(session_id)
-
-        asyncio.create_task(_delayed_cleanup())
 
     # Persist session data to database in a batched write.
     await _persist_turn_results(
@@ -697,39 +632,9 @@ async def start_background_query(
         )
         logger.debug(f"Created new session {session_id} with title: {title}")
 
-    # Generate a message ID for streaming
+    # Generate a message ID for the API response contract (clients key the
+    # in-flight turn on it; the runner itself no longer consumes it).
     assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
-
-    # Broadcast stream_start BEFORE returning so the WebSocket can pick it up
-    # This ensures is_streaming=true and buffer exists when client connects
-    await sync_engine.broadcast_stream_start(
-        session_id=session_id,
-        message_id=assistant_msg_id,
-        source_device_id=None,  # Don't exclude any device - all should see it
-        user_id=api_user_id
-    )
-    logger.debug(f"[Background] Broadcast stream_start for session {session_id}")
-
-    # Initialize LiveSessionStore for late-joining devices
-    try:
-        working_dir = resolve_working_dir(session)
-        sdk_sid = session.get("sdk_session_id") if session else None
-        # Offload the (potentially uncached) seed transcript parse to a thread:
-        # resolve_for_streaming_init can do a full synchronous Postgres store read in
-        # postgres_only mode, which would otherwise block the event loop on turn start.
-        initial_messages = await run_sync(
-            message_resolver.resolve_for_streaming_init, session_id, sdk_sid, working_dir
-        )
-    except Exception:
-        initial_messages = []
-
-    await live_session_store.start_streaming(
-        session_id, initial_messages, profile_id=profile_id
-    )
-
-    # Add user message to live store
-    user_msg_id = f"user-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    await live_session_store.add_user_message(session_id, prompt, user_msg_id)
 
     # Start background task
     task = asyncio.create_task(
@@ -742,7 +647,6 @@ async def start_background_query(
             resume_id=resume_id,
             device_id=device_id,
             api_user_id=api_user_id,
-            message_id=assistant_msg_id
         )
     )
 

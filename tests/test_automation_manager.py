@@ -378,7 +378,24 @@ def _fake_turn_handler(metadata=None, error=None, task=None):
     return handler
 
 
-def _session_run_env(handler, response_messages=None):
+def _fake_event_log(text, turn_id="t1"):
+    """A minimal v2 ``session_events`` log: one completed turn whose assistant
+    text is ``text``, split across two ``assistant.text_delta`` events so the
+    concatenation path is exercised."""
+    mid = len(text) // 2
+    return [
+        {"seq": 1, "turn_id": turn_id, "event_type": "turn.started", "payload": {}},
+        {"seq": 2, "turn_id": turn_id, "event_type": "message.user",
+         "payload": {"content": "do it"}},
+        {"seq": 3, "turn_id": turn_id, "event_type": "assistant.text_delta",
+         "payload": {"text": text[:mid]}},
+        {"seq": 4, "turn_id": turn_id, "event_type": "assistant.text_delta",
+         "payload": {"text": text[mid:]}},
+        {"seq": 5, "turn_id": turn_id, "event_type": "turn.completed", "payload": {}},
+    ]
+
+
+def _session_run_env(handler, response_text="all done"):
     """Patch stack for the streaming-session run path."""
     from contextlib import ExitStack
 
@@ -389,16 +406,16 @@ def _session_run_env(handler, response_messages=None):
         new=AsyncMock(return_value=handler),
     ))
     stack.enter_context(patch("app.core.sync_engine.sync_engine", new=AsyncMock()))
-    store = stack.enter_context(patch("app.core.live_session_store.live_session_store"))
-    store.get_session_dict.return_value = {
-        "messages": response_messages if response_messages is not None else [
-            {"role": "user", "content": "do it"},
-            {"role": "assistant", "type": "text", "content": "all done"},
-        ],
-    }
+    # V2: session_messages is no longer dual-written — the run's response text
+    # is derived from the session event log (the last completed turn's
+    # assistant.text_delta payloads).
+    stack.enter_context(patch(
+        "app.db.session_events.get_events",
+        return_value=_fake_event_log(response_text),
+    ))
     db.update_automation_run.return_value = {}
     db.update_automation.return_value = {}
-    return stack, db, launch, store
+    return stack, db, launch, None
 
 
 class TestRunAsSession:
@@ -439,12 +456,9 @@ class TestRunAsSession:
         session_id = create_kwargs["session_id"]
         assert session_id
 
-        # The prompt is persisted as a normal user message on that session
-        db.add_session_message.assert_called_once()
-        msg_kwargs = db.add_session_message.call_args.kwargs
-        assert msg_kwargs["session_id"] == session_id
-        assert msg_kwargs["role"] == "user"
-        assert msg_kwargs["content"] == "do it"
+        # V2: the prompt is NOT pre-seeded into legacy session_messages — the
+        # turn recorder persists it as a message.user event at turn start.
+        db.add_session_message.assert_not_called()
 
         # Exactly one streaming submit, through the deferred-delivery seam
         launch.assert_awaited_once()
@@ -509,11 +523,7 @@ class TestRunAsSession:
         long_response = "x" * 12000
         handler = _fake_turn_handler()
         stack, db, _launch, _store = _session_run_env(
-            handler,
-            response_messages=[
-                {"role": "user", "content": "do it"},
-                {"role": "assistant", "type": "text", "content": long_response},
-            ],
+            handler, response_text=long_response,
         )
         with stack:
             await manager._execute_run(self._automation(), "run-s5", "do it", {})
@@ -656,6 +666,39 @@ class TestRunAsSession:
         assert failed and "interrupted" in failed[0]["error"]
         assert "timed out" not in failed[0]["error"]
         db.record_automation_run_success.assert_not_called()
+
+
+class TestExtractFinalAssistantText:
+    """The run response is derived from the V2 session event log — the last
+    completed turn's assistant.text_delta payloads, concatenated in seq order."""
+
+    def test_concatenates_last_turn_text_deltas(self):
+        events = _fake_event_log("hello world")
+        with patch("app.db.session_events.get_events", return_value=events):
+            out = AutomationManager._extract_final_assistant_text("sess-1")
+        assert out == "hello world"
+
+    def test_picks_last_completed_turn(self):
+        events = (
+            _fake_event_log("first turn", turn_id="t1")
+            + _fake_event_log("second turn", turn_id="t2")
+        )
+        # Reallocate seqs so they are ascending across the two turns.
+        for i, ev in enumerate(events, start=1):
+            ev["seq"] = i
+        with patch("app.db.session_events.get_events", return_value=events):
+            out = AutomationManager._extract_final_assistant_text("sess-2")
+        assert out == "second turn"
+
+    def test_empty_log_returns_empty_string(self):
+        with patch("app.db.session_events.get_events", return_value=[]):
+            out = AutomationManager._extract_final_assistant_text("sess-3")
+        assert out == ""
+
+    def test_reader_error_is_swallowed(self):
+        with patch("app.db.session_events.get_events", side_effect=RuntimeError("boom")):
+            out = AutomationManager._extract_final_assistant_text("sess-4")
+        assert out == ""
 
 
 class TestScheduledFireOrdering:

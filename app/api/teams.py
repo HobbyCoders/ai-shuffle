@@ -2,7 +2,7 @@
 Team visibility API — inspect and control Claude Code agent teams spawned
 by a parent session.
 
-The core visibility (messages in chat) flows through the live_session_store
+The core visibility (messages in chat) flows through the session event feed
 and normal session polling. These endpoints cover the ancillary use cases
 that don't fit the message stream: listing active teammates for a status
 bar and terminating stuck teammate subprocesses.

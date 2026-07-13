@@ -504,15 +504,8 @@
       "title": "InteractionRequested",
       "type": "object"
     },
-    "MessageUser": {
+    "MessageAssistant": {
       "properties": {
-        "attachments": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Attachments",
-          "type": "array"
-        },
         "command_id": {
           "anyOf": [
             {
@@ -538,6 +531,39 @@
           "title": "Id",
           "type": "string"
         },
+        "kind": {
+          "default": "text",
+          "enum": [
+            "text",
+            "thinking"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -558,6 +584,175 @@
           "title": "Session Id",
           "type": "string"
         },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "message.assistant",
+          "default": "message.assistant",
+          "title": "Type",
+          "type": "string"
+        },
+        "uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uuid"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "content"
+      ],
+      "title": "MessageAssistant",
+      "type": "object"
+    },
+    "MessageUser": {
+      "properties": {
+        "attachments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "command_args": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Args"
+        },
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "command_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Name"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -575,6 +770,18 @@
           "default": "message.user",
           "title": "Type",
           "type": "string"
+        },
+        "uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uuid"
         }
       },
       "required": [
@@ -672,6 +879,19 @@
           "default": "subagent.completed",
           "title": "Type",
           "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usage"
         }
       },
       "required": [
@@ -1054,6 +1274,19 @@
           "title": "Subtype",
           "type": "string"
         },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -1198,6 +1431,354 @@
         "state"
       ],
       "title": "TaskUpdated",
+      "type": "object"
+    },
+    "TeamMemberCompleted": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "result_preview": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Preview"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "killed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "team_name": {
+          "title": "Team Name",
+          "type": "string"
+        },
+        "teammate_name": {
+          "title": "Teammate Name",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "team.member_completed",
+          "default": "team.member_completed",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usage"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "team_name",
+        "teammate_name",
+        "status"
+      ],
+      "title": "TeamMemberCompleted",
+      "type": "object"
+    },
+    "TeamMemberProgress": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "chunk",
+                "tool_use",
+                "tool_result"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "team_name": {
+          "title": "Team Name",
+          "type": "string"
+        },
+        "teammate_name": {
+          "title": "Teammate Name",
+          "type": "string"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokens"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "team.member_progress",
+          "default": "team.member_progress",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "team_name",
+        "teammate_name"
+      ],
+      "title": "TeamMemberProgress",
+      "type": "object"
+    },
+    "TeamMemberStarted": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "team_name": {
+          "title": "Team Name",
+          "type": "string"
+        },
+        "teammate_name": {
+          "title": "Teammate Name",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "team.member_started",
+          "default": "team.member_started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "team_name",
+        "teammate_name"
+      ],
+      "title": "TeamMemberStarted",
       "type": "object"
     },
     "ToolInputDelta": {
@@ -1348,6 +1929,19 @@
           "title": "Session Id",
           "type": "string"
         },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        },
         "tool_use_id": {
           "title": "Tool Use Id",
           "type": "string"
@@ -1425,6 +2019,18 @@
           "default": null,
           "title": "Run Id"
         },
+        "screenshot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Screenshot"
+        },
         "seq": {
           "title": "Seq",
           "type": "integer"
@@ -1432,6 +2038,19 @@
         "session_id": {
           "title": "Session Id",
           "type": "string"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
         },
         "tool_use_id": {
           "title": "Tool Use Id",
@@ -2111,6 +2730,7 @@
       "interaction.answered": "#/$defs/InteractionAnswered",
       "interaction.expired": "#/$defs/InteractionExpired",
       "interaction.requested": "#/$defs/InteractionRequested",
+      "message.assistant": "#/$defs/MessageAssistant",
       "message.user": "#/$defs/MessageUser",
       "subagent.completed": "#/$defs/SubagentCompleted",
       "subagent.progress": "#/$defs/SubagentProgress",
@@ -2118,6 +2738,9 @@
       "system.compaction_boundary": "#/$defs/SystemCompactionBoundary",
       "system.note": "#/$defs/SystemNote",
       "task.updated": "#/$defs/TaskUpdated",
+      "team.member_completed": "#/$defs/TeamMemberCompleted",
+      "team.member_progress": "#/$defs/TeamMemberProgress",
+      "team.member_started": "#/$defs/TeamMemberStarted",
       "tool.input_delta": "#/$defs/ToolInputDelta",
       "tool.result": "#/$defs/ToolResult",
       "tool.use": "#/$defs/ToolUse",
@@ -2158,6 +2781,9 @@
       "$ref": "#/$defs/MessageUser"
     },
     {
+      "$ref": "#/$defs/MessageAssistant"
+    },
+    {
       "$ref": "#/$defs/AssistantTextDelta"
     },
     {
@@ -2180,6 +2806,15 @@
     },
     {
       "$ref": "#/$defs/SubagentCompleted"
+    },
+    {
+      "$ref": "#/$defs/TeamMemberStarted"
+    },
+    {
+      "$ref": "#/$defs/TeamMemberProgress"
+    },
+    {
+      "$ref": "#/$defs/TeamMemberCompleted"
     },
     {
       "$ref": "#/$defs/TaskUpdated"

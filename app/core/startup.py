@@ -396,7 +396,7 @@ def start_background_tasks() -> List[asyncio.Task]:
 
     async def _periodic_db_maintenance():
         """Background task: database maintenance every 4 hours."""
-        from app.core.live_session_store import live_session_store
+        from app.core import streaming_status
 
         # Run once on startup after a short delay (catch up after long uptime).
         await asyncio.sleep(30)
@@ -404,10 +404,10 @@ def start_background_tasks() -> List[asyncio.Task]:
             try:
                 # Skip VACUUM if any session is actively streaming — VACUUM
                 # acquires an exclusive lock that would block all DB reads/writes
-                # for potentially several seconds on large databases.
-                has_streaming = any(
-                    s.is_streaming
-                    for s in live_session_store._sessions.values()  # noqa: SLF001
+                # for potentially several seconds on large databases. Busy truth
+                # comes from the durable runs table (lease-valid active runs).
+                has_streaming = await asyncio.to_thread(
+                    streaming_status.has_any_active_run
                 )
                 _maint_start = time.monotonic()
                 result = await asyncio.to_thread(
@@ -497,6 +497,18 @@ def start_background_tasks() -> List[asyncio.Task]:
         f"Lifecycle reconcile task started (every {int(RECONCILE_INTERVAL_SECONDS)}s)"
     )
 
+    # Durable busy-status reconciler (v2 core): re-checks sessions last
+    # broadcast as busy so a lease that expires with no terminal event (crashed
+    # runner) still turns the board spinner off. Also registers the event
+    # gateway global listener as the secondary re-check trigger.
+    from app.core import streaming_status
+    streaming_status.install_gateway_listener()
+    tasks.append(asyncio.create_task(streaming_status.sweep_loop()))
+    logger.info(
+        f"Streaming-status sweep task started "
+        f"(every {int(streaming_status.SWEEP_INTERVAL_SECONDS)}s)"
+    )
+
     return tasks
 
 
@@ -548,14 +560,11 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
-    # Free in-memory session/permission state. These are never otherwise
-    # emptied, so a long-lived server accumulates LiveSession message buffers
-    # for every session that ever streamed.
+    # Free in-memory permission/task state (never otherwise emptied on a
+    # long-lived server).
     try:
-        from app.core.live_session_store import live_session_store
         from app.core.permission_handler import permission_handler
         from app.core.task_registry import task_registry
-        live_session_store.reset_all()
         permission_handler.reset_all()
         task_registry.reset_all()
     except Exception:

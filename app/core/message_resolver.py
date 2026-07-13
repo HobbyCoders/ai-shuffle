@@ -1,18 +1,16 @@
 """
-Unified message resolution — single entry point for the LiveSessionStore → JSONL → PostgreSQL fallback chain.
+Unified message resolution — single entry point for the JSONL → PostgreSQL fallback chain.
 
-This eliminates the 4 duplicate fallback implementations that previously existed in:
-- api/sessions.py get_session (REST)
-- api/sessions.py get_live_session (polling)
-- api/websocket.py load_session handler
-- api/websocket.py run_query initialization
+V2: live render state rides the append-only session event feed; this resolver
+serves only PERSISTED transcripts (SDK JSONL/transcript store, then the message
+rows in Postgres as the final fallback).
 
 Usage:
     from app.core.message_resolver import message_resolver
 
     result = message_resolver.resolve(session_id, sdk_session_id, working_dir)
     result.messages  # List[Dict] in normalized camelCase format
-    result.source    # "live_store" | "jsonl" | "database"
+    result.source    # "jsonl" | "database"
     result.usage     # Optional usage dict
 """
 
@@ -44,10 +42,7 @@ _OPTIONAL_FIELDS = (
 class ResolvedMessages:
     """Result of message resolution."""
     messages: List[Dict[str, Any]] = field(default_factory=list)
-    source: str = "none"  # "live_store", "jsonl", "database", "none"
-    is_streaming: bool = False
-    last_update_id: int = 0
-    initial_message_count: int = 0
+    source: str = "none"  # "jsonl", "database", "none"
     usage: Optional[Dict[str, Any]] = None
 
 
@@ -113,7 +108,7 @@ def _normalize_db_message(m: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class MessageResolver:
-    """Unified message resolution with LiveSessionStore → JSONL → PostgreSQL fallback.
+    """Unified message resolution with JSONL → PostgreSQL fallback.
 
     All code that needs to load session messages should use this instead of
     implementing the fallback chain directly.
@@ -124,163 +119,33 @@ class MessageResolver:
         session_id: str,
         sdk_session_id: Optional[str] = None,
         working_dir: Optional[str] = None,
-        *,
-        check_live_store: bool = True,
-        force_jsonl: bool = False,
     ) -> ResolvedMessages:
         """Resolve messages for a session from the best available source.
 
         Priority:
-        1. LiveSessionStore (if check_live_store=True and not force_jsonl)
-        2. JSONL files (Claude SDK session history)
-        3. PostgreSQL database (fallback)
+        1. JSONL files (Claude SDK session history / transcript store)
+        2. PostgreSQL database (fallback)
 
         Args:
             session_id: AI Shuffle session ID
             sdk_session_id: Claude SDK session UUID (for JSONL lookup)
             working_dir: Project working directory (for JSONL file location)
-            check_live_store: Whether to check LiveSessionStore first
-            force_jsonl: Skip LiveSessionStore even if check_live_store=True
 
         Returns:
             ResolvedMessages with normalized messages and metadata
         """
-        result = ResolvedMessages()
-
-        # --- Tier 1: LiveSessionStore (in-memory, during/after streaming) ---
-        if check_live_store and not force_jsonl:
-            live_result = MessageResolver._try_live_store(session_id)
-            if live_result is not None:
-                return live_result
-
-        # --- Tier 2: JSONL files (persistent, written by Claude CLI) ---
+        # --- Tier 1: JSONL files (persistent, written by Claude CLI) ---
         if sdk_session_id:
             jsonl_result = MessageResolver._try_jsonl(session_id, sdk_session_id, working_dir)
             if jsonl_result is not None:
                 return jsonl_result
 
-        # --- Tier 3: PostgreSQL database (fallback) ---
+        # --- Tier 2: PostgreSQL database (fallback) ---
         return MessageResolver._try_database(session_id)
-
-    @staticmethod
-    def resolve_for_streaming_init(
-        session_id: str,
-        sdk_session_id: Optional[str] = None,
-        working_dir: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Resolve messages specifically for seeding LiveSessionStore.start_streaming().
-
-        This is a lighter version used by run_query initialization.
-        Checks ended (non-streaming) LiveSessionStore first, then JSONL.
-        Returns raw messages suitable for start_streaming() — no DB fallback
-        (DB messages may have different IDs that conflict with JSONL-based sessions).
-        """
-        from app.core.live_session_store import live_session_store
-
-        # Check for ended-but-not-yet-cleaned-up session in live store.
-        #
-        # This tier-1 snapshot can be LESS complete than the durable store
-        # transcript when the turn that produced it crashed mid-stream or was
-        # seeded from empty history (the orphaned-session symptom). heal_seed_
-        # against_store (below) applies the SAME "longer wins" completeness heal
-        # the /live read path uses (sessions.py get_live_session), so a truncated
-        # snapshot can't propagate a short seed into the new turn's buffer.
-        existing = live_session_store.get_session(session_id)
-        if existing and not existing.is_streaming and existing.messages:
-            snapshot = [m.to_dict() for m in existing.messages]
-            return heal_seed_against_store(snapshot, sdk_session_id, working_dir)
-
-        # Fall back to the durable transcript.
-        if sdk_session_id:
-            from app.core.config import settings as _cfg
-
-            # postgres_only: JSONL on disk is not the source of truth (and may be
-            # absent on this machine) — the session store is. Seed from the store
-            # so historical assistant turns aren't dropped while the new turn
-            # streams (mirrors the run_query seed + /live read paths).
-            if _cfg.session_store_mode == "postgres_only":
-                # use_cache=False: the turn-start seed must NOT inherit a
-                # stale _store_parse_cache. After a rewind the cache is
-                # invalidated, but a poisoned seed here (from before the fix)
-                # would otherwise get reseeded forever via handle_done's
-                # "fresh >= seed" guard. Turn start runs once per turn, so a
-                # fresh store parse here is an acceptable cost.
-                messages = _parse_store_transcript(
-                    sdk_session_id, working_dir, use_cache=False
-                )
-                if messages is not None:
-                    # Raw transcripts record a profile only on user rows; walk the
-                    # turns so seeded history bubbles keep their OWN profile while
-                    # the new turn streams (else they'd fall back to the live
-                    # selector and re-label on a profile switch).
-                    from app.core.cost_utils import attach_turn_profile_ids
-                    return attach_turn_profile_ids(session_id, messages)
-                # Store parse FAILED (raised). Do NOT silently seed [] — a failed
-                # parse here used to drop the whole transcript for the duration of
-                # the turn (only the current user prompt + new output survived the
-                # frontend full-replace). Fall through to the JSONL reader; if that
-                # also yields nothing we return [] as before, but a transient store
-                # hiccup no longer wipes visible history.
-
-            try:
-                from app.core.jsonl_parser import parse_session_history
-                messages, _usage = parse_session_history(
-                    sdk_session_id,
-                    working_dir or _default_working_dir(),
-                )
-                # See the postgres_only branch above: attach per-turn profile so
-                # seeded history keeps its own attribution during the new turn.
-                from app.core.cost_utils import attach_turn_profile_ids
-                return attach_turn_profile_ids(session_id, messages)
-            except Exception as e:
-                logger.warning(f"Failed to load history for live store init: {e}")
-
-        return []
-
-    @staticmethod
-    def resolve_delta(
-        session_id: str,
-        since_update_id: int,
-    ) -> Optional[Dict[str, Any]]:
-        """Resolve delta updates from LiveSessionStore for efficient polling.
-
-        Returns None if there are no updates since the given update_id,
-        or the delta dict from LiveSessionStore.get_session_since().
-        """
-        from app.core.live_session_store import live_session_store
-
-        if not live_session_store.has_session(session_id):
-            return None
-
-        if since_update_id > 0:
-            return live_session_store.get_session_since(session_id, since_update_id)
-        else:
-            return live_session_store.get_session_dict(session_id)
 
     # -------------------------------------------------------------------------
     # Private tier methods
     # -------------------------------------------------------------------------
-
-    @staticmethod
-    def _try_live_store(session_id: str) -> Optional[ResolvedMessages]:
-        """Try to load messages from the LiveSessionStore."""
-        from app.core.live_session_store import live_session_store
-
-        if not live_session_store.has_session(session_id):
-            return None
-
-        live_data = live_session_store.get_session_dict(session_id)
-        if not live_data or not live_data.get("messages"):
-            return None
-
-        return ResolvedMessages(
-            messages=live_data["messages"],
-            source="live_store",
-            is_streaming=live_data.get("is_streaming", False),
-            last_update_id=live_data.get("last_update_id", 0),
-            initial_message_count=live_data.get("initial_message_count", 0),
-            usage=live_data.get("usage"),
-        )
 
     @staticmethod
     def _try_jsonl(
@@ -343,173 +208,6 @@ def _default_working_dir() -> str:
     return str(settings.workspace_dir)
 
 
-def _parse_store_transcript(
-    sdk_session_id: str,
-    working_dir: Optional[str],
-    *,
-    use_cache: bool = True,
-) -> Optional[List[Dict[str, Any]]]:
-    """Parse the durable Postgres store transcript for a session.
-
-    Returns the parsed messages, or ``None`` when the parse RAISES. The
-    None-on-failure contract is load-bearing: callers must be able to tell a
-    genuinely-empty transcript ([]) apart from a transient store hiccup (None) so
-    a failure never silently produces a shorter seed than the durable transcript.
-
-    postgres_only-only — the store is the single source of truth there.
-    """
-    try:
-        from app.core.pg_session_store import _load_entries_by_session_id_sync
-        from app.core.jsonl_parser import parse_session_history_from_store
-
-        def _store_loader(sid: str, subpath: Optional[str] = None) -> list:
-            return _load_entries_by_session_id_sync(sid, subpath)
-
-        messages, _usage = parse_session_history_from_store(
-            sdk_session_id,
-            working_dir or _default_working_dir(),
-            _store_loader,
-            use_cache=use_cache,
-        )
-        return messages
-    except Exception as e:
-        logger.warning(f"Store-backed history load failed for live store init: {e}")
-        return None
-
-
-def heal_seed_against_store(
-    initial_messages: List[Dict[str, Any]],
-    sdk_session_id: Optional[str],
-    working_dir: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Heal a turn-start seed against the durable store transcript ("longer wins").
-
-    This is the SEED-path analogue of the "longer wins" completeness heal on the
-    non-streaming /live read path (see ``app/api/sessions.py`` get_live_session).
-    Every seed source can be LESS complete than the authoritative Postgres store
-    transcript the client already renders:
-
-      * a store-parse failure that swallowed to ``[]`` (empty seed),
-      * a NULL sdk_session_id turn whose later reuse propagates a short snapshot,
-      * a tier-1 in-memory snapshot left crash-truncated by a mid-stream OOM/kill.
-
-    When the durable transcript is MORE complete than ``initial_messages``, prefer
-    it — exactly as the read-path heal does — so historical assistant/tool turns
-    aren't dropped when the new turn's compaction poll forces a frontend full
-    replace. When the seed is longer/equal (genuinely ahead of the not-yet-flushed
-    mirror, or JSONL-mode) it wins, preserving tier-1 semantics.
-
-    "Longer" is NOT sufficient on its own, though. The two sources have a
-    systematic granularity mismatch: the live buffer coalesces a streamed turn's
-    text into ONE message, while the store parse emits one row per text block per
-    assistant message (``text-{uuid}-{n}``) plus system-ish user rows the buffer
-    never held. After ``interrupt_for_query`` the durable transcript can therefore
-    be numerically longer while MISSING the interrupted turn's unflushed tail that
-    ``end_streaming`` deliberately preserved in memory. A bare longer-wins would
-    destroy that tail (and the id-family switch would duplicate cards client-side).
-
-    So the heal is ANCHORED: the durable transcript may only win when it is longer
-    AND carries the snapshot's anchor uuid — the last message in the snapshot with
-    a truthy transcript uuid (populated by ``_backfill_message_uuids`` before
-    parking). Special cases:
-
-      * empty seed → durable wins (the store-parse-swallowed / NULL-sdk case),
-      * seed has NO transcript uuids at all → fall back to plain longer-wins
-        (preserves the genuine crash-truncation heal this function was built for).
-
-    No-ops (returns ``initial_messages`` unchanged) outside postgres_only, without
-    a usable ``sdk_session_id``, or when the store parse fails — a heal must never
-    make the seed SHORTER than what the caller already resolved.
-    """
-    if not sdk_session_id:
-        return initial_messages
-
-    from app.core.config import settings as _cfg
-
-    if _cfg.session_store_mode != "postgres_only":
-        return initial_messages
-
-    # use_cache=False: mirror resolve_for_streaming_init's rationale — the seed
-    # must not inherit a stale/poisoned _store_parse_cache entry.
-    durable = _parse_store_transcript(sdk_session_id, working_dir, use_cache=False)
-    if durable is None:
-        # Parse failed — keep whatever the caller resolved (never shrink the seed).
-        return initial_messages
-
-    # Empty seed → the durable transcript is unambiguously more complete (this is
-    # the store-parse-swallowed-to-[] / NULL-sdk-session case). Nothing to anchor.
-    if not initial_messages:
-        if durable:
-            logger.debug(
-                "heal_seed_against_store: empty seed — healing to durable "
-                "transcript (%d msgs)",
-                len(durable),
-            )
-            return durable
-        return initial_messages
-
-    if len(durable) <= len(initial_messages):
-        # Seed is already at least as long — never shrink it.
-        return initial_messages
-
-    # Durable is numerically longer, but "longer" is NOT sufficient on its own.
-    # The granularity between the two sources is systematically mismatched:
-    #
-    #   * the live buffer coalesces a streamed turn's text into ONE message
-    #     (append_text), while
-    #   * the store parse emits one row PER text block per assistant message
-    #     (text-{uuid}-{n}) plus system-ish user rows the buffer never held.
-    #
-    # So after interrupt_for_query, the durable transcript can be longer while
-    # MISSING the interrupted turn's unflushed tail that end_streaming
-    # deliberately preserved in memory. A bare "longer wins" would then destroy
-    # that tail and, via the id-family switch (parser text-{uuid}-{n} vs live
-    # text-{12hex}), spawn duplicate cards client-side.
-    #
-    # Guard: durable may only win if it is longer AND is a superset of the
-    # snapshot's tail — it must carry the LAST transcript uuid the snapshot holds
-    # (end_streaming's _backfill_message_uuids populates these before parking).
-    anchor_uuid = None
-    for msg in reversed(initial_messages):
-        uuid = msg.get("uuid")
-        if uuid:
-            anchor_uuid = uuid
-            break
-
-    if anchor_uuid is None:
-        # The snapshot carries NO transcript uuids at all (e.g. a crash-truncated
-        # tier-1 buffer whose backfill never ran). We cannot anchor, so fall back
-        # to the original longer-wins — this preserves the genuine crash-
-        # truncation heal this function was built for.
-        logger.debug(
-            "heal_seed_against_store: seed has no anchor uuid — falling back to "
-            "longer-wins (durable %d > seed %d msgs)",
-            len(durable), len(initial_messages),
-        )
-        return durable
-
-    durable_has_anchor = any(m.get("uuid") == anchor_uuid for m in durable)
-    if durable_has_anchor:
-        logger.debug(
-            "heal_seed_against_store: durable transcript (%d msgs) is longer and "
-            "contains the seed's anchor %s — healing seed to durable transcript",
-            len(durable), anchor_uuid,
-        )
-        return durable
-
-    # Durable is longer but does NOT contain the anchor: it is a DIFFERENT (and
-    # likely more coarsely/finely blocked) view that is missing the interrupted
-    # tail the snapshot preserved. Keep the seed to protect that tail and avoid
-    # the duplicate-card id-family switch.
-    logger.debug(
-        "heal_seed_against_store: durable transcript (%d msgs) is longer but "
-        "MISSING the seed's anchor %s — keeping seed (%d msgs) to preserve the "
-        "interrupted tail",
-        len(durable), anchor_uuid, len(initial_messages),
-    )
-    return initial_messages
-
-
 def resolve_working_dir(session: Dict[str, Any]) -> str:
     """Resolve the working directory for a session, checking worktree first, then project.
 
@@ -523,8 +221,8 @@ def resolve_working_dir(session: Dict[str, Any]) -> str:
        column is tried when the row (or its path) is missing on disk. No status
        self-heal here — that lives in query_options only.
     2. Project path — only when no worktree directory exists on disk. This is
-       an auxiliary reader (history/JSONL parsing, LiveSessionStore seeding,
-       checkpoint flows), so a missing worktree dir degrades to the project
+       an auxiliary reader (history/JSONL parsing, checkpoint flows), so a
+       missing worktree dir degrades to the project
        dir instead of raising; it must never break history reads.
     3. Default workspace.
     """

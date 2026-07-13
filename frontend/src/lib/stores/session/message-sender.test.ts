@@ -84,8 +84,6 @@ function makeDeps(initial: ActiveSessionState) {
 		getState,
 		internal,
 		wsConn,
-		sessionPoller: { stop: vi.fn(), startStreaming: vi.fn() },
-		sessionState: { removeSession: vi.fn() },
 		sessionEphemeralCache: { remove: vi.fn() },
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
 		persistSession: vi.fn(),

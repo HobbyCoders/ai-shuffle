@@ -59,6 +59,22 @@ class MessageUser(EventBase):
     type: Literal["message.user"] = "message.user"
     content: str
     attachments: list[str] = Field(default_factory=list)  # artifact hashes
+    kind: str | None = None  # e.g. 'text' | 'command'
+    command_name: str | None = None
+    command_args: str | None = None
+    profile_id: str | None = None
+    uuid: str | None = None  # raw jsonl entry uuid (rewind target)
+    timestamp: datetime | None = None  # preferred over created_at when stamping
+
+
+class MessageAssistant(EventBase):
+    type: Literal["message.assistant"] = "message.assistant"
+    content: str
+    kind: Literal["text", "thinking"] = "text"
+    model: str | None = None
+    profile_id: str | None = None
+    uuid: str | None = None  # raw jsonl entry uuid (rewind target)
+    timestamp: datetime | None = None  # preferred over created_at when stamping
 
 
 class AssistantTextDelta(EventBase):
@@ -76,6 +92,8 @@ class ToolUse(EventBase):
     tool_use_id: str
     name: str
     input: dict = Field(default_factory=dict)
+    screenshot: str | None = None  # data URI from MCP image results (rendered inline)
+    timestamp: datetime | None = None  # preferred over created_at when stamping
 
 
 class ToolInputDelta(EventBase):
@@ -90,6 +108,7 @@ class ToolResult(EventBase):
     is_error: bool = False
     content_preview: str | None = None
     artifact_hashes: list[str] = Field(default_factory=list)
+    timestamp: datetime | None = None  # preferred over created_at when stamping
 
 
 class SubagentStarted(EventBase):
@@ -115,6 +134,34 @@ class SubagentCompleted(EventBase):
     task_id: str
     status: Literal["completed", "failed", "killed"]
     result_preview: str | None = None
+    usage: dict | None = None
+
+
+class TeamMemberStarted(EventBase):
+    type: Literal["team.member_started"] = "team.member_started"
+    team_name: str
+    teammate_name: str
+    description: str | None = None
+    prompt: str | None = None
+
+
+class TeamMemberProgress(EventBase):
+    type: Literal["team.member_progress"] = "team.member_progress"
+    team_name: str
+    teammate_name: str
+    kind: Literal["chunk", "tool_use", "tool_result"] | None = None
+    payload: dict = Field(default_factory=dict)
+    note: str | None = None
+    tokens: int | None = None
+
+
+class TeamMemberCompleted(EventBase):
+    type: Literal["team.member_completed"] = "team.member_completed"
+    team_name: str
+    teammate_name: str
+    status: Literal["completed", "failed", "killed"]
+    result_preview: str | None = None
+    usage: dict | None = None
 
 
 class TaskUpdated(EventBase):
@@ -130,6 +177,7 @@ class SystemNote(EventBase):
     type: Literal["system.note"] = "system.note"
     subtype: str
     data: dict = Field(default_factory=dict)
+    timestamp: datetime | None = None  # preferred over created_at when stamping
 
 
 class SystemCompactionBoundary(EventBase):
@@ -177,6 +225,7 @@ SessionEvent = Annotated[
         TurnAborted,
         TurnUsage,
         MessageUser,
+        MessageAssistant,
         AssistantTextDelta,
         AssistantThinkingDelta,
         ToolUse,
@@ -185,6 +234,9 @@ SessionEvent = Annotated[
         SubagentStarted,
         SubagentProgress,
         SubagentCompleted,
+        TeamMemberStarted,
+        TeamMemberProgress,
+        TeamMemberCompleted,
         TaskUpdated,
         SystemNote,
         SystemCompactionBoundary,
@@ -206,6 +258,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "turn.aborted",
     "turn.usage",
     "message.user",
+    "message.assistant",
     "assistant.text_delta",
     "assistant.thinking_delta",
     "tool.use",
@@ -214,6 +267,9 @@ EVENT_TYPES: tuple[str, ...] = (
     "subagent.started",
     "subagent.progress",
     "subagent.completed",
+    "team.member_started",
+    "team.member_progress",
+    "team.member_completed",
     "task.updated",
     "system.note",
     "system.compaction_boundary",

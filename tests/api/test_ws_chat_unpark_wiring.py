@@ -28,9 +28,10 @@ matters at runtime, driven directly against the shared ``*_impl`` functions:
    the parent via websocket-style collaborators (a ``_deliver_unpark`` closure
    capturing a connection-local ``run_query`` + ``set_query_task``).
 
-Plus a source tripwire that the unified ``run_query`` finally block guards
-cleanup against a successor turn (``superseded_by_successor``) and does not
-resurrect the deleted post-turn fast-path follow-up.
+Plus source tripwires that the unified ``run_query`` finally block never
+regrows an unguarded ``cleanup_session()`` (V2 deleted the store teardown the
+``superseded_by_successor`` guard used to protect) and does not resurrect the
+deleted post-turn fast-path follow-up.
 
 No Postgres or real SDK client is required — every boundary is mocked.
 """
@@ -43,7 +44,6 @@ import pytest
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 import app.api.ws_cleanup as ws_cleanup
-from app.api.ws_event_handlers import MutableStreamState
 from app.core.task_registry import task_registry
 from claude_agent_sdk import TaskNotificationMessage
 
@@ -66,40 +66,32 @@ from claude_agent_sdk import TaskNotificationMessage
 # ---------------------------------------------------------------------------
 
 
-def test_run_query_finally_guards_cleanup_against_successor():
-    """The unified run_query ``finally`` block must NOT cleanup_session() a live
-    session that a SUCCESSOR turn now owns.
+def test_run_query_finally_has_no_store_cleanup_to_race():
+    """V2 superseding form of the successor-race guard.
 
-    THE BUG THIS GUARDS: a turn's finally runs CONCURRENTLY with a successor
-    turn's startup whenever the between-turns drain pump delivers an unpark
-    follow-up inside the finally's window (the pump batches for ~1.5s; the
-    finally spends up to ~1s in heartbeat teardown plus DB fetches — longest
-    exactly when the origin socket died to a page refresh). The finally's
-    teardown heuristics check only STORE state (``has_session &&
-    is_streaming`` / ``remaining_devices == 0``), so when the follow-up's
-    ``start_streaming`` wins the race, the parent read the successor's
-    streaming state as its own dangling one and called ``cleanup_session()``:
-    the follow-up's live session was deleted out from under it, its registry
-    tasks reaped to "killed", and the unpark_pending latch cleared. The
-    follow-up turn then streamed into a void — the durable transcript kept
-    growing (new messages appeared on refresh) while ``/live`` reported
-    not-streaming forever, so the page never re-entered streaming.
+    THE BUG THE OLD GUARD PROTECTED: a turn's finally runs CONCURRENTLY with a
+    successor turn's startup (the drain pump's unpark follow-up lands inside
+    the finally's window), and the old store-state cleanup heuristics
+    (``has_session && is_streaming`` / ``remaining_devices == 0`` →
+    ``cleanup_session()``) would read the SUCCESSOR's streaming state as this
+    turn's dangling one and wipe its live session. The pre-V2 fix gated every
+    heuristic on ``superseded_by_successor(session_id)``.
 
-    The fix: every cleanup_session() heuristic in a run_query finally checks
-    ``superseded_by_successor(session_id)`` (ownership via
-    ``_active_chat_sessions``) and skips teardown when another task has
-    replaced this turn as the session's active turn.
+    V2 deletes the hazard at the root: run_query's finally performs NO live
+    store teardown at all — busy truth lives in the durable runs table and a
+    crashed writer self-heals via the run-lease TTL. Pin that none of it comes
+    back: if a future change reintroduces a ``cleanup_session()`` call in
+    run_query, it must bring the ``superseded_by_successor`` ownership guard
+    back with it (see ws_cleanup.superseded_by_successor's docstring — the
+    predicate is kept for exactly that reason).
     """
     import inspect
 
     src = inspect.getsource(cwh.ChatWebSocketHandler.run_query)
-    label = "chat_ws_handler.run_query"
-    occurrences = src.count("await superseded_by_successor(session_id)")
-    assert occurrences >= 2, (
-        f"{label}: expected the ownership guard on BOTH finally cleanup "
-        f"heuristics (streaming-never-ended AND no-devices), found "
-        f"{occurrences} — an unguarded cleanup_session() will race the "
-        f"drain pump's unpark follow-up and wipe its live session"
+    assert "cleanup_session(" not in src, (
+        "chat_ws_handler.run_query grew a cleanup_session() call again — it "
+        "must be gated on superseded_by_successor(session_id) or it will race "
+        "the drain pump's unpark follow-up and wipe its live session"
     )
 
 
@@ -146,8 +138,12 @@ def test_post_turn_fast_path_stays_deleted():
     assert "_maybe_unpark_followup" not in inspect.getsource(
         cwh.ChatWebSocketHandler.run_query
     )
-    # The stash's carrier field is gone too.
-    assert not hasattr(MutableStreamState(), "pending_task_notifications")
+    # The stash's carrier (MutableStreamState.pending_task_notifications) is
+    # gone even harder in V2: the whole MutableStreamState class was deleted
+    # with ws_event_handlers. Pin that neither handler re-grows a stash field.
+    for mod in (cwh, ws_mod):
+        assert not hasattr(mod, "MutableStreamState")
+        assert "pending_task_notifications" not in inspect.getsource(mod)
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +228,11 @@ def _patch_deliver_boundaries(stack):
     sync = stack.enter_context(patch.object(cwh, "sync_engine"))
     sync.broadcast_message_added = AsyncMock()
 
-    store = stack.enter_context(patch.object(cwh, "live_session_store"))
-    store.end_streaming = AsyncMock()
+    # V2: the live_session_store.end_streaming finalize is deleted with the
+    # module — the deliver path's turn-end boundary is persist_turn_end_state.
+    stack.enter_context(
+        patch.object(cwh, "persist_turn_end_state", new=AsyncMock())
+    )
 
     # Isolate the registry the impl writes the handoff into (it imports it from
     # app.api.websocket at call time, so patch there).

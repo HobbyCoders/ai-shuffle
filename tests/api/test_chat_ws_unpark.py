@@ -12,9 +12,9 @@ Drives the REAL ChatWebSocketHandler.run_query while faking the SDK stream
   (mark_unparked) so the between-turns drain pump can't re-deliver it either.
 - Duplicates and already-latched tasks likewise spawn nothing.
 
-All heavy collaborators (live_session_store, sync_engine, database, the
-session-pool/SDK, websocket I/O, cleanup) are mocked; no Postgres or SDK client
-is required.
+All heavy collaborators (sync_engine, database, the turn recorder/finalizer,
+the session-pool/SDK, websocket I/O, cleanup) are mocked; no Postgres or SDK
+client is required.
 """
 
 import asyncio
@@ -97,25 +97,20 @@ def _run_query_patches(handler, fake_stream, created):
     # asyncio.create_task as used inside chat_ws_handler (heartbeat + follow-up).
     stack.enter_context(patch.object(cwh.asyncio, "create_task", new=created))
 
-    # live_session_store (async) methods.
-    store = stack.enter_context(patch.object(cwh, "live_session_store"))
-    store.start_streaming = AsyncMock()
-    store.add_user_message = AsyncMock()
-    store.end_streaming = AsyncMock()
-    store.cleanup_session = AsyncMock()
-    store.get_session_dict = MagicMock(return_value=None)
-    # Finally-block guards: report no live/streaming session so cleanup is skipped.
-    store.has_session = MagicMock(return_value=False)
-    store.is_streaming = MagicMock(return_value=False)
+    # --- V2 turn recording/finalize seams --------------------------------------
+    # (V2: the live session store is deleted — turn events are recorded durably
+    # via turn_recorder.record_drained_event and turn-end state is persisted via
+    # turn_finalize.persist_turn_end_state.)
+    stack.enter_context(
+        patch("app.core.turn_recorder.record_drained_event", new=AsyncMock())
+    )
+    stack.enter_context(patch.object(cwh, "persist_turn_end_state", new=AsyncMock()))
 
     # sync_engine (async) methods.
     sync = stack.enter_context(patch.object(cwh, "sync_engine"))
     sync.unregister_device = AsyncMock()
     sync.broadcast_message_added = AsyncMock()
     sync.broadcast_queue_updated = AsyncMock()
-    sync.broadcast_stream_end = AsyncMock()
-    # Finally-block guard: report not-streaming so no stream_end broadcast fires.
-    sync.is_session_streaming = MagicMock(return_value=False)
 
     # connector + webhook dispatch fired on completion (only reached on the
     # non-handoff path, but guard them so a stray call can't crash the test).
@@ -143,11 +138,8 @@ def _run_query_patches(handler, fake_stream, created):
     mr.resolve_for_streaming_init = MagicMock(return_value=[])
     stack.enter_context(patch.object(cwh, "resolve_working_dir", return_value="/tmp"))
 
-    # dispatch_event (origin module) — but we want the REAL stash logic, which
-    # lives in run_query itself, so dispatch_event can be a no-op AsyncMock.
-    stack.enter_context(
-        patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock())
-    )
+    # (V2: the dispatch layer is deleted — the stash logic under test lives in
+    # run_query's inline stream loop, so no dispatch_event stand-in is needed.)
 
     # websocket helpers (lazy-imported inside run_query).
     import app.api.websocket as ws_mod

@@ -90,9 +90,7 @@ from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler, _DeferSentinel
 from app.core.user_question_handler import user_question_handler
 
-from app.core.live_session_store import live_session_store
 from app.core.task_registry import task_registry
-from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
 
 # --- Re-export symbols from extracted modules for backward compatibility ---
@@ -187,11 +185,9 @@ async def _apply_rate_limit_live_event(rli: Any) -> None:
     """Persist a live ``rate_limit`` refinement into the shared usage snapshot.
 
     A yielded ``rate_limit`` frame reaches only clients connected directly to
-    THIS install's WS; peers (and offloaded/cloud-relayed views, which read the
-    owning install's ``/live`` via ``live_session_store`` — where ``rate_limit``
-    is never written) see the change only through the shared ``usage_snapshots``
-    row persisted here plus the cluster ``usage_snapshot`` broadcast. Best-effort
-    — never break streaming.
+    THIS install's WS; peers (and offloaded/cloud-relayed views) see the change
+    only through the shared ``usage_snapshots`` row persisted here plus the
+    cluster ``usage_snapshot`` broadcast. Best-effort — never break streaming.
     """
     try:
         from app.core.usage_limits import usage_limits_monitor
@@ -438,7 +434,7 @@ def _record_subagent_lane_launches(session_id: Optional[str], message: Any) -> N
 # placeholder the SDK returns the moment a Task is started with
 # ``run_in_background``. This is a fallback to the ``run_in_background`` flag (the
 # primary signal) for the rare case the flag is absent; mirrors the content sniff
-# in ``live_session_store._is_background_ack`` / ``jsonl_parser``.
+# in ``jsonl_parser``.
 _SUBAGENT_LAUNCH_ACK_PHRASES = (
     "launched successfully",
     "working in the background",
@@ -518,20 +514,19 @@ def _cli_turn_events_from_message(
     string and the model answers it. Those messages arrive on the pooled client
     with only the between-turns drain pump reading them; without this converter
     the assistant's answer reached ONLY the durable SDK transcript mirror (so it
-    appeared after a page refresh) but never the live store — an actively-watched
-    session showed nothing until reload. The pump dispatches these events through
-    ``dispatch_event`` (the identical handler chain a normal turn uses), so the
-    live store appends + ``update_id`` bumps and park-pollers render the CLI's
-    own wake turn live.
+    appeared after a page refresh) but no live render path — an actively-watched
+    session showed nothing until reload. The pump records the recordable
+    subset of these events to the session event log (``record_drained_event``);
+    the rest surface on reload via the SDK transcript.
 
     Parity rules (mirrors ``stream_to_websocket`` + the reload parser):
     - The injected user-lane STRING (and any top-level user TextBlock) yields NO
       event — in-stream these steering messages are never rendered, and the
       reload path (``jsonl_parser._is_task_notification``) hides them too.
     - Assistant ``TextBlock`` → ``chunk`` (same event the non-partial in-stream
-      path yields); ``ThinkingBlock`` → a ``thinking_block`` marker the pump
-      routes to ``live_session_store.append_thinking``/``finalize_thinking``
-      (there is no dispatchable thinking event type).
+      path yields); ``ThinkingBlock`` → a ``thinking_block`` marker (not a
+      recordable drained type — the pump drops it; it surfaces on reload via
+      the SDK transcript).
     - ``ToolUseBlock`` named Task/Agent → ``subagent_start`` (same shape as
       in-stream) so a sub-agent launched BY the CLI-driven turn gets its node;
       any other tool → ``tool_use``. Launch classification side-effects mirror
@@ -644,12 +639,11 @@ def _task_status_events_from_message(message: Any) -> List[Dict[str, Any]]:
     RC2 (parked-state "Task Updated" chip): in-stream, a ``TaskUpdatedMessage``
     (a SystemMessage subclass) falls through to the generic SystemMessage branch
     in ``stream_to_websocket`` and yields
-    ``{"type": "system", "subtype": <subtype>, "data": <data>}`` → ``handle_system``
-    → ``add_system_message`` → live-store ``update_id`` bump → the chip renders.
-    The between-turns drain pump had no equivalent, so a status patch that arrives
-    while the session is PARKED was structurally undeliverable (the park-poller,
-    keyed on ``update_id``, had nothing to fetch). This mirrors the in-stream shape
-    so the pump can dispatch it through the identical handler chain.
+    ``{"type": "system", "subtype": <subtype>, "data": <data>}``, which the
+    recorder appends to the event log → the chip renders. The between-turns
+    drain pump had no equivalent, so a status patch that arrives while the
+    session is PARKED was structurally undeliverable. This mirrors the
+    in-stream shape so the pump can record it (``record_drained_event``).
 
     Only NON-init task-status system frames are converted (``init`` carries the SDK
     session id and is handled specially in-stream — never forwarded as a chip).
@@ -1054,8 +1048,8 @@ async def execute_query(
     await push_memory(project_id, getattr(options, "cwd", None))
 
     # Notify connected frontends that this session has new messages
-    # (non-streaming queries don't use LiveSessionStore, so we broadcast
-    # a session_updated event so the frontend poller picks up the changes)
+    # (non-streaming queries render nothing live, so we broadcast a
+    # session_updated event so the frontend poller picks up the changes)
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_session_updated(
@@ -1211,7 +1205,7 @@ async def stream_query(
 
     # Store user message and broadcast to other devices. Skipped on a failover
     # retry (persist_user_message=False): the original entry already added the
-    # user message to the DB, live store, and broadcast it — re-doing it here
+    # user message to the DB and broadcast it — re-doing it here
     # would duplicate the message on every connected device.
     if persist_user_message:
         user_msg = await run_sync(
@@ -1397,20 +1391,12 @@ async def stream_query(
     state.last_activity = datetime.now(timezone.utc)
 
     # Claim-to-try guard: is_streaming is claimed but the protective
-    # try/finally hasn't started yet — any exit here (the broadcast/sync-log
-    # awaits can raise or be cancelled) must clear the flag or the pooled
+    # try/finally hasn't started yet — any exit here (the sync-log
+    # await can raise or be cancelled) must clear the flag or the pooled
     # client is bricked (busy error forever, never idle-evicted).
     try:
         # Generate a message ID for streaming sync
         assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
-
-        # Broadcast stream start to other devices
-        await sync_engine.broadcast_stream_start(
-            session_id=session_id,
-            message_id=assistant_msg_id,
-            source_device_id=device_id,
-            user_id=api_user_id
-        )
 
         # Log stream start for polling fallback
         await run_sync(
@@ -1500,15 +1486,6 @@ async def stream_query(
                         response_text.append(block.text)
                         yield {"type": "text", "content": block.text}
 
-                        # Broadcast text chunk to other devices
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="text",
-                            chunk_data={"content": block.text},
-                            source_device_id=device_id
-                        )
-
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
 
@@ -1530,15 +1507,6 @@ async def stream_query(
                             "input": block.input
                         })
 
-                        # Broadcast tool use to other devices
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_use",
-                            chunk_data={"name": block.name, "input": block.input},
-                            source_device_id=device_id
-                        )
-
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
                         output = truncate_large_payload(block.content)
@@ -1558,15 +1526,6 @@ async def stream_query(
                             "output": output
                         })
 
-                        # Broadcast tool result to other devices
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_result",
-                            chunk_data={"name": tool_name, "output": output},
-                            source_device_id=device_id
-                        )
-
                     elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
                         # Server-executed tool call (advisor, web_search, web_fetch).
                         tool_id = block.id
@@ -1585,13 +1544,6 @@ async def stream_query(
                             "input": block.input,
                             "server_side": True,
                         })
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_use",
-                            chunk_data={"name": block.name, "input": block.input, "server_side": True},
-                            source_device_id=device_id
-                        )
 
                     elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
                         tool_use_id = getattr(block, 'tool_use_id', None)
@@ -1610,13 +1562,6 @@ async def stream_query(
                             "output": output,
                             "server_side": True,
                         })
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_result",
-                            chunk_data={"name": tool_name, "output": output, "server_side": True},
-                            source_device_id=device_id
-                        )
 
                 metadata["model"] = message.model
 
@@ -1656,23 +1601,14 @@ async def stream_query(
                             "output": output
                         })
 
-                        # Broadcast tool result to other devices
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=assistant_msg_id,
-                            chunk_type="tool_result",
-                            chunk_data={"name": tool_name, "output": output, "tool_use_id": block.tool_use_id},
-                            source_device_id=device_id
-                        )
-
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
                 _rli = message.rate_limit_info
                 # Yield the frame to clients on THIS install's WS. Cross-install
                 # views (peers, offloaded/cloud-relayed sessions) do NOT receive
-                # this frame — the relay serves live_session_store, which never
-                # carries rate_limit. They see the change only via the shared
-                # usage_snapshots row + cluster broadcast we persist below.
+                # this frame — the event log never carries rate_limit. They see
+                # the change only via the shared usage_snapshots row + cluster
+                # broadcast we persist below.
                 yield _rate_limit_event_dict(_rli, session_id)
                 await _apply_rate_limit_live_event(_rli)
 
@@ -1747,17 +1683,6 @@ async def stream_query(
         # Remove dead clients from pool
         if not state.is_connected:
             await pool.remove_dead(session_id)
-
-        # Broadcast stream end to other devices.
-        # Use interrupt_requested as fallback — SDK interrupt ends the loop
-        # naturally without CancelledError, so `interrupted` may still be False.
-        await sync_engine.broadcast_stream_end(
-            session_id=session_id,
-            message_id=assistant_msg_id,
-            metadata=metadata,
-            interrupted=interrupted or state.interrupt_requested,
-            source_device_id=device_id
-        )
 
     # Persist session data to database in a batched write (single transaction
     # for all tool messages + assistant response, instead of N+1 individual writes).
@@ -3480,9 +3405,9 @@ async def _stream_to_websocket_impl(
                 _rli = message.rate_limit_info
                 # Yield the frame to clients on THIS install's WS. Cross-install
                 # views (peers, offloaded/cloud-relayed sessions) do NOT receive
-                # this frame — the relay serves live_session_store, which never
-                # carries rate_limit. They see the change only via the shared
-                # usage_snapshots row + cluster broadcast we persist below.
+                # this frame — the event log never carries rate_limit. They see
+                # the change only via the shared usage_snapshots row + cluster
+                # broadcast we persist below.
                 yield _rate_limit_event_dict(_rli, session_id)
                 await _apply_rate_limit_live_event(_rli)
 
