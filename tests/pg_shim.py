@@ -345,12 +345,19 @@ class ShimConnection:
         return cur
 
     def commit(self):
+        # Take the shared lock even on read-only paths (which hold no claim):
+        # an unguarded commit can interleave with another thread's in-flight
+        # write statements on the shared connection and raise "cannot commit
+        # transaction - SQL statements in progress". For a writer thread the
+        # RLock re-acquire is free; _txn_release_all repays the whole claim.
+        _txn_acquire()
         try:
             return self._commit_or_rollback(self._conn.commit)
         finally:
             _txn_release_all()
 
     def rollback(self):
+        _txn_acquire()
         try:
             return self._commit_or_rollback(self._conn.rollback)
         finally:
