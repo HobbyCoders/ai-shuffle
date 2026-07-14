@@ -39,77 +39,6 @@ def test_nonexistent_project_path_raises_with_path_and_name(tmp_path):
     assert "other-install" in msg
 
 
-def test_nonexistent_project_rebinds_to_local_sibling(tmp_path):
-    """Cross-device rebind: a plain (non-worktree) session whose project path is
-    foreign runs transparently in this install's clone of the same repo, and the
-    rebound (local) project id — not the stale foreign one — flows into the
-    builtin tools server (guarding the `project = local_project` reassignment)."""
-    missing = tmp_path / "foreign-gone"
-    local_clone = tmp_path / "local-clone"
-    local_clone.mkdir()
-    project = {"id": "p-foreign", "name": "MyRepo", "path": str(missing)}
-    local_project = {"id": "p-local", "name": "MyRepo", "path": str(local_clone)}
-
-    captured = {}
-
-    def _fake_builtins(**kwargs):
-        captured.update(kwargs)
-        return None
-
-    with patch.object(qo, "get_security_instructions", return_value=""), patch(
-        "app.core.project_links.resolve_runnable_local_project",
-        return_value=(project, local_project),
-    ), patch(
-        "app.mcp.builtin_tools.create_builtin_tools_server",
-        side_effect=_fake_builtins,
-    ):
-        opts, _ = qo.build_options_from_profile(profile=_profile(), project=project)
-
-    # cwd rebound onto the local clone; the foreign path never reaches the SDK.
-    assert str(opts.cwd) == str(local_clone)
-    # The rebound project id (not the foreign one) is what downstream tools see.
-    assert captured.get("project_id") == "p-local"
-
-
-def test_worktree_rebind_refreshes_in_memory_project(tmp_path):
-    """follow-up #3: a cross-device WORKTREE rebind moved the session onto this
-    install's local project row (persisted in the DB). build_options must adopt
-    that row in-memory too, so the builtin tools server sees the LOCAL project id
-    on THIS send — not the foreign one, which previously leaked for one send and
-    only self-healed on the next reload."""
-    wt_dir = tmp_path / "wt"
-    wt_dir.mkdir()
-    foreign = {"id": "p-foreign", "name": "MyRepo", "path": str(tmp_path / "foreign")}
-    local_project = {"id": "p-local", "name": "MyRepo", "path": str(tmp_path / "local")}
-
-    captured = {}
-
-    def _fake_builtins(**kwargs):
-        captured.update(kwargs)
-        return None
-
-    def _fake_resolve(session_id, project):
-        # Simulate _rebind_worktree_cwd_cross_device surfacing the local project as
-        # the explicit 4th return value (no longer smuggled through worktree_info).
-        return str(wt_dir), "worktree", {
-            "branch": "feat/x", "base_branch": "main",
-        }, local_project
-
-    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
-        qo, "_resolve_session_worktree_cwd", side_effect=_fake_resolve
-    ), patch(
-        "app.mcp.builtin_tools.create_builtin_tools_server",
-        side_effect=_fake_builtins,
-    ):
-        opts, _ = qo.build_options_from_profile(
-            profile=_profile(), project=foreign, session_id="ses-1"
-        )
-
-    assert str(opts.cwd) == str(wt_dir)
-    # The rebound (local) project id — not the foreign one — reaches downstream.
-    assert captured.get("project_id") == "p-local"
-
-
 def test_nonexistent_profile_config_cwd_raises(tmp_path):
     missing = tmp_path / "gone-cwd"
     with patch.object(qo, "get_security_instructions", return_value=""):
@@ -135,43 +64,40 @@ def test_missing_default_workspace_is_created(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# M-1: the SPAWN cwd is resolved through the origin-keyed project_resolver for a
-# v2-bound session. resolve_cwd MATERIALIZES (git worktree add) here — this is
-# the spawn path, unlike the pure-read message_resolver seam. opts.cwd is the
-# spawn artifact the assertions pin.
+# The SPAWN cwd is resolved through the origin-keyed project_resolver for EVERY
+# session (resolver-FIRST, no project_v2_id gate). resolve_cwd MATERIALIZES (git
+# worktree add) here — this is the spawn path, unlike the pure-read
+# message_resolver seam. There is no legacy worktree/project ladder anymore: when
+# the resolver yields None the outcome is decided purely by whether the session
+# resolves to a project_v2 (honest refusal) or not (config/workspace parity).
 # ---------------------------------------------------------------------------
 
 
-def test_v2_bound_base_spawn_cwd_from_resolver(tmp_path, monkeypatch):
-    """Flag ON + v2-bound (no branch) → opts.cwd is the resolver's base checkout
-    path; the legacy worktree ladder is never consulted."""
+def test_session_spawn_cwd_from_resolver_base(tmp_path):
+    """A session (no branch) → opts.cwd is the resolver's base checkout path,
+    resolver-first with no gate."""
     base = tmp_path / "checkouts" / "proj" / "base"
     base.mkdir(parents=True)
-    monkeypatch.setattr(qo.settings, "v2_projects", True)
     session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": None}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
     ), patch(
         "app.core.project_resolver.resolve_cwd", return_value=str(base)
-    ) as rc, patch.object(
-        qo, "_resolve_session_worktree_cwd"
-    ) as legacy:
+    ) as rc:
         opts, _ = qo.build_options_from_profile(
             profile=_profile(), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(base)
     rc.assert_called_once_with(session)
-    legacy.assert_not_called()
 
 
-def test_v2_bound_branch_spawn_cwd_from_resolver(tmp_path, monkeypatch):
-    """Flag ON + v2-bound WITH a branch → resolver's branch checkout path wins and
+def test_session_spawn_cwd_from_resolver_branch(tmp_path):
+    """A branch-bound session → resolver's branch checkout path wins and
     base_branch is enriched from the legacy worktree row."""
     feat = tmp_path / "checkouts" / "proj" / "feat-x"
     feat.mkdir(parents=True)
-    monkeypatch.setattr(qo.settings, "v2_projects", True)
     session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": "feat/x"}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
@@ -180,67 +106,89 @@ def test_v2_bound_branch_spawn_cwd_from_resolver(tmp_path, monkeypatch):
         qo.database, "get_worktree_by_session", return_value={"base_branch": "develop"}
     ), patch(
         "app.core.project_resolver.resolve_cwd", return_value=str(feat)
-    ) as rc, patch.object(
-        qo, "_resolve_session_worktree_cwd"
-    ) as legacy:
+    ) as rc:
         opts, _ = qo.build_options_from_profile(
             profile=_profile(), session_id="ses-1"
         )
 
     assert str(opts.cwd) == str(feat)
     rc.assert_called_once_with(session)
-    legacy.assert_not_called()
 
 
-def test_v2_resolver_none_falls_through_to_legacy_ladder(tmp_path, monkeypatch):
-    """Flag ON + v2-bound but resolver yields None (no materializable checkout
-    here) → the UNCHANGED legacy worktree ladder runs (honest fallback / fail-
-    fast preserved)."""
-    wt_dir = tmp_path / "wt"
-    wt_dir.mkdir()
-    monkeypatch.setattr(qo.settings, "v2_projects", True)
+def test_v2_project_not_materialized_here_raises(tmp_path):
+    """resolve_cwd None but the session HAS a project_v2 (its checkout lives only
+    on another runner) → refuse with an actionable error instead of running in the
+    wrong place. No legacy ladder to fall through to."""
     session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": None}
-
-    def _fake_legacy(session_id, project):
-        return str(wt_dir), "worktree", {"branch": "b", "base_branch": "main"}, None
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
     ), patch(
         "app.core.project_resolver.resolve_cwd", return_value=None
-    ), patch.object(
-        qo, "_resolve_session_worktree_cwd", side_effect=_fake_legacy
-    ) as legacy:
-        opts, _ = qo.build_options_from_profile(
-            profile=_profile(), session_id="ses-1"
-        )
-
-    assert str(opts.cwd) == str(wt_dir)
-    legacy.assert_called_once()
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2",
+        return_value={"id": "pv2-1", "name": "MyRepo", "origin": "git:abc"},
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+    assert "not checked out on this device" in str(exc_info.value)
 
 
-def test_flag_off_never_calls_resolver(tmp_path, monkeypatch):
-    """Flag OFF → the resolver is never consulted; the legacy ladder alone runs
-    (byte-identical legacy behavior)."""
-    proj_dir = tmp_path / "proj"
-    proj_dir.mkdir()
-    monkeypatch.setattr(qo.settings, "v2_projects", False)
-    session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": None}
-    project = {"id": "p1", "name": "R", "path": str(proj_dir)}
-
-    def _fake_legacy(session_id, project):
-        return None, None, None, None  # no worktree → falls to project path
+def test_v2_worktree_not_materialized_here_raises_worktree_error(tmp_path):
+    """A worktree-flagged session whose checkout isn't here raises
+    WorktreeUnavailableError carrying the branch (the query engines convert it to
+    a user-visible event rather than running in main)."""
+    session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": "feat/x"}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
     ), patch(
-        "app.core.project_resolver.resolve_cwd"
-    ) as rc, patch.object(
-        qo, "_resolve_session_worktree_cwd", side_effect=_fake_legacy
+        "app.core.project_resolver.resolve_cwd", return_value=None
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2",
+        return_value={"id": "pv2-1", "name": "MyRepo"},
+    ):
+        with pytest.raises(qo.WorktreeUnavailableError) as exc_info:
+            qo.build_options_from_profile(profile=_profile(), session_id="ses-1")
+    assert exc_info.value.branch_name == "feat/x"
+
+
+def test_orphan_session_falls_to_workspace(tmp_path, monkeypatch):
+    """A session with no project_v2 and no live legacy project (resolve_cwd None,
+    resolve_project_v2 None) → default workspace (legacy parity)."""
+    ws = tmp_path / "ws"
+    monkeypatch.setattr(qo.settings, "workspace_dir", ws)
+    session = {"id": "ses-1", "project_v2_id": None, "branch": None}
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+        qo.database, "get_session", return_value=session
+    ), patch(
+        "app.core.project_resolver.resolve_cwd", return_value=None
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2", return_value=None
     ):
         opts, _ = qo.build_options_from_profile(
-            profile=_profile(), project=project, session_id="ses-1"
+            profile=_profile(), session_id="ses-1"
         )
 
-    assert str(opts.cwd) == str(proj_dir)
-    rc.assert_not_called()
+    assert str(opts.cwd) == str(ws)
+
+
+def test_orphan_session_uses_profile_config_cwd(tmp_path):
+    """An orphan session with a profile-config cwd → that cwd (legacy parity)."""
+    cfg_dir = tmp_path / "cfgcwd"
+    cfg_dir.mkdir()
+    session = {"id": "ses-1", "project_v2_id": None, "branch": None}
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
+        qo.database, "get_session", return_value=session
+    ), patch(
+        "app.core.project_resolver.resolve_cwd", return_value=None
+    ), patch(
+        "app.core.project_resolver.resolve_project_v2", return_value=None
+    ):
+        opts, _ = qo.build_options_from_profile(
+            profile=_profile({"cwd": str(cfg_dir)}), session_id="ses-1"
+        )
+
+    assert str(opts.cwd) == str(cfg_dir)

@@ -14,7 +14,6 @@ from app.core.models import VALID_AUTOMATION_TRIGGER_TYPES
 from app.core.project_links import (  # noqa: F401 — re-exported for existing callers/tests
     _link_group_siblings,
     _local_candidate,
-    resolve_local_project,
     resolve_runnable_local_project,
 )
 from app.db import database
@@ -101,11 +100,14 @@ def check_budget(automation: Dict[str, Any]) -> Tuple[bool, str]:
 # Scheduled-runner election
 #
 # Automations live in the shared database while their project's ``path`` is
-# machine-specific, so a run must map the stored project row onto whatever
-# clone THIS install has. The cross-install resolution helpers
-# (``resolve_local_project`` / ``_local_candidate`` / ``_link_group_siblings``)
-# live in ``app/core/project_links.py`` and are re-imported above so this
-# module — and its tests — keep referencing them unchanged.
+# machine-specific, so scheduled-runner ELECTION must map the stored project row
+# onto whatever clone THIS install has. The cross-install election helpers
+# (``_local_candidate`` / ``_link_group_siblings``, plus
+# ``resolve_runnable_local_project`` for the worktree-recreate rebind) live in
+# ``app/core/project_links.py`` and are re-imported above. NOTE: these serve
+# distributed runner election / worktree recreation, NOT cwd/adopt resolution
+# (which the origin resolver now owns) — that is why they survived PR-B's ladder
+# deletion (``resolve_local_project`` did not).
 # ---------------------------------------------------------------------------
 
 def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:

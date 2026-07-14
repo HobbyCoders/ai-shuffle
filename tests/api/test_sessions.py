@@ -2050,124 +2050,58 @@ class TestAdoptSession:
 
         assert response.status_code == 404
 
-    def test_adopt_blocks_when_project_not_local(self, client, mock_database, sample_session):
-        """Preflight: repo isn't cloned on this device → 409, no adopt write."""
+    def test_adopt_blocks_when_project_not_checked_out_here(self, client, mock_database, sample_session):
+        """Preflight (resolver-only): the session's project has no BASE checkout on
+        this runner -> 409, no adopt write. has_local_base_checkout is the single
+        gate (base availability, NOT the branch checkout)."""
         sample_session["instance_id"] = "other-install-xyz"
         sample_session["project_id"] = "proj-1"
         mock_database.get_session.return_value = sample_session
         mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
 
         with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=({"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
-                           "path": "/foreign/missing"}, None),
-        ):
+            "app.core.project_resolver.has_local_base_checkout", return_value=False
+        ) as gate:
             response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert "isn't available on this device" in detail
-        assert "MyRepo" in detail
+        assert "checked out on this device" in response.json()["detail"]
+        gate.assert_called_once()
         mock_database.adopt_session.assert_not_called()
 
-    def test_adopt_succeeds_with_warning_when_branch_unpushed(
-        self, client, mock_database, sample_session
-    ):
-        """Preflight resolves onto a sibling clone but the worktree branch isn't
-        pushed → adopt succeeds and the response carries a warning."""
+    def test_adopt_succeeds_when_checkout_present(self, client, mock_database, sample_session):
+        """Base checkout present on this runner -> adopt proceeds (ownership flip
+        only); project_id is NEVER rewritten under the resolver-only path. A branch
+        session adopts on base availability alone (branch materializes at spawn)."""
         from app.core.config import settings
 
         sample_session["instance_id"] = "other-install-xyz"
         sample_session["project_id"] = "proj-1"
-        sample_session["worktree_branch"] = "feat/unpushed"
+        sample_session["branch"] = "feature-x"  # branch session: base gate suffices
         mock_database.get_session.return_value = sample_session
         mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
         mock_database.adopt_session.return_value = {
             **sample_session, "instance_id": settings.effective_instance_id
         }
 
-        def _branches(_dir, include_remote=False):
-            if include_remote:
-                return [{"name": "main"}, {"name": "origin/main"}]
-            return [{"name": "main"}]
-
-        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
-                  "path": "/foreign/missing"}
-        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
-
-        git_mock = MagicMock()
-        git_mock.list_branches.side_effect = _branches
         with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, local),
-        ), patch("app.core.git_service.git_service", git_mock):
+            "app.core.project_resolver.has_local_base_checkout", return_value=True
+        ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 200
         data = response.json()
         assert data["adopted"] is True
-        assert data["local_project_id"] == "proj-local"
-        assert data["warning"] and "hasn't been pushed" in data["warning"]
-        assert "feat/unpushed" in data["warning"]
-        mock_database.adopt_session.assert_called_once()
-
-    def test_adopt_no_false_warning_when_branch_pushed_but_unfetched(
-        self, client, mock_database, sample_session
-    ):
-        """follow-up #4: the worktree branch IS on origin but hasn't been fetched
-        into this clone yet. The preflight must fetch first so it sees
-        origin/<branch> and does NOT emit a false 'hasn't been pushed' warning.
-        Pre-fix (offline listing, no fetch) this returned a bogus warning."""
-        from app.core.config import settings
-        from app.core.worktree_manager import reset_fetch_cache
-
-        reset_fetch_cache()
-        sample_session["instance_id"] = "other-install-xyz"
-        sample_session["project_id"] = "proj-1"
-        sample_session["worktree_branch"] = "feat/pushed"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
-        mock_database.adopt_session.return_value = {
-            **sample_session, "instance_id": settings.effective_instance_id
-        }
-
-        # The remote-tracking ref for the branch only appears AFTER a fetch — the
-        # exact "pushed elsewhere, not yet fetched here" race the warning tripped on.
-        state = {"fetched": False}
-
-        def _fetch(_dir, remote="origin"):
-            state["fetched"] = True
-            return True
-
-        def _branches(_dir, include_remote=False):
-            names = [{"name": "main"}]
-            if include_remote:
-                names.append(
-                    {"name": "origin/feat/pushed"} if state["fetched"]
-                    else {"name": "origin/main"}
-                )
-            return names
-
-        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
-                  "path": "/foreign/missing"}
-        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
-        git_mock = MagicMock()
-        git_mock.fetch.side_effect = _fetch
-        git_mock.list_branches.side_effect = _branches
-        with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, local),
-        ), patch("app.core.git_service.git_service", git_mock):
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["adopted"] is True
-        assert data["warning"] is None  # no FALSE unpushed warning
-        git_mock.fetch.assert_called_once()  # freshened origin refs at adopt time
+        assert data["instance_id"] == settings.effective_instance_id
+        # No cross-install project rebind under the resolver-only path.
+        mock_database.set_session_project.assert_not_called()
+        mock_database.adopt_session.assert_called_once_with(
+            "test-session-id", settings.effective_instance_id
+        )
 
     def test_adopt_preflight_error_fails_open(self, client, mock_database, sample_session):
-        """A preflight bug must never make an adoptable session un-adoptable."""
+        """A preflight bug must never make an adoptable session un-adoptable: a
+        resolver error (non-409) fails open and the adopt still proceeds."""
         from app.core.config import settings
 
         sample_session["instance_id"] = "other-install-xyz"
@@ -2179,127 +2113,14 @@ class TestAdoptSession:
         }
 
         with patch(
-            "app.core.project_links.resolve_runnable_local_project",
+            "app.core.project_resolver.has_local_base_checkout",
             side_effect=RuntimeError("preflight boom"),
         ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["adopted"] is True
-        assert data["warning"] is None
+        assert response.json()["adopted"] is True
         mock_database.adopt_session.assert_called_once()
-
-    def test_adopt_persists_rebind_onto_sibling(self, client, mock_database, sample_session):
-        """Preflight resolves onto a DIFFERENT local clone (a sibling) → the
-        rebind is persisted at adopt time so search/commands/fork immediately
-        see the local project id, closing the adopt→first-send window."""
-        from app.core.config import settings
-
-        sample_session["instance_id"] = "other-install-xyz"
-        sample_session["project_id"] = "proj-1"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
-        mock_database.adopt_session.return_value = {
-            **sample_session, "instance_id": settings.effective_instance_id
-        }
-
-        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
-                  "path": "/foreign/missing"}
-        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
-        with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, local),
-        ):
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-
-        assert response.status_code == 200
-        assert response.json()["local_project_id"] == "proj-local"
-        mock_database.set_session_project.assert_called_once_with(
-            "test-session-id", "proj-local"
-        )
-
-    def test_adopt_no_rebind_persist_when_project_already_local(
-        self, client, mock_database, sample_session
-    ):
-        """Preflight resolves onto the SAME project id (already local) → no
-        set_session_project write; adoption is only an ownership flip."""
-        from app.core.config import settings
-
-        sample_session["instance_id"] = "other-install-xyz"
-        sample_session["project_id"] = "proj-1"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
-        mock_database.adopt_session.return_value = {
-            **sample_session, "instance_id": settings.effective_instance_id
-        }
-
-        stored = {"id": "proj-1", "name": "MyRepo",
-                  "instance_id": settings.effective_instance_id, "path": "/local/clone"}
-        local = {"id": "proj-1", "name": "MyRepo", "path": "/local/clone"}
-        with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, local),
-        ):
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-
-        assert response.status_code == 200
-        assert response.json()["adopted"] is True
-        mock_database.set_session_project.assert_not_called()
-
-    def test_adopt_survives_rebind_persist_failure(self, client, mock_database, sample_session):
-        """A failure persisting the rebind must not undo an already-successful
-        adopt (the send-path lazy rebind still heals it later)."""
-        from app.core.config import settings
-
-        sample_session["instance_id"] = "other-install-xyz"
-        sample_session["project_id"] = "proj-1"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
-        mock_database.adopt_session.return_value = {
-            **sample_session, "instance_id": settings.effective_instance_id
-        }
-        mock_database.set_session_project.side_effect = RuntimeError("db down")
-
-        stored = {"id": "proj-1", "name": "MyRepo", "instance_id": "other-install-xyz",
-                  "path": "/foreign/missing"}
-        local = {"id": "proj-local", "name": "MyRepo", "path": "/local/clone"}
-        with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, local),
-        ):
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-
-        assert response.status_code == 200
-        assert response.json()["adopted"] is True
-        assert response.json()["local_project_id"] == "proj-local"
-
-    def test_adopt_blocks_with_self_device_message_when_own_path_gone(
-        self, client, mock_database, sample_session
-    ):
-        """When the project row belongs to THIS install but its folder is gone,
-        the 409 must NOT tell the user to clone onto 'another device' — it uses a
-        distinct 'no longer exists on this device' message."""
-        from app.core.config import settings
-
-        sample_session["instance_id"] = "other-install-xyz"
-        sample_session["project_id"] = "proj-1"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
-
-        stored = {"id": "proj-1", "name": "MyRepo",
-                  "instance_id": settings.effective_instance_id, "path": "/gone/local/path"}
-        with patch(
-            "app.core.project_links.resolve_runnable_local_project",
-            return_value=(stored, None),
-        ):
-            response = client.post("/api/v1/sessions/test-session-id/adopt")
-
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert "no longer exists on this device" in detail
-        assert "isn't available on this device" not in detail
-        mock_database.adopt_session.assert_not_called()
 
 
 # =============================================================================
@@ -2310,23 +2131,28 @@ class TestCreateWorktreeSession:
     """Test POST /api/v1/sessions/with-worktree endpoint."""
 
     def test_create_worktree_session_success(self, client, mock_database, sample_project):
-        """Should create session with worktree."""
+        """The endpoint delegates to the v2 branch-intake helper (PR-B removed the
+        legacy worktree fork); the helper's response is returned verbatim with a
+        NULL worktree_id. The helper's internals are covered by
+        tests/api/test_v2_branch_intake.py."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
         mock_database.get_project.return_value = sample_project
 
-        mock_worktree = {
-            "id": "wt-123",
-            "branch_name": "feature/test",
-            "base_branch": "main",
-            "worktree_path": "/workspace/test-project-wt"
-        }
-        mock_session = {
-            "id": "session-123",
-            "title": "Worktree Session"
-        }
-
-        with patch("app.core.worktree_manager.worktree_manager") as mock_wt_manager:
-            mock_wt_manager.create_worktree_session.return_value = (mock_worktree, mock_session)
-
+        v2_response = WorktreeSessionResponse(
+            session_id="session-123",
+            worktree_id=None,
+            branch_name="feature/test",
+            base_branch="main",
+            worktree_path="/workspace/checkouts/test-project/feature-test",
+            status="active",
+            query_started=False,
+        )
+        with patch(
+            "app.api.sessions_worktree._create_v2_branch_session",
+            new_callable=AsyncMock,
+            return_value=v2_response,
+        ) as v2_helper:
             response = client.post(
                 "/api/v1/sessions/with-worktree",
                 json={
@@ -2336,10 +2162,11 @@ class TestCreateWorktreeSession:
                 }
             )
 
+        v2_helper.assert_awaited_once()
         assert response.status_code == 200
         data = response.json()
         assert data["session_id"] == "session-123"
-        assert data["worktree_id"] == "wt-123"
+        assert data["worktree_id"] is None
         assert data["branch_name"] == "feature/test"
         assert data["status"] == "active"
 
@@ -2376,26 +2203,6 @@ class TestCreateWorktreeSession:
 
         assert response.status_code == 403
         assert "Access denied" in response.json()["detail"]
-
-    def test_create_worktree_session_worktree_error(self, client, mock_database, sample_project):
-        """Should handle worktree creation errors."""
-        mock_database.get_project.return_value = sample_project
-
-        from app.core.worktree_manager import WorktreeError
-
-        with patch("app.core.worktree_manager.worktree_manager") as mock_wt_manager:
-            mock_wt_manager.create_worktree_session.side_effect = WorktreeError("Branch already exists")
-
-            response = client.post(
-                "/api/v1/sessions/with-worktree",
-                json={
-                    "project_id": "test-project",
-                    "branch_name": "existing-branch"
-                }
-            )
-
-        assert response.status_code == 400
-        assert "Branch already exists" in response.json()["detail"]
 
 
 # =============================================================================

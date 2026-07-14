@@ -648,6 +648,40 @@ def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow
     return get_session(session_id)
 
 
+def set_session_branch(
+    session_id: str, branch: Optional[str], project_v2_id: Optional[str] = None
+) -> Optional[SessionRow]:
+    """Bind a session to a logical ``branch`` (and optionally its origin-keyed
+    ``project_v2_id``) — the v2 branch-intake path.
+
+    Replaces the legacy ``worktrees`` row + md5-hash dir for a NEW branch session:
+    the session records only its logical ``sessions.branch`` and ``project_v2_id``;
+    the deterministic per-runner checkout is materialized lazily by the resolver
+    at spawn (``project_resolver.resolve_cwd`` → ``checkout_manager.ensure_checkout``).
+    ``worktree_id``/``worktree_branch``/``worktree_path`` are left NULL. A targeted
+    column write (like :func:`set_session_project`), not a stats update. Returns the
+    updated row, or ``None`` when no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        if project_v2_id is not None:
+            cursor.execute(
+                f"UPDATE sessions SET branch = {_ph}, project_v2_id = {_ph}, "
+                f"updated_at = {_ph} WHERE id = {_ph}",
+                (branch, project_v2_id, now, session_id),
+            )
+        else:
+            cursor.execute(
+                f"UPDATE sessions SET branch = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
+                (branch, now, session_id),
+            )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 

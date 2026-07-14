@@ -1889,16 +1889,26 @@ class TestCreateWorktree:
         self, app, mock_database, mock_git_service, mock_worktree_manager,
         mock_settings, sample_project, sample_worktree
     ):
-        """Should create worktree with associated session."""
+        """Profile-bound create routes through v2 branch-intake (PR-B R5.4a): NO
+        legacy worktree row — the response carries the new session and a NULL
+        worktree; ``create_worktree_session`` is never called."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
         session = {
             "id": "ses-abc123",
             "title": "Branch: feature/test",
             "status": "active"
         }
         mock_database.get_project.return_value = sample_project
+        mock_database.get_session.return_value = session
         mock_git_service.is_git_repo.return_value = True
-        mock_worktree_manager.create_worktree_session.return_value = (sample_worktree, session)
-        mock_worktree_manager.get_worktree_details.return_value = sample_worktree
+
+        v2_resp = WorktreeSessionResponse(
+            session_id="ses-abc123", worktree_id=None, branch_name="feature/test",
+            base_branch="feature/test", worktree_path="/ws/checkouts/p/feature-test",
+            status="active", query_started=False,
+        )
+        v2_helper = AsyncMock(return_value=v2_resp)
 
         with (patch("app.api.git.git_service", mock_git_service),
              patch("app.api.git_worktrees.git_service", mock_git_service),
@@ -1909,7 +1919,8 @@ class TestCreateWorktree:
                  patch("app.api.git_helpers.database", mock_database),
                  patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
-                        with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        with (patch("app.api.auth.get_api_user_from_request", return_value=None),
+                              patch("app.api.sessions_worktree._create_v2_branch_session", v2_helper)):
                             client = TestClient(app)
                             response = client.post(
                                 "/api/v1/projects/test-project-id/git/worktrees",
@@ -1919,6 +1930,58 @@ class TestCreateWorktree:
         assert response.status_code == 200
         data = response.json()
         assert data["session"]["id"] == "ses-abc123"
+        assert data["worktree"] is None
+        v2_helper.assert_awaited_once()
+        mock_worktree_manager.create_worktree_session.assert_not_called()
+
+    def test_create_worktree_profile_maps_request_to_v2(
+        self, app, mock_database, mock_git_service, mock_worktree_manager,
+        mock_settings, sample_project
+    ):
+        """The profile-bound create maps its WorktreeCreate body onto a
+        CreateWorktreeSessionRequest (branch/base/create_new/profile) for the v2
+        helper."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
+        mock_database.get_project.return_value = sample_project
+        mock_database.get_session.return_value = {"id": "ses-xyz", "status": "active"}
+        mock_git_service.is_git_repo.return_value = True
+
+        v2_resp = WorktreeSessionResponse(
+            session_id="ses-xyz", worktree_id=None, branch_name="feature/test",
+            base_branch="develop", worktree_path="/ws/checkouts/p/feature-test",
+            status="active", query_started=False,
+        )
+        v2_helper = AsyncMock(return_value=v2_resp)
+
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
+                    with patch("app.api.git.settings", mock_settings):
+                        with (patch("app.api.auth.get_api_user_from_request", return_value=None),
+                              patch("app.api.sessions_worktree._create_v2_branch_session", v2_helper)):
+                            client = TestClient(app)
+                            response = client.post(
+                                "/api/v1/projects/test-project-id/git/worktrees",
+                                json={
+                                    "branch_name": "feature/test",
+                                    "profile_id": "profile-123",
+                                    "create_new_branch": True,
+                                    "base_branch": "develop",
+                                },
+                            )
+
+        assert response.status_code == 200
+        req = v2_helper.call_args.args[1]
+        assert req.branch_name == "feature/test"
+        assert req.profile_id == "profile-123"
+        assert req.create_new_branch is True
+        assert req.base_branch == "develop"
 
     def test_create_worktree_invalid_branch_name(
         self, app, mock_database, mock_git_service, mock_settings, sample_project
@@ -1948,11 +2011,17 @@ class TestCreateWorktree:
         self, app, mock_database, mock_git_service, mock_worktree_manager,
         mock_settings, sample_project
     ):
-        """Should return 400 when worktree with session creation fails."""
+        """v2 branch-intake refusing (project not materializable here) surfaces its
+        409 honestly — no silent legacy fallback."""
+        from fastapi import HTTPException
+
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
-        # Return None for worktree to simulate failure
-        mock_worktree_manager.create_worktree_session.return_value = (None, None)
+
+        v2_helper = AsyncMock(side_effect=HTTPException(
+            status_code=409,
+            detail="This project isn't checked out on this device yet.",
+        ))
 
         with (patch("app.api.git.git_service", mock_git_service),
              patch("app.api.git_worktrees.git_service", mock_git_service),
@@ -1963,15 +2032,17 @@ class TestCreateWorktree:
                  patch("app.api.git_helpers.database", mock_database),
                  patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
-                        with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        with (patch("app.api.auth.get_api_user_from_request", return_value=None),
+                              patch("app.api.sessions_worktree._create_v2_branch_session", v2_helper)):
                             client = TestClient(app)
                             response = client.post(
                                 "/api/v1/projects/test-project-id/git/worktrees",
                                 json={"branch_name": "feature/test", "profile_id": "profile-123"}
                             )
 
-        assert response.status_code == 400
-        assert "Failed to create worktree" in response.json()["detail"]
+        assert response.status_code == 409
+        assert "checked out on this device" in response.json()["detail"]
+        mock_worktree_manager.create_worktree_session.assert_not_called()
 
     def test_create_worktree_failure(
         self, app, mock_database, mock_git_service, mock_worktree_manager,

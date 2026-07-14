@@ -64,12 +64,11 @@ def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
 #
 # A rebind that must recover a branch surviving only on origin needs fresh
 # remote-tracking refs, which means a ``git fetch`` — a slow, network-bound
-# operation (historically up to ~60s). That fetch used to run synchronously
-# inside ``resolve_rebound_branch_plan`` on the SEND hot path, adding latency to
-# the first message of every cross-device resume. It is now primed at adopt time
-# (``_adopt_preflight_sync`` in app/api/sessions.py, off the hot path) and cached
-# here for a short window, so the first send reuses those refs instead of
-# blocking on another fetch. Keyed by the resolved local-clone directory.
+# operation (historically up to ~60s). ``resolve_rebound_branch_plan`` (called by
+# ``recreate_worktree``) fetches once and caches the result here for a short
+# window, so a burst of rebind attempts against the same clone reuses those refs
+# instead of blocking on another fetch. Keyed by the resolved local-clone
+# directory.
 #
 # Backed by the shared ``git_cache`` TTL store (the same per-key cache
 # git_service / git_branch_ops / git_diff_ops use, instrumented by

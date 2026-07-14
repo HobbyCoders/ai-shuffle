@@ -35,8 +35,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.core.git_service import git_service
-from app.core.worktree_manager import worktree_manager
+from app.core.worktree_manager import (
+    WorktreeError,
+    resolve_rebound_branch_plan,
+    worktree_manager,
+)
 from app.db import checkouts as checkouts_db
+from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -92,19 +97,43 @@ def _dir_is_worktree(path: str) -> bool:
     return p.is_dir() and (p / ".git").exists()
 
 
-def _branch_plan(base_dir: str, branch: str) -> Tuple[bool, Optional[str]]:
-    """Decide new-branch vs existing-branch for ``git worktree add``, matching
-    ``worktree_manager.create_worktree`` semantics: if the branch already exists
-    locally, check it out (``new_branch=False``); otherwise create it from the base
-    checkout's current HEAD (``new_branch=True``, no explicit base)."""
+def _branch_plan(
+    base_dir: str,
+    branch: str,
+    base_branch: Optional[str] = None,
+    create_new_branch: bool = False,
+) -> Optional[Tuple[bool, Optional[str]]]:
+    """Decide new-branch vs existing-branch for ``git worktree add``.
+
+    * ``create_new_branch=True`` — the caller is intentionally minting a fresh
+      branch (new-session compose): create it from ``base_branch`` (its own tip;
+      ``add_worktree`` prefers ``origin/{base}`` internally). No fetch, no
+      recovery — the branch is new by construction.
+    * otherwise reuse ``worktree_manager.resolve_rebound_branch_plan`` so lazy
+      materialization stays in lockstep with the cross-device rebind path:
+        - branch exists locally → check it out → ``(False, None)``
+        - else present on origin (after a fetch) → create from the pushed tip →
+          ``(True, branch)`` — ``add_worktree`` prefers ``origin/{branch}``
+        - else the branch is unrecoverable on this runner → return ``None`` so
+          the caller honestly reports not-materializable, rather than silently
+          fabricating an empty branch off the base HEAD (the pre-fix bug).
+    """
+    if create_new_branch:
+        return True, base_branch
     try:
-        local = git_service.list_branches(base_dir, include_remote=False)
-        local_names = [b["name"] for b in local if not b.get("is_remote")]
-        if branch in local_names:
-            return False, None
+        return resolve_rebound_branch_plan(git_service, base_dir, branch)
+    except WorktreeError as e:
+        logger.warning(
+            "checkout_manager: branch %r not materializable on this runner: %s",
+            branch,
+            e,
+        )
+        return None
     except Exception as e:  # pragma: no cover - defensive
-        logger.warning("checkout_manager: list_branches failed for %s: %s", base_dir, e)
-    return True, None
+        logger.warning(
+            "checkout_manager: branch-plan resolution failed for %s: %s", base_dir, e
+        )
+        return None
 
 
 def _ensure_base_checkout(project_id: str, runner_id: str) -> Optional[str]:
@@ -129,11 +158,89 @@ def _ensure_base_checkout(project_id: str, runner_id: str) -> Optional[str]:
     return path
 
 
+def _adopt_legacy_worktree(
+    project_v2_row: Dict[str, Any],
+    project_id: str,
+    runner_id: str,
+    branch: str,
+) -> Optional[str]:
+    """Lazily adopt an EXISTING legacy ``worktrees`` dir for ``branch`` — the lazy
+    counterpart of the v60 collapse migration Step E, symmetric with
+    ``project_resolver._effective_branch`` (the lazy Step F).
+
+    The one-time v60 Step E folded every legacy ``worktrees`` row into a branch
+    ``checkouts`` row. Legacy worktrees minted AFTER that one-time seed were never
+    seeded, so they carry no ``checkouts`` row and nothing at the deterministic
+    path. Two live sources still produce them post-collapse:
+
+    * an un-upgraded install sharing the DB, still writing ``worktrees`` rows; and
+    * the not-yet-cut-over ExecutionModeBar/WS ``worktree_id`` intake (legacy until
+      the Phase 4 worktree-UI redesign), which materializes into the old md5-hash
+      worktree dir and sets ``sessions.worktree_branch``.
+
+    Such a branch is ALREADY checked out on disk in its legacy dir. Falling through
+    to deterministic materialization would run ``git worktree add`` at a fresh path
+    and fail with "branch already checked out at <legacy md5 path>" (and, absent
+    that guard, double-materialize a branch already present). So — before
+    ``_branch_plan``/materialization — resolve that existing dir and adopt it.
+
+    Mirrors Step E's join (``worktrees`` -> ``git_repositories`` -> ``projects``)
+    and is status-blind like Step E (the dir is stat'd at use time, the real
+    check). The legacy project's origin is derived exactly as
+    ``project_resolver.origin_for_legacy_project`` (``link_group_id`` else
+    ``'local:' + id``) and matched against this project_v2's ``origin``. For the
+    first candidate whose ``worktree_path`` exists on this runner's disk AND is a
+    valid worktree (disk presence = this-runner locality, the same proxy the
+    module already uses), upsert the branch ``checkouts`` row and return the path.
+    No candidate → ``None`` → the caller falls through to ordinary deterministic
+    materialization unchanged.
+    """
+    origin = project_v2_row.get("origin")
+    if not origin:
+        return None
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT w.worktree_path AS worktree_path, "
+                "p.id AS legacy_id, p.link_group_id AS link_group_id "
+                "FROM worktrees w "
+                "JOIN git_repositories gr ON gr.id = w.repository_id "
+                "JOIN projects p ON p.id = gr.project_id "
+                "WHERE w.branch_name = %s AND w.worktree_path IS NOT NULL",
+                (branch,),
+            )
+            candidates = cursor.fetchall()
+    except Exception as e:  # pragma: no cover - defensive; adopt is best-effort
+        logger.warning(
+            "checkout_manager: legacy-worktree lookup failed for branch %r: %s",
+            branch,
+            e,
+        )
+        return None
+
+    for cand in candidates:
+        # origin match, exactly like project_resolver.origin_for_legacy_project.
+        legacy_origin = cand["link_group_id"] or ("local:" + str(cand["legacy_id"]))
+        if legacy_origin != origin:
+            continue
+        path = cand["worktree_path"]
+        if path and os.path.isdir(path) and _dir_is_worktree(path):
+            checkouts_db.upsert_checkout(
+                project_id, runner_id, path, branch=branch, status="active"
+            )
+            return path
+    return None
+
+
 def _ensure_branch_checkout(
     project_v2_row: Dict[str, Any],
     project_id: str,
     runner_id: str,
     branch: str,
+    *,
+    base_branch: Optional[str] = None,
+    create_new_branch: bool = False,
 ) -> Optional[str]:
     """Resolve (materializing if needed) the (project, runner, branch) checkout."""
     # A branch checkout requires a materialized base checkout to `git worktree add`
@@ -178,7 +285,22 @@ def _ensure_branch_checkout(
         )
         return None
 
-    new_branch, base_branch = _branch_plan(base_path, branch)
+    # Lazy Step-E mirror: a branch already checked out in a post-collapse legacy
+    # worktree dir (un-upgraded install or the legacy WS worktree_id intake) must
+    # resolve to THAT dir — materializing at the deterministic path would fail on
+    # "branch already checked out" and double-materialize.
+    legacy_path = _adopt_legacy_worktree(project_v2_row, project_id, runner_id, branch)
+    if legacy_path is not None:
+        return legacy_path
+
+    plan = _branch_plan(
+        base_path, branch, base_branch=base_branch, create_new_branch=create_new_branch
+    )
+    if plan is None:
+        # Branch not local, not on origin, and not an intentional new branch —
+        # honestly not materializable here (never fabricate an empty branch).
+        return None
+    new_branch, plan_base = plan
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:  # pragma: no cover - defensive
@@ -190,7 +312,7 @@ def _ensure_branch_checkout(
         path=dest_str,
         branch=branch,
         new_branch=new_branch,
-        base_branch=base_branch,
+        base_branch=plan_base,
     )
     if not success:
         logger.warning(
@@ -211,6 +333,9 @@ def ensure_checkout(
     project_v2_row: Optional[Dict[str, Any]],
     branch: Optional[str] = None,
     runner_id: Optional[str] = None,
+    *,
+    base_branch: Optional[str] = None,
+    create_new_branch: bool = False,
 ) -> Optional[str]:
     """Lazily materialize (or resolve) a checkout for a project_v2 on this runner.
 
@@ -218,10 +343,18 @@ def ensure_checkout(
         project_v2_row: a ``projects_v2`` row (dict with at least ``id``/``name``).
         branch: the logical branch; ``None`` or ``''`` = the base checkout.
         runner_id: defaults to ``settings.effective_instance_id``.
+        base_branch: for a branch that must be created, the branch to fork from
+            (``add_worktree`` prefers ``origin/{base}``). Ignored for the base
+            checkout and for a branch that already exists locally / on origin.
+        create_new_branch: intentionally mint ``branch`` as a fresh branch from
+            ``base_branch`` (new-session compose). When ``False`` (default) an
+            unknown branch is recovered from origin or, failing that, reported as
+            not-materializable rather than fabricated.
 
     Returns the absolute checkout path, or ``None`` when it is not materializable
-    on this device (no base checkout exists here — Phase 3 never clones). Idempotent
-    and safe to call on every send.
+    on this device (no base checkout here — Phase 3 never clones — or a branch that
+    exists nowhere and was not requested as new). Idempotent and safe to call on
+    every send.
     """
     if not project_v2_row:
         return None
@@ -234,4 +367,11 @@ def ensure_checkout(
     branch = (branch or "").strip()
     if not branch:
         return _ensure_base_checkout(project_id, runner_id)
-    return _ensure_branch_checkout(project_v2_row, project_id, runner_id, branch)
+    return _ensure_branch_checkout(
+        project_v2_row,
+        project_id,
+        runner_id,
+        branch,
+        base_branch=base_branch,
+        create_new_branch=create_new_branch,
+    )

@@ -341,6 +341,12 @@ class Session(SessionBase):
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
     worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
+    # V2 branch-intake (Phase 3): a NEW branch session records only its logical
+    # branch here (no legacy worktree row); the deterministic per-runner checkout
+    # is materialized lazily at spawn. Legacy worktree sessions leave this NULL and
+    # keep using worktree_branch. The UI badge falls back to this when
+    # worktree_branch is absent.
+    branch: Optional[str] = None
     # Automation provenance — set when an automation run created this session.
     # Automation sessions run headless (no live watch surface), so the sessions
     # list badges them to differentiate from interactive chats.
@@ -362,8 +368,8 @@ class Session(SessionBase):
     link_group_id: Optional[str] = None
     # V2 projects (Phase 3): the origin-keyed project this session belongs to
     # (install-independent identity) and its origin token. Populated by the API
-    # enrichment layer when ``settings.v2_projects`` is on. ``origin`` is 1:1
-    # with ``link_group_id`` for grouped projects, so the board folds identically
+    # enrichment layer (unconditional since PR-B). ``origin`` is 1:1 with
+    # ``link_group_id`` for grouped projects, so the board folds identically
     # whether it groups by ``origin`` or ``link_group_id`` (no regroup flash).
     project_v2_id: Optional[str] = None
     origin: Optional[str] = None

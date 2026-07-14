@@ -566,29 +566,26 @@ class AutomationManager:
     ) -> Optional[str]:
         """V2 (origin-keyed) project resolution for an automation run.
 
-        When ``settings.v2_projects`` is on AND the automation's legacy
-        ``project_id`` maps to a v2 (origin-keyed) project, the origin/checkout
-        resolver — not the legacy link-group heuristic — owns where the run
-        materializes. The per-runner ``checkouts`` row must already exist on THIS
-        install; a v2 project whose checkout lives only on another runner is the
-        SAME "project not runnable here" failure as a legacy missing clone
-        (``resolve_local_checkout`` is a pure lookup — it never auto-materializes a
-        foreign project, mirroring adopt's 409). ``automations.project_id`` is left
-        intact (hazard 7): the resolver derives project_v2 from it, and the legacy
-        id keeps flowing downstream so an un-upgraded install can still read the row.
+        When the automation's legacy ``project_id`` maps to a v2 (origin-keyed)
+        project, the origin/checkout resolver — not the legacy link-group
+        heuristic — owns where the run materializes. The per-runner ``checkouts``
+        row must already exist on THIS install; a v2 project whose checkout lives
+        only on another runner is the SAME "project not runnable here" failure as a
+        legacy missing clone (``resolve_local_checkout`` is a pure lookup — it never
+        auto-materializes a foreign project, mirroring adopt's 409).
+        ``automations.project_id`` is left intact (hazard 7): the resolver derives
+        project_v2 from it, and the legacy id keeps flowing downstream so an
+        un-upgraded install can still read the row.
 
         Returns the ``project_v2`` id when the v2 path owns this run (checkout
-        present here) so the caller skips the legacy link-group resolution AND
-        binds the minted session to it; ``None`` when the flag is off or no v2
-        project maps to this legacy id, so the caller runs the unchanged legacy
-        path. Raises ``ValueError`` (missing-project message) when a v2 project
-        maps but has no checkout on this runner.
+        present here) so the caller binds the minted session to it; ``None`` when
+        no v2 project maps to this legacy id — which, since resolve_project_v2
+        self-seeds any live legacy row (F4), means there is no legacy project row
+        on this shared DB at all, so the caller raises the missing-project error
+        (the legacy link-group fallback died in PR-B). Raises ``ValueError``
+        (missing-project message) directly when a v2 project maps but has no
+        checkout on this runner.
         """
-        from app.core.config import settings
-
-        if not settings.v2_projects:
-            return None
-
         from app.core import project_resolver
 
         session_row = {"project_id": project_id}
@@ -666,24 +663,19 @@ class AutomationManager:
                 project_id = automation.get("project_id")
                 project_v2_id = None
                 if project_id:
+                    # V2 (origin-keyed) resolution is the ONLY path. resolve_project_v2
+                    # self-seeds a fresh legacy project (F4), so "no v2 project maps to
+                    # this legacy id" means there is no live legacy row on this shared DB
+                    # at all → the project is genuinely missing here. When a v2 project
+                    # DOES map but its checkout lives only on another runner,
+                    # _resolve_v2_project_here raises the missing-here ValueError itself.
+                    # Legacy project_id is left intact (hazard 7): the resolver derives
+                    # project_v2 from it and the legacy id keeps flowing downstream.
                     project_v2_id = self._resolve_v2_project_here(
                         automation_id, project_id
                     )
-                if project_id and not project_v2_id:
-                    # Flag OFF, or no v2 (origin-keyed) project maps to this legacy
-                    # id → unchanged legacy link-group resolution (this install's
-                    # clone of the same repo).
-                    from app.core.automation_service import resolve_local_project
-
-                    local_project = resolve_local_project(project_id)
-                    if local_project is None:
+                    if not project_v2_id:
                         raise ValueError(self._missing_project_message(project_id))
-                    if local_project["id"] != project_id:
-                        logger.info(
-                            f"Automation {automation_id}: project {project_id} belongs to another "
-                            f"install; using local clone {local_project['id']} ({local_project.get('path')})"
-                        )
-                        project_id = local_project["id"]
 
                 outcome = await self._run_prompt_as_session(
                     automation, run_id, rendered_prompt, project_id,

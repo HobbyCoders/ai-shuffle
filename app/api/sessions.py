@@ -144,86 +144,6 @@ def _adopt_device_name(instance_id: Optional[str]) -> Optional[str]:
     return (install or {}).get("device_name")
 
 
-def _adopt_preflight_sync(session: dict, project_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Cross-device rebind preflight for adopt (runs in a worker thread).
-
-    Returns ``(warning, local_project_id)``. Raises ``HTTPException`` 409 — the
-    ONE deliberate blocker — when the session's repository has no clone on this
-    device. All other trouble is left to the caller's fail-open wrapper.
-    """
-    from app.core.project_links import resolve_runnable_local_project
-    from app.core.git_service import git_service
-    from app.core.config import settings
-
-    stored, local = resolve_runnable_local_project(project_id)
-    if local is None:
-        name = (stored or {}).get("name") or "unknown"
-        path = get_project_working_dir(stored) if stored else "another device"
-        stored_instance = (stored or {}).get("instance_id")
-        if stored_instance and stored_instance == settings.effective_instance_id:
-            # The project row belongs to THIS install but its folder is gone —
-            # naming "another device" would be misleading and unactionable.
-            detail = (
-                f"This session's project '{name}' points at {path}, which no "
-                f"longer exists on this device. Restore the project folder or "
-                f"re-add the project, then try again."
-            )
-        else:
-            device_name = _adopt_device_name(stored_instance)
-            detail = (
-                f"This session's project '{name}' isn't available on this device — "
-                f"its files live at {path} on {device_name or 'another device'}. "
-                f"Clone the repository on this device and add it as a project, then "
-                f"try again."
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=detail,
-        )
-
-    warning: Optional[str] = None
-    # Best-effort push check: only meaningful when we resolved onto a DIFFERENT
-    # local clone (a sibling) for a worktree-flagged session.
-    try:
-        resolved_via_sibling = local["id"] != project_id
-        is_worktree_session = bool(session.get("worktree_branch") or session.get("worktree_id"))
-        branch = session.get("worktree_branch")
-        if resolved_via_sibling and is_worktree_session and branch:
-            local_dir = get_project_working_dir(local)
-            # Freshen origin refs before deciding "unpushed". Without a fetch, a
-            # branch that WAS pushed from the other device but hasn't been fetched
-            # into this clone yet looks absent and yields a FALSE "hasn't been
-            # pushed" warning (PR #493 follow-up #4). This runs at adopt time (off
-            # the send hot path) and primes the rebind fetch cache so the first
-            # send doesn't fetch again (follow-up #1). A fetch failure here is
-            # non-fatal — fall through to the offline listing rather than block.
-            from app.core.worktree_manager import fetch_repo_cached
-            try:
-                fetch_repo_cached(git_service, local_dir, force=True)
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "Adopt preflight fetch failed for %s; using offline refs",
-                    local_dir, exc_info=True,
-                )
-            # One listing covers both checks: include_remote=True returns local
-            # branches by their bare name AND remote-tracking ones as "origin/<b>",
-            # so local presence is `branch in all_names` and origin presence is
-            # `origin/{branch} in all_names`.
-            all_names = {b["name"] for b in git_service.list_branches(local_dir, include_remote=True)}
-            if branch not in all_names and f"origin/{branch}" not in all_names:
-                device_name = _adopt_device_name((stored or {}).get("instance_id"))
-                warning = (
-                    f"Branch '{branch}' hasn't been pushed to origin — resuming here "
-                    f"will fail until you push it from "
-                    f"{device_name or 'the original device'} "
-                    f"(git push -u origin {branch})."
-                )
-    except Exception:  # noqa: BLE001 — a warning-check bug must never block adopt
-        logger.warning("Adopt preflight branch-check failed for project %s", project_id, exc_info=True)
-
-    return warning, local["id"]
-
-
 @router.post("/{session_id}/adopt", response_model=AdoptSessionResponse)
 async def adopt_session_endpoint(
     request: Request,
@@ -287,42 +207,40 @@ async def adopt_session_endpoint(
             ),
         )
 
-    # Cross-device rebind preflight: refuse (409) when the session's repository
-    # isn't cloned on this device — otherwise the first send would crash on git
-    # against a foreign path. Everything else fails open: a preflight bug must
-    # never make an adoptable session impossible to adopt.
-    warning: Optional[str] = None
-    local_project_id: Optional[str] = None
-    project_id = session.get("project_id")
-    if settings.v2_projects and session.get("project_v2_id"):
-        # V2 projects: identity is origin-keyed and install-independent, so the
-        # session's project_v2 is already correct on every runner. Adopt only
-        # confirms a checkout materializes on THIS install; if none, 409 (mirrors
-        # the legacy preflight's one blocker). sessions.project_id is NEVER
-        # rewritten under v2 — the resolver owns cwd via project_v2 — so
-        # local_project_id stays None and the rebind-persist below is skipped.
+    # Cross-runner adopt preflight — the origin resolver is the single authority.
+    # A session's project_v2 identity is origin-keyed and install-independent, so
+    # it is already correct on every runner; adopt only confirms the project's
+    # BASE checkout is present on THIS install (has_local_base_checkout self-heals
+    # project_v2_id off the legacy project_id first, so pre-cutover sessions work
+    # too). The gate is base-availability, NOT the branch checkout — a branch
+    # session materializes its branch lazily at spawn (checkout_manager), so
+    # gating on the branch row would spuriously 409 a branch session whenever only
+    # the base is present. If the base isn't checked out here, refuse with 409 —
+    # the ONE deliberate blocker — rather than let the first send crash on git
+    # against a path that doesn't exist locally. sessions.project_id is NEVER rewritten: the resolver
+    # owns cwd via project_v2, so there is no cross-install project rebind to
+    # persist. Fails open on any non-409 error — a preflight bug must never make an
+    # adoptable session impossible to adopt. Project-less sessions skip this
+    # entirely (nothing to check out).
+    if session.get("project_v2_id") or session.get("project_id"):
         from app.core import project_resolver
 
-        checkout = await run_sync(
-            project_resolver.resolve_local_checkout, session, me
-        )
-        if checkout is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "This session's project isn't checked out on this device yet. "
-                    "Create a checkout of the repository here (clone it and open the "
-                    "project), then try again."
-                ),
-            )
-    elif project_id:
         try:
-            warning, local_project_id = await run_sync(
-                _adopt_preflight_sync, session, project_id
+            has_base = await run_sync(
+                project_resolver.has_local_base_checkout, session, me
             )
+            if not has_base:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "This session's project isn't checked out on this device "
+                        "yet. Create a checkout of the repository here (clone it and "
+                        "open the project), then try again."
+                    ),
+                )
         except HTTPException:
             raise
-        except Exception:  # noqa: BLE001 — fail open on any non-409 preflight error
+        except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
             logger.warning(
                 "Adopt preflight errored for session %s; proceeding fail-open",
                 session_id,
@@ -336,34 +254,12 @@ async def adopt_session_endpoint(
             detail=f"Session not found: {session_id}",
         )
 
-    # Persist the cross-device rebind onto this install's local clone right after
-    # the adopt write succeeds, so search / commands / fork resolve the LOCAL path
-    # immediately — closing the adopt→first-send window where they would otherwise
-    # still see the foreign project_id (and fork would copy it). Wrapped fail-open:
-    # adoption already succeeded and must not be undone by a persist hiccup; the
-    # send-path lazy rebind still heals sessions adopted before this shipped.
-    if local_project_id and local_project_id != project_id:
-        try:
-            await run_sync(database.set_session_project, session_id, local_project_id)
-            logger.info(
-                "Rebound adopted session %s onto local project %s",
-                session_id, local_project_id,
-            )
-        except Exception:  # noqa: BLE001 — persist failure must not fail the adopt
-            logger.warning(
-                "Failed to persist rebind of session %s to local project %s; "
-                "adoption still succeeded",
-                session_id, local_project_id, exc_info=True,
-            )
-
     logger.info("Adopted session %s from install %s -> %s", session_id, owner, me)
     return AdoptSessionResponse(
         session_id=session_id,
         instance_id=me,
         adopted=True,
         status="adopted",
-        warning=warning,
-        local_project_id=local_project_id,
     )
 
 

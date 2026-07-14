@@ -128,10 +128,14 @@ class CreateWorktreeSessionRequest(BaseModel):
 class WorktreeSessionResponse(BaseModel):
     """Response for worktree session creation"""
     session_id: str
-    worktree_id: str
+    # Legacy worktree row id — NULL on the v2 branch-intake path (a NEW branch
+    # session has no legacy worktree row; it records only sessions.branch and its
+    # deterministic checkout is materialized lazily at spawn).
+    worktree_id: Optional[str] = None
     branch_name: str
     base_branch: str
-    worktree_path: str
+    # The materialized checkout path (v2) or the legacy worktree path.
+    worktree_path: Optional[str] = None
     status: str
     # True when ``prompt`` was provided and the backend has already spawned
     # a ``run_query`` task for the new session. Frontend uses this flag to
@@ -400,20 +404,20 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             project_link_groups[pid] = proj.get("link_group_id")
             project_origins[pid] = origin_for_legacy_project(proj)
 
-    # v2-projects (behind the flag): resolve each session's origin-keyed project
-    # + origin token via ONE batched pass over ``list_projects_v2`` (never a
-    # per-session DB call — the board fetches every session). ``origin`` is 1:1
-    # with ``link_group_id`` for grouped projects, so the board folds identically.
+    # v2-projects: resolve each session's origin-keyed project + origin token via
+    # ONE batched pass over ``list_projects_v2`` (never a per-session DB call — the
+    # board fetches every session). ``origin`` is 1:1 with ``link_group_id`` for
+    # grouped projects, so the board folds identically. Unconditional since PR-B
+    # (the ``v2_projects`` kill switch was removed).
     pv2_by_id: dict[str, dict] = {}
     pv2_origin_to_id: dict[str, str] = {}
-    if settings.v2_projects:
-        try:
-            for row in projects_v2_db.list_projects_v2():
-                pv2_by_id[row["id"]] = row
-                if row.get("origin"):
-                    pv2_origin_to_id[row["origin"]] = row["id"]
-        except Exception:  # noqa: BLE001 — enrichment must never break the listing
-            logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
+    try:
+        for row in projects_v2_db.list_projects_v2():
+            pv2_by_id[row["id"]] = row
+            if row.get("origin"):
+                pv2_origin_to_id[row["origin"]] = row["id"]
+    except Exception:  # noqa: BLE001 — enrichment must never break the listing
+        logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
 
     my_install = installs_map.get(me)
     for session in sessions:
@@ -441,25 +445,24 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         if pid and project_link_groups.get(pid):
             session["link_group_id"] = project_link_groups[pid]
 
-        # v2-projects: emit project_v2_id + origin (flag ON only). Authoritative
-        # source is the session's own ``project_v2_id`` column; fall back to the
-        # legacy project's origin for self-heal-pending rows. Both resolved from
-        # the batched ``pv2_by_id`` / ``pv2_origin_to_id`` maps — no per-session
-        # query.
-        if settings.v2_projects:
-            pv2_id = session.get("project_v2_id")
-            origin = None
-            if pv2_id and pv2_id in pv2_by_id:
-                origin = pv2_by_id[pv2_id].get("origin")
-            else:
-                legacy_origin = project_origins.get(pid) if pid else None
-                if legacy_origin and legacy_origin in pv2_origin_to_id:
-                    pv2_id = pv2_origin_to_id[legacy_origin]
-                    origin = legacy_origin
-            if pv2_id:
-                session["project_v2_id"] = pv2_id
-            if origin:
-                session["origin"] = origin
+        # v2-projects: emit project_v2_id + origin. Authoritative source is the
+        # session's own ``project_v2_id`` column; fall back to the legacy project's
+        # origin for self-heal-pending rows. Both resolved from the batched
+        # ``pv2_by_id`` / ``pv2_origin_to_id`` maps — no per-session query.
+        # Unconditional since PR-B (the ``v2_projects`` kill switch was removed).
+        pv2_id = session.get("project_v2_id")
+        origin = None
+        if pv2_id and pv2_id in pv2_by_id:
+            origin = pv2_by_id[pv2_id].get("origin")
+        else:
+            legacy_origin = project_origins.get(pid) if pid else None
+            if legacy_origin and legacy_origin in pv2_origin_to_id:
+                pv2_id = pv2_origin_to_id[legacy_origin]
+                origin = legacy_origin
+        if pv2_id:
+            session["project_v2_id"] = pv2_id
+        if origin:
+            session["origin"] = origin
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:

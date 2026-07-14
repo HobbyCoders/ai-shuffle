@@ -1,16 +1,17 @@
 """Tests for the V2-projects cutover seam in ``resolve_working_dir``
 (app/core/message_resolver.py).
 
-When ``settings.v2_projects`` is ON and the session is bound to a ``project_v2_id``,
-the origin-keyed ``project_resolver.resolve_existing_cwd`` is the single cwd
-authority. This is an auxiliary READ path (history/JSONL), so it uses the
-PURE-READ ``resolve_existing_cwd`` (never materializes — no git worktree add /
-clone), NOT the spawn-path ``resolve_cwd``:
-  - resolver returns a path  → that path wins (legacy walk never runs).
-  - resolver returns ``None`` → the DEFAULT workspace, NEVER the legacy project
+The origin-keyed ``project_resolver.resolve_existing_cwd`` is the single cwd
+authority for EVERY session (resolver-FIRST, no ``project_v2_id`` gate). This is
+an auxiliary READ path (history/JSONL), so it uses the PURE-READ
+``resolve_existing_cwd`` (never materializes — no git worktree add / clone), NOT
+the spawn-path ``resolve_cwd``:
+  - resolver returns a path  → that path wins (no legacy walk exists).
+  - resolver returns ``None`` → the DEFAULT workspace, NEVER a legacy project
     path (an unmaterialized checkout must surface honestly).
-Sessions without ``project_v2_id``, or with the flag OFF, take the unchanged
-legacy worktree→project→default chain.
+PR-B deleted the legacy worktree→project→default chain entirely, so even a
+session created by an un-upgraded install (only a legacy ``project_id``) goes
+through the resolver, which self-heals its binding.
 """
 
 from unittest.mock import MagicMock
@@ -18,7 +19,6 @@ from unittest.mock import MagicMock
 import pytest
 
 import app.core.message_resolver as mr
-from app.core.config import settings
 from app.core.message_resolver import resolve_working_dir
 
 
@@ -57,8 +57,7 @@ def _session(project_v2_id="pv2-abc", project_id="proj-1", worktree_id=None):
     }
 
 
-def test_flag_on_and_v2_bound_existing_uses_resolver(db, resolver, monkeypatch):
-    monkeypatch.setattr(settings, "v2_projects", True)
+def test_v2_bound_existing_uses_resolver(db, resolver):
     resolver.return_value = "/runner/checkouts/proj/base"
 
     result = resolve_working_dir(_session())
@@ -72,8 +71,7 @@ def test_flag_on_and_v2_bound_existing_uses_resolver(db, resolver, monkeypatch):
     db.get_project.assert_not_called()
 
 
-def test_flag_on_resolver_none_uses_default_not_legacy_project(db, resolver, monkeypatch):
-    monkeypatch.setattr(settings, "v2_projects", True)
+def test_resolver_none_uses_default_not_legacy_project(db, resolver):
     resolver.return_value = None
     # A legacy project row exists, but it must NOT be used — the honest fallback
     # is the default workspace so an unmaterialized checkout surfaces.
@@ -85,25 +83,15 @@ def test_flag_on_resolver_none_uses_default_not_legacy_project(db, resolver, mon
     db.get_project.assert_not_called()
 
 
-def test_flag_off_takes_legacy_chain(db, resolver, monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "v2_projects", False)
-    proj_dir = tmp_path / "proj"
-    proj_dir.mkdir()
-    db.get_project.return_value = {"id": "proj-1", "path": str(proj_dir)}
-
-    result = resolve_working_dir(_session())
-
-    assert result == str(proj_dir)
-    resolver.assert_not_called()
-
-
-def test_no_project_v2_id_takes_legacy_chain(db, resolver, monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "v2_projects", True)
-    proj_dir = tmp_path / "proj"
-    proj_dir.mkdir()
-    db.get_project.return_value = {"id": "proj-1", "path": str(proj_dir)}
+def test_no_project_v2_id_still_uses_resolver(db, resolver):
+    """resolver-FIRST: a session WITHOUT project_v2_id (pre-cutover / un-upgraded
+    install) STILL goes through the resolver — resolve_existing_cwd self-heals its
+    binding off the legacy project_id. There is no legacy worktree/project walk."""
+    resolver.return_value = "/runner/checkouts/legacy/base"
 
     result = resolve_working_dir(_session(project_v2_id=None))
 
-    assert result == str(proj_dir)
-    resolver.assert_not_called()
+    assert result == "/runner/checkouts/legacy/base"
+    resolver.assert_called_once()
+    db.get_worktree.assert_not_called()
+    db.get_project.assert_not_called()

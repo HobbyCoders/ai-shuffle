@@ -143,32 +143,20 @@ def _local_candidate(
     return None
 
 
-def resolve_local_project(project_id: str) -> Optional[Dict[str, Any]]:
-    """Map a project id onto the row runnable on THIS install, if any.
-
-    Returns the project row itself when this install owns it, else this
-    install's clone of the same repo (same ``link_group_id``), else the
-    stored row when its path exists here anyway. None means the project only
-    exists on other installs and a run here would fail on a nonexistent
-    working directory.
-    """
-    project = database.get_project(project_id)
-    if not project:
-        return None
-    return _local_candidate(project, _link_group_siblings(project))
-
-
 def resolve_runnable_local_project(
     project_id: str,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """``(stored_project, local_project_or_None)`` for a project id.
 
-    Like :func:`resolve_local_project` but the returned ``local`` is only
-    non-None when its working directory is an existing directory ON THIS
-    MACHINE. ``resolve_local_project``'s own-row and sibling branches trust the
-    ``instance_id`` match without touching the filesystem, which is right for
-    election but wrong for a rebind that is about to run git against the path —
-    so this variant adds a final ``is_dir()`` guard.
+    Maps a project id onto the row runnable on THIS install (own row, then this
+    install's link-group sibling, then the stored row when its path exists here),
+    but the returned ``local`` is only non-None when its working directory is an
+    existing directory ON THIS MACHINE — the own-row / sibling branches trust the
+    ``instance_id`` match without touching the filesystem (right for election but
+    wrong for a rebind about to run git against the path), so this adds a final
+    ``is_dir()`` guard. Surviving caller: ``worktree_manager.recreate_worktree``
+    (the worktree-recreate endpoint, Phase-4 worktree machinery) — cwd/adopt
+    resolution moved to the origin resolver in PR-B.
 
     ``stored`` is the raw project row (or None if the id is unknown), useful for
     building an actionable "not on this device" message.

@@ -459,26 +459,59 @@ async def create_worktree(
     session = None
 
     if body.profile_id:
-        # Legacy mode: Create worktree and session together
-        try:
-            worktree, session = worktree_manager.create_worktree_session(
-                project_id=project_id,
-                branch_name=body.branch_name,
-                create_new_branch=body.create_new_branch,
-                base_branch=body.base_branch,
-                profile_id=body.profile_id
-            )
-        except WorktreeError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e)
-            )
+        # V2 branch-intake cutover (Phase-3 PR-B): a profile-bound create used to
+        # mint a legacy worktree row + session via ``create_worktree_session``.
+        # That residual session-creating mouth now routes through the SAME v2
+        # branch-intake as ``/sessions/with-worktree`` — the session records only
+        # ``sessions.branch`` + ``project_v2_id`` and materializes a deterministic
+        # ``{workspace}/checkouts/{project}/{branch}`` checkout (no md5-hash
+        # ``worktrees`` row). Returns early: ``worktree`` is NULL (there is no
+        # legacy worktree row) and ``session`` carries the new session row.
+        from app.api.auth import get_api_user_from_request
+        from app.api.sessions_helpers import CreateWorktreeSessionRequest
+        from app.api.sessions_worktree import _create_v2_branch_session
+        from app.db.async_database import run_sync
 
-        if not worktree:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create worktree. Branch may already be in use or doesn't exist."
+        project = await run_sync(database.get_project, project_id)
+        api_user = get_api_user_from_request(request)
+        api_user_id = api_user["id"] if api_user else None
+
+        req = CreateWorktreeSessionRequest(
+            project_id=project_id,
+            branch_name=body.branch_name,
+            base_branch=body.base_branch or "main",
+            profile_id=body.profile_id,
+            create_new_branch=body.create_new_branch,
+        )
+        wt_resp = await _create_v2_branch_session(request, req, project, api_user_id)
+
+        # Copy uncommitted files into the materialized checkout if requested
+        # (the v2 checkout stands in for the old worktree dir here).
+        copy_result = None
+        if body.copy_uncommitted and wt_resp.worktree_path:
+            copy_result = await run_git(
+                _copy_uncommitted_files, working_dir, wt_resp.worktree_path
             )
+        copy_errors = copy_result.get("errors") if copy_result else None
+
+        _invalidate_worktree_status_cache(project_id)
+
+        session_row = await run_sync(database.get_session, wt_resp.session_id)
+        message = f"Created branch session for '{body.branch_name}'"
+        if copy_result:
+            total_copied = (
+                copy_result["modified_copied"] + copy_result["untracked_copied"]
+            )
+            if total_copied > 0:
+                message += f" with {total_copied} uncommitted file(s) copied"
+
+        return WorktreeCreateResponse(
+            success=True,
+            message=message,
+            worktree=None,
+            session=session_row,
+            errors=copy_errors if copy_errors else None,
+        )
     else:
         # New mode: Create standalone worktree (no session)
         try:

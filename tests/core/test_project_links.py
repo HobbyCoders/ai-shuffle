@@ -11,7 +11,6 @@ from app.core.project_links import (
     auto_link_group_id,
     is_link_locked,
     maybe_auto_link_project,
-    resolve_local_project,
     resolve_runnable_local_project,
     LINK_LOCKED_KEY,
 )
@@ -187,35 +186,6 @@ def resolve_env():
         yield db
 
 
-class TestResolveLocalProject:
-    def test_project_not_found(self, resolve_env):
-        resolve_env.get_project.return_value = None
-        assert resolve_local_project("missing") is None
-
-    def test_own_row(self, resolve_env):
-        mine = _proj("proj-A", instance_id=_ME)
-        resolve_env.get_project.return_value = mine
-        assert resolve_local_project("proj-A") == mine
-
-    def test_link_group_sibling(self, resolve_env):
-        foreign = _proj("proj-A", instance_id=_OTHER, link_group_id="git:abc")
-        sibling = _proj("proj-B", instance_id=_ME, link_group_id="git:abc")
-        resolve_env.get_project.return_value = foreign
-        resolve_env.get_projects_in_link_group.return_value = [foreign, sibling]
-        assert resolve_local_project("proj-A") == sibling
-        resolve_env.get_projects_in_link_group.assert_called_once_with("git:abc")
-
-    def test_stored_path_exists_fallback(self, resolve_env):
-        """No row is ours, but the stored path exists here → run it anyway."""
-        foreign = _proj("proj-A", instance_id=_OTHER, path=_EXISTING_DIR)
-        resolve_env.get_project.return_value = foreign
-        assert resolve_local_project("proj-A") == foreign
-
-    def test_foreign_no_sibling_no_path(self, resolve_env):
-        resolve_env.get_project.return_value = _proj("proj-A", instance_id=_OTHER)
-        assert resolve_local_project("proj-A") is None
-
-
 class TestResolveRunnableLocalProject:
     def test_unknown_id_returns_none_none(self, resolve_env):
         resolve_env.get_project.return_value = None
@@ -229,8 +199,8 @@ class TestResolveRunnableLocalProject:
         assert local == mine
 
     def test_own_row_with_missing_dir_is_not_runnable(self, resolve_env):
-        """resolve_local_project trusts the instance-id match; the runnable
-        variant additionally requires the path to exist on disk."""
+        """A matching instance-id alone is not enough: the runnable resolver
+        additionally requires the checkout path to exist on disk."""
         mine = _proj("proj-A", instance_id=_ME, path="/definitely/not/here")
         resolve_env.get_project.return_value = mine
         stored, local = resolve_runnable_local_project("proj-A")

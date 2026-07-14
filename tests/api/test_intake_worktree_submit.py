@@ -119,7 +119,9 @@ def test_intake_and_worktree_callers_use_turn_manager_not_headless():
     assert '"intake"' in intake_src
     assert "launch_headless_query" not in intake_src
 
-    worktree_src = inspect.getsource(worktree_api.create_session_with_worktree)
+    # Since PR-B the /with-worktree endpoint delegates to the v2 branch-intake
+    # helper, which is where the durable ``source=worktree`` turn is submitted.
+    worktree_src = inspect.getsource(worktree_api._create_v2_branch_session)
     assert "turn_manager.submit" in worktree_src
     assert '"worktree"' in worktree_src
     assert "launch_headless_query" not in worktree_src

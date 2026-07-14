@@ -1,14 +1,17 @@
 """Tests for the V2-projects cutover in the adopt preflight
 (POST /api/v1/sessions/{id}/adopt in app/api/sessions.py).
 
-When ``settings.v2_projects`` is ON and the session carries a ``project_v2_id``,
-the legacy ``_adopt_preflight_sync`` (link-group resolution + branch-push
-heuristic that rewrites ``sessions.project_id``) is REPLACED by a single
-``project_resolver.resolve_local_checkout`` gate:
-  - no local checkout on this runner → 409 (mirrors the legacy blocker's shape).
-  - checkout present → adopt proceeds, ``instance_id`` flips, ``project_id`` is
-    NEVER rewritten (``set_session_project`` untouched, ``local_project_id`` None).
-Legacy sessions (no ``project_v2_id``) or flag OFF keep the legacy preflight.
+PR-B deleted the legacy ``_adopt_preflight_sync`` (link-group resolution +
+branch-push heuristic that rewrote ``sessions.project_id``). EVERY session with a
+project now takes a single ``project_resolver.has_local_base_checkout`` gate — no
+``project_v2_id`` special-casing:
+  - no local BASE checkout on this runner → 409 (the one deliberate blocker). The
+    gate is base availability, NOT the branch checkout — a branch session adopts
+    on the base being present (its branch materializes lazily at spawn).
+  - base checkout present → adopt proceeds, ``instance_id`` flips, ``project_id``
+    is NEVER rewritten (``set_session_project`` untouched).
+A pre-cutover session (only a legacy ``project_id``) goes through the SAME gate,
+which self-heals its project_v2 binding off the legacy id.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -80,36 +83,32 @@ def _v2_session():
     }
 
 
-def test_v2_no_local_checkout_conflicts(client, mock_database, monkeypatch):
-    """v2 session + resolver finds no local checkout → 409, no adopt write."""
-    monkeypatch.setattr(settings, "v2_projects", True)
+def test_v2_no_local_checkout_conflicts(client, mock_database):
+    """v2 session + no local BASE checkout → 409, no adopt write."""
     mock_database.get_session.return_value = _v2_session()
     mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
 
     with patch(
-        "app.core.project_resolver.resolve_local_checkout", return_value=None
-    ) as rlc:
+        "app.core.project_resolver.has_local_base_checkout", return_value=False
+    ) as gate:
         response = client.post("/api/v1/sessions/test-session-id/adopt")
 
     assert response.status_code == 409
     assert "checked out on this device" in response.json()["detail"]
-    rlc.assert_called_once()
+    gate.assert_called_once()
     mock_database.adopt_session.assert_not_called()
 
 
-def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_database, monkeypatch):
+def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_database):
     """v2 session + local checkout → 200, instance_id flipped, project_id UNCHANGED."""
-    monkeypatch.setattr(settings, "v2_projects", True)
     session = _v2_session()
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
     adopted_row = {**session, "instance_id": settings.effective_instance_id}
     mock_database.adopt_session.return_value = adopted_row
 
-    checkout = {"id": "ck-1", "project_id": "pv2-abc", "runner_id": settings.effective_instance_id,
-                "path": "/local/checkout", "branch": None}
     with patch(
-        "app.core.project_resolver.resolve_local_checkout", return_value=checkout
+        "app.core.project_resolver.has_local_base_checkout", return_value=True
     ), patch(
         "app.core.project_links.resolve_runnable_local_project"
     ) as legacy_preflight:
@@ -130,29 +129,23 @@ def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_databas
     )
 
 
-def test_flag_off_uses_legacy_preflight(client, mock_database, monkeypatch):
-    """Flag OFF: even a project_v2_id-carrying session takes the legacy preflight
-    (resolve_runnable_local_project), NOT the v2 resolver gate."""
-    monkeypatch.setattr(settings, "v2_projects", False)
-    session = _v2_session()
+def test_legacy_session_also_uses_resolver_gate(client, mock_database):
+    """PR-B: a session WITHOUT project_v2_id (pre-cutover / un-upgraded install)
+    is NOT special-cased — it goes through the SAME has_local_base_checkout gate
+    (which self-heals project_v2 off the legacy project_id). No legacy link-group
+    preflight, no project_id rewrite."""
+    session = {**_v2_session(), "project_v2_id": None}
     mock_database.get_session.return_value = session
     mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
     adopted_row = {**session, "instance_id": settings.effective_instance_id}
     mock_database.adopt_session.return_value = adopted_row
 
-    # Legacy preflight resolves onto THIS install's own project row (id unchanged)
-    # → no sibling rebind, adopt proceeds.
-    stored = {"id": "proj-1", "name": "MyRepo", "path": "/local/clone",
-              "instance_id": settings.effective_instance_id}
     with patch(
-        "app.core.project_links.resolve_runnable_local_project",
-        return_value=(stored, stored),
-    ) as legacy_preflight, patch(
-        "app.core.project_resolver.resolve_local_checkout"
+        "app.core.project_resolver.has_local_base_checkout", return_value=True
     ) as v2_gate:
         response = client.post("/api/v1/sessions/test-session-id/adopt")
 
     assert response.status_code == 200
     assert response.json()["adopted"] is True
-    legacy_preflight.assert_called_once()
-    v2_gate.assert_not_called()
+    v2_gate.assert_called_once()
+    mock_database.set_session_project.assert_not_called()

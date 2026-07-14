@@ -111,7 +111,9 @@ def test_base_missing_dir_returns_none_no_recreation(project, mock_db, tmp_path,
 # ---------------------------------------------------------------------------
 
 def test_branch_lazy_create_deterministic_path(project, base_checkout, workspace_root):
-    path = checkout_manager.ensure_checkout(project, branch="feature-x", runner_id=RUNNER)
+    path = checkout_manager.ensure_checkout(
+        project, branch="feature-x", runner_id=RUNNER, create_new_branch=True
+    )
     assert path is not None
     p = Path(path)
     assert p.is_dir()
@@ -128,8 +130,12 @@ def test_branch_lazy_create_deterministic_path(project, base_checkout, workspace
 
 
 def test_branch_idempotent_same_path_no_duplicate_rows(project, base_checkout, workspace_root):
-    first = checkout_manager.ensure_checkout(project, branch="feat/login", runner_id=RUNNER)
-    second = checkout_manager.ensure_checkout(project, branch="feat/login", runner_id=RUNNER)
+    first = checkout_manager.ensure_checkout(
+        project, branch="feat/login", runner_id=RUNNER, create_new_branch=True
+    )
+    second = checkout_manager.ensure_checkout(
+        project, branch="feat/login", runner_id=RUNNER, create_new_branch=True
+    )
     assert first is not None and first == second
     # base + one branch checkout = exactly two rows; the re-call adds none.
     rows = checkouts_db.list_checkouts(project["id"])
@@ -145,7 +151,9 @@ def test_branch_requires_base_checkout(project, workspace_root):
 
 
 def test_branch_sanitizes_slashes_in_dir_name(project, base_checkout, workspace_root):
-    path = checkout_manager.ensure_checkout(project, branch="feat/deep/name", runner_id=RUNNER)
+    path = checkout_manager.ensure_checkout(
+        project, branch="feat/deep/name", runner_id=RUNNER, create_new_branch=True
+    )
     assert path is not None
     # Slashes are sanitized to dashes in the final path component.
     assert Path(path).name == "feat-deep-name"
@@ -166,7 +174,9 @@ def test_per_runner_divergence_same_branch(project, base_checkout, tmp_path, wor
     """A second install resolves the SAME branch to its OWN path — divergence comes
     from each install's own configured workspace root (home dirs differ per machine),
     with an independent per-runner base checkout + checkouts row."""
-    path_a = checkout_manager.ensure_checkout(project, branch="shared", runner_id=RUNNER)
+    path_a = checkout_manager.ensure_checkout(
+        project, branch="shared", runner_id=RUNNER, create_new_branch=True
+    )
     assert path_a is not None
 
     # Install B: a different workspace root + its own base checkout clone.
@@ -177,7 +187,248 @@ def test_per_runner_divergence_same_branch(project, base_checkout, tmp_path, wor
     repo_b = _make_base_repo(tmp_path / "b")
     checkouts_db.upsert_checkout(project["id"], "runnerB", str(repo_b))
 
-    path_b = checkout_manager.ensure_checkout(project, branch="shared", runner_id="runnerB")
+    path_b = checkout_manager.ensure_checkout(
+        project, branch="shared", runner_id="runnerB", create_new_branch=True
+    )
     assert path_b is not None
     assert path_b != path_a
     assert "workspace_b" in path_b
+
+
+# ---------------------------------------------------------------------------
+# Branch-plan semantics (R5.2): existing-local vs origin-recovery vs
+# not-materializable vs intentional new branch.
+# ---------------------------------------------------------------------------
+
+def _current_branch(repo) -> str:
+    r = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"], cwd=str(repo),
+        check=True, capture_output=True, text=True,
+    )
+    return r.stdout.strip()
+
+
+def _make_repo_with_origin(tmp_root):
+    """A ``base_repo`` clone carrying an ``origin`` remote (a bare repo), plus a
+    ``seed`` clone used to push branches the base_repo has NOT fetched yet."""
+    remote = Path(tmp_root) / "remote.git"
+    _git(tmp_root, "init", "--bare", str(remote))
+
+    seed = Path(tmp_root) / "seed"
+    _git(tmp_root, "clone", str(remote), str(seed))
+    _git(seed, "config", "user.email", "t@t.test")
+    _git(seed, "config", "user.name", "T")
+    (seed / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-m", "init")
+    _git(seed, "push", "origin", "HEAD")
+
+    base = Path(tmp_root) / "base_repo"
+    _git(tmp_root, "clone", str(remote), str(base))
+    _git(base, "config", "user.email", "t@t.test")
+    _git(base, "config", "user.name", "T")
+    return remote, seed, base
+
+
+def test_existing_local_branch_checked_out_without_fetch(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    # A branch already present locally is checked out as-is — no origin recovery,
+    # no fetch (create_new_branch left False).
+    _git(base_checkout, "branch", "existing-local")
+
+    from app.core.git_service import git_service
+    fetches = []
+    orig_fetch = git_service.fetch
+    monkeypatch.setattr(
+        git_service, "fetch",
+        lambda wd, remote="origin": (fetches.append(wd), orig_fetch(wd, remote))[1],
+    )
+
+    path = checkout_manager.ensure_checkout(
+        project, branch="existing-local", runner_id=RUNNER
+    )
+    assert path is not None and (Path(path) / ".git").exists()
+    assert fetches == []
+
+
+def test_branch_recovered_from_origin_fetches(
+    project, tmp_path, workspace_root, monkeypatch
+):
+    # A branch that lives ONLY on origin is recovered: the plan fetches and creates
+    # the checkout from the pushed tip (never a fabricated empty branch).
+    remote, seed, base = _make_repo_with_origin(tmp_path)
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(base))
+
+    _git(seed, "checkout", "-b", "pushed-feature")
+    (seed / "feat.txt").write_text("x\n", encoding="utf-8")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-m", "feat")
+    _git(seed, "push", "origin", "pushed-feature")
+
+    from app.core import checkout_manager as cm
+    from app.core.git_service import git_service
+    fetches = []
+    orig_fetch = git_service.fetch
+    monkeypatch.setattr(
+        git_service, "fetch",
+        lambda wd, remote="origin": (fetches.append(wd), orig_fetch(wd, remote))[1],
+    )
+
+    path = cm.ensure_checkout(project, branch="pushed-feature", runner_id=RUNNER)
+    assert path is not None
+    assert Path(path).is_dir() and (Path(path) / ".git").exists()
+    # Materialized from the PUSHED tip — the origin commit's file is present.
+    assert (Path(path) / "feat.txt").exists()
+    # A fetch was performed during recovery.
+    assert fetches
+
+
+def test_branch_missing_everywhere_returns_none(project, tmp_path, workspace_root):
+    # Not local, not on origin, not an intentional new branch → honest None
+    # (the pre-fix bug silently fabricated an empty branch off the base HEAD).
+    remote, seed, base = _make_repo_with_origin(tmp_path)
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(base))
+    assert checkout_manager.ensure_checkout(
+        project, branch="ghost-branch", runner_id=RUNNER
+    ) is None
+
+
+def test_create_new_branch_honors_base_and_skips_recovery(
+    project, base_checkout, workspace_root, monkeypatch
+):
+    # create_new_branch=True mints the branch from base_branch WITHOUT consulting
+    # the origin-recovery plan at all.
+    from app.core import checkout_manager as cm
+
+    called = {"hit": False}
+
+    def _boom(git, main_dir, branch_name):  # pragma: no cover - must never run
+        called["hit"] = True
+        raise AssertionError("origin recovery must not run for create_new_branch")
+
+    monkeypatch.setattr(cm, "resolve_rebound_branch_plan", _boom)
+
+    default = _current_branch(base_checkout)
+    path = cm.ensure_checkout(
+        project,
+        branch="brand-new",
+        runner_id=RUNNER,
+        base_branch=default,
+        create_new_branch=True,
+    )
+    assert path is not None
+    assert Path(path).is_dir() and (Path(path) / ".git").exists()
+    assert called["hit"] is False
+
+
+# ---------------------------------------------------------------------------
+# Lazy Step-E mirror: adopt an EXISTING post-collapse legacy worktree dir
+# (un-upgraded install / not-yet-cut-over WS worktree_id intake) as the branch
+# checkout, instead of failing on "branch already checked out".
+# ---------------------------------------------------------------------------
+
+def _seed_legacy_project(pid, name, path, instance_id=None, link_group_id=None):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO projects (id, name, path, instance_id, link_group_id) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (pid, name, path, instance_id, link_group_id),
+        )
+
+
+def _seed_git_repository(repo_id, project_id):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO git_repositories (id, project_id) VALUES (%s, %s)",
+            (repo_id, project_id),
+        )
+
+
+def _seed_worktree(wt_id, repository_id, branch_name, worktree_path, status="active"):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO worktrees "
+            "(id, repository_id, branch_name, worktree_path, status) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (wt_id, repository_id, branch_name, worktree_path, status),
+        )
+
+
+def _add_legacy_worktree(base_repo, dest, branch):
+    """A REAL ``git worktree add`` at an md5-style legacy path — the physical dir
+    the old worktree_manager materialized, distinct from the deterministic path."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _git(base_repo, "worktree", "add", str(dest), "-b", branch)
+    return dest
+
+
+def test_adopts_legacy_worktree_dir_as_branch_checkout(
+    project, base_checkout, mock_db, tmp_path, workspace_root
+):
+    # A branch checked out in a post-collapse legacy worktree dir, WITH its
+    # legacy projects/git_repositories/worktrees rows present but NO checkouts
+    # row → ensure_checkout adopts the EXISTING legacy dir (Step-E mirror),
+    # upserts the checkout row at that path, and does NOT create the
+    # deterministic dir (which git would refuse: "branch already checked out").
+    branch = "legacy-feat"
+    legacy_dir = _add_legacy_worktree(
+        base_checkout, tmp_path / "legacy_wt" / f"{branch}-a1b2", branch
+    )
+
+    # Legacy rows: origin = link_group_id must equal the project_v2 origin
+    # ("git:repo"), joined worktrees -> git_repositories -> projects.
+    _seed_legacy_project("lp1", "My Cool Repo", str(base_checkout),
+                         link_group_id="git:repo")
+    _seed_git_repository("gr1", "lp1")
+    _seed_worktree("wt1", "gr1", branch, str(legacy_dir))
+
+    path = checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER)
+
+    assert path == str(legacy_dir)
+    # The checkout row was upserted at the LEGACY path.
+    rows = checkouts_db.list_checkouts(project["id"])
+    branch_rows = [r for r in rows if r.get("branch") == branch]
+    assert len(branch_rows) == 1
+    assert branch_rows[0]["path"] == str(legacy_dir)
+    # The deterministic dir was NEVER created.
+    assert not checkout_manager._branch_checkout_path(project, branch).exists()
+
+
+def test_adopted_legacy_worktree_second_call_uses_row_fast_path(
+    project, base_checkout, mock_db, tmp_path, workspace_root
+):
+    branch = "legacy-feat2"
+    legacy_dir = _add_legacy_worktree(
+        base_checkout, tmp_path / "legacy_wt" / f"{branch}-c3d4", branch
+    )
+    _seed_legacy_project("lp1", "My Cool Repo", str(base_checkout),
+                         link_group_id="git:repo")
+    _seed_git_repository("gr1", "lp1")
+    _seed_worktree("wt1", "gr1", branch, str(legacy_dir))
+
+    first = checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER)
+    second = checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER)
+    assert first == str(legacy_dir)
+    assert second == first
+    # Still exactly one branch checkout row (fast path added none).
+    rows = checkouts_db.list_checkouts(project["id"])
+    branch_rows = [r for r in rows if r.get("branch") == branch]
+    assert len(branch_rows) == 1
+
+
+def test_no_legacy_row_branch_checked_out_elsewhere_returns_none(
+    project, base_checkout, mock_db, tmp_path, workspace_root
+):
+    # The bug's shape WITHOUT the legacy worktrees row: the branch is checked out
+    # in an untracked dir, so git refuses `git worktree add` at the deterministic
+    # path and there is no row to adopt → honest None (unchanged behavior).
+    branch = "orphan-feat"
+    _add_legacy_worktree(base_checkout, tmp_path / "untracked_wt" / branch, branch)
+    # No legacy projects/git_repositories/worktrees rows seeded.
+    assert checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER
+    ) is None

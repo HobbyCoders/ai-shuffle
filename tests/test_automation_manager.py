@@ -955,89 +955,20 @@ class TestScheduleReconcile:
 
 
 class TestExecuteRunProjectResolution:
-    """A run must execute against THIS install's clone of the automation's
-    project (same link group), not the machine-specific row stored at
-    creation time on another install."""
+    """PR-B: the origin/checkout resolver is the ONLY project-resolution path for
+    an automation run — the legacy link-group heuristic (``resolve_local_project``)
+    is gone.
 
-    def _automation(self):
-        return {
-            "id": "auto-xi",
-            "name": "Cross Install",
-            "profile_id": "default",
-            "project_id": "proj-A",
-            "action_steps": [],
-            "run_count": 0,
-            "failure_count": 0,
-            "total_cost_used": 0,
-            "max_turns": 1,
-            "timeout_seconds": 60,
-            "output_config": {"type": "none"},
-        }
-
-    @pytest.mark.asyncio
-    async def test_run_uses_local_link_group_clone(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", False)
-        sibling = {"id": "proj-B", "path": "/local/clone"}
-        stack, db, submit, _wait, _int = _session_run_env()
-        with stack, patch(
-            "app.core.automation_service.resolve_local_project", return_value=sibling
-        ) as resolve:
-            await manager._execute_run(self._automation(), "run-xi", "do it", {})
-
-        resolve.assert_called_once_with("proj-A")
-        assert submit.call_args.kwargs["project_id"] == "proj-B"
-        assert db.create_session.call_args.kwargs["project_id"] == "proj-B"
-
-    @pytest.mark.asyncio
-    async def test_run_keeps_own_project_when_local(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", False)
-        mine = {"id": "proj-A", "path": "/here"}
-        stack, _db, submit, _wait, _int = _session_run_env()
-        with stack, patch(
-            "app.core.automation_service.resolve_local_project", return_value=mine
-        ):
-            await manager._execute_run(self._automation(), "run-xj", "do it", {})
-
-        assert submit.call_args.kwargs["project_id"] == "proj-A"
-
-    @pytest.mark.asyncio
-    async def test_unresolvable_project_fails_run_with_clear_error(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", False)
-        stack, db, submit, _wait, _int = _session_run_env()
-        with stack, patch(
-            "app.core.automation_service.resolve_local_project", return_value=None
-        ):
-            db.get_project.return_value = {
-                "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
-            }
-            db.get_install.return_value = {"device_name": "Office PC"}
-            with pytest.raises(ValueError, match="Office PC"):
-                await manager._execute_run(self._automation(), "run-xk", "do it", {})
-
-        submit.assert_not_called()
-        db.create_session.assert_not_called()
-        failed = [
-            c.kwargs for c in db.update_automation_run.call_args_list
-            if c.kwargs.get("status") == "failed"
-        ]
-        assert failed and "My Repo" in failed[0]["error"]
-        assert "Office PC" in failed[0]["error"]
-
-
-class TestExecuteRunV2ProjectResolution:
-    """Under ``settings.v2_projects``, an automation whose legacy ``project_id``
-    maps to a v2 (origin-keyed) project resolves via the origin/checkout resolver,
-    NOT the legacy link-group heuristic:
-
+    - the automation's legacy ``project_id`` maps to a v2 (origin-keyed) project
+      via ``resolve_project_v2`` (which self-seeds any live legacy row, F4);
     - the per-runner ``checkouts`` row must already exist HERE — a v2 project whose
-      checkout lives only on another runner is the SAME "not runnable here" failure
-      as a legacy missing clone (``resolve_local_checkout`` never auto-materializes);
+      checkout lives only on another runner is "not runnable here"
+      (``resolve_local_checkout`` never auto-materializes), the SAME failure as a
+      legacy missing clone;
     - ``automations.project_id`` / the downstream legacy ``project_id`` is left
       intact (hazard 7) — the resolver derives project_v2 from it;
-    - flag OFF, or no v2 project maps to the legacy id, → unchanged legacy path.
+    - no v2 project maps to the legacy id (no live legacy row on this shared DB) →
+      the run FAILS with a clear missing-project error (no legacy fallback).
     """
 
     def _automation(self):
@@ -1056,9 +987,7 @@ class TestExecuteRunV2ProjectResolution:
         }
 
     @pytest.mark.asyncio
-    async def test_v2_project_here_bypasses_legacy_and_keeps_project_id(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", True)
+    async def test_v2_project_here_keeps_project_id_and_binds_pv2(self, manager):
         stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.project_resolver.resolve_project_v2", return_value={"id": "pv2-A"},
@@ -1067,14 +996,11 @@ class TestExecuteRunV2ProjectResolution:
             return_value={"id": "ck-1", "path": "/runner/clone", "runner_id": "this"},
         ) as rlc, patch(
             "app.core.project_resolver._persist_session_project_v2"
-        ) as persist, patch(
-            "app.core.automation_service.resolve_local_project"
-        ) as legacy:
+        ) as persist:
             await manager._execute_run(self._automation(), "run-v1", "do it", {})
 
         rpv2.assert_called_once()
         rlc.assert_called_once()
-        legacy.assert_not_called()  # v2 path owns the run — legacy heuristic skipped
         # project_id is NEVER rewritten (hazard 7): the legacy id flows downstream.
         assert submit.call_args.kwargs["project_id"] == "proj-A"
         assert db.create_session.call_args.kwargs["project_id"] == "proj-A"
@@ -1084,12 +1010,10 @@ class TestExecuteRunV2ProjectResolution:
         assert persist.call_args.args[1] == "pv2-A"
 
     @pytest.mark.asyncio
-    async def test_minted_session_bound_to_project_v2(self, manager, monkeypatch):
-        """The session minted for a v2-owned run carries its project_v2_id: the
-        run resolves the pv2 id and persists it onto the fresh session row (the
-        SPAWN artifact for later resolve_cwd hits)."""
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", True)
+    async def test_minted_session_bound_to_project_v2(self, manager):
+        """The session minted for a run carries its project_v2_id: the run resolves
+        the pv2 id and persists it onto the fresh session row (the SPAWN artifact
+        for later resolve_cwd hits)."""
         stack, db, submit, _wait, _int = _session_run_env()
         db.create_session.return_value = {"id": "sess-x"}
         with stack, patch(
@@ -1099,29 +1023,22 @@ class TestExecuteRunV2ProjectResolution:
             return_value={"id": "ck-1", "path": "/runner/clone", "runner_id": "this"},
         ), patch(
             "app.core.project_resolver._persist_session_project_v2"
-        ) as persist, patch(
-            "app.core.automation_service.resolve_local_project"
-        ):
+        ) as persist:
             await manager._execute_run(self._automation(), "run-v5", "do it", {})
 
-        # persist(session_id, "pv2-A") — the same session_id that was minted.
         minted_session_id = db.create_session.call_args.kwargs["session_id"]
         persist.assert_called_once()
         assert persist.call_args.args[0] == minted_session_id
         assert persist.call_args.args[1] == "pv2-A"
 
     @pytest.mark.asyncio
-    async def test_v2_project_without_checkout_here_fails_like_missing_clone(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", True)
+    async def test_v2_project_without_checkout_here_fails_like_missing_clone(self, manager):
         stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.project_resolver.resolve_project_v2", return_value={"id": "pv2-A"},
         ), patch(
             "app.core.project_resolver.resolve_local_checkout", return_value=None,
-        ), patch(
-            "app.core.automation_service.resolve_local_project"
-        ) as legacy:
+        ):
             db.get_project.return_value = {
                 "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
             }
@@ -1129,7 +1046,6 @@ class TestExecuteRunV2ProjectResolution:
             with pytest.raises(ValueError, match="Office PC"):
                 await manager._execute_run(self._automation(), "run-v2", "do it", {})
 
-        legacy.assert_not_called()
         submit.assert_not_called()
         db.create_session.assert_not_called()
         failed = [
@@ -1139,38 +1055,29 @@ class TestExecuteRunV2ProjectResolution:
         assert failed and "My Repo" in failed[0]["error"]
 
     @pytest.mark.asyncio
-    async def test_no_v2_project_falls_back_to_legacy_link_group(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", True)
+    async def test_no_v2_project_fails_run_with_clear_error(self, manager):
+        """No v2 project maps to the legacy id (no live legacy row on this shared
+        DB) -> the run FAILS with the missing-project error; there is no legacy
+        link-group fallback anymore (deleted in PR-B)."""
         stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.project_resolver.resolve_project_v2", return_value=None,
         ) as rpv2, patch(
             "app.core.project_resolver.resolve_local_checkout"
-        ) as rlc, patch(
-            "app.core.automation_service.resolve_local_project",
-            return_value={"id": "proj-B", "path": "/clone"},
-        ) as legacy:
-            await manager._execute_run(self._automation(), "run-v3", "do it", {})
+        ) as rlc:
+            db.get_project.return_value = {
+                "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
+            }
+            db.get_install.return_value = {"device_name": "Office PC"}
+            with pytest.raises(ValueError, match="Office PC"):
+                await manager._execute_run(self._automation(), "run-v3", "do it", {})
 
         rpv2.assert_called_once()
-        rlc.assert_not_called()  # no v2 project → checkout lookup never happens
-        legacy.assert_called_once_with("proj-A")
-        assert submit.call_args.kwargs["project_id"] == "proj-B"
-
-    @pytest.mark.asyncio
-    async def test_flag_off_uses_legacy_and_never_consults_v2_resolver(self, manager, monkeypatch):
-        from app.core.config import settings
-        monkeypatch.setattr(settings, "v2_projects", False)
-        stack, _db, submit, _wait, _int = _session_run_env()
-        with stack, patch(
-            "app.core.project_resolver.resolve_project_v2"
-        ) as rpv2, patch(
-            "app.core.automation_service.resolve_local_project",
-            return_value={"id": "proj-A", "path": "/here"},
-        ) as legacy:
-            await manager._execute_run(self._automation(), "run-v4", "do it", {})
-
-        rpv2.assert_not_called()
-        legacy.assert_called_once_with("proj-A")
-        assert submit.call_args.kwargs["project_id"] == "proj-A"
+        rlc.assert_not_called()  # no v2 project -> checkout lookup never happens
+        submit.assert_not_called()
+        db.create_session.assert_not_called()
+        failed = [
+            c.kwargs for c in db.update_automation_run.call_args_list
+            if c.kwargs.get("status") == "failed"
+        ]
+        assert failed and "My Repo" in failed[0]["error"]

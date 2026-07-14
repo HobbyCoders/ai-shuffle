@@ -404,8 +404,8 @@ def _installs(*specs):
 def svc_env():
     """Patch the service's database facade and pin this install's id to ME.
 
-    The cross-install resolution helpers (``resolve_local_project`` /
-    ``_local_candidate`` / ``_link_group_siblings``) now live in
+    The cross-install ELECTION helpers (``_local_candidate`` /
+    ``_link_group_siblings`` / ``resolve_runnable_local_project``) live in
     ``app.core.project_links`` and read ``database``/``settings`` from THAT
     module, so patch both modules to the same mocks — ``should_run_scheduled_here``
     still calls them plus its own ``database``/``settings`` in automation_service.
@@ -417,60 +417,6 @@ def svc_env():
         st.effective_instance_id = ME
         db.get_projects_in_link_group.return_value = []
         yield db
-
-
-class TestResolveLocalProject:
-    def test_project_not_found(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        svc_env.get_project.return_value = None
-        assert resolve_local_project("missing") is None
-
-    def test_owned_by_this_install(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        mine = _proj("proj-A", instance_id=ME)
-        svc_env.get_project.return_value = mine
-        assert resolve_local_project("proj-A") == mine
-
-    def test_legacy_row_without_owner_and_existing_path(self, svc_env, tmp_path):
-        from app.core.automation_service import resolve_local_project
-        legacy = _proj("proj-A", instance_id=None, path=str(tmp_path))
-        svc_env.get_project.return_value = legacy
-        assert resolve_local_project("proj-A") == legacy
-
-    def test_legacy_row_without_owner_and_missing_path(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        legacy = _proj("proj-A", instance_id=None, path="/does/not/exist")
-        svc_env.get_project.return_value = legacy
-        assert resolve_local_project("proj-A") is None
-
-    def test_foreign_row_with_usable_local_path(self, svc_env, tmp_path):
-        """Stale/regenerated instance ids and shared filesystems: no row is
-        ours, but the stored path exists here — run it (pre-tracking behavior)."""
-        from app.core.automation_service import resolve_local_project
-        foreign = _proj("proj-A", instance_id=OTHER, path=str(tmp_path))
-        svc_env.get_project.return_value = foreign
-        assert resolve_local_project("proj-A") == foreign
-
-    def test_foreign_row_resolves_to_local_link_group_sibling(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
-        assert resolve_local_project("proj-A") == sibling
-        svc_env.get_projects_in_link_group.assert_called_once_with("git:abc")
-
-    def test_foreign_row_without_link_group(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        svc_env.get_project.return_value = _proj("proj-A", instance_id=OTHER)
-        assert resolve_local_project("proj-A") is None
-
-    def test_foreign_row_with_no_local_sibling(self, svc_env):
-        from app.core.automation_service import resolve_local_project
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign]
-        assert resolve_local_project("proj-A") is None
 
 
 class TestShouldRunScheduledHere:

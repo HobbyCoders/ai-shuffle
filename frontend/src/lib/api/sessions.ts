@@ -40,6 +40,10 @@ export interface Session {
 	worktree_branch?: string | null;
 	worktree_path?: string | null;
 	worktree_deleted?: boolean;
+	// V2 branch-intake (Phase 3): a NEW branch session records only its logical
+	// branch here (no legacy worktree row). The branch badge falls back to this
+	// when worktree_branch is absent.
+	branch?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

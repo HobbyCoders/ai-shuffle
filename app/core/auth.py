@@ -855,8 +855,8 @@ class AuthService:
         origin-keyed and install-independent (``projects_v2``), so they need NO
         per-install registration: a session/automation referencing an origin
         materializes its checkout lazily under this root. There is deliberately
-        no project-level gate here, and none is added under
-        ``settings.v2_projects`` — the workspace-root pick is the whole gate.
+        no project-level gate here (v2 projects are the unconditional model since
+        PR-B) — the workspace-root pick is the whole gate.
         """
         val = database.get_system_setting("onboarding_complete")
         if val == "true":

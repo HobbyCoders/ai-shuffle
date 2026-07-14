@@ -76,14 +76,21 @@ def enrich_session_worktree_meta(
     """
     session_wt_id = session.get("worktree_id")
     session_branch = session.get("worktree_branch")
+    # V2 branch-intake (Phase 3): a NEW branch session records only
+    # ``sessions.branch`` (no legacy worktree_id/worktree_branch/worktree_path).
+    # Surface it as a worktree-mode session so the resume snapshot restores branch
+    # mode; the origin resolver owns its cwd, so there is no legacy worktree dir to
+    # stat here (path stays None → worktree_deleted False).
+    session_v2_branch = session.get("branch")
 
-    # Not a worktree session at all — nothing to add.
-    if not (session_wt_id or session_branch or session.get("worktree_path")):
+    # Not a worktree/branch session at all — nothing to add.
+    if not (session_wt_id or session_branch or session.get("worktree_path") or session_v2_branch):
         return {}
 
     # Prefer the live worktree row's values; fall back to the session's backup
-    # columns when the row is missing or carries no branch/path.
-    branch = (worktree.get("branch_name") if worktree else None) or session_branch
+    # columns, then the v2 logical branch, when the row is missing or carries no
+    # branch/path.
+    branch = (worktree.get("branch_name") if worktree else None) or session_branch or session_v2_branch
     path = (worktree.get("worktree_path") if worktree else None) or session.get(
         "worktree_path"
     )

@@ -151,6 +151,46 @@ def _seed_pv2_from_legacy(
     return projects_v2.get_project_v2_by_origin(origin)
 
 
+def _effective_branch(session_row: Dict[str, Any]) -> Optional[str]:
+    """The session's logical branch, lazily mirroring the v60 Step-F backfill.
+
+    Returns ``sessions.branch`` when it is set. When ``branch`` is NULL/empty but
+    the session carries a legacy ``worktree_branch`` — a worktree session minted
+    by an un-upgraded install AFTER the one-time v60 collapse, which migration
+    Step F never saw — backfill ``sessions.branch`` from it (one-shot,
+    NULL-guarded, never overwriting a non-NULL branch, exactly like Step F) and
+    use it for THIS resolution. Reads the SESSION's OWN ``worktree_branch``
+    column — it does NOT require the ``worktrees`` row. Without this, such a
+    session would resolve to the BASE checkout under the resolver (a cwd
+    regression), because only Step F otherwise sets ``sessions.branch``.
+    """
+    branch = session_row.get("branch")
+    if branch and str(branch).strip():
+        return branch
+    wt_branch = session_row.get("worktree_branch")
+    if not wt_branch or not str(wt_branch).strip():
+        return None
+    session_id = session_row.get("id")
+    if session_id:
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE sessions SET branch = %s "
+                    "WHERE id = %s AND (branch IS NULL OR branch = '')",
+                    (wt_branch, session_id),
+                )
+        except Exception as e:  # pragma: no cover - best-effort self-heal
+            logger.warning(
+                "project_resolver: failed to backfill sessions.branch for %s: %s",
+                session_id,
+                e,
+            )
+    # Use it for THIS resolution even if the persist raced/failed.
+    session_row["branch"] = wt_branch
+    return wt_branch
+
+
 def resolve_local_checkout(
     session_row: Dict[str, Any], runner_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
@@ -165,10 +205,40 @@ def resolve_local_checkout(
         return None
     if runner_id is None:
         runner_id = settings.effective_instance_id
-    branch = session_row.get("branch")
+    branch = _effective_branch(session_row)
     return checkouts_db.get_checkout_with_legacy_fallback(
         project["id"], runner_id, branch=branch
     )
+
+
+def has_local_base_checkout(
+    session_row: Dict[str, Any], runner_id: Optional[str] = None
+) -> bool:
+    """Whether this session's project has its BASE checkout materialized on THIS
+    runner (branch-independent).
+
+    The adopt preflight gate: a branch session can be adopted here as long as the
+    project's base is present on disk — the branch checkout itself is materialized
+    lazily by ``checkout_manager.ensure_checkout`` at spawn time. Gating adopt on
+    the BRANCH checkout (as ``resolve_local_checkout`` would) spuriously 409s a
+    branch session whenever only the base is present.
+
+    True iff ``resolve_project_v2`` resolves, its base ``checkouts`` row (branch
+    NULL, legacy-fallback honored) exists, AND that row's ``path`` is a directory
+    on this runner's disk. Pure read — never materializes.
+    """
+    project = resolve_project_v2(session_row)
+    if not project:
+        return False
+    if runner_id is None:
+        runner_id = settings.effective_instance_id
+    row = checkouts_db.get_checkout_with_legacy_fallback(
+        project["id"], runner_id, branch=None
+    )
+    if not row:
+        return False
+    path = row.get("path")
+    return bool(path and os.path.isdir(path))
 
 
 def resolve_cwd(session_row: Dict[str, Any]) -> Optional[str]:
@@ -184,7 +254,7 @@ def resolve_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     project = resolve_project_v2(session_row)
     if not project:
         return None
-    branch = session_row.get("branch")
+    branch = _effective_branch(session_row)
     if branch and str(branch).strip():
         return checkout_manager.ensure_checkout(project, branch=branch)
     return checkout_manager.ensure_checkout(project, None)

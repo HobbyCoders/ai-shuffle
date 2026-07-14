@@ -44,11 +44,12 @@ def _seed_project(shim, pid, name, link_group_id=None):
     )
 
 
-def _seed_session(shim, sid, project_id=None, project_v2_id=None, branch=None):
+def _seed_session(shim, sid, project_id=None, project_v2_id=None, branch=None,
+                  worktree_branch=None):
     shim.cursor().execute(
-        "INSERT INTO sessions (id, project_id, project_v2_id, branch) "
-        "VALUES (%s, %s, %s, %s)",
-        (sid, project_id, project_v2_id, branch),
+        "INSERT INTO sessions (id, project_id, project_v2_id, branch, worktree_branch) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (sid, project_id, project_v2_id, branch, worktree_branch),
     )
 
 
@@ -220,6 +221,66 @@ def test_resolve_local_checkout_no_project_none(mock_db):
 
 
 # ---------------------------------------------------------------------------
+# _effective_branch — lazy Step-F sessions.branch backfill
+# ---------------------------------------------------------------------------
+
+def test_effective_branch_prefers_set_branch(mock_db):
+    # A non-NULL branch wins outright; worktree_branch is ignored, no DB touched.
+    row = {"id": "sb1", "branch": "feature-a", "worktree_branch": "other-b"}
+    assert project_resolver._effective_branch(row) == "feature-a"
+
+
+def test_effective_branch_none_when_both_absent(mock_db):
+    assert project_resolver._effective_branch({"id": "sb2"}) is None
+    assert project_resolver._effective_branch(
+        {"id": "sb2", "branch": "", "worktree_branch": ""}
+    ) is None
+
+
+def test_effective_branch_backfills_from_worktree_branch(mock_db):
+    # Worktree session minted by an un-upgraded install AFTER the v60 collapse:
+    # branch is NULL but worktree_branch carries the logical branch. Mirror Step F
+    # — one-shot, NULL-guarded backfill of sessions.branch — and use it here.
+    _seed_session(mock_db, "sb3", project_v2_id="pv2-x", branch=None,
+                  worktree_branch="feat/minted")
+    row = {"id": "sb3", "branch": None, "worktree_branch": "feat/minted"}
+
+    assert project_resolver._effective_branch(row) == "feat/minted"
+    # persisted onto the sessions row (one-shot Step-F mirror) ...
+    assert _session_row(mock_db, "sb3")["branch"] == "feat/minted"
+    # ... and mutated in-place for THIS resolution.
+    assert row["branch"] == "feat/minted"
+
+
+def test_effective_branch_never_overwrites_set_db_branch(mock_db):
+    # NULL-guarded: an already-set branch is never clobbered by worktree_branch.
+    _seed_session(mock_db, "sb4", project_v2_id="pv2-x", branch="kept",
+                  worktree_branch="ignored")
+    row = {"id": "sb4", "branch": "kept", "worktree_branch": "ignored"}
+    assert project_resolver._effective_branch(row) == "kept"
+    assert _session_row(mock_db, "sb4")["branch"] == "kept"
+
+
+def test_resolve_local_checkout_honors_backfilled_worktree_branch(mock_db):
+    # End-to-end: a branch-NULL + worktree_branch session resolves to the BRANCH
+    # checkout (not base) because _effective_branch backfills the branch first —
+    # without it such a session would regress to the base checkout.
+    pv2 = projects_v2.upsert_project("git:wb", name="WB")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, "/work/base")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, "/work/feat", branch="feat/minted")
+    _seed_session(mock_db, "sb5", project_v2_id=pv2["id"], branch=None,
+                  worktree_branch="feat/minted")
+
+    row = {"id": "sb5", "project_v2_id": pv2["id"], "branch": None,
+           "worktree_branch": "feat/minted"}
+    got = project_resolver.resolve_local_checkout(row)
+    assert got is not None and got["path"] == "/work/feat"
+    assert got["branch"] == "feat/minted"
+    # the backfill also persisted to the sessions row.
+    assert _session_row(mock_db, "sb5")["branch"] == "feat/minted"
+
+
+# ---------------------------------------------------------------------------
 # resolve_cwd (checkout_manager stubbed)
 # ---------------------------------------------------------------------------
 
@@ -338,3 +399,64 @@ def test_resolve_existing_cwd_none_when_no_checkout_row(mock_db):
         {"id": "s18", "project_v2_id": pv2["id"]}
     )
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# has_local_base_checkout — the adopt preflight gate (R5.1). Gates on BASE
+# availability (dir present on disk), NOT the branch checkout — a real dir is
+# required, so these use tmp_path.
+# ---------------------------------------------------------------------------
+
+def test_has_local_base_checkout_true_when_base_present(mock_db, tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    pv2 = projects_v2.upsert_project("git:hb1", name="HB1")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(base))
+    assert project_resolver.has_local_base_checkout(
+        {"id": "hb1", "project_v2_id": pv2["id"]}
+    ) is True
+
+
+def test_has_local_base_checkout_true_for_branch_session_on_base_only(mock_db, tmp_path):
+    # THE FIX: a BRANCH session is adoptable on BASE availability — the branch
+    # checkout need not exist yet (it materializes lazily at spawn). Gating on the
+    # branch row (as resolve_local_checkout does) would spuriously return False.
+    base = tmp_path / "base"
+    base.mkdir()
+    pv2 = projects_v2.upsert_project("git:hb2", name="HB2")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(base))  # base only, no branch row
+    row = {"id": "hb2", "project_v2_id": pv2["id"], "branch": "feature-x"}
+    assert project_resolver.has_local_base_checkout(row) is True
+    # Sanity: the branch checkout genuinely is NOT materialized on this runner.
+    assert project_resolver.resolve_local_checkout(row) is None
+
+
+def test_has_local_base_checkout_false_when_no_base_row(mock_db):
+    pv2 = projects_v2.upsert_project("git:hb3", name="HB3")
+    assert project_resolver.has_local_base_checkout(
+        {"id": "hb3", "project_v2_id": pv2["id"]}
+    ) is False
+
+
+def test_has_local_base_checkout_false_when_dir_missing(mock_db, tmp_path):
+    gone = tmp_path / "never"  # row present, dir absent
+    pv2 = projects_v2.upsert_project("git:hb4", name="HB4")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(gone))
+    assert project_resolver.has_local_base_checkout(
+        {"id": "hb4", "project_v2_id": pv2["id"]}
+    ) is False
+
+
+def test_has_local_base_checkout_false_when_no_project(mock_db):
+    assert project_resolver.has_local_base_checkout({"id": "hb5"}) is False
+
+
+def test_has_local_base_checkout_wrong_runner_false(mock_db, tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    pv2 = projects_v2.upsert_project("git:hb6", name="HB6")
+    checkouts_db.upsert_checkout(pv2["id"], "other-runner", str(base))
+    # Default runner is RUNNER (pinned) — the base lives only on another runner.
+    assert project_resolver.has_local_base_checkout(
+        {"id": "hb6", "project_v2_id": pv2["id"]}
+    ) is False

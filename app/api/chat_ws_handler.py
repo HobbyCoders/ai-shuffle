@@ -645,6 +645,26 @@ class ChatWebSocketHandler:
 
             await run_sync(_create_session_atomic)
 
+            # V2 projects: bind the new session to its origin-keyed project_v2 so
+            # the resolver is a DIRECT hit on the first send (rather than relying on
+            # the send-path self-heal). resolve_project_v2 self-seeds a fresh legacy
+            # project (F4) and persists sessions.project_v2_id when given the id and
+            # it is still NULL. Best-effort: a failure just defers to the send-path
+            # self-heal — it must never block session creation. project_id may be
+            # None (project-less session) → resolver returns None, a no-op.
+            if project_id:
+                try:
+                    from app.core import project_resolver
+                    await run_sync(
+                        project_resolver.resolve_project_v2,
+                        {"project_id": project_id, "id": session_id},
+                    )
+                except Exception:  # noqa: BLE001 — self-heal covers it later
+                    logger.debug(
+                        "V2 project bind failed for new session %s", session_id,
+                        exc_info=True,
+                    )
+
             # Immediately notify frontend of new session_id so it persists on refresh.
             # Echo the client's adoption token so the awaiting frontend accepts this
             # session_created ONLY if it matches — authenticating new-session adoption.

@@ -209,68 +209,33 @@ def _default_working_dir() -> str:
 
 
 def resolve_working_dir(session: Dict[str, Any]) -> str:
-    """Resolve the working directory for a session, checking worktree first, then project.
+    """Resolve the working directory for a session (auxiliary history/JSONL reader).
 
-    Priority:
-    1. Worktree path — used whenever the resolved directory EXISTS on disk,
-       regardless of the worktree row's ``status`` (same rule as
-       ``_resolve_session_worktree_cwd``: a per-device sync sweep can flip a
-       healthy row to 'deleted' in shared Postgres without the directory
-       moving, and this auxiliary reader must keep reading history/JSONL from
-       where the session actually runs). The session's backup ``worktree_path``
-       column is tried when the row (or its path) is missing on disk. No status
-       self-heal here — that lives in query_options only.
-    2. Project path — only when no worktree directory exists on disk. This is
-       an auxiliary reader (history/JSONL parsing, checkpoint flows), so a
-       missing worktree dir degrades to the project
-       dir instead of raising; it must never break history reads.
-    3. Default workspace.
+    The origin resolver is the SINGLE cwd authority for every session, so this
+    reader defers to it unconditionally — no legacy worktree/project walk. It is
+    resolver-FIRST (no ``project_v2_id`` gate): ``resolve_existing_cwd``
+    self-heals the session's ``project_v2_id`` / ``branch`` off its legacy
+    ``project_id`` / ``worktree_branch`` and returns this runner's checkout path
+    when that dir exists on disk. Crucially it is a PURE READ — it NEVER
+    materializes a checkout (no ``git worktree add`` / clone), which is exactly
+    right here: materialization is the spawn path's job (query_options).
+
+    Returns the default workspace when the resolver yields ``None`` — no
+    project_v2, or a checkout not materialized on this runner. This auxiliary
+    reader degrades instead of raising; it must never break history/JSONL reads.
     """
-    from app.db import database
-    from app.core.project_utils import get_project_working_dir, resolve_existing_worktree_cwd
-    from app.core.config import settings
+    from app.core import project_resolver
 
-    # V2 projects: the resolver is the single cwd authority for a session bound to
-    # an origin-keyed project_v2. When it yields a path, use it; when it yields
-    # None (no materializable checkout on this runner) fall straight through to the
-    # default workspace ONLY — NEVER the legacy project-path walk below — so an
-    # unmaterialized checkout surfaces honestly instead of silently running in a
-    # stale legacy path. Sessions without project_v2_id, or flag OFF, take the
-    # unchanged legacy chain.
-    if settings.v2_projects and session.get("project_v2_id"):
-        from app.core import project_resolver
-        # PURE READ: resolve_existing_cwd never materializes (no git worktree
-        # add / clone) — this is an auxiliary history/JSONL reader, not the spawn
-        # path. Materialization is the spawn path's job (query_options).
+    try:
         v2_cwd = project_resolver.resolve_existing_cwd(session)
-        if v2_cwd is not None:
-            return v2_cwd
-        return _default_working_dir()
-
-    # Check for worktree first — worktree sessions should resolve to the worktree path,
-    # not the main project directory. Disk existence is the only gate:
-    # resolve_existing_worktree_cwd tries the row's path, then the session's
-    # backup worktree_path, per-candidate, and never raises.
-    worktree_id = session.get("worktree_id")
-    if worktree_id:
-        worktree = None
-        try:
-            worktree = database.get_worktree(worktree_id)
-        except Exception:  # noqa: BLE001 — a row lookup failure must not skip the backup path
-            logger.debug(
-                "resolve_working_dir: worktree row lookup failed; trying the "
-                "session's backup worktree_path",
-                exc_info=True,
-            )
-        resolved = resolve_existing_worktree_cwd(worktree, session)
-        if resolved:
-            return resolved
-
-    project_id = session.get("project_id")
-    if project_id:
-        project = database.get_project(project_id)
-        if project:
-            return get_project_working_dir(project)
+    except Exception:  # noqa: BLE001 — this reader must never break history reads
+        logger.debug(
+            "resolve_working_dir: resolver failed; using default workspace",
+            exc_info=True,
+        )
+        v2_cwd = None
+    if v2_cwd is not None:
+        return v2_cwd
     return _default_working_dir()
 
 

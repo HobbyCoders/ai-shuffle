@@ -5,7 +5,7 @@ Pins what ``AuthService.is_onboarding_complete`` requires: an admin, the
 workspace-root pick. Under v2-projects the workspace root is where project
 *checkouts* materialize; projects are origin-keyed (``projects_v2``) and need
 NO per-install/per-project registration. This test locks in that there is no
-project-level gate (and none appears under ``settings.v2_projects``).
+project-level gate at all.
 """
 
 from unittest.mock import patch
@@ -74,9 +74,8 @@ def test_project_registration_not_required(mock_db):
     """v2 semantics: with the workspace root chosen, the gate is complete with
     ZERO projects_v2/checkouts/legacy-projects rows.
 
-    The gate references no project table, so it is flag-independent — there is
-    no per-project onboarding to satisfy whether ``settings.v2_projects`` is on
-    or off. This is the whole point of the v2 reframe: workspace-root pick only.
+    The gate references no project table — there is no per-project onboarding to
+    satisfy. This is the whole point of the v2 reframe: workspace-root pick only.
     """
     _seed_admin_and_onboarding()
     database.set_system_setting(_workspace_key(), "/some/workspace/root")

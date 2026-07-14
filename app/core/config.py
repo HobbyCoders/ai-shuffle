@@ -320,20 +320,13 @@ class Settings(BaseSettings):
         ),
     )
 
-    # V2 projects cutover (Phase 3). When ON, project/checkout resolution keys
-    # off the origin-keyed ``projects_v2`` + per-runner ``checkouts`` tables
-    # (seeded by the v60 collapse migration) instead of the legacy
-    # ``project_links`` heuristic chains, path-existence cwd fallbacks, and
-    # adopt preflight. Read only at the resolution seams; the legacy and v2 paths
-    # share no in-memory state, so a flag flip is a clean rollback. ON by default
-    # (cutover). Kill switch: AI_SHUFFLE_V2_PROJECTS=false. No reader is wired in
-    # this commit — the seeded rows are dormant until later Phase-3 commits.
-    v2_projects: bool = Field(
-        default=True,
-        validation_alias=AliasChoices(
-            "AI_SHUFFLE_V2_PROJECTS", "V2_PROJECTS", "v2_projects"
-        ),
-    )
+    # V2 projects cutover (Phase 3) is COMPLETE. Project/checkout resolution keys
+    # unconditionally off the origin-keyed ``projects_v2`` + per-runner
+    # ``checkouts`` tables (seeded by the v60 collapse migration) for any session
+    # bound to a ``project_v2_id``; sessions without one (created by an un-upgraded
+    # install sharing the DB) still take the legacy resolver ladder. The
+    # ``AI_SHUFFLE_V2_PROJECTS`` kill switch was removed in PR-B — rollback is now
+    # git-revert, not a flag flip.
 
     class Config:
         env_file = ".env"

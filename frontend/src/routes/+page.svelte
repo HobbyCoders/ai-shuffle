@@ -94,9 +94,11 @@
 
 		// Build worktree info from the session list data so the switcher can
 		// use server-authoritative values instead of stale in-memory state.
-		const worktreeInfo = session?.worktree_id || session?.worktree_branch ? {
+		// A v2 branch session carries only `branch` (no legacy worktree_id/
+		// worktree_branch); fall back to it so branch mode restores on switch.
+		const worktreeInfo = session?.worktree_id || session?.worktree_branch || session?.branch ? {
 			worktreeId: session.worktree_id ?? null,
-			worktreeBranch: session.worktree_branch ?? '',
+			worktreeBranch: session.worktree_branch ?? session.branch ?? '',
 			worktreeDeleted: session.worktree_deleted ?? false,
 			executionMode: 'worktree' as const,
 		} : null;

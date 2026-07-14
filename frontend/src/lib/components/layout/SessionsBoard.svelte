@@ -844,8 +844,8 @@
 				{:else}
 					<span class="row-stat muted">No activity yet</span>
 				{/if}
-				{#if session.worktree_branch}
-					<span class="row-branch"><GitBranch size={11} strokeWidth={1.6} />{session.worktree_branch}</span>
+				{#if session.worktree_branch || session.branch}
+					<span class="row-branch"><GitBranch size={11} strokeWidth={1.6} />{session.worktree_branch || session.branch}</span>
 				{/if}
 			</div>
 		</div>
