@@ -62,7 +62,8 @@ class _HandlerHarness:
     closure oracle:
       .sync  — sync_engine (is_device_watching_session / _connections /
                register_device / unregister_device)
-      .db    — database (get_queued_messages)
+      .db    — database (get_session)
+      .queue_view — the v2 queue view (_v2_queue_view: turns-table source)
       .perm  — permission_handler (respond / get_pending_requests /
                get_deferred_requests / requeue_deferred / get_queue_count)
     """
@@ -80,7 +81,12 @@ class _HandlerHarness:
 
         # --- database -----------------------------------------------------------
         self.db = s.enter_context(patch.object(cwh, "database"))
-        self.db.get_queued_messages = MagicMock(return_value=[])
+        # V2: the watch-restore queue is re-sourced from the durable turns table
+        # via the module-level _v2_queue_view (the legacy database.get_queued_messages
+        # path is deleted). Patch that seam instead.
+        self.queue_view = s.enter_context(
+            patch.object(cwh, "_v2_queue_view", MagicMock(return_value=[]))
+        )
         # Permission handlers now consult the session row to decide whether to
         # relay to a remote owner. These watch/permission tests exercise the
         # LOCAL path, so return a legacy row (instance_id=None => local) keyed
@@ -197,7 +203,7 @@ async def test_watch_session_restores_nonempty_queue():
     sync/queue_updated frame the queue_message handlers emit — and it goes
     through the class send_json, so the raw frame carries _seq."""
     with _HandlerHarness() as h:
-        h.db.get_queued_messages.return_value = [{"id": "q1", "content": "later"}]
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
         await h.make_handler().handle_watch_session(dict(WATCH))
 
     assert _queue_frames(h.ws) == [{
@@ -207,6 +213,25 @@ async def test_watch_session_restores_nonempty_queue():
         "data": {"queued_messages": [{"id": "q1", "content": "later"}]},
     }]
     assert h.ws.sent[0]["_seq"] == 1
+
+
+async def test_watch_session_queue_hydrates_from_v2_turns_view():
+    """Change-1 regression: watch_session must source the restore queue from the
+    durable turns table via ``_v2_queue_view(session_id)`` — the legacy
+    ``database.get_queued_messages`` path is deleted and must never be consulted."""
+    with _HandlerHarness() as h:
+        h.queue_view.return_value = [{"id": "t-1", "content": "later"}]
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    h.queue_view.assert_called_once_with("sess-1")
+    # The dead legacy queue source is never touched.
+    h.db.get_queued_messages.assert_not_called()
+    assert _queue_frames(h.ws) == [{
+        "type": "sync",
+        "event_type": "queue_updated",
+        "session_id": "sess-1",
+        "data": {"queued_messages": [{"id": "t-1", "content": "later"}]},
+    }]
 
 
 async def test_watch_session_empty_queue_sends_no_frame():
@@ -220,7 +245,7 @@ async def test_watch_session_queue_load_failure_still_registers_silently():
     """Closure parity: a DB failure loading the queue is swallowed — the watch
     registration stands, and neither a queue frame nor an error frame is sent."""
     with _HandlerHarness() as h:
-        h.db.get_queued_messages.side_effect = RuntimeError("db down")
+        h.queue_view.side_effect = RuntimeError("db down")
         handler = h.make_handler()
         await handler.handle_watch_session(dict(WATCH))
 
@@ -290,11 +315,11 @@ async def test_watch_session_duplicate_live_ws_skips_queue_restore():
         h.sync._connections = {
             "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
         }
-        h.db.get_queued_messages.return_value = [{"id": "q1", "content": "later"}]
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
         await h.make_handler().handle_watch_session(dict(WATCH))
 
     assert _queue_frames(h.ws) == []
-    h.db.get_queued_messages.assert_not_called()
+    h.queue_view.assert_not_called()
 
 
 async def test_watch_session_dead_old_ws_is_replaced():
@@ -320,7 +345,7 @@ async def test_watch_session_same_ws_rewatch_proceeds():
         h.sync._connections = {
             "sess-1": {"dev-1": SimpleNamespace(websocket=h.ws)}
         }
-        h.db.get_queued_messages.return_value = [{"id": "q1", "content": "later"}]
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
         await handler.handle_watch_session(dict(WATCH))
 
     h.sync.register_device.assert_awaited_once()

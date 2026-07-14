@@ -307,19 +307,18 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "turns_reaped": 0,
     }
 
-    # V2 turns boot sweep (flag-gated): settle/requeue the previous process's
-    # dead-lease live turns and kick affected sessions. Guarded independently.
-    if settings.v2_turns:
-        try:
-            counts["turns_reaped"] = await _boot_reap_and_kick_turns()
-        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
-            logger.exception("Boot reconcile: reaping dead-lease turns failed")
-            record_error(
-                "backend",
-                f"Boot reconcile failed while reaping dead-lease turns: {exc}",
-                detail=traceback.format_exc(),
-                context={"reconcile": "turns_reap"},
-            )
+    # V2 turns boot sweep: settle/requeue the previous process's dead-lease live
+    # turns and kick affected sessions. Guarded independently.
+    try:
+        counts["turns_reaped"] = await _boot_reap_and_kick_turns()
+    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+        logger.exception("Boot reconcile: reaping dead-lease turns failed")
+        record_error(
+            "backend",
+            f"Boot reconcile failed while reaping dead-lease turns: {exc}",
+            detail=traceback.format_exc(),
+            context={"reconcile": "turns_reap"},
+        )
 
     try:
         counts["parked_markers_cleared"] = await asyncio.to_thread(

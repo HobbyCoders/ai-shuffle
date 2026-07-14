@@ -66,9 +66,8 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 def _has_live_turn_db(session_id: str) -> bool:
     """True iff a v2 live turn (running|interrupting|draining) exists for the
-    session. Fully guarded and flag-gated: returns False when ``v2_turns`` is
-    off, or on ANY error (missing table, etc.) — so this union can NEVER lose
-    the authoritative runs-busy signal it augments.
+    session. Fully guarded: returns False on ANY error (missing table, etc.) —
+    so this union can NEVER lose the authoritative runs-busy signal it augments.
 
     A ``draining`` turn is the reason this matters: an escalated interrupt keeps
     the healthy client while its reader drains, and the run lease may already be
@@ -76,10 +75,6 @@ def _has_live_turn_db(session_id: str) -> bool:
     busy until the drain settles.
     """
     try:
-        from app.core.config import settings
-
-        if not settings.v2_turns:
-            return False
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -360,15 +355,11 @@ async def sweep_once() -> int:
 
 
 async def _reap_and_kick_turns() -> int:
-    """Reap dead-lease live turns and kick each affected session. Flag-gated and
-    fully guarded — a reap/kick failure must never break the spinner sweep.
+    """Reap dead-lease live turns and kick each affected session. Fully guarded
+    — a reap/kick failure must never break the spinner sweep.
 
-    Returns the number of turns reaped (0 when the flag is off or on error)."""
+    Returns the number of turns reaped (0 on error)."""
     try:
-        from app.core.config import settings
-
-        if not settings.v2_turns:
-            return 0
         from app.core import turn_scheduler
         from app.db import turns as turns_db
 

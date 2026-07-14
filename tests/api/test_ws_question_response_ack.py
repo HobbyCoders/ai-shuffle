@@ -74,7 +74,8 @@ def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_
     db = stack.enter_context(patch.object(ws_mod, "database"))
     stack.enter_context(patch.object(cwh, "database", new=db))
     db.get_session = MagicMock(return_value=_REMOTE_SESSION)
-    db.get_queued_messages = MagicMock(return_value=[])
+    # V2: watch-restore hydrates from the durable turns table via _v2_queue_view.
+    stack.enter_context(patch.object(cwh, "_v2_queue_view", MagicMock(return_value=[])))
 
     async def _fake_run_sync(fn, *a, **k):
         try:

@@ -419,36 +419,6 @@ class TaskRegistry:
         seen.add(task_id)
         return True
 
-    def mark_unpark_pending(self, session_id: str) -> None:
-        """Latch that an unpark follow-up turn is committed but not yet streaming.
-
-        Defensive: a missing ``session_id`` is a no-op.
-        """
-        if not session_id:
-            return
-        self._unpark_pending.add(session_id)
-        self._unpark_pending_since[session_id] = time.monotonic()
-
-    def clear_unpark_pending(self, session_id: str) -> None:
-        """Drop the unpark-pending latch (follow-up started streaming or failed)."""
-        if not session_id:
-            return
-        self._unpark_pending.discard(session_id)
-        self._unpark_pending_since.pop(session_id, None)
-
-    def is_unpark_pending(self, session_id: str) -> bool:
-        """True iff an unpark follow-up turn is committed but not yet streaming."""
-        return session_id in self._unpark_pending
-
-    def unpark_pending_age(self, session_id: str) -> Optional[float]:
-        """Seconds since the unpark-pending latch was set, or ``None`` when the
-        latch is not set. Monotonic-clock based; used by the lifecycle
-        reconciler to age-gate its stale-latch repair."""
-        since = self._unpark_pending_since.get(session_id)
-        if since is None or session_id not in self._unpark_pending:
-            return None
-        return time.monotonic() - since
-
     def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
         """Idempotency latch for the parent "unpark" follow-up turn.
 
@@ -469,37 +439,6 @@ class TaskRegistry:
             return False
         seen.add(key)
         return True
-
-    def mark_unparked(self, session_id: str, task_id: str) -> bool:
-        """One-unpark-per-task latch, keyed on ``task_id`` ALONE.
-
-        Returns ``True`` only the FIRST time ``task_id`` is seen for
-        ``session_id``; every later call returns ``False`` regardless of the
-        notification's uuid/signature. This is the dedup gate for the unpark
-        follow-up turn: a background task drives at most ONE follow-up for its
-        whole life. It deliberately ignores the per-rest uuid that
-        ``mark_notified`` keyed on, because the newer CLI re-emits a terminal
-        TaskNotificationMessage with a FRESH uuid each time the agent comes to
-        rest — which RE-ARMED the old latch and let one task storm the session
-        with repeated "nothing to act on" follow-ups.
-
-        Defensive: a missing ``session_id``/``task_id`` never latches (returns
-        ``False``) so a stray notification can't strand state.
-        """
-        if not session_id or not task_id:
-            return False
-        seen = self._unparked.setdefault(session_id, set())
-        if task_id in seen:
-            return False
-        seen.add(task_id)
-        self._persist_task_state(session_id, task_id)
-        return True
-
-    def was_unparked(self, session_id: str, task_id: str) -> bool:
-        """True iff ``task_id`` has already driven an unpark for ``session_id``."""
-        if not session_id or not task_id:
-            return False
-        return task_id in self._unparked.get(session_id, set())
 
     def reset_started_this_turn(self, session_id: str) -> None:
         """Clear the "started this turn" set for a session.

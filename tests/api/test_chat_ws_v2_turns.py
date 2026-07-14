@@ -36,11 +36,6 @@ from app.db import database
 from app.db import turns as turns_db
 
 
-@pytest.fixture(autouse=True)
-def _v2_turns_on(monkeypatch):
-    monkeypatch.setattr(settings, "v2_turns", True)
-
-
 def _make_session(session_id="sess-1", *, title="t", profile_id="default"):
     database.create_session(session_id=session_id, profile_id=profile_id, title=title)
     return session_id
@@ -77,11 +72,6 @@ class _Patches:
         # No cross-install relay in these tests.
         s.enter_context(
             patch("app.core.cloud_relay.is_remote_session", MagicMock(return_value=False))
-        )
-        # A genuine query resets the auto-continue latch — harmless, stubbed for
-        # isolation.
-        s.enter_context(
-            patch.object(cwh.compact_continue, "reset_auto_continue", MagicMock())
         )
         return self
 

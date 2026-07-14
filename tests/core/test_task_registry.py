@@ -513,55 +513,6 @@ class TestMarkNotified:
         assert reg.mark_notified("s1", "t1", "uuid-1") is True
 
 
-class TestMarkUnparked:
-    """One-unpark-per-task latch keyed on task_id ALONE (Bug 1, policy #2).
-
-    Unlike ``mark_notified`` (which re-arms on a fresh per-rest uuid and so let one
-    task storm the session with repeated 'nothing to act on' follow-ups), a given
-    task drives AT MOST ONE unpark for its whole life regardless of signature.
-    """
-
-    def test_true_once_then_false(self, reg):
-        assert reg.mark_unparked("s1", "t1") is True
-        assert reg.mark_unparked("s1", "t1") is False
-        assert reg.mark_unparked("s1", "t1") is False
-
-    def test_fresh_uuid_cannot_rearm(self, reg):
-        # The whole point: there is no signature/uuid input, so a task that re-rests
-        # under a fresh uuid can never re-arm the latch.
-        assert reg.mark_unparked("s1", "t1") is True
-        assert reg.was_unparked("s1", "t1") is True
-        assert reg.mark_unparked("s1", "t1") is False
-
-    def test_independent_per_task_and_session(self, reg):
-        assert reg.mark_unparked("s1", "t1") is True
-        assert reg.mark_unparked("s1", "t2") is True   # different task
-        assert reg.mark_unparked("s2", "t1") is True   # different session
-
-    def test_was_unparked_reflects_state(self, reg):
-        assert reg.was_unparked("s1", "t1") is False
-        reg.mark_unparked("s1", "t1")
-        assert reg.was_unparked("s1", "t1") is True
-
-    def test_blank_ids_never_latch(self, reg):
-        assert reg.mark_unparked("", "t1") is False
-        assert reg.mark_unparked("s1", "") is False
-        assert reg.was_unparked("", "t1") is False
-        # No state stranded -> a real (session, task) still latches True.
-        assert reg.mark_unparked("s1", "t1") is True
-
-    def test_cleared_by_clear_session(self, reg):
-        assert reg.mark_unparked("s1", "t1") is True
-        reg.clear_session("s1")
-        assert reg.was_unparked("s1", "t1") is False
-        assert reg.mark_unparked("s1", "t1") is True
-
-    def test_cleared_by_reset_all(self, reg):
-        assert reg.mark_unparked("s1", "t1") is True
-        reg.reset_all()
-        assert reg.mark_unparked("s1", "t1") is True
-
-
 class TestStartedThisTurn:
     """The per-turn scope set that suppresses spurious in-stream unparks.
 
@@ -672,48 +623,6 @@ class TestBackgroundLaunch:
         reg.mark_background_launch("s1", "tool-1")
         reg.reset_all()
         assert reg.was_background_launch("s1", "tool-1") is False
-
-
-class TestUnparkPending:
-    """The latch bridging the unpark hand-off gap.
-
-    Set the instant a parked session's background sub-agent completion is handed
-    off to a follow-up turn (the task has already dropped out of get_active), and
-    cleared the moment that turn starts streaming (or it fails). /live surfaces it
-    so a polling client keeps its park-poll alive across the gap instead of seeing
-    a transient (is_streaming=false, activeTasks=[]) and STOPPING.
-    """
-
-    def test_default_false(self, reg):
-        assert reg.is_unpark_pending("s1") is False
-
-    def test_mark_then_clear(self, reg):
-        reg.mark_unpark_pending("s1")
-        assert reg.is_unpark_pending("s1") is True
-        reg.clear_unpark_pending("s1")
-        assert reg.is_unpark_pending("s1") is False
-
-    def test_independent_per_session(self, reg):
-        reg.mark_unpark_pending("s1")
-        assert reg.is_unpark_pending("s1") is True
-        assert reg.is_unpark_pending("s2") is False
-
-    def test_blank_id_is_noop(self, reg):
-        reg.mark_unpark_pending("")
-        assert reg.is_unpark_pending("") is False
-        reg.clear_unpark_pending("")  # must not raise
-
-    def test_cleared_by_clear_session(self, reg):
-        reg.mark_unpark_pending("s1")
-        reg.mark_unpark_pending("s2")
-        reg.clear_session("s1")
-        assert reg.is_unpark_pending("s1") is False
-        assert reg.is_unpark_pending("s2") is True
-
-    def test_cleared_by_reset_all(self, reg):
-        reg.mark_unpark_pending("s1")
-        reg.reset_all()
-        assert reg.is_unpark_pending("s1") is False
 
 
 class TestClearAndNoOps:
@@ -1070,68 +979,6 @@ class TestLiveActiveTasks:
         tr._recent_terminal[session_id]["bg1"]["recorded_at"] = 0.0
         result2 = await self._call_live(session_id)
         assert result2["activeTasks"] == []
-
-        tr.reset_all()
-
-    @pytest.mark.asyncio
-    async def test_live_surfaces_then_clears_unpark_pending(self):
-        """/live carries the unpark-pending latch; the turn-end finalize clears it.
-
-        Reproduces the hand-off gap: a parked session's sub-agent completed (so
-        it has no activeTasks) but the follow-up turn hasn't started yet. The
-        latch must surface on /live so the poller keeps park-polling. V2's
-        primary release is the durable turn-end finalize
-        (``persist_turn_end_state``) — after it runs, /live reports the latch
-        down again.
-        """
-        from app.core.task_registry import task_registry as tr
-        from app.core.turn_finalize import persist_turn_end_state
-
-        session_id = "live-unpark"
-        tr.reset_all()
-
-        # The unpark hand-off latches "pending" after the parked turn, before the
-        # follow-up streams. (No active tasks — the sub-agent already completed.)
-        tr.mark_unpark_pending(session_id)
-        assert tr.is_unpark_pending(session_id) is True
-
-        result = await self._call_live(session_id)
-        assert result["unpark_pending"] is True
-        assert result["activeTasks"] == []
-
-        # The follow-up turn's end-of-turn finalize releases the latch (V2: the
-        # latch-clear lives in persist_turn_end_state, not a live-store flip).
-        await persist_turn_end_state(session_id)
-        assert tr.is_unpark_pending(session_id) is False
-
-        result2 = await self._call_live(session_id)
-        assert result2["unpark_pending"] is False
-
-        tr.reset_all()
-
-    @pytest.mark.asyncio
-    async def test_finalize_clears_latch_even_when_session_absent(self):
-        """persist_turn_end_state clears the unpark latch with NO session state.
-
-        Backstop hardening (V2 home of the old end-streaming-clears-latch
-        guarantee): if a follow-up unpark turn dies/cancels before it starts
-        AND the session has no row/pool entry anywhere, the error-path finalize
-        must still drop the latch — it never raises and never gates the clear
-        on the session existing — so the latch can't strand a polling client.
-        """
-        from app.core.task_registry import task_registry as tr
-        from app.core.turn_finalize import persist_turn_end_state
-
-        session_id = "live-unpark-evicted"
-        tr.reset_all()
-
-        # Latch set, but the session exists nowhere else (already reaped).
-        tr.mark_unpark_pending(session_id)
-        assert tr.is_unpark_pending(session_id) is True
-
-        # Never raises (absent session row included) yet still clears the latch.
-        await persist_turn_end_state(session_id)
-        assert tr.is_unpark_pending(session_id) is False
 
         tr.reset_all()
 

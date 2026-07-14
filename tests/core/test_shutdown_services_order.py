@@ -1,21 +1,20 @@
 """Shutdown teardown order (lifecycle-notification batch, item 1).
 
 ``shutdown_services`` used to close the Postgres connection pool FIRST — before
-the drain pumps were stopped and before the SDK session pool was shut down.
-Every teardown step after that point (pump finalize writes, reap persistence,
-``end_streaming`` parked-marker writes) then hit a closed pool and died with
+the SDK session pool was shut down. Every teardown step after that point (reap
+persistence, parked-marker writes) then hit a closed pool and died with
 connection errors, so kill attribution / terminal chips written during shutdown
 never became durable.
 
 These tests drive the REAL ``shutdown_services`` coroutine (only the external
 collaborators are mocked) and assert the strict order:
 
-    is_shutting_down=True  →  stop_all_drain_pumps  →  session pool shutdown
+    is_shutting_down=True  →  session pool shutdown
       →  in-memory reset_all()s (permissions, task registry)  →  ...
       →  close_pool LAST
 
-They also pin the new ``is_shutting_down`` module flag semantics: it must be
-set BEFORE any teardown step runs, and the unpark delivery path must refuse to
+They also pin the ``is_shutting_down`` module flag semantics: it must be set
+BEFORE any teardown step runs, and the unpark delivery path must refuse to
 start a new follow-up ``run_query`` while it is set.
 """
 
@@ -34,23 +33,21 @@ def _reset_shutdown_flag():
     startup.is_shutting_down = False
 
 
-async def test_close_pool_runs_strictly_after_pump_stop_and_pool_shutdown():
+async def test_close_pool_runs_strictly_after_pool_shutdown():
     calls: list[str] = []
 
-    pool = MagicMock()
-    pool.shutdown = AsyncMock(side_effect=lambda: calls.append("pool_shutdown"))
-
-    def _stop_pumps_effect():
+    def _pool_shutdown_effect():
         # The flag must already be up when the FIRST teardown step runs, so
         # concurrent unpark deliveries see it before their client disappears.
         assert startup.is_shutting_down is True
-        calls.append("stop_pumps")
+        calls.append("pool_shutdown")
+
+    pool = MagicMock()
+    pool.shutdown = AsyncMock(side_effect=_pool_shutdown_effect)
 
     # (V2: the live session store is deleted — the in-memory resets are the
     # permission handler and the task registry only.)
-    with patch("app.api.ws_cleanup.stop_all_drain_pumps",
-               new=AsyncMock(side_effect=_stop_pumps_effect)), \
-         patch("app.core.session_pool.get_session_pool", return_value=pool), \
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch("app.core.permission_handler.permission_handler.reset_all",
                side_effect=lambda: calls.append("perm_reset")), \
          patch("app.core.task_registry.task_registry.reset_all",
@@ -64,13 +61,10 @@ async def test_close_pool_runs_strictly_after_pump_stop_and_pool_shutdown():
                side_effect=lambda: calls.append("close_pool")):
         await startup.shutdown_services()
 
-    assert "stop_pumps" in calls
     assert "pool_shutdown" in calls
     assert "close_pool" in calls
-    # Strict order: pumps stop before the pool they read is torn down…
-    assert calls.index("stop_pumps") < calls.index("pool_shutdown")
-    # …and the DB pool closes only after BOTH (it is needed by their teardown
-    # writes). It must be the very last teardown step.
+    # The DB pool closes only after the SDK pool teardown (its reaps may still
+    # persist). It must be the very last teardown step.
     assert calls.index("pool_shutdown") < calls.index("close_pool")
     assert calls[-1] == "close_pool"
     # The in-memory resets also land before the DB pool closes.
@@ -85,8 +79,7 @@ async def test_shutdown_flag_is_set_even_if_a_step_fails():
     pool.shutdown = AsyncMock(side_effect=RuntimeError("boom"))
     closed = []
 
-    with patch("app.api.ws_cleanup.stop_all_drain_pumps", new=AsyncMock()), \
-         patch("app.core.session_pool.get_session_pool", return_value=pool), \
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch("app.core.permission_handler.permission_handler.reset_all"), \
          patch("app.core.task_registry.task_registry.reset_all"), \
          patch("app.core.http_client.close_http_client", new=AsyncMock()), \

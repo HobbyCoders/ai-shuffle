@@ -248,17 +248,6 @@ def test_draining_turn_reads_busy_without_active_run(mock_db):
     assert streaming_status.has_active_run("s1") is True
 
 
-def test_live_turn_union_flag_gated(mock_db, monkeypatch):
-    from app.core.config import settings
-    from app.db import turns as turns_db
-
-    monkeypatch.setattr(settings, "v2_turns", False)
-    tid = turns_db.enqueue_turn("s2", "user", prompt="p")["id"]
-    turns_db.start_turn(tid, run_id="run-x")
-    # Flag off → the union contributes nothing; no active run → not busy.
-    assert streaming_status.has_active_run("s2") is False
-
-
 async def test_sweep_reaps_dead_lease_turns_and_kicks(mock_db, monkeypatch):
     from app.core import turn_scheduler
     from app.db import turns as turns_db
@@ -273,23 +262,6 @@ async def test_sweep_reaps_dead_lease_turns_and_kicks(mock_db, monkeypatch):
     # User turn requeued at its position; the session was kicked to restart it.
     assert turns_db.get_turn(tid)["state"] == "queued"
     assert kicked == ["s1"]
-
-
-async def test_sweep_reap_flag_gated(mock_db, monkeypatch):
-    from app.core import turn_scheduler
-    from app.core.config import settings
-    from app.db import turns as turns_db
-
-    kicked = []
-    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
-    monkeypatch.setattr(settings, "v2_turns", False)
-    tid = turns_db.enqueue_turn("s1", "user", prompt="p")["id"]
-    turns_db.start_turn(tid, run_id="run-missing")
-
-    await streaming_status.sweep_once()
-
-    assert turns_db.get_turn(tid)["state"] == "running"  # untouched
-    assert kicked == []
 
 
 # =============================================================================

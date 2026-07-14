@@ -41,7 +41,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import app.api.chat_ws_handler as cwh
-import app.api.ws_cleanup as ws_cleanup
 import app.core.startup as startup
 from app.core import resource_monitor
 from app.core import task_persistence
@@ -71,9 +70,6 @@ def _own_task(task_id="t-1", tool_use_id="tu-1", kind="agent"):
 async def _isolate():
     startup.is_shutting_down = False
     task_registry.reset_all()
-    ws_cleanup._drain_pumps.clear()
-    _saved_window = cwh._UNPARK_BATCH_WINDOW_SECONDS
-    cwh._UNPARK_BATCH_WINDOW_SECONDS = 0.05
     # ROOT-CAUSE ISOLATION (cross-test flake): every ``start_task`` /
     # ``complete_task`` also enqueues a durable ``task_persistence`` snapshot,
     # whose consumer writes to the DB on its OWN ``asyncio.to_thread``. The test
@@ -90,10 +86,8 @@ async def _isolate():
     # disable it here to give the surface write exclusive use of the connection.
     with patch.object(task_persistence, "is_enabled", return_value=False):
         yield
-        cwh._UNPARK_BATCH_WINDOW_SECONDS = _saved_window
         startup.is_shutting_down = False
         task_registry.reset_all()
-        ws_cleanup._drain_pumps.clear()
 
 
 def _make_db_session():
@@ -248,14 +242,12 @@ async def test_callback_records_only_no_unpark_handoff_even_with_live_client():
     pool = MagicMock()
     pool.peek = MagicMock(return_value=state)
 
-    deliver = AsyncMock(return_value=True)
-    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
-         patch.object(cwh, "_deliver_unpark_impl", new=deliver):
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
         task_registry.complete_task(SESSION, "t-live", "killed")
         await _drain_terminal_surface()
 
-    # No unpark handoff (step 3 stripped) — but the durable terminal row lands.
-    deliver.assert_not_awaited()
+    # No unpark handoff (step 3 stripped, ``_deliver_unpark_impl`` deleted in
+    # PR-B) — but the durable terminal row still lands.
     rows = await _terminal_rows("t-live")
     assert len(rows) == 1, f"expected exactly ONE durable terminal row, got {len(rows)}"
     assert rows[0]["metadata"]["system_data"].get("status") == "killed"
@@ -287,13 +279,10 @@ async def test_callback_durable_chip_only_when_no_live_client():
 
     pool = MagicMock()
     pool.peek = MagicMock(return_value=None)
-    deliver = AsyncMock(return_value=True)
-    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
-         patch.object(cwh, "_deliver_unpark_impl", new=deliver):
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
         task_registry.complete_task(SESSION, "t-noclient", "killed")
         await _drain_terminal_surface()
 
-    deliver.assert_not_awaited()
     assert await _terminal_rows("t-noclient"), (
         "expected a durable terminal chip for t-noclient"
     )
@@ -311,13 +300,10 @@ async def test_callback_durable_chip_only_during_shutdown():
     pool.peek = MagicMock(return_value=state)
 
     startup.is_shutting_down = True
-    deliver = AsyncMock(return_value=True)
-    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
-         patch.object(cwh, "_deliver_unpark_impl", new=deliver):
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
         task_registry.complete_task(SESSION, "t-shutdown", "killed")
         await _drain_terminal_surface()
 
-    deliver.assert_not_awaited()
     assert await _terminal_rows("t-shutdown"), (
         "expected a durable terminal chip for t-shutdown"
     )
@@ -474,124 +460,3 @@ async def test_stop_session_task_live_agent_calls_terminal_callback_once():
     assert wire["id"] == "t-cb"
     assert wire["status"] == "killed"
     assert wire.get("reason") == USER_STOP_REASON
-
-
-async def test_pump_killed_payload_carries_server_shutdown_summary():
-    """The pump's killed-pending payload (TaskUpdated-alone terminal) carries
-    the shutdown attribution when the reap happens during teardown."""
-
-    class _FakeClient:
-        def __init__(self, messages):
-            self._messages = list(messages)
-
-        async def receive_messages(self):
-            for m in self._messages:
-                yield m
-
-    def _fake_state(client):
-        state = MagicMock()
-        state.is_streaming = False
-        state.stale_turn_undrained = False
-        state.client = client
-        state.adapter.is_alive = MagicMock(return_value=True)
-        return state
-
-    _own_task("t-killed", "tu-killed")
-    startup.is_shutting_down = True
-
-    handler = cwh.ChatWebSocketHandler(
-        websocket=MagicMock(), device_id="dev-1", user_id="admin",
-        api_user_id=None,
-    )
-    handler.send_json = AsyncMock(return_value=True)
-    handler._deliver_unpark = AsyncMock(return_value=True)
-
-    killed = TaskUpdatedMessage(
-        subtype="task_updated",
-        data={"task_id": "t-killed", "patch": {"status": "killed"}},
-        task_id="t-killed",
-        patch={"status": "killed", "end_time": 1},
-        status="killed",
-        session_id=SESSION,
-        uuid="uu-killed",
-    )
-    client = _FakeClient([killed])
-    pool = MagicMock()
-    pool.peek = MagicMock(return_value=_fake_state(client))
-    with patch("app.core.session_pool.get_session_pool", return_value=pool):
-        await handler._drain_notifications(SESSION, "claude-code", None, None)
-
-    handler._deliver_unpark.assert_awaited_once()
-    pending = handler._deliver_unpark.await_args.kwargs["pending"]
-    assert len(pending) == 1
-    assert pending[0]["task_id"] == "t-killed"
-    assert pending[0]["summary"] == SERVER_SHUTDOWN_SUMMARY
-
-
-# ===========================================================================
-# Kill-notification husk: both synthesized payloads must be enriched from the
-# registry record instead of arriving with empty tool_use_id / summary.
-# ===========================================================================
-
-
-# NOTE (V2 A7, B5): ``test_surface_unpark_payload_enriched_from_registry_record``
-# was DELETED — it pinned the step-3 unpark payload (tool_use_id + enriched
-# summary) that the terminal surface no longer produces. The pump-path
-# enrichment below is unaffected (legacy drain pump, deleted in PR-B), and the
-# durable-row guarantee is covered by
-# ``test_callback_records_only_no_unpark_handoff_even_with_live_client``.
-
-
-async def test_pump_killed_payload_enriched_from_registry_record():
-    """Site 1 (pump ``deliver-killed``): a TaskUpdated-alone killed terminal, NOT
-    during shutdown, still yields a payload with the launch ``tool_use_id`` and a
-    human-readable summary derived from the registry record."""
-
-    class _FakeClient:
-        def __init__(self, messages):
-            self._messages = list(messages)
-
-        async def receive_messages(self):
-            for m in self._messages:
-                yield m
-
-    def _fake_state(client):
-        state = MagicMock()
-        state.is_streaming = False
-        state.stale_turn_undrained = False
-        state.client = client
-        state.adapter.is_alive = MagicMock(return_value=True)
-        return state
-
-    _own_task("t-killed2", "tu-killed2")
-    # NOT shutting down (fixture default) → summary derives from the record.
-
-    handler = cwh.ChatWebSocketHandler(
-        websocket=MagicMock(), device_id="dev-1", user_id="admin",
-        api_user_id=None,
-    )
-    handler.send_json = AsyncMock(return_value=True)
-    handler._deliver_unpark = AsyncMock(return_value=True)
-
-    killed = TaskUpdatedMessage(
-        subtype="task_updated",
-        data={"task_id": "t-killed2", "patch": {"status": "killed"}},
-        task_id="t-killed2",
-        patch={"status": "killed", "end_time": 1},
-        status="killed",
-        session_id=SESSION,
-        uuid="uu-killed2",
-    )
-    client = _FakeClient([killed])
-    pool = MagicMock()
-    pool.peek = MagicMock(return_value=_fake_state(client))
-    with patch("app.core.session_pool.get_session_pool", return_value=pool):
-        await handler._drain_notifications(SESSION, "claude-code", None, None)
-
-    handler._deliver_unpark.assert_awaited_once()
-    pending = handler._deliver_unpark.await_args.kwargs["pending"]
-    assert len(pending) == 1
-    assert pending[0]["task_id"] == "t-killed2"
-    assert pending[0]["tool_use_id"] == "tu-killed2"
-    assert pending[0]["summary"], "expected a non-empty summary from the record"
-    assert "bg work" in pending[0]["summary"]

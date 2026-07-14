@@ -2,7 +2,7 @@
 
 Every turn-END path (the main chat_ws pump, the background query runner, the
 unpark delivery, the drain-pump CLI-turn finalize) calls this to perform the
-DURABLE writes a finished turn owes the session row:
+DURABLE write a finished turn owes the session row:
 
 1. Parked marker — if the turn ends with live background work (a running
    sub-agent or an SDK-backgrounded shell), record the pinning kind on the
@@ -10,12 +10,7 @@ DURABLE writes a finished turn owes the session row:
    "parked awaiting unpark" apart from idle (boot reconcile force-clears
    stale markers, since no background work survives a restart).
 
-2. Backstop clear of the "unpark pending" latch — a turn ending means no
-   follow-up is mid-handoff for this session. Safe for the unpark path:
-   ``_deliver_unpark_impl`` sets the latch AFTER its own end-of-turn call,
-   so this never wipes a just-set latch.
-
-Both writes are best-effort and never raise: a persistence bug must never
+This write is best-effort and never raises: a persistence bug must never
 break turn teardown.
 """
 
@@ -41,11 +36,3 @@ async def persist_turn_end_state(session_id: str) -> None:
         )
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
-
-    # 2. Backstop clear of the "unpark pending" latch (unconditional).
-    try:
-        from app.core.task_registry import task_registry
-
-        task_registry.clear_unpark_pending(session_id)
-    except Exception:
-        logger.debug("task_registry.clear_unpark_pending failed", exc_info=True)

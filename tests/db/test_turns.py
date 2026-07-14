@@ -231,15 +231,28 @@ def test_migration_seeds_turns_from_queued_messages(test_db):
     source='queue' queued turns, preserving order, and never duplicates on a
     re-run."""
     from tests.pg_shim import route_db_to
-    from app.db import database, queued_messages
+    from app.db import database
 
     # queued_messages has an FK to sessions we don't need for this unit test.
     test_db.execute("PRAGMA foreign_keys = OFF")
 
     with route_db_to(test_db) as shim:
-        queued_messages.add_queued_message("sess-1", "first msg", profile_id="p1")
-        queued_messages.add_queued_message("sess-1", "second msg")
-        queued_messages.add_queued_message("sess-2", "other session")
+        # Seed the legacy queued_messages TABLE directly. The module that used to
+        # write it is deleted (V2 deletion), but the table and the v59 migration
+        # that reads it both survive (older installs on the shared DB still write
+        # it), so the migration must still carry any existing rows into turns.
+        seed = shim.cursor()
+        for row in (
+            ("qm-1", "sess-1", "first msg", "p1", None, 0),
+            ("qm-2", "sess-1", "second msg", None, None, 1),
+            ("qm-3", "sess-2", "other session", None, None, 0),
+        ):
+            seed.execute(
+                "INSERT INTO queued_messages "
+                "(id, session_id, content, profile_id, project_id, position) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                row,
+            )
 
         cursor = shim.cursor()
         database._run_column_migrations(cursor)

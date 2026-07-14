@@ -1,7 +1,7 @@
 """Durable background-task snapshot writer tests (Phase 1, WRITE-ONLY).
 
 Every row asserted here was produced by REAL task_registry writer sequences
-(start_task / update_task / complete_task / mark_unparked) flowing through the
+(start_task / update_task / complete_task) flowing through the
 fire-and-forget enqueue -> coalescing queue -> single async consumer -> v55
 ``background_tasks`` upsert. NO reader flips: the assertions read the table
 with raw SQL precisely because no application read path exists yet.
@@ -105,18 +105,6 @@ async def test_terminal_notified_persisted_via_callback_point(mock_db):
     row = _rows(mock_db, sid)[0]
     assert row["status"] == "killed"
     assert row["terminal_notified"]
-
-
-async def test_mark_unparked_persists_flag(mock_db):
-    sid = "tpers-unparked"
-    task_registry.start_task(sid, "t1", "agent", "bg work")
-    task_registry.complete_task(sid, "t1", "completed")
-    assert task_registry.mark_unparked(sid, "t1") is True
-    await tp.flush()
-
-    row = _rows(mock_db, sid)[0]
-    assert row["unparked"]
-    assert row["status"] == "completed"
 
 
 async def test_sdk_background_flag_persisted(mock_db):

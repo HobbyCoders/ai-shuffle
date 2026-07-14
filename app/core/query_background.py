@@ -178,46 +178,6 @@ async def _run_background_query_impl(
         hook_project_id=project.get("id") if project else None,
     )
 
-    # --- Stale-turn early gate (F3) ---
-    # Check stale_turn_undrained BEFORE stopping the drain pump: the pump is the
-    # ONLY thing that can clear the flag (by consuming the killed turn's buffered
-    # ResultMessage). Stopping the pump first and then refusing would orphan the
-    # flag forever — every subsequent query refused, session bricked. Refuse
-    # early and leave the running pump untouched; the late gate below stays as a
-    # backstop for races where the flag is set after this peek.
-    _pre_state = get_session_pool().peek(session_id)
-    if (
-        _pre_state is not None
-        and _pre_state.is_connected
-        and is_subprocess_alive(_pre_state)
-        and getattr(_pre_state, "stale_turn_undrained", False)
-    ):
-        error_msg = (
-            "Session is still winding down a cancelled response; "
-            "try again shortly."
-        )
-        logger.warning(
-            f"[Background] Pooled client for session {session_id} is winding "
-            f"down a cancelled response — refusing early, drain pump left "
-            f"running (stale-turn guard)"
-        )
-        if recorder:
-            await recorder.on_event({"type": "error", "message": error_msg})
-        return
-
-    # --- Single-reader invariant (Bug D) ---
-    # Before this background turn becomes a reader of the pooled SDK client
-    # (reuse + client.query() + receive_response() below), cancel any between-turns
-    # drain pump that may be reading the SAME client. The pump is the R2 reader
-    # (receive_messages()) the WS turn loop always stops via stop_drain_pump() at
-    # turn start; the REST fire-and-forget path must enforce the same invariant or
-    # two coroutines race on one anyio message stream → lost/corrupted messages.
-    # The pump only samples is_streaming once at startup, so flipping it below is
-    # NOT enough to make it self-terminate — it must be explicitly cancelled here.
-    # Function-local import: app.core must not import app.api at module load (cycle).
-    from app.api.ws_cleanup import stop_drain_pump
-    await stop_drain_pump(session_id)
-
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
     existing_state = pool.get(session_id)
@@ -236,22 +196,6 @@ async def _run_background_query_impl(
             logger.warning(
                 f"[Background] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent background query (busy-write guard)"
-            )
-            if recorder:
-                await recorder.on_event({"type": "error", "message": error_msg})
-            return
-        if existing_state.stale_turn_undrained:
-            # A force-cancelled turn's terminal ResultMessage is still buffered on
-            # the pooled client's read loop; the drain pump clears this flag once it
-            # consumes the stale frame. Refuse until then — same fail-safe as the
-            # busy-write gate, and likewise leave the live store untouched.
-            error_msg = (
-                "Session is still winding down a cancelled response; "
-                "try again shortly."
-            )
-            logger.warning(
-                f"[Background] Pooled client for session {session_id} is winding "
-                f"down a cancelled response — refusing (stale-turn guard)"
             )
             if recorder:
                 await recorder.on_event({"type": "error", "message": error_msg})

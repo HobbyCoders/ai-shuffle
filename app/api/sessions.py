@@ -968,16 +968,6 @@ async def get_live_session(
     active_tasks = lifecycle.active_tasks
     unpark_pending = lifecycle.unpark_pending
 
-    # Drift observed on this poll → debounced fire-and-forget reconcile
-    # request (latch/marker repairs only, age-gated + confirm-twice — see
-    # app/core/lifecycle_reconcile.py). Never blocks or fails the poll.
-    if lifecycle.drift:
-        try:
-            from app.core.lifecycle_reconcile import request_reconcile
-            request_reconcile(session_id)
-        except Exception:
-            logger.debug("lifecycle reconcile request failed", exc_info=True)
-
     # Effective "a plain Stop spares background sub-agents" state. Only true when
     # the operator opted in AND the deploy-time CLI binary patch actually landed
     # (the flag alone is intent, not effect). Computed ONCE and attached to every

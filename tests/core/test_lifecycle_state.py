@@ -4,14 +4,10 @@ Every scenario is produced by REAL writer sequences — a claimed run in the
 durable ``runs`` table (the streaming authority since the v2 cutover), the
 task registry's start/complete/clear, the durable parked marker written by
 ``turn_finalize.persist_turn_end_state`` (V2: the live store and its
-end_streaming marker write are deleted), real sessions/queued_messages rows —
-never by planting dicts into private state. Two narrow exceptions: the
-drain-pump registration (production itself registers pumps by direct dict
-assignment, chat_ws_handler -> ws_cleanup._drain_pumps) and the pool-peek
-union test (the pooled SDK client cannot be spawned in a unit test).
+end_streaming marker write are deleted), real sessions/turns rows — never by
+planting dicts into private state. One narrow exception: the pool-peek union
+test (the pooled SDK client cannot be spawned in a unit test).
 """
-
-import asyncio
 
 import pytest
 
@@ -123,45 +119,18 @@ async def test_parked_with_work_state(mock_db):
     assert "class=parked-marker-while-idle" not in _drift_classes(snap)
 
 
-async def test_waking_state_via_unpark_latch(mock_db):
-    sid = "lstate-waking"
-    task_registry.mark_unpark_pending(sid)
-    try:
-        snap = await compute(sid)
-    finally:
-        task_registry.clear_unpark_pending(sid)
-
-    assert snap.state == STATE_WAKING
-    assert snap.unpark_latch is True
-    assert snap.unpark_pending is True
-    # Latch set -> the queued-messages keep-alive is short-circuited (verbatim
-    # /live ordering).
-    assert snap.queued_count is None
-
-
-async def test_waking_state_via_queued_messages(mock_db):
-    sid = "lstate-waking-queue"
-    database.create_session(session_id=sid, profile_id="default")
-    database.add_queued_message(sid, "queued follow-up")
-
-    snap = await compute(sid)
-
-    assert snap.state == STATE_WAKING
-    assert snap.unpark_latch is False
-    assert snap.unpark_pending is True
-    assert snap.queued_count == 1
-
-
 async def test_waking_outranks_parked_with_work(mock_db):
     """Both a committed follow-up AND visible work: the committed follow-up is
-    the stronger claim about what happens next."""
+    the stronger claim about what happens next. V2: the wake signal is a queued
+    ``source=unpark`` turn (the legacy registry latch is deleted)."""
+    from app.db import turns as turns_db
+
     sid = "lstate-precedence"
     task_registry.start_task(sid, "t1", "agent", "bg work")
-    task_registry.mark_unpark_pending(sid)
+    turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification>...")
     try:
         snap = await compute(sid)
     finally:
-        task_registry.clear_unpark_pending(sid)
         task_registry.clear_session(sid)
 
     assert snap.state == STATE_WAKING
@@ -169,14 +138,15 @@ async def test_waking_outranks_parked_with_work(mock_db):
 
 
 async def test_streaming_outranks_everything(mock_db):
+    from app.db import turns as turns_db
+
     sid = "lstate-stream-precedence"
     runs.claim_run(sid, "runner-1", 60)
     task_registry.start_task(sid, "t1", "agent", "bg work")
-    task_registry.mark_unpark_pending(sid)
+    turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification>...")
     try:
         snap = await compute(sid)
     finally:
-        task_registry.clear_unpark_pending(sid)
         task_registry.clear_session(sid)
 
     assert snap.state == STATE_STREAMING
@@ -227,25 +197,6 @@ async def test_parked_with_work_via_parked_turn(mock_db):
     assert snap.state == STATE_PARKED_WITH_WORK
 
 
-async def test_v2_turn_signals_flag_gated(mock_db, monkeypatch):
-    """Flag off → neither the queued-unpark nor parked-turn signal contributes;
-    the derivation is byte-identical to the legacy view."""
-    from app.core.config import settings
-    from app.db import turns as turns_db
-
-    monkeypatch.setattr(settings, "v2_turns", False)
-    sid = "lstate-v2-off"
-    turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification>")
-    tid = turns_db.enqueue_turn(sid, "user", prompt="p")["id"]
-    turns_db.start_turn(tid, run_id="run-x")
-    turns_db.park_turn(tid, ["task-1"])
-
-    snap = await compute(sid)
-
-    assert snap.state == STATE_IDLE
-    assert snap.unpark_pending is False
-
-
 # =============================================================================
 # Drift sensor
 # =============================================================================
@@ -272,18 +223,18 @@ async def test_drift_logs_once_per_transition(mock_db, caplog):
     """Drift logs fire on TRANSITION (newly-appears), not per poll: a persistent
     drift condition sampled repeatedly emits exactly one ``lifecycle-drift``
     line until it clears or the hourly re-log window elapses. (Exercised via
-    ``class=unpark-no-pump`` — the sync-vs-livestore class is quiesced by the
-    runs-table cutover.)"""
+    ``class=bg-work-dead-client`` — a surviving drift class.)"""
     import logging
 
     lifecycle_state.reset_drift_log_state()
     sid = "lstate-drift-transition"
-    task_registry.mark_unpark_pending(sid)  # latch, no pump, nothing streaming
+    # Running background agent with no pooled SDK client → persistent drift.
+    task_registry.start_task(sid, "t1", "agent", "bg work")
     try:
         with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
             for _ in range(5):
                 snap = await compute(sid)
-        assert "class=unpark-no-pump" in _drift_classes(snap)
+        assert "class=bg-work-dead-client" in _drift_classes(snap)
         drift_lines = [
             r for r in caplog.records
             if r.getMessage().startswith("lifecycle-drift session=" + sid)
@@ -293,7 +244,7 @@ async def test_drift_logs_once_per_transition(mock_db, caplog):
             f"{[r.getMessage() for r in drift_lines]}"
         )
     finally:
-        task_registry.clear_unpark_pending(sid)
+        task_registry.clear_session(sid)
         lifecycle_state.reset_drift_log_state()
 
 
@@ -306,12 +257,12 @@ async def test_drift_relogs_after_clearing(mock_db, caplog):
     sid = "lstate-drift-reappear"
     try:
         with caplog.at_level(logging.INFO, logger="app.core.lifecycle_state"):
-            task_registry.mark_unpark_pending(sid)
+            task_registry.start_task(sid, "t1", "agent", "bg work")
             await compute(sid)          # transition 1: appears -> logs
             await compute(sid)          # still standing -> suppressed
-            task_registry.clear_unpark_pending(sid)
+            task_registry.clear_session(sid)
             await compute(sid)          # cleared -> forgotten, no drift
-            task_registry.mark_unpark_pending(sid)
+            task_registry.start_task(sid, "t1", "agent", "bg work")
             await compute(sid)          # transition 2: reappears -> logs
         drift_lines = [
             r for r in caplog.records
@@ -319,7 +270,7 @@ async def test_drift_relogs_after_clearing(mock_db, caplog):
         ]
         assert len(drift_lines) == 2, [r.getMessage() for r in drift_lines]
     finally:
-        task_registry.clear_unpark_pending(sid)
+        task_registry.clear_session(sid)
         lifecycle_state.reset_drift_log_state()
 
 
@@ -337,38 +288,6 @@ async def test_drift_parked_marker_while_idle(mock_db):
     assert snap.state == STATE_IDLE
     assert snap.parked_task_kind == "agent"
     assert "class=parked-marker-while-idle" in _drift_classes(snap)
-
-
-async def test_drift_unpark_latch_without_pump(mock_db):
-    sid = "lstate-drift-unpark"
-    task_registry.mark_unpark_pending(sid)
-    try:
-        snap = await compute(sid)
-    finally:
-        task_registry.clear_unpark_pending(sid)
-
-    assert snap.pump_running is False
-    assert "class=unpark-no-pump" in _drift_classes(snap)
-
-
-async def test_no_unpark_drift_while_pump_runs(mock_db):
-    """A live drain pump makes the latch coherent — no drift. (Registration by
-    direct dict assignment mirrors the production writer exactly.)"""
-    from app.api import ws_cleanup
-
-    sid = "lstate-pump-ok"
-    task_registry.mark_unpark_pending(sid)
-    pump = asyncio.create_task(asyncio.sleep(30))
-    ws_cleanup._drain_pumps[sid] = pump  # noqa: SLF001 — production writer shape
-    try:
-        snap = await compute(sid)
-    finally:
-        ws_cleanup._drain_pumps.pop(sid, None)
-        pump.cancel()
-        task_registry.clear_unpark_pending(sid)
-
-    assert snap.pump_running is True
-    assert "class=unpark-no-pump" not in _drift_classes(snap)
 
 
 async def test_drift_background_work_with_dead_pool_client(mock_db):
@@ -399,40 +318,6 @@ async def test_monitor_shell_does_not_trip_dead_client_drift(mock_db):
     assert snap.state == STATE_PARKED_WITH_WORK  # still visible on the taskbar
     assert snap.background_work == []  # but it parks nothing
     assert "class=bg-work-dead-client" not in _drift_classes(snap)
-
-
-# =============================================================================
-# Timestamped unpark latch (reconciler age-gate input)
-# =============================================================================
-
-def test_unpark_pending_age_lifecycle():
-    sid = "lstate-latch-age"
-    assert task_registry.unpark_pending_age(sid) is None
-    task_registry.mark_unpark_pending(sid)
-    age = task_registry.unpark_pending_age(sid)
-    assert age is not None and 0.0 <= age < 5.0
-    task_registry.clear_unpark_pending(sid)
-    assert task_registry.unpark_pending_age(sid) is None
-
-
-def test_unpark_pending_age_cleared_with_session():
-    sid = "lstate-latch-clear-session"
-    task_registry.mark_unpark_pending(sid)
-    task_registry.clear_session(sid)
-    assert task_registry.is_unpark_pending(sid) is False
-    assert task_registry.unpark_pending_age(sid) is None
-
-
-def test_unpark_pending_age_re_mark_resets_clock():
-    sid = "lstate-latch-remark"
-    task_registry.mark_unpark_pending(sid)
-    task_registry._unpark_pending_since[sid] -= 100.0  # age it
-    assert task_registry.unpark_pending_age(sid) >= 100.0
-    task_registry.mark_unpark_pending(sid)  # re-latch resets the clock
-    try:
-        assert task_registry.unpark_pending_age(sid) < 5.0
-    finally:
-        task_registry.clear_unpark_pending(sid)
 
 
 async def test_session_row_passthrough_avoids_db_fetch(mock_db, monkeypatch):

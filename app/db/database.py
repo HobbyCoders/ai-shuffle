@@ -1428,16 +1428,6 @@ from app.db.background_tasks import (  # noqa: F401
     mark_stale_background_tasks_killed,
 )
 
-from app.db.queued_messages import (  # noqa: F401
-    add_queued_message,
-    get_queued_messages,
-    count_queued_messages,
-    pop_next_queued_message,
-    remove_queued_message,
-    clear_queued_messages,
-    requeue_message_at_front,
-)
-
 # Backward-compatible alias kept for callers that import the private helper.
 _parse_subagent_json_fields = None
 try:

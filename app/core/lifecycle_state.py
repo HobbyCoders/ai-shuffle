@@ -19,8 +19,7 @@ changes no writers. ``get_live_session`` destructures ``active_tasks`` /
 ``unpark_pending`` from the snapshot — the values (and the exact side-effect
 ordering that produces them) are byte-identical to what it computed inline
 before. Disagreements between the sources are reported as DRIFT (log-only,
-stable prefix ``lifecycle-drift``); repairs live in
-``app.core.lifecycle_reconcile``.
+stable prefix ``lifecycle-drift``).
 
 State model (see docs/lifecycle-states.md):
 
@@ -143,22 +142,6 @@ def _drift_entries_to_log(session_id: str, drift: List[str]) -> List[str]:
     return to_log
 
 
-def _pump_running(session_id: str) -> bool:
-    """True iff a live between-turns drain pump exists for the session.
-
-    READ-ONLY view of ``ws_cleanup._drain_pumps`` — never touches the pump
-    (the single-reader invariant and ``stop_drain_pump`` ownership are not
-    this module's business).
-    """
-    try:
-        from app.api import ws_cleanup
-
-        task = ws_cleanup._drain_pumps.get(session_id)  # noqa: SLF001
-        return task is not None and not task.done()
-    except Exception:
-        return False
-
-
 def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
     """Additive V2-turns lifecycle inputs (flag-gated, fully guarded).
 
@@ -169,13 +152,9 @@ def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
     * ``has_parked_turn`` — a ``parked`` turn exists (foreground done, background
       work survives) → contributes to ``parked_with_work``.
 
-    Returns ``(False, False)`` when the flag is off or on ANY error, so the
-    legacy derivation is byte-identical with the flag off / turns table absent.
+    Returns ``(False, False)`` on ANY error, so the derivation is byte-identical
+    when the turns table is absent.
     """
-    from app.core.config import settings
-
-    if not settings.v2_turns:
-        return (False, False)
     try:
         from app.db import turns as turns_db
         from app.db.base import get_db
@@ -258,28 +237,16 @@ async def compute(
     # ``get_visible`` (not ``get_active``) is the DISPLAY view.
     active_tasks = task_registry.get_visible(session_id)
 
-    # "Unpark pending": an unpark follow-up turn is committed but has NOT yet
-    # flipped ``is_streaming`` true.
-    unpark_latch = task_registry.is_unpark_pending(session_id)
+    # "Unpark pending": the legacy registry unpark latch and the undrained
+    # ``queued_messages`` keep-alive are both GONE (V2 deletion) — the latch
+    # writers and the queue table's writers were removed, so both are
+    # permanently inert. The composed ``unpark_pending`` wire value is now
+    # driven solely by the v2 ``has_queued_unpark`` signal below (a queued
+    # ``source=unpark`` turn). The raw fields are retained on the snapshot for
+    # shape parity, hard-set to their inert values.
+    unpark_latch = False
     unpark_pending = unpark_latch
-
-    # Keep-polling ALSO stays up while undrained queued messages await the
-    # drain pump: a follow-up turn is imminent even though nothing is
-    # streaming this instant. Reuses ``unpark_pending`` as the keep-alive
-    # channel; scoped narrowly to the exact "a queue row still exists"
-    # condition. Only queried when the latch is unset (same short-circuit as
-    # the inline code); a failed count degrades to False, never raises.
     queued_count: Optional[int] = None
-    if not unpark_pending:
-        try:
-            queued_count = await run_sync(database.count_queued_messages, session_id)
-            if queued_count > 0:
-                unpark_pending = True
-        except Exception:
-            queued_count = None
-            logger.debug(
-                "count_queued_messages failed for %s", session_id, exc_info=True
-            )
     # --- end verbatim block -------------------------------------------------
 
     # Remaining raw inputs (read-only; no side effects).
@@ -321,7 +288,10 @@ async def compute(
     except Exception:
         logger.debug("session row read failed for %s", session_id, exc_info=True)
 
-    pump_running = _pump_running(session_id)
+    # The between-turns drain pump is GONE (V2 deletion) — nothing registers a
+    # pump, so this signal is permanently inert. Retained on the snapshot for
+    # shape parity, hard-set False.
+    pump_running = False
 
     # Additive V2-turns signals (flag-gated; (False, False) with the flag off).
     # A queued unpark turn folds into the composed ``unpark_pending`` wire value

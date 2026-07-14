@@ -1286,22 +1286,6 @@ async def stream_query(
                            "Wait for it to finish, then send your message again.",
             }
             return
-        if existing_state.stale_turn_undrained:
-            # A force-cancelled turn's terminal ResultMessage is still buffered on
-            # the pooled client's read loop; reusing it now would terminate this
-            # query on that stale frame (message-crossing) or write into a possibly
-            # mid-turn CLI. The between-turns drain pump clears the flag once it
-            # consumes the stale frame; refuse until then.
-            logger.warning(
-                f"Pooled client for session {session_id} is winding down a "
-                f"cancelled response — refusing concurrent query (stale-turn guard)"
-            )
-            yield {
-                "type": "error",
-                "message": "Session is still winding down a cancelled response; "
-                           "try again shortly.",
-            }
-            return
         if not requires_reconnect(existing_state, options):
             state = existing_state
             reusing_client = True
@@ -1900,20 +1884,6 @@ async def _stream_to_websocket_impl(
                 "type": "error",
                 "message": "Session is busy with another response. "
                            "Wait for it to finish, then send your message again.",
-            }
-            return
-        if existing_state.stale_turn_undrained:
-            # See stream_query: a force-cancelled turn's terminal ResultMessage is
-            # still buffered on the pooled client; the drain pump clears this flag
-            # once consumed. Refuse until then so we never cross the stale frame.
-            logger.warning(
-                f"[WS] Pooled client for session {session_id} is winding down a "
-                f"cancelled response — refusing concurrent query (stale-turn guard)"
-            )
-            yield {
-                "type": "error",
-                "message": "Session is still winding down a cancelled response; "
-                           "try again shortly.",
             }
             return
         # Candidate for reuse — check if critical options changed

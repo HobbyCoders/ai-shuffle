@@ -26,7 +26,6 @@ from fastapi.websockets import WebSocketState
 
 from app.api.ws_utils import safe_ws_send, WSPayloadEncodeError
 from app.api.chat_ws_handler import ChatWebSocketHandler
-from app.db.queued_messages import _normalize_row
 
 
 class _FakeWebSocket:
@@ -171,34 +170,3 @@ async def test_send_json_transport_error_poisons_connection():
     ok2 = await handler.send_json({"type": "anything"})
     assert ok2 is False
     ws.send_text.assert_not_called()
-
-
-# ─── _normalize_row (Fix 2: datetimes never leave the DB layer) ──────────────
-
-
-def test_normalize_row_coerces_created_at_to_iso_string():
-    row = {
-        "id": "queued-1",
-        "session_id": "sess-1",
-        "content": "hi",
-        "profile_id": None,
-        "project_id": None,
-        "position": 0,
-        "created_at": datetime(2026, 6, 24, 22, 17, 0, tzinfo=timezone.utc),
-    }
-
-    normalized = _normalize_row(row)
-
-    assert isinstance(normalized["created_at"], str)
-    # The whole row is now JSON-encodable with the stock encoder (no default=).
-    json.dumps(normalized)
-
-
-def test_normalize_row_leaves_string_created_at_untouched():
-    row = {"id": "q", "session_id": "s", "content": "c",
-           "profile_id": None, "project_id": None, "position": 0,
-           "created_at": "2026-06-24T22:17:00+00:00"}
-
-    normalized = _normalize_row(row)
-
-    assert normalized["created_at"] == "2026-06-24T22:17:00+00:00"

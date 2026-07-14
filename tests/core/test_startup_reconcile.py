@@ -246,23 +246,6 @@ async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
     assert kicked == ["boot-s1"]
 
 
-async def test_boot_reap_flag_gated(mock_db, test_db, monkeypatch):
-    from app.core import turn_scheduler
-    from app.db import turns as turns_db
-
-    kicked = []
-    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
-    monkeypatch.setattr(settings, "v2_turns", False)
-    tid = turns_db.enqueue_turn("boot-s2", "user", prompt="p")["id"]
-    turns_db.start_turn(tid, run_id="run-missing")
-
-    counts = await reconcile_from_durable_truth()
-
-    assert counts["turns_reaped"] == 0
-    assert turns_db.get_turn(tid)["state"] == "running"  # untouched
-    assert kicked == []
-
-
 # =============================================================================
 # Schema: version parity + parked_task_kind column
 # =============================================================================

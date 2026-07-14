@@ -35,14 +35,7 @@ from app.api.ws_auth import authenticate_websocket  # noqa: F401
 from app.api.ws_cleanup import (  # noqa: F401
     _active_chat_sessions,
     _active_sessions_lock,
-    _drain_pumps,
-    _draining_sessions,
-    _interrupt_pending_sessions,
-    _stopped_sessions,
     cleanup_session_handlers,
-    stop_all_drain_pumps,
-    stop_drain_pump,
-    superseded_by_successor,
 )
 from app.api.ws_utils import ping_loop, safe_ws_send, WSPayloadEncodeError  # noqa: F401
 from app.api.ws_cli import (  # noqa: F401

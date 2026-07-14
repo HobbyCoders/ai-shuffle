@@ -483,20 +483,6 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(_periodic_usage_limits()))
     logger.info("Usage-limits poll task started (every 5 minutes, first run in 5s)")
 
-    # Runtime lifecycle reconciler (Phase 1): periodic latch/marker-only drift
-    # repair sweep over every session the lifecycle sources know about. Skips
-    # itself entirely while is_shutting_down; each repair is age-gated,
-    # confirm-twice, and recorded via record_error. See
-    # app/core/lifecycle_reconcile.py.
-    from app.core.lifecycle_reconcile import (
-        RECONCILE_INTERVAL_SECONDS,
-        periodic_reconcile_loop,
-    )
-    tasks.append(asyncio.create_task(periodic_reconcile_loop()))
-    logger.info(
-        f"Lifecycle reconcile task started (every {int(RECONCILE_INTERVAL_SECONDS)}s)"
-    )
-
     # Durable busy-status reconciler (v2 core): re-checks sessions last
     # broadcast as busy so a lease that expires with no terminal event (crashed
     # runner) still turns the board spinner off. Also registers the event
@@ -516,20 +502,18 @@ def install_v2_turns_wiring() -> None:
     # V2 turns wiring (Phase 2): install the scheduler seams (kick /
     # on_turn_settled / on_task_terminal) and route turn_manager's interrupt
     # executor to the live SessionRuntime — turn_manager must not import
-    # session_runtime, so the routing closure lives here. Gated on the cutover
-    # flag: with it OFF the legacy pipeline stays in sole control.
-    if settings.v2_turns:
-        from app.core import session_runtime, turn_manager, turn_scheduler
+    # session_runtime, so the routing closure lives here.
+    from app.core import session_runtime, turn_manager, turn_scheduler
 
-        turn_scheduler.install()
+    turn_scheduler.install()
 
-        async def _route_interrupt(session_id: str, mode: str) -> None:
-            runtime = session_runtime.get_live_runtime(session_id)
-            if runtime is not None:
-                await runtime.interrupt(mode)
+    async def _route_interrupt(session_id: str, mode: str) -> None:
+        runtime = session_runtime.get_live_runtime(session_id)
+        if runtime is not None:
+            await runtime.interrupt(mode)
 
-        turn_manager.register_interrupt_executor(_route_interrupt)
-        logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
+    turn_manager.register_interrupt_executor(_route_interrupt)
+    logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
 
 
 # Process-wide "we are tearing down" flag. Set FIRST inside shutdown_services
@@ -549,28 +533,18 @@ async def shutdown_services() -> None:
     """Shutdown async services in correct dependency order.
 
     ORDER MATTERS (lifecycle-notification batch, item 1). The old order closed
-    the Postgres pool FIRST, so every later teardown step (pump finalize
-    writes, reap persistence, parked-marker writes) hit a closed pool and its
-    durable writes were lost. The pinned order is:
+    the Postgres pool FIRST, so every later teardown step (reap persistence,
+    parked-marker writes) hit a closed pool and its durable writes were lost.
+    The pinned order is:
 
         1. is_shutting_down = True   (gates new unpark follow-ups everywhere)
-        2. stop_all_drain_pumps      (pumps must stop reading clients about to die)
-        3. session pool shutdown     (disconnect SDK subprocesses; reaps may write)
-        4. in-memory reset_all()s    (live store / permissions / task registry)
-        5. remaining services        (http client, automations, connectors)
-        6. close_pool — VERY LAST    (every step above may still need the DB)
+        2. session pool shutdown     (disconnect SDK subprocesses; reaps may write)
+        3. in-memory reset_all()s    (live store / permissions / task registry)
+        4. remaining services        (http client, automations, connectors)
+        5. close_pool — VERY LAST    (every step above may still need the DB)
     """
     global is_shutting_down
     is_shutting_down = True
-
-    # Stop any between-turns drain pumps BEFORE disconnecting the pooled SDK
-    # clients they read (single-reader invariant — a pump must not be reading a
-    # client that's being torn down).
-    try:
-        from app.api.ws_cleanup import stop_all_drain_pumps
-        await stop_all_drain_pumps()
-    except Exception:
-        pass
 
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:

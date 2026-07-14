@@ -123,9 +123,6 @@ def _bg_patches(stack: ExitStack, pool: _StubPool, run_sync_calls=None):
     stack.enter_context(patch(
         "app.core.hook_service.attach_hooks_to_options", new=MagicMock()
     ))
-    stack.enter_context(patch(
-        "app.api.ws_cleanup.stop_drain_pump", new=AsyncMock()
-    ))
     # streaming_status.notify (fired on lease claim/release) schedules an async
     # DB re-check thread that shares the per-test ShimConnection; its commit can
     # interleave with append_events' in-flight statements and corrupt the shim's
@@ -293,12 +290,11 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
 # ─── persist_turn_end_state (turn_finalize) ─────────────────────────────────
 
 
-async def test_persist_turn_end_state_records_parked_kind_and_clears_latch():
+async def test_persist_turn_end_state_records_parked_kind():
     registry = MagicMock()
     registry.get_active_background_work = MagicMock(
         return_value=[{"kind": "shell"}]
     )
-    registry.clear_unpark_pending = MagicMock()
     set_kind = MagicMock()
 
     from app.core import task_registry as task_registry_module
@@ -308,20 +304,18 @@ async def test_persist_turn_end_state_records_parked_kind_and_clears_latch():
         await persist_turn_end_state("sess-park")
 
     set_kind.assert_called_once_with("sess-park", "shell")
-    registry.clear_unpark_pending.assert_called_once_with("sess-park")
 
 
 async def test_persist_turn_end_state_clears_marker_when_idle_and_never_raises():
     registry = MagicMock()
     registry.get_active_background_work = MagicMock(return_value=[])
-    registry.clear_unpark_pending = MagicMock(side_effect=RuntimeError("boom"))
-    set_kind = MagicMock()
+    set_kind = MagicMock(side_effect=RuntimeError("boom"))
 
     from app.core import task_registry as task_registry_module
     from app.db import database
     with patch.object(task_registry_module, "task_registry", new=registry), \
          patch.object(database, "set_session_parked_task_kind", new=set_kind):
-        # Latch-clear failure is swallowed (never breaks turn teardown).
+        # A persistence failure is swallowed (never breaks turn teardown).
         await persist_turn_end_state("sess-idle")
 
     set_kind.assert_called_once_with("sess-idle", None)
