@@ -140,16 +140,24 @@ function scheduleFlush(): void {
 	if (flushScheduled) return;
 	flushScheduled = true;
 	const run = () => {
-		rafHandle = null;
-		timerHandle = null;
-		flushScheduled = false;
+		// Whichever timer fired first wins the race: cancel the loser (rAF or
+		// timeout) and clear the coalescing latch so the next batch can schedule
+		// a fresh flush. This makes `run` execute exactly once per schedule even
+		// when both handles are pending.
+		clearScheduledFlush();
 		fold();
 	};
+	// Race the rAF against a setTimeout fallback. Browsers pause rAF in hidden
+	// or fully-occluded tabs, so a pure-rAF schedule would strand
+	// `flushScheduled=true` forever — the reducer keeps advancing but the UI
+	// never folds, freezing the live view until the tab is refocused/reloaded.
+	// The 250ms timer guarantees the fold still runs while backgrounded; when
+	// visible, rAF fires first (~16ms) and cancels the timer, preserving the
+	// single-flush-per-frame coalescing.
 	if (typeof requestAnimationFrame !== 'undefined') {
 		rafHandle = requestAnimationFrame(run);
-	} else {
-		timerHandle = setTimeout(run, 16);
 	}
+	timerHandle = setTimeout(run, 250);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

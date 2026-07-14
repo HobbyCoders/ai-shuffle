@@ -9,7 +9,8 @@
  * Parses SSE frames incrementally (`id:` / `event:` / `data:`, multi-line data,
  * `:`-prefixed keepalive comments ignored), tracks `lastSeq` from each frame's
  * `id:`, and on disconnect reconnects with exponential backoff (1s → 15s cap) at
- * `from_seq=lastSeq+1`. Resubscribes on `visibilitychange`/`online`, mirroring
+ * `from_seq=lastSeq` (the server filter is exclusive: `seq > from_seq`, so this
+ * is gap-free and duplicate-free). Resubscribes on `visibilitychange`/`online`, mirroring
  * ws-connection.ts's revive behavior. `stop()` aborts cleanly.
  *
  * No new npm deps: uses `fetch` + `ReadableStream` + `TextDecoder`.
@@ -22,7 +23,7 @@ export interface SseFeedOptions {
 	onEvent: (event: Record<string, unknown>) => void;
 	/** Optional: called on transient errors (before a reconnect is scheduled). */
 	onError?: (err: unknown) => void;
-	/** Seed cursor. The first request uses `from_seq`; reconnects use lastSeq+1. */
+	/** Seed cursor. The first request uses `from_seq`; reconnects use lastSeq (server filter is exclusive). */
 	fromSeq?: number;
 }
 
@@ -120,7 +121,9 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	let running = true;
 	let lastSeq = typeof options.fromSeq === 'number' ? Math.max(0, options.fromSeq) : 0;
 	// `nextFrom` is the from_seq to use for the NEXT connect attempt. First
-	// connect replays from the seed cursor; reconnects resume at lastSeq+1.
+	// connect replays from the seed cursor; reconnects resume at lastSeq. The
+	// server filter is exclusive (`seq > from_seq`), so `lastSeq` yields the
+	// next unseen event with no gap and no duplicate.
 	let nextFrom = lastSeq;
 	let backoff = BACKOFF_MIN_MS;
 	let controller: AbortController | null = null;
@@ -222,7 +225,13 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				for (const frame of frames) {
 					if (!Number.isNaN(frame.id)) {
 						lastSeq = Math.max(lastSeq, frame.id);
-						nextFrom = lastSeq + 1;
+						// The server filters `WHERE seq > from_seq` (exclusive), so the
+						// reconnect cursor is `lastSeq` — NOT `lastSeq + 1`. Passing
+						// `lastSeq + 1` would make the server skip event `lastSeq + 1`
+						// on every reconnect/revive (off-by-one drop). `lastSeq` is
+						// both gap-free (> lastSeq starts at lastSeq+1) and
+						// duplicate-free (lastSeq itself is excluded).
+						nextFrom = lastSeq;
 					}
 					if (frame.data) {
 						try {

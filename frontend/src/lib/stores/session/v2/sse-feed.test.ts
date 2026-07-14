@@ -7,8 +7,8 @@
  * CRLF transport, and the leading-space rule.
  */
 
-import { describe, it, expect } from 'vitest';
-import { createFrameParser, type ParsedFrame } from './sse-feed';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createFrameParser, createSseFeed, type ParsedFrame } from './sse-feed';
 
 function frames(...chunks: string[]): ParsedFrame[] {
 	const p = createFrameParser();
@@ -77,5 +77,89 @@ describe('createFrameParser', () => {
 		const out = frames(': ka\n\n', 'id: 4\ndata: real\n\n', ': ka\n\n');
 		expect(out).toHaveLength(1);
 		expect(out[0]).toEqual({ id: 4, event: '', data: 'real' });
+	});
+});
+
+// ─── Reconnect cursor (off-by-one regression) ────────────────────────────────
+
+describe('createSseFeed reconnect cursor', () => {
+	// A ReadableStream that emits the given string chunks then closes.
+	function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		let i = 0;
+		return new ReadableStream({
+			pull(controller) {
+				if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]));
+				else controller.close();
+			},
+		});
+	}
+
+	// A ReadableStream that never produces or closes — keeps the reader parked so
+	// the feed doesn't loop reconnecting after we've captured the second URL.
+	function pendingStream(): ReadableStream<Uint8Array> {
+		return new ReadableStream({
+			pull() {
+				return new Promise<void>(() => {});
+			},
+		});
+	}
+
+	// Flush the microtask queue enough times to drain a chunked stream read loop.
+	// ReadableStream scheduling is microtask-based (not timer-based), so real
+	// awaits drain it even while vitest fake timers are installed.
+	const tick = async (n = 30) => {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	};
+
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('reconnects at from_seq=lastSeq (server filter is exclusive), not lastSeq+1', async () => {
+		const urls: string[] = [];
+		const fetchMock = vi.fn(async (url: string) => {
+			urls.push(url);
+			// First connect delivers seq 1–3 then closes → triggers a reconnect.
+			// Second connect parks so we can inspect its URL without churn.
+			return urls.length === 1
+				? {
+						ok: true,
+						status: 200,
+						body: streamFromChunks([
+							'id: 1\ndata: {"seq":1}\n\n',
+							'id: 2\ndata: {"seq":2}\n\n',
+							'id: 3\ndata: {"seq":3}\n\n',
+						]),
+					}
+				: { ok: true, status: 200, body: pendingStream() };
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+
+		// Drain the first connect + full stream. When it closes, the feed schedules
+		// a reconnect at the 1s backoff.
+		await tick();
+		expect(events).toHaveLength(3);
+		expect(feed.lastSeq).toBe(3);
+
+		// Fire the backoff timer → second connect.
+		await vi.advanceTimersByTimeAsync(1_000);
+		await tick();
+		expect(urls.length).toBeGreaterThanOrEqual(2);
+
+		// First connect replays from the seed cursor.
+		expect(urls[0]).toContain('from_seq=0');
+		// The reconnect must resume at lastSeq (3), NOT lastSeq+1 (4). The server
+		// filters `WHERE seq > from_seq` (exclusive), so from_seq=4 would skip
+		// event 4 forever; from_seq=3 is gap-free and duplicate-free.
+		expect(urls[1]).toContain('from_seq=3');
+		expect(urls[1]).not.toContain('from_seq=4');
+
+		feed.stop();
 	});
 });
