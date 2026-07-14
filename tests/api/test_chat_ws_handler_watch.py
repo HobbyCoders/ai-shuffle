@@ -13,7 +13,8 @@ tests/api/test_ws_closure_characterization.py (section H):
 * the dead-vs-live duplicate-socket ASYMMETRY: a DEAD old socket is replaced
   (page-refresh recovery); a LIVE old socket skips re-registration (duplicate
   tab) but still binds current_session_id,
-* headless (websocket=None) NEVER registers as a watcher (plan step 6).
+* (V2 A7: the headless websocket=None watcher-guard test was removed with
+  headless_query_runner.py; the guard itself remains in the class.)
 
 Part B — deferred-permissions shapes where the CLASS is the intended winner
 (plan section "Divergences where the class is the intended winner"). These pin
@@ -38,7 +39,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.websockets import WebSocketState
 
 import app.api.chat_ws_handler as cwh
-from app.core.headless_query_runner import HeadlessChatHandler
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -119,10 +119,6 @@ class _HandlerHarness:
             user_id="admin",
             api_user_id=None,
         )
-
-    def make_headless(self):
-        """The real HeadlessChatHandler (websocket=None)."""
-        return HeadlessChatHandler(user_id="admin", api_user_id=None)
 
 
 def _shapes(ws):
@@ -331,21 +327,10 @@ async def test_watch_session_same_ws_rewatch_proceeds():
     assert _queue_frames(h.ws), "same-socket re-watch still restores the queue"
 
 
-# ═══ A3. watch_session — headless must never watch (plan step 6) ═══════════════
-
-
-async def test_headless_watch_session_never_registers():
-    """A headless handler (websocket=None) must never register itself as a
-    watcher — sync_engine must not even be consulted, and no DB read happens."""
-    with _HandlerHarness() as h:
-        handler = h.make_headless()
-        await handler.handle_watch_session(dict(WATCH))
-
-    h.sync.is_device_watching_session.assert_not_called()
-    h.sync.register_device.assert_not_awaited()
-    h.sync.unregister_device.assert_not_awaited()
-    h.db.get_queued_messages.assert_not_called()
-    assert handler.current_session_id is None
+# NOTE (V2 A7): the headless-never-watches test is GONE — A7 deleted
+# headless_query_runner.py, so no ChatWebSocketHandler is built with
+# websocket=None. The ``self.websocket is None`` early-return guard in
+# handle_watch_session remains in the class.
 
 
 # ═══ B1. get_pending_permissions — class shape is canonical ════════════════════

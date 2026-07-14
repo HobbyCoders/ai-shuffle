@@ -64,8 +64,41 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 # DB reads
 # ----------------------------------------------------------------------
 
+def _has_live_turn_db(session_id: str) -> bool:
+    """True iff a v2 live turn (running|interrupting|draining) exists for the
+    session. Fully guarded and flag-gated: returns False when ``v2_turns`` is
+    off, or on ANY error (missing table, etc.) — so this union can NEVER lose
+    the authoritative runs-busy signal it augments.
+
+    A ``draining`` turn is the reason this matters: an escalated interrupt keeps
+    the healthy client while its reader drains, and the run lease may already be
+    released — the runs read alone would read idle, but the session is still
+    busy until the drain settles.
+    """
+    try:
+        from app.core.config import settings
+
+        if not settings.v2_turns:
+            return False
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM turns WHERE session_id=%s "
+                "AND state IN ('running','interrupting','draining') LIMIT 1",
+                (session_id,),
+            )
+            return cursor.fetchone() is not None
+    except Exception:
+        logger.debug(
+            "[streaming_status] live-turn read failed for %s", session_id,
+            exc_info=True,
+        )
+        return False
+
+
 def _has_active_run_db(session_id: str) -> bool:
-    """Uncached lease-valid busy read (notifier/sweep path). May raise."""
+    """Uncached busy read (notifier/sweep + guard path). May raise on the runs
+    read; the v2 live-turn union is guarded and never masks the runs signal."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -73,7 +106,9 @@ def _has_active_run_db(session_id: str) -> bool:
             "LIMIT 1",
             (session_id,),
         )
-        return cursor.fetchone() is not None
+        if cursor.fetchone() is not None:
+            return True
+    return _has_live_turn_db(session_id)
 
 
 def has_active_run(session_id: Optional[str]) -> bool:
@@ -299,7 +334,13 @@ async def sweep_once() -> int:
 
     Catches lease expiry with no terminal event (crashed runner never released
     its run and stopped heartbeating). Returns the number of spinners cleared.
+
+    V2 turns (flag-gated): also reaps dead-lease live turns (``reap_expired``
+    requeues user/queue work, aborts the rest) and kicks each affected session
+    so a requeued turn restarts — the 15s crash/kill recovery backstop.
     """
+    await _reap_and_kick_turns()
+
     cleared = 0
     for session_id in list(_last_broadcast):
         try:
@@ -316,6 +357,31 @@ async def sweep_once() -> int:
             await _apply_busy_state(session_id, False)
             cleared += 1
     return cleared
+
+
+async def _reap_and_kick_turns() -> int:
+    """Reap dead-lease live turns and kick each affected session. Flag-gated and
+    fully guarded — a reap/kick failure must never break the spinner sweep.
+
+    Returns the number of turns reaped (0 when the flag is off or on error)."""
+    try:
+        from app.core.config import settings
+
+        if not settings.v2_turns:
+            return 0
+        from app.core import turn_scheduler
+        from app.db import turns as turns_db
+
+        reaped = await asyncio.to_thread(turns_db.reap_expired)
+        if not reaped:
+            return 0
+        for session_id in {r["session_id"] for r in reaped}:
+            turn_scheduler.kick(session_id)
+        logger.info("[streaming_status] sweep reaped %d dead-lease turn(s)", len(reaped))
+        return len(reaped)
+    except Exception:
+        logger.warning("[streaming_status] turn reap sweep failed", exc_info=True)
+        return 0
 
 
 async def sweep_loop() -> None:

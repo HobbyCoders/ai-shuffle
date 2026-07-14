@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 58
+SCHEMA_VERSION = 59
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1529,6 +1529,53 @@ def create_postgres_schema(cursor) -> None:
             UNIQUE (project_id, runner_id, path)
         )
     """)
+
+    # ------------------------------------------------------------------
+    # 56. turns — the durable per-session turn queue + live-turn state
+    #     machine (v2 core, Phase 2).
+    #
+    # A *turn* is one unit of work for a session (a user prompt, a queued
+    # follow-up, an unpark wake, a failover retry, …). The table is the state
+    # machine; the session_events log is the record. At most one turn per
+    # session may be in a live state (running|interrupting|draining), enforced
+    # by the partial unique index below — the same DB-raced ownership discipline
+    # as ``runs``. Every transition is a single guarded UPDATE (see
+    # app/db/turns.py); there are no in-memory locks. Event mirroring
+    # (turn.* into session_events) is wired at the runtime layer, not here.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS turns (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            source TEXT NOT NULL,
+            prompt TEXT,
+            profile_id TEXT,
+            project_id TEXT,
+            worktree_id TEXT,
+            overrides JSONB NOT NULL DEFAULT '{}',
+            payload JSONB NOT NULL DEFAULT '{}',
+            command_id TEXT,
+            parent_turn_id TEXT,
+            run_id TEXT,
+            interrupt_mode TEXT,
+            stop_background BOOLEAN NOT NULL DEFAULT FALSE,
+            position DOUBLE PRECISION,
+            instance_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            started_at TIMESTAMP WITH TIME ZONE,
+            ended_at TIMESTAMP WITH TIME ZONE,
+            stop_reason TEXT,
+            error TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_live_per_session "
+        "ON turns(session_id) WHERE state IN ('running','interrupting','draining')"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
+    )
 
     # ==================================================================
     # SEED DATA

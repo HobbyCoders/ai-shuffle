@@ -300,6 +300,12 @@ class TurnRecorder:
         self.fence_token = fence_token
         self.runner_id = runner_id
         self.turn_id = str(uuid.uuid4())
+        # True when THIS recorder owns the run lease (the legacy ``maybe_create``
+        # self-claim path): ``close()`` then releases the lease. The Phase-2
+        # ``create_for_run`` injection path sets this False — the SessionRuntime
+        # owns the lease + renew loop and releases it itself, so ``close()`` must
+        # NOT release out from under the runtime.
+        self._owns_lease = True
 
         # Delta batching state. Insertion-ordered: kind -> list[str] chunks.
         self._delta_buffers: Dict[str, List[str]] = {}
@@ -375,6 +381,53 @@ class TurnRecorder:
         _last_turn_recorders[session_id] = recorder
         return recorder
 
+    @classmethod
+    async def create_for_run(
+        cls,
+        session_id: str,
+        *,
+        run_id: str,
+        fence_token: int,
+        turn_id: str,
+        command_id: Optional[str] = None,
+        runner_id: Optional[str] = None,
+    ) -> "TurnRecorder":
+        """Build a recorder bound to a run lease the CALLER already claimed
+        (Phase 2 injection path).
+
+        :class:`app.core.session_runtime.SessionRuntime` claims the fenced run
+        lease, starts the ``turns`` row, and owns the renew loop, then hands the
+        recorder the injected ``(run_id, fence_token, turn_id)`` instead of
+        letting it self-claim (the :meth:`maybe_create` path). Consequences vs.
+        ``maybe_create``:
+
+        * the recorder does NOT claim a run and does NOT start its own renew loop
+          (``_renew_task`` stays ``None`` — the runtime heartbeats the lease);
+        * ``close()`` does NOT release the run (``_owns_lease`` is False — the
+          runtime releases it in its ``finally``);
+        * the recorder's ``turn_id`` is the injected ``turns`` row id, so every
+          appended event ties to the durable turn machine.
+
+        All other recording internals (delta batching, usage coalescing,
+        terminal translation) are identical. Like ``maybe_create`` this seeds the
+        legacy history backfill before the turn's first append and never raises
+        for the backfill.
+        """
+        from app.core.history_backfill import ensure_backfilled
+        await ensure_backfilled(session_id)
+
+        recorder = cls(
+            session_id,
+            command_id,
+            run_id,
+            fence_token,
+            runner_id or settings.effective_instance_id,
+        )
+        recorder.turn_id = turn_id
+        recorder._owns_lease = False
+        _last_turn_recorders[session_id] = recorder
+        return recorder
+
     async def start(self, user_message: str) -> None:
         """Append ``turn.started`` then ``message.user``."""
         try:
@@ -440,7 +493,11 @@ class TurnRecorder:
             self._flush_task = None
             self._cancel_task(self._renew_task)
             self._renew_task = None
-            if self.run_id is not None and self.fence_token is not None:
+            if (
+                self._owns_lease
+                and self.run_id is not None
+                and self.fence_token is not None
+            ):
                 try:
                     await asyncio.to_thread(
                         runs_db.release_run, self.run_id, self.fence_token
@@ -522,10 +579,22 @@ class TurnRecorder:
                 )
                 if k in metadata
             }
+            # Phase 2 A5 amendment (plan §1.6(1)): carry the pump's API error
+            # status into the terminal payload — a usage-limit 429 turn
+            # otherwise settles as a normal completion with api_error_status
+            # living only in in-memory pump metadata, leaving the scheduler's
+            # failover policy nothing durable to key on. ``extra_payload``
+            # because the frozen contract model has no field for it (same
+            # mechanism as turn.aborted ``message``). ``ResultMessage`` exposes
+            # only ``api_error_status`` — no message field is ever populated.
+            api_error: Optional[Dict[str, Any]] = None
+            if metadata.get("api_error_status") is not None:
+                api_error = {"api_error_status": metadata["api_error_status"]}
             events.append(self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),
                 usage=usage_summary,
+                extra_payload=api_error,
             ))
             self._terminal_recorded = True
         elif etype == "interrupted":

@@ -13,9 +13,16 @@
     ``mark_terminal_notified`` latch) when the parent's OWN background work
     transitions to error/killed. The chat layer registers the callback once at
     startup; it synthesizes the durable terminal chip (persisted
-    ``add_session_message``) and hands off ONE consolidated unpark via
-    ``_deliver_unpark_impl`` ONLY when a live pooled client exists and the
-    server is not shutting down (durable-chip-only during shutdown).
+    ``add_session_message``) plus the live task_updated event.
+
+    V2 A7 (B5): the legacy STEP 3 — the ``HeadlessChatHandler`` unpark handoff
+    via ``_deliver_unpark_impl`` — is STRIPPED from
+    ``_surface_terminal_notification``. The v2 scheduler
+    (idle_reader → turn_scheduler.on_task_terminal) is now the sole unpark
+    producer, so this surface ONLY records (chip + durable row); it never spawns
+    a runner or hands off an unpark, live client or not. The accepted flag-OFF
+    regression: a user-stop of a live background sub-agent no longer auto-wakes
+    the parent, but the durable chip still records it.
 
 V2 (Phase-1 deletion): ``LiveSessionStore.cleanup_ended_session`` — the old
 force-reap entry point — is deleted with the live store; the force reap now
@@ -227,7 +234,11 @@ async def test_force_eviction_reap_surfaces_exactly_one_terminal_row():
     assert (r_meta := terminal_rows[0]["metadata"]).get("subtype") == "task_updated", r_meta
 
 
-async def test_callback_hands_off_one_consolidated_unpark_with_live_client():
+async def test_callback_records_only_no_unpark_handoff_even_with_live_client():
+    """V2 A7 (B5): the terminal surface NO LONGER hands off an unpark, even when
+    a live pooled client exists — the scheduler is the sole unpark producer. The
+    kill is still recorded durably (chip + row); ``_deliver_unpark_impl`` is
+    never called and no runner is spawned."""
     _make_db_session()
     cwh.register_terminal_notification_callback()
     _own_task("t-live", "tu-live")
@@ -243,12 +254,29 @@ async def test_callback_hands_off_one_consolidated_unpark_with_live_client():
         task_registry.complete_task(SESSION, "t-live", "killed")
         await _drain_terminal_surface()
 
-    deliver.assert_awaited_once()
-    kwargs = deliver.await_args.kwargs
-    assert kwargs["session_id"] == SESSION
-    pending = kwargs["pending"]
-    assert len(pending) == 1 and pending[0]["task_id"] == "t-live"
-    assert pending[0]["status"] == "killed"
+    # No unpark handoff (step 3 stripped) — but the durable terminal row lands.
+    deliver.assert_not_awaited()
+    rows = await _terminal_rows("t-live")
+    assert len(rows) == 1, f"expected exactly ONE durable terminal row, got {len(rows)}"
+    assert rows[0]["metadata"]["system_data"].get("status") == "killed"
+
+
+def test_surface_terminal_notification_records_only_never_spawns():
+    """Source guard: the terminal surface keeps steps 1 (live chip) & 2 (durable
+    row) but the step-3 unpark handoff is gone — its body must not reference the
+    deleted ``HeadlessChatHandler`` / ``StreamingContext`` husk nor call
+    ``_deliver_unpark_impl``, so it can never spawn a runner."""
+    import inspect
+
+    src = inspect.getsource(cwh._surface_terminal_notification)
+    # Steps that must remain (the guaranteed terminal SURFACE):
+    assert "mark_chipped" in src, "step 1 (live chip) must remain"
+    assert "add_session_message" in src, "step 2 (durable row) must remain"
+    # The stripped step-3 handoff must be absent from the executable body.
+    body = src.split('"""', 2)[-1]  # drop the docstring (which explains the strip)
+    assert "_deliver_unpark_impl(" not in body, "step 3 unpark handoff must be gone"
+    assert "HeadlessChatHandler(" not in body, "must not instantiate a headless runner"
+    assert "StreamingContext(" not in body, "must not build the pending husk"
 
 
 async def test_callback_durable_chip_only_when_no_live_client():
@@ -506,31 +534,12 @@ async def test_pump_killed_payload_carries_server_shutdown_summary():
 # ===========================================================================
 
 
-async def test_surface_unpark_payload_enriched_from_registry_record():
-    """Site 2 (#522 exactly-once surface): the consolidated unpark payload for a
-    killed task carries the launch ``tool_use_id`` and a non-empty human-readable
-    summary derived from the registry record — not a contentless husk."""
-    _make_db_session()
-    cwh.register_terminal_notification_callback()
-    _own_task("t-enrich", "tu-enrich")
-
-    state = MagicMock()
-    state.adapter.is_alive = MagicMock(return_value=True)
-    pool = MagicMock()
-    pool.peek = MagicMock(return_value=state)
-
-    deliver = AsyncMock(return_value=True)
-    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
-         patch.object(cwh, "_deliver_unpark_impl", new=deliver):
-        task_registry.complete_task(SESSION, "t-enrich", "killed")
-        await _drain_terminal_surface()
-
-    deliver.assert_awaited_once()
-    pending = deliver.await_args.kwargs["pending"]
-    assert len(pending) == 1
-    assert pending[0]["tool_use_id"] == "tu-enrich"
-    assert pending[0]["summary"], "expected a non-empty summary from the record"
-    assert "bg work" in pending[0]["summary"]
+# NOTE (V2 A7, B5): ``test_surface_unpark_payload_enriched_from_registry_record``
+# was DELETED — it pinned the step-3 unpark payload (tool_use_id + enriched
+# summary) that the terminal surface no longer produces. The pump-path
+# enrichment below is unaffected (legacy drain pump, deleted in PR-B), and the
+# durable-row guarantee is covered by
+# ``test_callback_records_only_no_unpark_handoff_even_with_live_client``.
 
 
 async def test_pump_killed_payload_enriched_from_registry_record():

@@ -181,6 +181,13 @@ async def lifespan(app: FastAPI):
     from app.core.file_logging import emit_pending_fatal_warning
     emit_pending_fatal_warning()
 
+    # Install the v2 turn-scheduler seams (turn_scheduler.install +
+    # turn_manager interrupt executor) BEFORE reconcile runs: reconcile's boot
+    # sweep fires turn_scheduler.kick() for recovered sessions, which is a no-op
+    # unless these seams are already installed.
+    from app.core.startup import install_v2_turns_wiring
+    install_v2_turns_wiring()
+
     # Reconcile from durable truth BEFORE any session machinery starts: a
     # previous run's crash can leave sessions durably marked parked (stuck
     # spinners/badges in the UI) and leak its CLI subprocesses — nothing in

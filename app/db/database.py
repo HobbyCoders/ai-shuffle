@@ -102,7 +102,10 @@ def _safe_json(value):
 # 56: v2 core primitives (session_events, session_event_counters, runs, pending_interactions, artifacts, projects_v2, checkouts)
 # 57: sessions.v2_stream — per-session opt-in flag for the V2 streaming path (Phase 1 cutover)
 # 58: force v2_stream TRUE on every session + flip the column default TRUE (V2 Phase 1 deletion; the per-session opt-in is retired)
-SCHEMA_VERSION = 58
+# 59: turns table (V2 Phase 2 — durable per-session turn queue + live-turn state
+#     machine, one live turn per session via partial unique index) + one-time
+#     migration seeding queued turns from the frozen queued_messages table
+SCHEMA_VERSION = 59
 
 
 def _run_column_migrations(cursor):
@@ -834,6 +837,66 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("checkouts")
+
+    # turns — durable per-session turn queue + live-turn state machine (v59,
+    # V2 Phase 2). Idempotent so upgrades from any older version land the table
+    # (same defensive pattern as the v2-core block above). The partial unique
+    # index enforces one live turn (running|interrupting|draining) per session.
+    if not table_exists(cursor, "turns"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS turns (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'queued',
+                source TEXT NOT NULL,
+                prompt TEXT,
+                profile_id TEXT,
+                project_id TEXT,
+                worktree_id TEXT,
+                overrides JSONB NOT NULL DEFAULT '{}',
+                payload JSONB NOT NULL DEFAULT '{}',
+                command_id TEXT,
+                parent_turn_id TEXT,
+                run_id TEXT,
+                interrupt_mode TEXT,
+                stop_background BOOLEAN NOT NULL DEFAULT FALSE,
+                position DOUBLE PRECISION,
+                instance_id TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                started_at TIMESTAMP WITH TIME ZONE,
+                ended_at TIMESTAMP WITH TIME ZONE,
+                stop_reason TEXT,
+                error TEXT
+            )
+        """)
+        migrations_applied.append("turns")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_live_per_session "
+        "ON turns(session_id) WHERE state IN ('running','interrupting','draining')"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
+    )
+
+    # One-time seed: carry every existing queued_messages row into turns as a
+    # source='queue' queued turn, preserving order via position. queued_messages
+    # is left in place, frozen (dropped in a later deletion PR). Deterministic
+    # turn ids ('turn-qm-<qm.id>') + ON CONFLICT DO NOTHING make this safe to
+    # re-run every boot — an already-seeded (or since-settled) row is never
+    # duplicated.
+    if table_exists(cursor, "turns") and table_exists(cursor, "queued_messages"):
+        cursor.execute("""
+            INSERT INTO turns
+                (id, session_id, state, source, prompt, profile_id, project_id,
+                 position, created_at)
+            SELECT 'turn-qm-' || id, session_id, 'queued', 'queue', content,
+                   profile_id, project_id, position, created_at
+            FROM queued_messages
+            WHERE true
+            ON CONFLICT (id) DO NOTHING
+        """)
+        if cursor.rowcount and cursor.rowcount > 0:
+            migrations_applied.append(f"turns<-queued_messages({cursor.rowcount})")
 
     # Per-session V2 streaming column (v57). Originally a per-session opt-in;
     # the v58 block below forces it TRUE on every session and flips the default.

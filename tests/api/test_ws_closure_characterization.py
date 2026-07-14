@@ -60,8 +60,21 @@ from fastapi.websockets import WebSocketState
 import app.api.chat_ws_handler as cwh_mod
 import app.api.websocket as ws_mod
 import app.core.cloud_relay as cloud_relay_mod
+import pytest
 
 InstallOffline = cloud_relay_mod.InstallOffline
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): pin the LEGACY (flag-off) handler path. This is
+    the closure/handler oracle for query/stop/interrupt/queue/remove/clear; under
+    ``AI_SHUFFLE_V2_TURNS`` (default ON) those delegate to ``turn_manager``. The
+    legacy path still SHIPS behind the flag as the PR-A rollback path and is
+    pinned here so the oracle stays green; the v2 turns-backed delegation is
+    covered in tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
 
 
 # ═══ Harness (FLIP-ADAPT: the only place allowed to know closure internals) ══

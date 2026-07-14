@@ -49,6 +49,18 @@ import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): pin the LEGACY (flag-off) handler path. Under
+    ``AI_SHUFFLE_V2_TURNS`` (default ON) query delegates to ``turn_manager.submit``
+    (no run_query spawn, no start-frame token — B4 echoes request_id only in
+    session_created); the legacy path still SHIPS behind the flag as the PR-A
+    rollback path. The v2 delegation is covered in
+    tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
+
+
 # ---------------------------------------------------------------------------
 # Fake WebSocket that yields one scripted inbound frame then "disconnects".
 # ---------------------------------------------------------------------------

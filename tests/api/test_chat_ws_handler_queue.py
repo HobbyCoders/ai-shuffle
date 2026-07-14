@@ -51,10 +51,24 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.websockets import WebSocketState
 
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): every test in this module pins the LEGACY
+    (flag-off) drain-on-load / queue-drain-once / stop-requeue machinery. Under
+    ``AI_SHUFFLE_V2_TURNS`` (default ON) draining is owned by the turn scheduler
+    and these handler-level mechanisms are bypassed; the legacy path still SHIPS
+    behind the flag as the PR-A rollback path, so these tests keep it covered.
+    The v2 turns-backed delegation is covered in
+    tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

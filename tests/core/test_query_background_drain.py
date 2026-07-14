@@ -45,7 +45,7 @@ def _preamble_patches(stop_mock, *, pool_side_effect):
         patch("app.core.query_background.sync_engine", new=sync_mock),
         patch("app.core.query_background.direct_oauth", new=oauth_mock),
         patch(
-            "app.core.query_background.build_options_from_profile",
+            "app.core.sdk_options.build_options_from_profile",
             new=MagicMock(return_value=(MagicMock(), {})),
         ),
         patch("app.core.query_background.get_session_pool", side_effect=pool_side_effect),

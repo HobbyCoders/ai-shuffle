@@ -39,10 +39,24 @@ per-test ``_draining_sessions`` set.
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import app.api.chat_ws_handler as cwh  # noqa: F401  (patch surface)
 import app.api.websocket as ws_mod
 
 from tests.api.test_chat_ws_handler_queue import _FakeLiveTask, _Harness, _queued
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): these queue/preempt race-gap tests pin the LEGACY
+    (flag-off) drain machinery (the closure's ``_draining_sessions`` reservation,
+    the late check-and-register). Under ``AI_SHUFFLE_V2_TURNS`` (default ON) the
+    turn scheduler owns draining; the legacy path still SHIPS behind the flag as
+    the PR-A rollback path. The v2 delegation is covered in
+    tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
 
 
 class _GapHarness(_Harness):

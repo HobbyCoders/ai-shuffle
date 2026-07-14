@@ -114,8 +114,7 @@ def _bg_patches(stack: ExitStack, pool: _StubPool, run_sync_calls=None):
     stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
     options = MagicMock()
     options.cwd = None
-    stack.enter_context(patch.object(
-        qb, "build_options_from_profile", return_value=(options, {})
+    stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ))
     stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))

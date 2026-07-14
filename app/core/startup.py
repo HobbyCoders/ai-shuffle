@@ -512,6 +512,26 @@ def start_background_tasks() -> List[asyncio.Task]:
     return tasks
 
 
+def install_v2_turns_wiring() -> None:
+    # V2 turns wiring (Phase 2): install the scheduler seams (kick /
+    # on_turn_settled / on_task_terminal) and route turn_manager's interrupt
+    # executor to the live SessionRuntime — turn_manager must not import
+    # session_runtime, so the routing closure lives here. Gated on the cutover
+    # flag: with it OFF the legacy pipeline stays in sole control.
+    if settings.v2_turns:
+        from app.core import session_runtime, turn_manager, turn_scheduler
+
+        turn_scheduler.install()
+
+        async def _route_interrupt(session_id: str, mode: str) -> None:
+            runtime = session_runtime.get_live_runtime(session_id)
+            if runtime is not None:
+                await runtime.interrupt(mode)
+
+        turn_manager.register_interrupt_executor(_route_interrupt)
+        logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
+
+
 # Process-wide "we are tearing down" flag. Set FIRST inside shutdown_services
 # (before any teardown step runs) and never cleared for the process lifetime.
 # Consulted by the lifecycle-notification paths so they degrade gracefully:

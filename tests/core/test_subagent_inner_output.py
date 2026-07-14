@@ -529,8 +529,7 @@ def _ack_chat_patches(stack, pool):
     options = _MagicMock()
     options.include_partial_messages = True
     options.cwd = None
-    stack.enter_context(_patch.object(
-        _qe, "build_options_from_profile", return_value=(options, {})
+    stack.enter_context(_patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ))
     stack.enter_context(_patch.object(_qe, "get_session_pool", return_value=pool))
     stack.enter_context(_patch.object(_qe, "is_subprocess_alive", return_value=True))

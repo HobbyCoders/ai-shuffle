@@ -368,7 +368,7 @@ async def _finalize_intake_session(
     ``resolve_working_dir`` then runs in the project's main checkout.
     """
     from app.api.sessions_worktree import _detect_command_meta
-    from app.core.headless_query_runner import launch_headless_query
+    from app.core import turn_manager
     from app.core.sync_engine import sync_engine
 
     title = prompt[:100].strip()
@@ -398,15 +398,20 @@ async def _finalize_intake_session(
         logger.warning("Cloud intake session broadcast failed: %s", e)
 
     try:
-        await launch_headless_query(
+        # Submit a durable ``source=intake`` turn; ``submit`` kicks the scheduler
+        # into the ONE spawn path. Called ON the loop (not via run_sync) so the
+        # kick can schedule the runtime task. ``api_user_id`` rides the payload
+        # so the runtime can attribute the server-originated turn.
+        payload = {"api_user_id": api_user_id} if api_user_id else None
+        turn_manager.submit(
+            session["id"],
+            "intake",
             prompt=prompt,
-            session_id=session["id"],
             profile_id=profile_id,
             project_id=project_id,
-            user_id="admin",
-            api_user_id=api_user_id,
             worktree_id=worktree_id,
             overrides=overrides,
+            payload=payload,
         )
         return True
     except Exception as e:  # noqa: BLE001

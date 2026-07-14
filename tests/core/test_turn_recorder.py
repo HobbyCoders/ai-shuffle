@@ -361,6 +361,42 @@ async def test_done_maps_to_turn_completed_with_usage_summary(mock_db):
     await rec.close()
 
 
+async def test_done_with_api_error_status_carried_in_payload(mock_db):
+    # A5 amendment (plan §1.6(1)): a usage-limit 429 settles as a normal
+    # completion, so the terminal turn.completed payload must durably carry
+    # the pump's api_error_status for the scheduler's failover derivation.
+    # ResultMessage exposes only api_error_status — no message field exists.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {
+            "stop_reason": "end_turn", "tokens_in": 5,
+            "api_error_status": 429,
+        },
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert row["payload"]["api_error_status"] == 429
+    assert "api_error_message" not in row["payload"]
+    assert row["payload"]["usage"] == {"tokens_in": 5}  # not a usage key
+    await rec.close()
+
+
+async def test_done_without_api_error_has_no_error_keys(mock_db):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {"stop_reason": "end_turn"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert "api_error_status" not in row["payload"]
+    assert "api_error_message" not in row["payload"]
+    await rec.close()
+
+
 async def test_interrupted_maps_to_turn_aborted_interrupt(mock_db):
     _mk_session()
     rec = await _recorder()

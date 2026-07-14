@@ -183,6 +183,70 @@ async def test_streaming_outranks_everything(mock_db):
 
 
 # =============================================================================
+# V2 turns — additive lifecycle derivations (D3)
+# =============================================================================
+
+async def test_waking_state_via_queued_unpark_turn(mock_db):
+    """A queued ``source=unpark`` turn (a wake is imminent) reads as waking and
+    folds into the composed ``unpark_pending`` wire value."""
+    from app.db import turns as turns_db
+
+    sid = "lstate-waking-unpark-turn"
+    turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification>...")
+
+    snap = await compute(sid)
+
+    assert snap.state == STATE_WAKING
+    assert snap.unpark_pending is True
+
+
+async def test_queued_user_turn_is_not_waking(mock_db):
+    """Only unpark queued turns trigger waking; a queued user turn does not."""
+    from app.db import turns as turns_db
+
+    sid = "lstate-queued-user"
+    turns_db.enqueue_turn(sid, "user", prompt="p")
+
+    snap = await compute(sid)
+
+    assert snap.state == STATE_IDLE
+
+
+async def test_parked_with_work_via_parked_turn(mock_db):
+    """A parked turn (foreground done, background work survives) reads as
+    parked_with_work even when the registry has no visible tasks."""
+    from app.db import turns as turns_db
+
+    sid = "lstate-parked-turn"
+    tid = turns_db.enqueue_turn(sid, "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-x")
+    turns_db.park_turn(tid, ["task-1"])
+
+    snap = await compute(sid)
+
+    assert snap.state == STATE_PARKED_WITH_WORK
+
+
+async def test_v2_turn_signals_flag_gated(mock_db, monkeypatch):
+    """Flag off → neither the queued-unpark nor parked-turn signal contributes;
+    the derivation is byte-identical to the legacy view."""
+    from app.core.config import settings
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(settings, "v2_turns", False)
+    sid = "lstate-v2-off"
+    turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification>")
+    tid = turns_db.enqueue_turn(sid, "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-x")
+    turns_db.park_turn(tid, ["task-1"])
+
+    snap = await compute(sid)
+
+    assert snap.state == STATE_IDLE
+    assert snap.unpark_pending is False
+
+
+# =============================================================================
 # Drift sensor
 # =============================================================================
 

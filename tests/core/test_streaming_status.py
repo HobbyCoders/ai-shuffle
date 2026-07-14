@@ -233,6 +233,66 @@ async def test_sweep_keeps_live_sessions(mock_db, monkeypatch):
 
 
 # =============================================================================
+# V2 turns — live-turn busy union + reap-and-kick sweep (D3)
+# =============================================================================
+
+def test_draining_turn_reads_busy_without_active_run(mock_db):
+    """A draining turn (escalated interrupt keeping the healthy client) keeps
+    the session busy even with no lease-valid active run."""
+    from app.db import turns as turns_db
+
+    tid = turns_db.enqueue_turn("s1", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-x")  # no matching runs row
+    turns_db.interrupt_turn("s1", "stop")
+    turns_db.escalate_to_draining(tid)
+    assert streaming_status.has_active_run("s1") is True
+
+
+def test_live_turn_union_flag_gated(mock_db, monkeypatch):
+    from app.core.config import settings
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(settings, "v2_turns", False)
+    tid = turns_db.enqueue_turn("s2", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-x")
+    # Flag off → the union contributes nothing; no active run → not busy.
+    assert streaming_status.has_active_run("s2") is False
+
+
+async def test_sweep_reaps_dead_lease_turns_and_kicks(mock_db, monkeypatch):
+    from app.core import turn_scheduler
+    from app.db import turns as turns_db
+
+    kicked = []
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
+    tid = turns_db.enqueue_turn("s1", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-missing")  # no runs row → dead lease
+
+    await streaming_status.sweep_once()
+
+    # User turn requeued at its position; the session was kicked to restart it.
+    assert turns_db.get_turn(tid)["state"] == "queued"
+    assert kicked == ["s1"]
+
+
+async def test_sweep_reap_flag_gated(mock_db, monkeypatch):
+    from app.core import turn_scheduler
+    from app.core.config import settings
+    from app.db import turns as turns_db
+
+    kicked = []
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
+    monkeypatch.setattr(settings, "v2_turns", False)
+    tid = turns_db.enqueue_turn("s1", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-missing")
+
+    await streaming_status.sweep_once()
+
+    assert turns_db.get_turn(tid)["state"] == "running"  # untouched
+    assert kicked == []
+
+
+# =============================================================================
 # get_user_streaming_sessions — connect-time snapshot join
 # =============================================================================
 

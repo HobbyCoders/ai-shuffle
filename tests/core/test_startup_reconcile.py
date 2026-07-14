@@ -116,6 +116,7 @@ async def test_idle_sessions_untouched_and_nothing_reconciled(mock_db, test_db):
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
+        "turns_reaped": 0,
     }
     assert _session_row(test_db, session_id)["status"] == "active"
     assert _error_log_rows(test_db, session_id) == []
@@ -203,6 +204,7 @@ async def test_reconcile_db_failure_does_not_raise(mock_db, monkeypatch):
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
+        "turns_reaped": 0,
     }
 
 
@@ -223,6 +225,45 @@ async def test_stray_cli_sweep_suppressed_under_testing(mock_db, monkeypatch):
 
 
 # =============================================================================
+# V2 turns — boot reap-and-kick sweep (D3)
+# =============================================================================
+
+async def test_boot_reap_requeues_dead_lease_turns_and_kicks(
+    mock_db, test_db, monkeypatch
+):
+    from app.core import turn_scheduler
+    from app.db import turns as turns_db
+
+    kicked = []
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
+    tid = turns_db.enqueue_turn("boot-s1", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-missing")  # no runs row → dead lease
+
+    counts = await reconcile_from_durable_truth()
+
+    assert counts["turns_reaped"] == 1
+    assert turns_db.get_turn(tid)["state"] == "queued"  # user turn requeued
+    assert kicked == ["boot-s1"]
+
+
+async def test_boot_reap_flag_gated(mock_db, test_db, monkeypatch):
+    from app.core import turn_scheduler
+    from app.db import turns as turns_db
+
+    kicked = []
+    monkeypatch.setattr(turn_scheduler, "kick", lambda sid: kicked.append(sid))
+    monkeypatch.setattr(settings, "v2_turns", False)
+    tid = turns_db.enqueue_turn("boot-s2", "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-missing")
+
+    counts = await reconcile_from_durable_truth()
+
+    assert counts["turns_reaped"] == 0
+    assert turns_db.get_turn(tid)["state"] == "running"  # untouched
+    assert kicked == []
+
+
+# =============================================================================
 # Schema: version parity + parked_task_kind column
 # =============================================================================
 
@@ -231,12 +272,13 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 58 for the V2 Phase-1 deletion: v2_stream forced TRUE on every
-    # session + the column default flipped TRUE (v57 added the opt-in flag; v56
-    # added the V2 Phase-0 primitives: session_events, runs,
-    # pending_interactions, artifacts, projects_v2, checkouts).
-    assert db_version == 58
-    assert pg_version == 58
+    # Bumped to 59 for the V2 Phase-2 turns table (durable per-session turn
+    # queue + live-turn state machine, one live turn per session via a partial
+    # unique index, + one-time queued_messages->turns seed migration). v58 was
+    # the Phase-1 deletion (v2_stream forced TRUE + default flipped); v57 added
+    # the opt-in flag; v56 added the Phase-0 primitives.
+    assert db_version == 59
+    assert pg_version == 59
     assert db_version == pg_version
 
 

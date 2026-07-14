@@ -320,6 +320,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # V2 turns cutover (Phase 2). When ON, the WS/non-WS callers command the
+    # session through the durable ``turns`` table + SessionRuntime/turn_scheduler
+    # instead of the legacy run_query/queued_messages pipeline, and the
+    # busy/lifecycle views additionally re-source from live turns. Read at the
+    # command seams only (submit/interrupt) and by the additive busy/lifecycle/
+    # sweep derivations; the legacy and v2 paths share no in-memory state, so a
+    # flag flip is a clean rollback. ON by default (cutover). Kill switch:
+    # AI_SHUFFLE_V2_TURNS=false.
+    v2_turns: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_SHUFFLE_V2_TURNS", "V2_TURNS", "v2_turns"
+        ),
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

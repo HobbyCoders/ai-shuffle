@@ -733,14 +733,15 @@ class AutomationManager:
 
         Mints ONE FRESH automation-badged session per fire (no shared
         session, so overlapping fires can never race each other's
-        history), links the run row to the session, then submits the turn
-        through the headless streaming seam with ``deferred_delivery=True``
-        (the server-initiated-turn contract) so the run streams live to any
-        open tab, is openable on the sessions board, and persists normal
-        history — exactly like a user chat. The turn recorder persists the
-        rendered prompt as a ``message.user`` event at turn start.
+        history), links the run row to the session, then submits a durable
+        ``source=automation`` turn through :mod:`app.core.turn_manager`. The
+        scheduler kicks it into the ONE spawn path (``SessionRuntime``), so the
+        run streams live to any open tab, is openable on the sessions board,
+        and persists normal history — exactly like a user chat. The turn
+        recorder persists the rendered prompt as a ``message.user`` event at
+        turn start.
         """
-        from app.core import headless_query_runner
+        from app.core import turn_manager
 
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
@@ -781,75 +782,58 @@ class AutomationManager:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Automation {automation_id}: session broadcast failed: {e}")
 
-        # 3. Submit the streaming turn. deferred_delivery=True marks it
-        #    server-initiated so run_query keeps watching devices
-        #    registered with sync_engine — the turn streams live instead
-        #    of only surfacing on reload.
-        handler = await headless_query_runner.launch_headless_query(
+        # 3. Submit a durable ``source=automation`` turn. ``submit`` enqueues
+        #    then kicks the scheduler, which starts the turn in the ONE spawn
+        #    path (SessionRuntime). No ``deferred_delivery`` concept survives —
+        #    the v2 SSE typed-event feed is always live.
+        turn_manager.submit(
+            session_id,
+            "automation",
             prompt=rendered_prompt,
-            session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
-            user_id="admin",
-            api_user_id=None,
             overrides={"max_turns": automation.get("max_turns", 1)},
-            deferred_delivery=True,
         )
 
-        # 4. Await turn completion under the automation timeout. A hand-off
-        #    (account-failover retry, compact-boundary auto-continue) swaps
-        #    handler.query_task for a successor task and lets the original
-        #    return early — so keep re-awaiting the LATEST task until no new
-        #    successor appears, all under ONE shared deadline. Otherwise the
-        #    run row would be stamped from the first attempt's sniffed outcome
-        #    while the successor is still streaming, and the timeout wouldn't
-        #    cover the successor. wait_for cancels the current task on timeout
-        #    (runaway guard) and the TimeoutError propagates to _execute_run's
-        #    timeout stamp.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        task = handler.query_task
-        while task is not None:
-            await asyncio.wait_for(task, timeout=deadline - loop.time())
-            latest = handler.query_task
-            if latest is task:
-                break
-            task = latest
+        # 4. Block until the session fully drains — no live turn AND no queued
+        #    turn — under the automation timeout. A hand-off (account-failover
+        #    retry, compact-boundary auto-continue) is enqueued by the scheduler
+        #    as a NEW turn, so ``wait_session_idle`` naturally waits it out
+        #    (it returns only once the whole queue has drained), covering the
+        #    successor under the same deadline. On timeout, interrupt the wedged
+        #    live turn (the command→runtime seam routes it to the runtime's SDK
+        #    interrupt + escalation) and stamp the timeout.
+        idle = await turn_manager.wait_session_idle(
+            session_id, timeout=timeout_seconds
+        )
+        if not idle:
+            turn_manager.interrupt(session_id, "stop")
+            raise asyncio.TimeoutError()
 
-        # run_query reports the turn outcome only via terminal frames; the
-        # headless handler sniffs them for socketless callers like us.
-        if handler.last_turn_error:
-            raise RuntimeError(handler.last_turn_error)
-        if handler.last_turn_interrupted:
-            # The timeout cancel can be absorbed by run_query's graceful
-            # interrupt handling — the task then completes normally and
-            # wait_for never raises. Stamp that as the timeout it is, not as
-            # a generic interruption. A requested cancel (Task.cancelling) is
-            # the reliable tell: the deadline clock alone races, since the
-            # event loop may fire wait_for's timer up to one clock-resolution
-            # EARLY, while loop.time() still reads just under the deadline.
-            cancelling = getattr(task, "cancelling", None)
-            if (cancelling and cancelling()) or loop.time() >= deadline:
-                raise asyncio.TimeoutError()
+        # 5. Read the final outcome from the durable event log (the v2 path no
+        #    longer sniffs WS frames). The last terminal event of the session
+        #    decides success / error / interruption; ``turn.completed`` carries
+        #    the usage summary the run row is stamped from.
+        outcome = self._final_turn_outcome(session_id)
+        if outcome["error"] is not None:
+            raise RuntimeError(outcome["error"])
+        if outcome["interrupted"]:
             raise RuntimeError("Turn was interrupted before completion")
 
-        metadata = handler.last_turn_metadata or {}
+        usage = outcome["usage"]
         return {
             "session_id": session_id,
             "response": self._extract_final_assistant_text(session_id),
-            "cost_usd": float(metadata.get("total_cost_usd") or 0),
-            "tokens_in": int(metadata.get("tokens_in") or 0),
-            "tokens_out": int(metadata.get("tokens_out") or 0),
+            "cost_usd": float(usage.get("total_cost_usd") or 0),
+            "tokens_in": int(usage.get("tokens_in") or 0),
+            "tokens_out": int(usage.get("tokens_out") or 0),
         }
 
     @staticmethod
-    def _extract_final_assistant_text(session_id: str) -> str:
-        """Final assistant text of the turn — feeds output delivery and the
-        runs-list preview. Derived from the V2 session event log: the turn
-        recorder streams assistant text as ``assistant.text_delta`` events and
-        the v2 path no longer dual-writes ``session_messages``, so this
-        concatenates the LAST completed turn's text-delta payloads in seq order
-        exactly as replay would render them. Never raises (returns "")."""
+    def _load_session_events(session_id: str) -> List[Dict[str, Any]]:
+        """Read the whole V2 ``session_events`` log for a session in seq order.
+        Never raises — a reader error yields ``[]`` (the callers treat an empty
+        log as "no derivable outcome")."""
         from app.db import session_events as session_events_db
 
         events: List[Dict[str, Any]] = []
@@ -866,7 +850,58 @@ class AutomationManager:
                     break
                 from_seq = batch[-1].get("seq") or from_seq
         except Exception:  # noqa: BLE001
-            return ""
+            return []
+        return events
+
+    @classmethod
+    def _final_turn_outcome(cls, session_id: str) -> Dict[str, Any]:
+        """Derive the automation run's outcome from the session's LAST terminal
+        turn event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``).
+
+        Replaces the headless handler's WS-frame sniffing — the durable log is
+        now the record. Returns ``{"usage", "error", "interrupted"}``:
+
+        * ``turn.completed`` → ``usage`` = its usage summary, no error;
+        * ``turn.aborted`` with ``reason == 'interrupt'`` → ``interrupted`` True
+          (a genuine stop that settled before the timeout);
+        * any other ``turn.aborted`` (error / crash / escalation / lease) →
+          ``error`` = the aborted ``message`` or a reason-derived string;
+        * ``turn.parked`` / no terminal event → treated as a clean, empty run.
+        """
+        events = cls._load_session_events(session_id)
+        terminal = None
+        for ev in reversed(events):
+            if ev.get("event_type") in ("turn.completed", "turn.aborted", "turn.parked"):
+                terminal = ev
+                break
+        result: Dict[str, Any] = {"usage": {}, "error": None, "interrupted": False}
+        if terminal is None:
+            return result
+        etype = terminal.get("event_type")
+        payload = terminal.get("payload") or {}
+        if etype == "turn.completed":
+            usage = payload.get("usage")
+            result["usage"] = usage if isinstance(usage, dict) else {}
+        elif etype == "turn.aborted":
+            reason = payload.get("reason")
+            if reason == "interrupt":
+                result["interrupted"] = True
+            else:
+                result["error"] = (
+                    payload.get("message")
+                    or (f"Turn aborted: {reason}" if reason else "Turn aborted")
+                )
+        return result
+
+    @staticmethod
+    def _extract_final_assistant_text(session_id: str) -> str:
+        """Final assistant text of the turn — feeds output delivery and the
+        runs-list preview. Derived from the V2 session event log: the turn
+        recorder streams assistant text as ``assistant.text_delta`` events and
+        the v2 path no longer dual-writes ``session_messages``, so this
+        concatenates the LAST completed turn's text-delta payloads in seq order
+        exactly as replay would render them. Never raises (returns "")."""
+        events = AutomationManager._load_session_events(session_id)
 
         # Target the LAST completed turn; if none completed (an aborted or
         # interrupted run), fall back to the turn of the last assistant text

@@ -51,8 +51,7 @@ def engine_mocks():
 
     with patch.object(qe, "get_profile", return_value=profile), patch.object(
         qe, "database"
-    ) as mock_db, patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    ) as mock_db, patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ), patch.object(
         qe, "resolve_note_references", side_effect=lambda p: p
     ), patch.object(
@@ -160,8 +159,7 @@ async def test_resume_repersists_launched_model_on_model_switch(engine_mocks):
     async def quick_query(prompt, options):
         yield _init_message()
 
-    with patch.object(qe, "query", quick_query), patch.object(
-        qe, "build_options_from_profile", return_value=(resumed_options, {})
+    with patch.object(qe, "query", quick_query), patch("app.core.sdk_options.build_options_from_profile", return_value=(resumed_options, {})
     ), patch.object(
         qe, "_persist_turn_results", MagicMock(side_effect=lambda **kw: _noop_coro())
     ):

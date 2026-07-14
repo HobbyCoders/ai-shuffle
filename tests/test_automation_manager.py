@@ -361,29 +361,17 @@ class TestHandleConnectorEvent:
 # =============================================================================
 
 
-def _fake_turn_handler(metadata=None, error=None, task=None):
-    """Stand-in for the HeadlessChatHandler launch_headless_query returns."""
-    handler = MagicMock()
-    if task is None:
-        loop = asyncio.get_running_loop()
-        task = loop.create_future()
-        task.set_result(None)
-    handler.query_task = task
-    handler.last_turn_metadata = (
-        {"total_cost_usd": 0.01, "tokens_in": 10, "tokens_out": 20}
-        if metadata is None else metadata
-    )
-    handler.last_turn_error = error
-    handler.last_turn_interrupted = False
-    return handler
+def _fake_event_log(text, turn_id="t1", *, usage=None,
+                    terminal="completed", reason=None, message=None):
+    """A minimal v2 ``session_events`` log: one turn whose assistant text is
+    ``text``, split across two ``assistant.text_delta`` events so the
+    concatenation path is exercised, ending in a terminal turn event.
 
-
-def _fake_event_log(text, turn_id="t1"):
-    """A minimal v2 ``session_events`` log: one completed turn whose assistant
-    text is ``text``, split across two ``assistant.text_delta`` events so the
-    concatenation path is exercised."""
+    ``terminal='completed'`` carries ``payload.usage`` (the run cost/tokens the
+    automation derives from ``_final_turn_outcome``); ``terminal='aborted'``
+    carries ``payload.reason``/``payload.message`` (the error/interrupt path)."""
     mid = len(text) // 2
-    return [
+    events = [
         {"seq": 1, "turn_id": turn_id, "event_type": "turn.started", "payload": {}},
         {"seq": 2, "turn_id": turn_id, "event_type": "message.user",
          "payload": {"content": "do it"}},
@@ -391,38 +379,62 @@ def _fake_event_log(text, turn_id="t1"):
          "payload": {"text": text[:mid]}},
         {"seq": 4, "turn_id": turn_id, "event_type": "assistant.text_delta",
          "payload": {"text": text[mid:]}},
-        {"seq": 5, "turn_id": turn_id, "event_type": "turn.completed", "payload": {}},
     ]
+    if terminal == "aborted":
+        events.append({
+            "seq": 5, "turn_id": turn_id, "event_type": "turn.aborted",
+            "payload": {"reason": reason, "message": message},
+        })
+    else:
+        events.append({
+            "seq": 5, "turn_id": turn_id, "event_type": "turn.completed",
+            "payload": {"usage": usage or {}},
+        })
+    return events
 
 
-def _session_run_env(handler, response_text="all done"):
-    """Patch stack for the streaming-session run path."""
+def _session_run_env(*, log=None, idle=True):
+    """Patch stack for the V2 streaming-session run path.
+
+    The run submits a durable ``source=automation`` turn via
+    ``turn_manager.submit`` and blocks on ``turn_manager.wait_session_idle``;
+    the outcome (cost/tokens/error/interrupt) and response text are BOTH derived
+    from the durable ``session_events`` log, so patching ``get_events`` drives
+    both. ``idle=False`` simulates the automation timeout (the session never
+    drains within the deadline) — the run then interrupts the wedged turn.
+
+    Returns ``(stack, db, submit, wait_idle, interrupt)``.
+    """
     from contextlib import ExitStack
 
     stack = ExitStack()
     db = stack.enter_context(patch("app.core.automation_manager.database"))
-    launch = stack.enter_context(patch(
-        "app.core.headless_query_runner.launch_headless_query",
-        new=AsyncMock(return_value=handler),
+    submit = stack.enter_context(patch(
+        "app.core.turn_manager.submit", MagicMock(return_value="turn-x"),
+    ))
+    wait_idle = stack.enter_context(patch(
+        "app.core.turn_manager.wait_session_idle",
+        new=AsyncMock(return_value=idle),
+    ))
+    interrupt = stack.enter_context(patch(
+        "app.core.turn_manager.interrupt", MagicMock(return_value={"id": "turn-x"}),
     ))
     stack.enter_context(patch("app.core.sync_engine.sync_engine", new=AsyncMock()))
-    # V2: session_messages is no longer dual-written — the run's response text
-    # is derived from the session event log (the last completed turn's
-    # assistant.text_delta payloads).
     stack.enter_context(patch(
         "app.db.session_events.get_events",
-        return_value=_fake_event_log(response_text),
+        return_value=log if log is not None else _fake_event_log("all done"),
     ))
     db.update_automation_run.return_value = {}
     db.update_automation.return_value = {}
-    return stack, db, launch, None
+    return stack, db, submit, wait_idle, interrupt
 
 
 class TestRunAsSession:
     """An automation run IS a normal streaming chat session: the run mints a
-    fresh automation-badged session, persists the prompt as a regular user
-    message, and submits the turn through the headless streaming seam
-    (launch_headless_query → run_query, deferred_delivery=True)."""
+    fresh automation-badged session, then submits a durable ``source=automation``
+    turn through ``turn_manager.submit`` (the ONE spawn path via SessionRuntime)
+    and blocks on ``wait_session_idle``. Cost/tokens/response are derived from
+    the durable session-event log."""
 
     def _automation(self, **overrides):
         auto = {
@@ -443,8 +455,7 @@ class TestRunAsSession:
 
     @pytest.mark.asyncio
     async def test_run_creates_badged_session_and_submits_streaming_turn_once(self, manager):
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, submit, _wait, _int = _session_run_env()
         with stack:
             await manager._execute_run(self._automation(), "run-s1", "do it", {})
 
@@ -460,48 +471,46 @@ class TestRunAsSession:
         # turn recorder persists it as a message.user event at turn start.
         db.add_session_message.assert_not_called()
 
-        # Exactly one streaming submit, through the deferred-delivery seam
-        launch.assert_awaited_once()
-        launch_kwargs = launch.call_args.kwargs
-        assert launch_kwargs["prompt"] == "do it"
-        assert launch_kwargs["session_id"] == session_id
-        assert launch_kwargs["deferred_delivery"] is True
+        # Exactly one server-originated automation turn submitted for this session
+        submit.assert_called_once()
+        assert submit.call_args.args[0] == session_id
+        assert submit.call_args.args[1] == "automation"
+        assert submit.call_args.kwargs["prompt"] == "do it"
 
     @pytest.mark.asyncio
     async def test_run_links_session_before_turn_starts(self, manager):
         order = []
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, submit, _wait, _int = _session_run_env()
         with stack:
             db.update_automation_run.side_effect = (
                 lambda run_id, **kw: order.append(("link", kw)) or {}
             )
-            launch.side_effect = lambda **kw: order.append(("launch", kw)) or handler
+            submit.side_effect = lambda *a, **kw: order.append(("submit", a)) or "turn-x"
             await manager._execute_run(self._automation(), "run-s2", "do it", {})
 
         link_idx = next(
             i for i, (kind, kw) in enumerate(order)
             if kind == "link" and kw.get("session_id")
         )
-        launch_idx = next(i for i, (kind, _) in enumerate(order) if kind == "launch")
-        assert link_idx < launch_idx, "run→session link must precede the turn submit"
+        submit_idx = next(i for i, (kind, _) in enumerate(order) if kind == "submit")
+        assert link_idx < submit_idx, "run→session link must precede the turn submit"
 
     @pytest.mark.asyncio
     async def test_max_turns_cap_passed_through(self, manager):
-        handler = _fake_turn_handler()
-        stack, _db, launch, _store = _session_run_env(handler)
+        stack, _db, submit, _wait, _int = _session_run_env()
         with stack:
             await manager._execute_run(
                 self._automation(max_turns=7), "run-s3", "do it", {}
             )
-        assert launch.call_args.kwargs["overrides"] == {"max_turns": 7}
+        assert submit.call_args.kwargs["overrides"] == {"max_turns": 7}
 
     @pytest.mark.asyncio
     async def test_turn_cost_lands_on_run_row_and_automation(self, manager):
-        handler = _fake_turn_handler(
-            metadata={"total_cost_usd": 0.05, "tokens_in": 11, "tokens_out": 22}
+        log = _fake_event_log(
+            "all done",
+            usage={"total_cost_usd": 0.05, "tokens_in": 11, "tokens_out": 22},
         )
-        stack, db, _launch, _store = _session_run_env(handler)
+        stack, db, _submit, _wait, _int = _session_run_env(log=log)
         with stack:
             await manager._execute_run(self._automation(), "run-s4", "do it", {})
 
@@ -521,9 +530,8 @@ class TestRunAsSession:
     @pytest.mark.asyncio
     async def test_run_row_stores_response_tail_not_full_payload(self, manager):
         long_response = "x" * 12000
-        handler = _fake_turn_handler()
-        stack, db, _launch, _store = _session_run_env(
-            handler, response_text=long_response,
+        stack, db, _submit, _wait, _int = _session_run_env(
+            log=_fake_event_log(long_response),
         )
         with stack:
             await manager._execute_run(self._automation(), "run-s5", "do it", {})
@@ -538,8 +546,12 @@ class TestRunAsSession:
 
     @pytest.mark.asyncio
     async def test_turn_error_stamps_failure_and_keeps_session_link(self, manager):
-        handler = _fake_turn_handler(metadata={}, error="Error: CLI exploded")
-        stack, db, _launch, _store = _session_run_env(handler)
+        # An errored turn settles ``aborted`` with a non-interrupt reason and a
+        # message; ``_final_turn_outcome`` surfaces that as the run error.
+        log = _fake_event_log(
+            "", terminal="aborted", reason="error", message="Error: CLI exploded",
+        )
+        stack, db, _submit, _wait, _int = _session_run_env(log=log)
         with stack:
             with pytest.raises(RuntimeError, match="CLI exploded"):
                 await manager._execute_run(self._automation(), "run-s6", "do it", {})
@@ -564,17 +576,16 @@ class TestRunAsSession:
         db.record_automation_run_success.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_timeout_cancels_turn_and_stamps_failure(self, manager):
-        loop = asyncio.get_running_loop()
-        never_done = loop.create_future()
-        handler = _fake_turn_handler(task=never_done)
-        stack, db, _launch, _store = _session_run_env(handler)
+    async def test_timeout_interrupts_turn_and_stamps_failure(self, manager):
+        # The session never drains within the deadline (wait_session_idle False):
+        # the run interrupts the wedged turn and stamps the timeout.
+        stack, db, _submit, _wait, interrupt = _session_run_env(idle=False)
         with stack:
             await manager._execute_run(
                 self._automation(timeout_seconds=0.05), "run-s7", "do it", {}
             )
 
-        assert never_done.cancelled()
+        interrupt.assert_called_once_with(interrupt.call_args.args[0], "stop")
         failed = [
             c.kwargs for c in db.update_automation_run.call_args_list
             if c.kwargs.get("status") == "failed"
@@ -583,29 +594,25 @@ class TestRunAsSession:
         db.record_automation_run_success.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handoff_successor_task_awaited_before_stamping(self, manager):
-        """A hand-off (failover retry / auto-continue) swaps handler.query_task
-        for a successor and lets the original task return early. The run must
-        be stamped from the SUCCESSOR's outcome, not the first attempt's
-        sniffed state (#560 follow-up 1)."""
-        handler = _fake_turn_handler()
-        # The first attempt's sniffed state: if the run were stamped when the
-        # original task returns, this error would (wrongly) fail the run.
-        handler.last_turn_error = "superseded first attempt"
-
-        async def _successor_turn():
-            handler.last_turn_error = None
-            handler.last_turn_metadata = {
-                "total_cost_usd": 0.07, "tokens_in": 5, "tokens_out": 6,
-            }
-
-        async def _first_attempt():
-            # Hand-off contract: the successor is installed on the handler
-            # BEFORE the original task returns (chat_ws_handler does this).
-            handler.query_task = asyncio.create_task(_successor_turn())
-
-        handler.query_task = asyncio.create_task(_first_attempt())
-        stack, db, _launch, _store = _session_run_env(handler)
+    async def test_handoff_successor_outcome_wins_via_last_turn(self, manager):
+        """A hand-off (failover retry / auto-continue) is enqueued by the
+        scheduler as a NEW turn; ``wait_session_idle`` only returns once the
+        whole queue drains, and the outcome is read from the LAST terminal turn.
+        So the run is stamped from the SUCCESSOR's cost, not the first
+        attempt's (#560 follow-up 1, re-expressed durably)."""
+        log = (
+            _fake_event_log(
+                "first", turn_id="t1",
+                usage={"total_cost_usd": 0.02, "tokens_in": 1, "tokens_out": 1},
+            )
+            + _fake_event_log(
+                "second", turn_id="t2",
+                usage={"total_cost_usd": 0.07, "tokens_in": 5, "tokens_out": 6},
+            )
+        )
+        for i, ev in enumerate(log, start=1):
+            ev["seq"] = i
+        stack, db, _submit, _wait, _int = _session_run_env(log=log)
         with stack:
             await manager._execute_run(self._automation(), "run-s8", "do it", {})
 
@@ -618,41 +625,12 @@ class TestRunAsSession:
         db.record_automation_run_success.assert_called_once_with("auto-sess", 0.07)
 
     @pytest.mark.asyncio
-    async def test_timeout_absorbed_by_graceful_interrupt_still_stamps_timeout(self, manager):
-        """run_query can absorb wait_for's cancel gracefully — the task then
-        completes normally with last_turn_interrupted set and wait_for never
-        raises. Past the deadline that must stamp the timeout-specific error,
-        not a generic interruption (#560 follow-up 3)."""
-        handler = _fake_turn_handler()
-
-        async def _absorbs_cancel():
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                # run_query's graceful interrupt path: swallow, finish normally
-                handler.last_turn_interrupted = True
-
-        handler.query_task = asyncio.create_task(_absorbs_cancel())
-        stack, db, _launch, _store = _session_run_env(handler)
-        with stack:
-            await manager._execute_run(
-                self._automation(timeout_seconds=0.05), "run-s9", "do it", {}
-            )
-
-        failed = [
-            c.kwargs for c in db.update_automation_run.call_args_list
-            if c.kwargs.get("status") == "failed"
-        ]
-        assert failed and "timed out" in failed[0]["error"]
-        db.record_automation_run_success.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_interrupt_before_deadline_stamps_interruption(self, manager):
-        """A genuine interrupt (task done well before the deadline) keeps the
-        interruption message — it must not be mislabelled as a timeout."""
-        handler = _fake_turn_handler()
-        handler.last_turn_interrupted = True
-        stack, db, _launch, _store = _session_run_env(handler)
+    async def test_interrupt_stamps_interruption_not_timeout(self, manager):
+        """A genuine interrupt settles the turn ``aborted`` with reason
+        ``interrupt`` and the session drains cleanly (wait returns True) — the
+        run is stamped as an interruption, never a timeout."""
+        log = _fake_event_log("", terminal="aborted", reason="interrupt")
+        stack, db, _submit, _wait, _int = _session_run_env(log=log)
         with stack:
             with pytest.raises(RuntimeError, match="interrupted"):
                 await manager._execute_run(
@@ -734,8 +712,7 @@ class TestScheduledFireOrdering:
             "output_config": {"type": "none"},
         }
 
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, _submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.automation_service.should_run_scheduled_here",
             return_value=(True, "elected"),
@@ -758,8 +735,7 @@ class TestScheduledFireOrdering:
 
     @pytest.mark.asyncio
     async def test_budget_denied_creates_no_session(self, manager):
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.automation_service.check_budget",
             return_value=(False, "Budget exceeded"),
@@ -774,7 +750,7 @@ class TestScheduledFireOrdering:
             await manager._execute("auto-broke", {"trigger": "schedule"})
 
         db.create_session.assert_not_called()
-        launch.assert_not_awaited()
+        submit.assert_not_called()
         budget_runs = [
             c.kwargs for c in db.create_automation_run.call_args_list
             if c.kwargs.get("status") == "budget_exceeded"
@@ -808,8 +784,7 @@ class TestRunSessionProvenance:
 
     @pytest.mark.asyncio
     async def test_session_created_with_automation_id(self, manager):
-        handler = _fake_turn_handler()
-        stack, db, _launch, _store = _session_run_env(handler)
+        stack, db, _submit, _wait, _int = _session_run_env()
         with stack:
             await manager._execute_run(self._automation(), "run-badge", "do it", {})
 
@@ -1002,33 +977,30 @@ class TestExecuteRunProjectResolution:
     @pytest.mark.asyncio
     async def test_run_uses_local_link_group_clone(self, manager):
         sibling = {"id": "proj-B", "path": "/local/clone"}
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=sibling
         ) as resolve:
             await manager._execute_run(self._automation(), "run-xi", "do it", {})
 
         resolve.assert_called_once_with("proj-A")
-        assert launch.call_args.kwargs["project_id"] == "proj-B"
+        assert submit.call_args.kwargs["project_id"] == "proj-B"
         assert db.create_session.call_args.kwargs["project_id"] == "proj-B"
 
     @pytest.mark.asyncio
     async def test_run_keeps_own_project_when_local(self, manager):
         mine = {"id": "proj-A", "path": "/here"}
-        handler = _fake_turn_handler()
-        stack, _db, launch, _store = _session_run_env(handler)
+        stack, _db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=mine
         ):
             await manager._execute_run(self._automation(), "run-xj", "do it", {})
 
-        assert launch.call_args.kwargs["project_id"] == "proj-A"
+        assert submit.call_args.kwargs["project_id"] == "proj-A"
 
     @pytest.mark.asyncio
     async def test_unresolvable_project_fails_run_with_clear_error(self, manager):
-        handler = _fake_turn_handler()
-        stack, db, launch, _store = _session_run_env(handler)
+        stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.automation_service.resolve_local_project", return_value=None
         ):
@@ -1039,7 +1011,7 @@ class TestExecuteRunProjectResolution:
             with pytest.raises(ValueError, match="Office PC"):
                 await manager._execute_run(self._automation(), "run-xk", "do it", {})
 
-        launch.assert_not_awaited()
+        submit.assert_not_called()
         db.create_session.assert_not_called()
         failed = [
             c.kwargs for c in db.update_automation_run.call_args_list

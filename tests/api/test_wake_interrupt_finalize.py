@@ -41,6 +41,17 @@ from claude_agent_sdk import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): pin the LEGACY (flag-off) handler path. Under
+    ``AI_SHUFFLE_V2_TURNS`` (default ON) handle_stop delegates to
+    ``turn_manager.interrupt``; the legacy stop/finalize path still SHIPS behind
+    the flag as the PR-A rollback path and is covered here. The v2 delegation is
+    covered in tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
+
+
 SESSION = "sess-wake-stop"
 
 

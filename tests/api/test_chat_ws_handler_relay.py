@@ -12,9 +12,10 @@ are the oracle (same inputs, same forwarded payloads, same outbound frames).
 
 Class-specific requirements pinned here on top of the closure oracle:
 
-* Every relay branch is guarded by ``self.websocket is not None`` so
-  ``HeadlessChatHandler`` NEVER relays (plan step 6) — the headless section
-  proves ``is_remote_session`` is never even consulted.
+* Every relay branch is guarded by ``self.websocket is not None`` (originally so
+  ``HeadlessChatHandler`` never relayed, plan step 6). V2 A7 deleted
+  ``headless_query_runner.py``, so the runtime headless-instantiation tests are
+  gone; the guard is now pinned by source inspection (section 9).
 * Outbound frames go through the class's ``send_json`` and therefore carry
   the ``_seq`` diagnostic key (asserted once; shape comparisons strip it).
 * ``permission_response`` / ``get_pending_permissions`` deliberately gain NO
@@ -37,9 +38,21 @@ from fastapi.websockets import WebSocketState
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 import app.core.cloud_relay as cloud_relay_mod
-from app.core.headless_query_runner import HeadlessChatHandler
+import pytest
 
 InstallOffline = cloud_relay_mod.InstallOffline
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): pin the LEGACY (flag-off) handler path. These
+    tests assert the LOCAL (non-relay) actions (run_query spawn, _stopped_sessions,
+    interrupt_session); under ``AI_SHUFFLE_V2_TURNS`` (default ON) those delegate
+    to ``turn_manager``. The relay-vs-local routing is unchanged either way. The
+    legacy path still SHIPS behind the flag as the PR-A rollback path; the v2
+    delegation is covered in tests/api/test_chat_ws_v2_turns.py."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -233,10 +246,6 @@ class _HandlerHarness:
             user_id="admin",
             api_user_id=None,
         )
-
-    def make_headless(self):
-        """The real HeadlessChatHandler (websocket=None)."""
-        return HeadlessChatHandler(user_id="admin", api_user_id=None)
 
 
 def _shapes(ws):
@@ -754,89 +763,12 @@ async def test_relay_frames_carry_seq():
     assert raw and raw[0]["_seq"] == 1
 
 
-# ═══ 8. Headless — relay must NEVER fire when websocket is None ════════════════
-#
-# Plan step 6: HeadlessChatHandler (websocket=None) must never relay — even
-# for a session the registry says is remote. is_remote_session must not even
-# be consulted; the local path runs instead.
-
-
-async def test_headless_query_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        handler = h.make_headless()
-        await handler.handle_query({
-            "prompt": "headless hello",
-            "session_id": "sess-h",
-            "profile": "claude-code",
-        })
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_message.assert_not_awaited()
-    assert h.created.spawns("run_query") == 1, "headless query must run locally"
-
-
-async def test_headless_stop_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        await h.make_headless().handle_stop({"session_id": "sess-h"})
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_interrupt.assert_not_awaited()
-    assert "sess-h" in h.stopped, "headless stop must run the local path"
-    h.interrupt_session.assert_awaited_once_with("sess-h")
-
-
-async def test_headless_interrupt_for_query_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        await h.make_headless().handle_interrupt_for_query({"session_id": "sess-h"})
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_interrupt.assert_not_awaited()
-    h.interrupt_session.assert_awaited_once_with("sess-h")
-
-
-async def test_headless_user_question_response_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        await h.make_headless().handle_user_question_response({
-            "request_id": "q1",
-            "session_id": "sess-h",
-            "answers": {"choice": "A"},
-        })
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_question_response.assert_not_awaited()
-    h.uq.respond.assert_awaited_once()
-    # headless must not even fetch the session row for relay
-    h.db.get_session.assert_not_called()
-
-
-async def test_headless_get_pending_questions_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        handler = h.make_headless()
-        handler.current_session_id = "sess-h"
-        await handler.handle_get_pending_questions({})
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_get_pending_questions.assert_not_awaited()
-    h.uq.get_pending_questions.assert_called_once_with("sess-h")
-    h.db.get_session.assert_not_called()
-
-
-async def test_headless_queue_message_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        await h.make_headless().handle_queue_message({
-            "content": "later", "session_id": "sess-h",
-        })
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_queue_message.assert_not_awaited()
-    # headless queue op must run locally, not relay
-    h.db.add_queued_message.assert_called_once()
+# NOTE (V2 A7): the runtime instantiation tests for the headless relay guard
+# (HeadlessChatHandler with websocket=None never relays) are GONE — A7 deleted
+# headless_query_runner.py, so no ChatWebSocketHandler is ever built with
+# websocket=None. The websocket-None relay guards remain in the class and are
+# pinned by source inspection in section 9
+# (test_exactly_eight_class_handlers_relay_and_all_are_headless_guarded).
 
 
 # ═══ 7b. permission_response — relay site 7 ════════════════════════════════════
@@ -1156,34 +1088,3 @@ def test_exactly_eight_class_handlers_relay_and_all_are_headless_guarded():
         src = inspect.getsource(getattr(cwh.ChatWebSocketHandler, name))
         assert "is_remote_session" in src, f"{name} lost its relay branch"
         assert "self.websocket is not None" in src, f"{name} lost the headless guard"
-
-
-# ═══ 10. Headless — permission relays must NEVER fire when websocket is None ════
-
-
-async def test_headless_permission_response_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        await h.make_headless().handle_permission_response({
-            "request_id": "p1",
-            "session_id": "sess-h",
-            "decision": "allow",
-        })
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_permission_response.assert_not_awaited()
-    h.ph.respond.assert_awaited_once()
-    h.db.get_session.assert_not_called()
-
-
-async def test_headless_get_pending_permissions_never_relays():
-    with _HandlerHarness() as h:
-        h.cloud.is_remote_session.return_value = True
-        handler = h.make_headless()
-        handler.current_session_id = "sess-h"
-        await handler.handle_get_pending_permissions({})
-
-    h.cloud.is_remote_session.assert_not_called()
-    h.cloud.relay_get_pending_permissions.assert_not_awaited()
-    h.ph.get_pending_requests.assert_called_once_with("sess-h")
-    h.db.get_session.assert_not_called()

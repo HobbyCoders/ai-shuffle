@@ -364,28 +364,27 @@ class TestAtomicRunAccounting:
             "timeout_seconds": 60,
             "output_config": {"type": "none"},
         }
-        # Runs now execute as normal streaming sessions: the turn cost is
-        # sniffed off the headless handler's terminal-frame metadata.
-        handler = MagicMock()
-        done: asyncio.Future = asyncio.get_running_loop().create_future()
-        done.set_result(None)
-        handler.query_task = done
-        handler.last_turn_metadata = {
-            "total_cost_usd": 0.25,
-            "tokens_in": 1,
-            "tokens_out": 2,
+        # V2: runs execute as normal streaming sessions via turn_manager.submit;
+        # the cost/tokens are derived from the durable session-event log's
+        # terminal ``turn.completed`` usage (``_final_turn_outcome``), and the
+        # response text from the same log (``_extract_final_assistant_text``).
+        submit = MagicMock(return_value="turn-at")
+        outcome = {
+            "usage": {"total_cost_usd": 0.25, "tokens_in": 1, "tokens_out": 2},
+            "error": None,
+            "interrupted": False,
         }
-        handler.last_turn_error = None
-        handler.last_turn_interrupted = False
 
         with patch("app.core.automation_manager.database") as db, patch(
-            "app.core.headless_query_runner.launch_headless_query",
-            new=AsyncMock(return_value=handler),
-        ), patch("app.core.sync_engine.sync_engine", new=AsyncMock()):
-            # V2: response text is read from the persisted message rows.
-            db.get_session_messages.return_value = [
-                {"role": "assistant", "type": "text", "content": "done"},
-            ]
+            "app.core.turn_manager.submit", submit,
+        ), patch(
+            "app.core.turn_manager.wait_session_idle",
+            new=AsyncMock(return_value=True),
+        ), patch("app.core.sync_engine.sync_engine", new=AsyncMock()), patch.object(
+            AutomationManager, "_final_turn_outcome", return_value=outcome,
+        ), patch.object(
+            AutomationManager, "_extract_final_assistant_text", return_value="done",
+        ):
             db.update_automation_run.return_value = {}
             db.update_automation.return_value = {}
             await manager._execute_run(automation, "run-at", "do it", {})
@@ -394,3 +393,6 @@ class TestAtomicRunAccounting:
         for call in db.update_automation.call_args_list:
             assert "run_count" not in call.kwargs
             assert "total_cost_used" not in call.kwargs
+        # Submitted exactly one server-originated automation turn.
+        submit.assert_called_once()
+        assert submit.call_args.args[1] == "automation"

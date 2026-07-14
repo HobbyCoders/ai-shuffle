@@ -46,7 +46,6 @@ from app.core.query_persistence import (
     log_captured_cli_stderr,
 )
 from app.core.query_streaming import truncate_large_payload
-from app.core.query_options import build_options_from_profile
 from app.core.memory_sync import reconcile_memory, push_memory
 from app.core.turn_finalize import persist_turn_end_state
 
@@ -165,20 +164,19 @@ async def _run_background_query_impl(
     # instead of 401-ing. No-op when the token is still valid or on API-key auth.
     await direct_oauth.ensure_fresh_credentials()
 
-    # Build options with user-scoped credential resolution
-    options, agents_dict = build_options_from_profile(
+    # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
+    # through the shared sdk_options seam — previously only the WebSocket path
+    # attached hooks here (issue #567).
+    from app.core.sdk_options import build_session_options
+    options, agents_dict = build_session_options(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         api_user_id=api_user_id,
-        session_id=session_id
+        session_id=session_id,
+        hook_project_id=project.get("id") if project else None,
     )
-
-    # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
-    # spawn path too — previously only the WebSocket path did (issue #567).
-    from app.core.hook_service import attach_hooks_to_options
-    attach_hooks_to_options(options, project_id=project.get("id") if project else None)
 
     # --- Stale-turn early gate (F3) ---
     # Check stale_turn_undrained BEFORE stopping the drain pump: the pump is the

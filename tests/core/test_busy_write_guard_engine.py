@@ -105,8 +105,7 @@ def _chat_patches(stack: ExitStack, pool: _StubPool, *, credentials_rotated=Fals
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = None
-    stack.enter_context(patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ))
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
@@ -274,8 +273,7 @@ def _rest_patches(stack: ExitStack, pool: _StubPool):
     stack.enter_context(patch.object(qe, "direct_oauth", new=oauth))
     options = MagicMock()
     options.cwd = None
-    stack.enter_context(patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ))
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
@@ -321,8 +319,7 @@ async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_d
         oauth.ensure_fresh_credentials = AsyncMock()
         stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
-        stack.enter_context(patch.object(
-            qb, "build_options_from_profile", return_value=(options, {})
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
         ))
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
@@ -432,8 +429,7 @@ async def test_background_query_refuses_stale_undrained_client(mock_db):
         oauth.ensure_fresh_credentials = AsyncMock()
         stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
-        stack.enter_context(patch.object(
-            qb, "build_options_from_profile", return_value=(options, {})
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
         ))
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
@@ -541,8 +537,7 @@ async def test_background_claim_window_exception_clears_flag():
         oauth.ensure_fresh_credentials = AsyncMock()
         stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
-        stack.enter_context(patch.object(
-            qb, "build_options_from_profile", return_value=(options, {})
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
         ))
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))

@@ -266,6 +266,31 @@ def _sweep_stray_cli_processes() -> int:
     return len(pids)
 
 
+def _reap_dead_lease_turns() -> "list[Dict[str, Any]]":
+    """Reap every dead-lease live turn (v2 turns). The previous process's live
+    turns cannot survive a restart: their run leases are dead, so
+    ``turns.reap_expired`` requeues the user/queue work (front of queue) and
+    aborts the rest. Returns the reaped rows (as they were BEFORE resolution) so
+    the caller can kick each affected session."""
+    from app.db import turns as turns_db
+
+    return turns_db.reap_expired()
+
+
+async def _boot_reap_and_kick_turns() -> int:
+    """Boot sweep (v2 turns): reap dead-lease live turns, then kick each
+    affected session so a requeued turn restarts. Flag-gated by the caller.
+    Returns the number of turns reaped."""
+    from app.core import turn_scheduler
+
+    reaped = await asyncio.to_thread(_reap_dead_lease_turns)
+    if not reaped:
+        return 0
+    for session_id in {r["session_id"] for r in reaped}:
+        turn_scheduler.kick(session_id)
+    return len(reaped)
+
+
 async def reconcile_from_durable_truth() -> Dict[str, int]:
     """Run every boot-time reconcile branch; never raises.
 
@@ -279,7 +304,22 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "statuses_reset": 0,
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
+        "turns_reaped": 0,
     }
+
+    # V2 turns boot sweep (flag-gated): settle/requeue the previous process's
+    # dead-lease live turns and kick affected sessions. Guarded independently.
+    if settings.v2_turns:
+        try:
+            counts["turns_reaped"] = await _boot_reap_and_kick_turns()
+        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+            logger.exception("Boot reconcile: reaping dead-lease turns failed")
+            record_error(
+                "backend",
+                f"Boot reconcile failed while reaping dead-lease turns: {exc}",
+                detail=traceback.format_exc(),
+                context={"reconcile": "turns_reap"},
+            )
 
     try:
         counts["parked_markers_cleared"] = await asyncio.to_thread(

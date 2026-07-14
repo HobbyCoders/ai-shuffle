@@ -159,6 +159,44 @@ def _pump_running(session_id: str) -> bool:
         return False
 
 
+def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
+    """Additive V2-turns lifecycle inputs (flag-gated, fully guarded).
+
+    Returns ``(has_queued_unpark, has_parked_turn)``:
+
+    * ``has_queued_unpark`` — a ``queued`` ``source=unpark`` turn exists (a wake
+      is imminent) → contributes to ``waking``;
+    * ``has_parked_turn`` — a ``parked`` turn exists (foreground done, background
+      work survives) → contributes to ``parked_with_work``.
+
+    Returns ``(False, False)`` when the flag is off or on ANY error, so the
+    legacy derivation is byte-identical with the flag off / turns table absent.
+    """
+    from app.core.config import settings
+
+    if not settings.v2_turns:
+        return (False, False)
+    try:
+        from app.db import turns as turns_db
+        from app.db.base import get_db
+
+        has_queued_unpark = any(
+            t.get("source") == "unpark"
+            for t in turns_db.get_queued_turns(session_id)
+        )
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM turns WHERE session_id=%s AND state='parked' LIMIT 1",
+                (session_id,),
+            )
+            has_parked_turn = cursor.fetchone() is not None
+        return (has_queued_unpark, has_parked_turn)
+    except Exception:
+        logger.debug("v2 turn-signal read failed for %s", session_id, exc_info=True)
+        return (False, False)
+
+
 def _detect_drift(snap: LifecycleSnapshot) -> List[str]:
     """Cross-source disagreement classes (log-only).
 
@@ -285,6 +323,16 @@ async def compute(
 
     pump_running = _pump_running(session_id)
 
+    # Additive V2-turns signals (flag-gated; (False, False) with the flag off).
+    # A queued unpark turn folds into the composed ``unpark_pending`` wire value
+    # (so the /live wire agrees with the derived state); a parked turn is an
+    # additional trigger for ``parked_with_work``.
+    has_queued_unpark, has_parked_turn = await run_sync(
+        _v2_turn_signals, session_id
+    )
+    if has_queued_unpark:
+        unpark_pending = True
+
     # Derived state. Precedence: streaming > waking > parked_with_work > idle.
     # ``waking`` outranks ``parked_with_work`` because a committed follow-up
     # turn is a stronger claim about what happens next than lingering visible
@@ -293,7 +341,7 @@ async def compute(
         state_name = STATE_STREAMING
     elif unpark_pending:
         state_name = STATE_WAKING
-    elif active_tasks:
+    elif active_tasks or has_parked_turn:
         state_name = STATE_PARKED_WITH_WORK
     else:
         state_name = STATE_IDLE

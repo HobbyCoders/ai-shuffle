@@ -175,10 +175,55 @@ from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
     _stopped_sessions,
 )
 
+# v2 core (Phase 2 A6b): the command layer + durable turns table the WS handlers
+# delegate to when ``settings.v2_turns`` is on. Lightweight modules (no import
+# cycle: turn_manager imports only app.db.turns).
+from app.core import turn_manager  # noqa: E402
+from app.db import turns as turns_db  # noqa: E402
+
 
 # Terminal background-task statuses that should wake the parent (mirror the SDK's
 # TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
+
+
+# Queue sources that render as user-visible queue chips (B3). Internal
+# failover/auto_continue/unpark turns never appear in the queue UI.
+_V2_QUEUE_SOURCES = ("user", "queue")
+
+
+def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
+    """B3 — the user-visible queue for a session, re-sourced from the durable
+    ``turns`` table (v2 path).
+
+    Only ``source in ('user','queue')`` queued turns render as chips; the server
+    sorts with the exact ``pop_ready`` ordering (``get_queued_turns`` already
+    orders by ``position, created_at, id``) and emits SEQUENTIAL INTEGER
+    positions (the legacy numbering convention) so the float ``turns.position``
+    never leaks to the wire. ``id``←turn id (the ``query_queued`` ack carries the
+    same turn id, so FE-held ids match for remove), ``content``←prompt,
+    ``created_at``←ISO. The row shape matches ``queued_messages`` so the frontend
+    needs zero changes.
+    """
+    rows: List[Dict[str, Any]] = []
+    pos = 0
+    for turn in turns_db.get_queued_turns(session_id):
+        if turn.get("source") not in _V2_QUEUE_SOURCES:
+            continue
+        created = turn.get("created_at")
+        if created is not None and hasattr(created, "isoformat"):
+            created = created.isoformat()
+        rows.append({
+            "id": turn["id"],
+            "session_id": session_id,
+            "content": turn.get("prompt") or "",
+            "profile_id": turn.get("profile_id"),
+            "project_id": turn.get("project_id"),
+            "position": pos,
+            "created_at": created,
+        })
+        pos += 1
+    return rows
 
 # How long the two-phase ``interrupt_for_query`` waits for the interrupted
 # streaming task to drain naturally before force-cancelling it. The frontend's
@@ -721,12 +766,11 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     2. DURABLE row: persist the chip via ``database.add_session_message`` so
        the kill survives a reload (the live buffer may already be reaped — the
        force-eviction case — or be reset by the restart that caused the kill).
-    3. UNPARK: hand off ONE consolidated unpark via ``_deliver_unpark_impl``
-       ONLY when a live pooled client exists and the server is NOT shutting
-       down (DECISION: durable-chip-only during shutdown). ``mark_unparked``
-       dedups against the drain pump's own delivery for the same task.
+
+    The legacy step 3 (the ``HeadlessChatHandler`` unpark handoff) is GONE (V2
+    A7, B5): the v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal)
+    is the sole unpark producer, so this surface only records; it never spawns.
     """
-    from app.core import startup as _startup
     from app.core.task_registry import task_registry
 
     task_id = task.get("id")
@@ -776,71 +820,17 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
             session_id, task_id, exc_info=True,
         )
 
-    # 3) Consolidated unpark — only with a live client, never during shutdown.
-    if getattr(_startup, "is_shutting_down", False):
-        return
-    try:
-        from app.core.session_pool import get_session_pool
-
-        state = get_session_pool().peek(session_id)
-        if state is None or not state.adapter.is_alive():
-            return  # no live client — the durable chip is the surface
-    except Exception:
-        return
-    if not task_registry.mark_unparked(session_id, task_id):
-        return  # this task's one-unpark token is already spent (pump/CLI path)
-
-    try:
-        session_row = await run_sync(database.get_session, session_id)
-    except Exception:
-        session_row = None
-    if not session_row:
-        return
-
-    from app.core.headless_query_runner import HeadlessChatHandler
-
-    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
-    handler.current_session_id = session_id
-    ctx = StreamingContext(
-        session_id=session_id,
-        device_id=handler.device_id,
-        message_id=str(uuid.uuid4()),
-        user_id=handler.user_id,
-    )
-    pending = [{
-        "task_id": task_id,
-        "status": status,
-        # ENRICH (kill-notification husk): fall back to a derived
-        # "<kind> <status>: <title>" line so a summary-less killed task is not
-        # a contentless husk the parent cannot act on. output_file/usage stay
-        # None — a killed shell genuinely has no such data.
-        "summary": summary or _kill_summary_from_record(task, status),
-        "output_file": None,
-        "uuid": None,
-        "usage": None,
-        "tool_use_id": task.get("toolUseId"),
-    }]
-
-    def _set_query_task(t: "asyncio.Task") -> None:
-        handler.query_task = t
-
-    try:
-        await _deliver_unpark_impl(
-            pending=pending,
-            session_id=session_id,
-            profile_id=session_row.get("profile_id"),
-            project_id=session_row.get("project_id"),
-            worktree_id=session_row.get("worktree_id"),
-            ctx=ctx,
-            final_metadata=None,
-            run_query=handler.run_query,
-            set_query_task=_set_query_task,
-        )
-    except Exception:
-        logger.debug(
-            "terminal-surface unpark handoff failed for %s/%s",
-            session_id, task_id, exc_info=True,
-        )
+    # NOTE (V2 A7, B5): the legacy step 3 — the ``HeadlessChatHandler`` unpark
+    # handoff via ``_deliver_unpark_impl`` — has been REMOVED. The v2 scheduler
+    # (idle_reader -> turn_scheduler.on_task_terminal) is now the sole unpark
+    # producer for background-task completions/errors/kills, so firing a second
+    # unpark from here would double-wake the parent. Steps 1 (live chip) and 2
+    # (durable row) stay: they are the guaranteed terminal SURFACE for a
+    # force-eviction/ghost-reap/pool-teardown kill that never flows a frame
+    # through the reader. The remaining accepted regression is that an explicit
+    # user-stop of a LIVE background sub-agent (which emits no CLI frame) no
+    # longer auto-wakes the parent with a <task-notification>; the durable chip
+    # still records it. Rollback is a git revert, not a flag flip.
 
 
 def _drop_drain_pump_self(session_id: str, drain_pumps: "Dict[str, asyncio.Task]") -> None:
@@ -2223,7 +2213,12 @@ class ChatWebSocketHandler:
         # queue machinery drains it as a clean new query when the turn ends,
         # and the user sees it via the queue_updated ack frames. ("Send now"
         # goes through the two-phase interrupt_for_query, not this path.)
-        if session_id:
+        #
+        # v2 turns cutover: this whole in-memory busy guard is legacy-only. The
+        # v2 path routes ALL queries through ``turn_manager.submit`` at the tail
+        # of this handler — the durable unique live index is the busy-write guard
+        # (a query for a busy session queues durably; F5 ack below).
+        if session_id and not settings.v2_turns:
             async with _active_sessions_lock:
                 active_task = _active_chat_sessions.get(session_id)
             # Route to the queue when a turn is live OR when the pooled client is
@@ -2406,6 +2401,92 @@ class ChatWebSocketHandler:
                         source_device_id=None,
                     )
 
+        # v2 turns cutover: submit a durable ``source=user`` turn instead of
+        # spawning run_query. ``submit`` enqueues then kicks the scheduler, which
+        # starts the turn immediately when the session is idle or leaves it queued
+        # behind the live turn (the unique live index is the busy-write guard —
+        # a busy-session query queues durably, no cancel-and-requery). Rendering
+        # rides SOLELY the SSE typed-event feed; new-session adoption is
+        # authenticated by the ``session_created`` request_id echo already sent
+        # above (B4) — no origin-socket passthrough, no start-frame token.
+        if settings.v2_turns:
+            # Persist + broadcast the user message (P3 session_messages dual-write
+            # survives — the recorder also logs ``message.user`` to the event
+            # feed). New sessions persisted their first message atomically at
+            # creation; existing sessions persist here. Ordered before submit is
+            # safe: v2 ``submit`` always enqueues durably (never a
+            # preempted-and-discarded query), so there is no double-persist race.
+            try:
+                if not is_new_session:
+                    _msg_role = "user"
+                    _msg_meta = None
+                    if prompt.strip().startswith("/"):
+                        _parts = prompt.strip().split(None, 1)
+                        _msg_role = "command"
+                        _msg_meta = {
+                            "command_name": _parts[0],
+                            "command_args": _parts[1] if len(_parts) > 1 else "",
+                        }
+                    await run_sync(
+                        database.add_session_message,
+                        session_id=session_id,
+                        role=_msg_role,
+                        content=prompt,
+                        metadata=_msg_meta,
+                        profile_id=profile_id,
+                    )
+                await sync_engine.broadcast_message_added(
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": prompt,
+                        "profile_id": profile_id,
+                    },
+                    source_device_id=self.device_id,
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[v2] user-message persist/broadcast failed for session "
+                    f"{session_id} (turn will still run): {persist_exc}"
+                )
+
+            # A turn already live for the session means this query queues behind
+            # it (busy-write guard implicit). Checked BEFORE submit — submit's
+            # kick does not make a turn live synchronously, so a post-submit read
+            # could still see the previous live turn.
+            had_live = (
+                await run_sync(turns_db.get_live_turn, session_id) is not None
+            )
+
+            payload: Dict[str, Any] = {}
+            if request_id and is_new_session:
+                payload["request_id"] = request_id
+            if self.api_user_id:
+                payload["api_user_id"] = self.api_user_id
+            if getattr(self, "user_id", None):
+                payload["user_id"] = self.user_id
+
+            turn_manager.submit(
+                session_id,
+                "user",
+                prompt=prompt,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                overrides=overrides or None,
+                payload=payload or None,
+            )
+
+            if had_live:
+                # Queued behind the live turn: surface the chip (re-sourced from
+                # turns) and send the F5 query_queued ack so the client leaves its
+                # optimistic streaming state instead of spinning forever.
+                await self._v2_broadcast_queue(session_id)
+                await self.send_json(
+                    {"type": "query_queued", "session_id": session_id}
+                )
+            return
+
         # Start new query task — busy-write guard (late re-check): the liveness
         # check and the registration happen under the SAME lock acquisition, so
         # a turn that started while we were awaiting above (queue drain, unpark
@@ -2548,12 +2629,27 @@ class ChatWebSocketHandler:
             # when the preserve-background patch is BOTH enabled and actually active
             # — otherwise a plain interrupt already kills them, so the per-task loop
             # would be redundant. Gating here also makes flag-OFF a true no-op even
-            # though the frontend always sends stop_background=true.
+            # though the frontend always sends stop_background=true. (Gate computed
+            # VERBATIM for both paths — plan §1.4(1).)
             stop_background = (
                 bool(data.get("stop_background"))
                 and settings.preserve_background_on_interrupt
                 and is_patch_active()
             )
+
+            # v2 turns cutover: the ONE interrupt implementation. Flip the live
+            # turn running->interrupting (durable intent) and fire the executor,
+            # which drives the live runtime's SDK interrupt + evict/drain
+            # escalation (the safety-timeout/eviction choreography now lives in
+            # SessionRuntime, not here). A user stop settles the turn ``aborted``,
+            # so queued turns REMAIN untouched (F4) — no _stopped_sessions latch.
+            # The ``stop_background`` opt-in still tears down surviving background
+            # tasks transport-side (the runtime interrupt does not carry it).
+            if settings.v2_turns:
+                turn_manager.interrupt(session_id, "stop", stop_background=stop_background)
+                if stop_background:
+                    await stop_all_background_tasks(session_id)
+                return
 
             # Mark session as user-stopped so the finally block in run_query
             # does NOT auto-fire queued messages.  The queue stays intact —
@@ -2678,6 +2774,45 @@ class ChatWebSocketHandler:
                         "message": f"Could not reach owning device: {e}",
                     })
                 return
+
+        # v2 turns cutover (two-phase send-now). Flip the live turn
+        # running->interrupting with mode=send_now and fire the executor (SDK
+        # interrupt + escalation in the runtime), then wait — with today's drain
+        # timeout — until the live turn either SETTLES (clean stop) or ESCALATES
+        # to ``draining`` (wedged CLI kept alive). Either outcome is safe to send
+        # the replacement query after: the follow-up queued turn is held out of
+        # the live slot by the unique live index until the draining turn settles
+        # (F6), so it can never cross a mid-turn CLI. Confirm unconditionally so
+        # the frontend's replacement query is unblocked.
+        if settings.v2_turns:
+            try:
+                turn_manager.interrupt(session_id, "send_now")
+
+                async def _settled_or_draining() -> bool:
+                    live = await run_sync(turns_db.get_live_turn, session_id)
+                    return live is None or live.get("state") == "draining"
+
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + _INTERRUPT_DRAIN_TIMEOUT_SECONDS
+                while not await _settled_or_draining():
+                    if loop.time() >= deadline:
+                        logger.warning(
+                            "interrupt_for_query(v2): drain wait timed out for "
+                            "%s — confirming anyway (follow-up held by the "
+                            "unique live index until the draining turn settles)",
+                            session_id,
+                        )
+                        break
+                    await asyncio.sleep(0.05)
+                await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"interrupt_for_query(v2) failed for {session_id}: {e}")
+                await self.send_json({
+                    "type": "interrupt_failed",
+                    "session_id": session_id,
+                    "message": str(e),
+                })
+            return
 
         from app.core.query_engine import interrupt_session
 
@@ -2896,8 +3031,12 @@ class ChatWebSocketHandler:
             history_response["pendingPermissions"] = pending_perms
         if pending_qs:
             history_response["pendingQuestions"] = pending_qs
-        # Include queued messages so frontend displays server-side queue
-        queued = await run_sync(database.get_queued_messages, session_id)
+        # Include queued messages so frontend displays server-side queue. v2:
+        # re-source the chips from the durable turns table (same wire shape).
+        if settings.v2_turns:
+            queued = await run_sync(_v2_queue_view, session_id)
+        else:
+            queued = await run_sync(database.get_queued_messages, session_id)
         if queued:
             history_response["queuedMessages"] = queued
         await self.send_json(history_response)
@@ -3363,6 +3502,26 @@ class ChatWebSocketHandler:
         pass
 
     # ------------------------------------------------------------------
+    # _v2_broadcast_queue — re-source + fan out the queue_updated frame
+    # ------------------------------------------------------------------
+
+    async def _v2_broadcast_queue(self, session_id: str) -> None:
+        """Build the B3 queue view from the durable turns table and emit the
+        ``queue_updated`` frame both to the other devices (via the sync engine)
+        and directly to THIS socket (which is unregistered from the sync engine
+        while streaming, so the broadcast alone would not reach it). Same wire
+        shape as the legacy ``queued_messages`` path — the frontend is unchanged.
+        """
+        queue = await run_sync(_v2_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue)
+        await self.send_json({
+            "type": "sync",
+            "event_type": "queue_updated",
+            "session_id": session_id,
+            "data": {"queued_messages": queue},
+        })
+
+    # ------------------------------------------------------------------
     # handle_queue_message
     # ------------------------------------------------------------------
 
@@ -3421,6 +3580,23 @@ class ChatWebSocketHandler:
                     await self.send_json({"type": "error", "message": relay_error})
                 return
 
+        # v2 turns cutover: enqueue a durable ``source=queue`` turn instead of a
+        # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it
+        # immediately when the session is idle, or leaves it queued behind the
+        # live turn (busy-write guard implicit — the unique live index prevents a
+        # double-start). Called on the loop so the kick can schedule. The
+        # queue_updated frame is re-sourced from the turns table (B3).
+        if settings.v2_turns:
+            turn_manager.submit(
+                session_id,
+                "queue",
+                prompt=content,
+                profile_id=profile_id,
+                project_id=project_id,
+            )
+            await self._v2_broadcast_queue(session_id)
+            return
+
         # Clear stopped flag — user explicitly queued a new message, so they
         # want the queue to auto-process when the session becomes idle.
         _stopped_sessions.discard(session_id)
@@ -3471,6 +3647,16 @@ class ChatWebSocketHandler:
         if not message_id:
             return
 
+        # v2 turns cutover: ``message_id`` is a turn id (the queue_updated frame
+        # emits turn ids as ``id``). Settle it to aborted (kept as history) via
+        # the guarded queued->aborted transition; NO scheduler kick fires
+        # (removing a chip never starts anything). Re-broadcast from turns.
+        if settings.v2_turns:
+            await run_sync(turn_manager.remove_queued, message_id)
+            if session_id:
+                await self._v2_broadcast_queue(session_id)
+            return
+
         await run_sync(database.remove_queued_message, message_id)
 
         # Broadcast updated queue
@@ -3494,6 +3680,19 @@ class ChatWebSocketHandler:
         session_id = data.get("session_id") or self.current_session_id
 
         if not session_id:
+            return
+
+        # v2 turns cutover: abort every user-visible queued turn (kept as
+        # history); the queue view then re-sources to empty. Internal
+        # failover/auto_continue/unpark turns are never user queue chips, so they
+        # are left untouched.
+        if settings.v2_turns:
+            def _clear_v2_queue():
+                for turn in turns_db.get_queued_turns(session_id):
+                    if turn.get("source") in _V2_QUEUE_SOURCES:
+                        turn_manager.remove_queued(turn["id"])
+            await run_sync(_clear_v2_queue)
+            await self._v2_broadcast_queue(session_id)
             return
 
         await run_sync(database.clear_queued_messages, session_id)

@@ -59,7 +59,7 @@ async def cluster_message(
     already authenticated its own user).
     """
     from app.api.sessions_worktree import _detect_command_meta
-    from app.core.headless_query_runner import launch_headless_query
+    from app.core import turn_manager
     from app.core.sync_engine import sync_engine
 
     prompt = (body.prompt or "").strip()
@@ -73,7 +73,7 @@ async def cluster_message(
     # 'claude-code' is the controller's "no explicit profile" sentinel, not a
     # real profile row — treat it as absent so the session's own profile wins
     # (stream_to_websocket would error-yield "Profile not found" on it, which
-    # the headless path has no surface for).
+    # the intake path has no surface for).
     body_profile = body.profile_id if body.profile_id != "claude-code" else None
     profile_id = body_profile or session.get("profile_id") or "claude-code"
     msg_role, msg_meta = _detect_command_meta(prompt)
@@ -95,14 +95,19 @@ async def cluster_message(
     except Exception as e:  # noqa: BLE001
         logger.warning("Cluster message broadcast failed: %s", e)
 
+    # Submit a durable ``source=intake`` turn (peer relay). ``submit`` enqueues
+    # then kicks the scheduler, which starts it in the ONE spawn path when the
+    # session is idle here (or queues it behind a live turn). Called ON the loop
+    # (not via run_sync) so the kick can schedule the runtime task — a thread
+    # has no running loop and would silently drop the kick. Fire-and-forget: the
+    # relay returns immediately, exactly like the old detached launch.
     try:
-        await launch_headless_query(
+        turn_manager.submit(
+            session_id,
+            "intake",
             prompt=prompt,
-            session_id=session_id,
             profile_id=profile_id,
             project_id=session.get("project_id"),
-            user_id="admin",
-            api_user_id=None,
             worktree_id=session.get("worktree_id"),
             overrides=body.overrides,
         )
@@ -129,14 +134,17 @@ async def cluster_queue_message(
 ):
     """Queue a "send later" message on a session this install owns (peer relay).
 
-    Reuses the same server-side queue handler the local ``/ws/chat`` path uses:
-    the message is stored in the shared queue, broadcast to devices, and — if
-    the session is idle here — drained immediately by running the query in this
-    install's worktree. If a query is already streaming, the post-query drain
-    picks it up. Keyed by the *shared* session id and runs as admin (the
-    originating install already authenticated its own user).
+    Enqueues a durable ``source=queue`` turn in the shared turns table (the same
+    thing the local ``/ws/chat`` queue handler does under v2): ``submit`` stores
+    it and kicks the scheduler, which starts it immediately when the session is
+    idle here or leaves it queued behind the live turn. The queue_updated frame
+    is re-sourced from the turns table (B3) and broadcast to devices. Keyed by
+    the *shared* session id and runs as admin (the originating install already
+    authenticated its own user).
     """
-    from app.core.headless_query_runner import HeadlessChatHandler
+    from app.api.chat_ws_handler import _v2_queue_view
+    from app.core import turn_manager
+    from app.core.sync_engine import sync_engine
 
     content = (body.content or "").strip()
     if not content:
@@ -146,18 +154,25 @@ async def cluster_queue_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    handler = HeadlessChatHandler(user_id="admin", api_user_id=None)
-    handler.current_session_id = session_id
+    # Same sentinel handling as cluster_message: the queued turn's profile_id
+    # drives the eventual drain, so it must be a real profile.
+    profile_id = (
+        (body.profile_id if body.profile_id != "claude-code" else None)
+        or session.get("profile_id")
+    )
+    project_id = body.project_id or session.get("project_id")
     try:
-        await handler.handle_queue_message({
-            "session_id": session_id,
-            "content": content,
-            # Same sentinel handling as cluster_message: the queued row's
-            # profile_id drives the eventual drain, so it must be real.
-            "profile": (body.profile_id if body.profile_id != "claude-code" else None)
-                       or session.get("profile_id"),
-            "project": body.project_id or session.get("project_id"),
-        })
+        # Called ON the loop (not via run_sync) so the kick can schedule the
+        # runtime task when the session is idle.
+        turn_manager.submit(
+            session_id,
+            "queue",
+            prompt=content,
+            profile_id=profile_id,
+            project_id=project_id,
+        )
+        queue = await run_sync(_v2_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue)
     except Exception as e:  # noqa: BLE001
         logger.exception("Cluster queue_message failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to queue message")
@@ -172,30 +187,19 @@ async def cluster_interrupt(
     install_id: str = Depends(cluster.require_cluster_auth),
 ):
     """Interrupt a running query on a session this install owns (peer relay)."""
-    from app.core.query_engine import interrupt_session
-    from app.api.websocket import _active_chat_sessions, _active_sessions_lock, _stopped_sessions
+    from app.core import turn_manager
 
     session = await run_sync(database.get_session, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    _stopped_sessions.add(session_id)
-    interrupted = await interrupt_session(session_id)
+    # The ONE interrupt implementation: flip the live turn running->interrupting
+    # (durable intent) and fire the command→runtime executor, which drives the
+    # live runtime's SDK interrupt + evict/drain escalation. No _stopped_sessions
+    # latch or manual task force-cancel — the runtime owns that teardown now.
+    row = turn_manager.interrupt(session_id, "stop")
 
-    # Force-cancel the task if the SDK doesn't stop quickly (mirrors cloud intake).
-    async with _active_sessions_lock:
-        task = _active_chat_sessions.get(session_id)
-    if task and not task.done():
-        import asyncio
-
-        async def _safety_cancel(t, timeout=10.0):
-            await asyncio.sleep(timeout)
-            if not t.done():
-                t.cancel()
-
-        asyncio.ensure_future(_safety_cancel(task))
-
-    return {"ok": True, "interrupted": interrupted}
+    return {"ok": True, "interrupted": row is not None}
 
 
 @router.get("/sessions/{session_id}/pending_questions")

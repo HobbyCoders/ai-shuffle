@@ -844,19 +844,19 @@ async def execute_query(
     # A WorktreeUnavailableError propagates here (non-streaming path) just like
     # the ValueErrors above — the caller turns it into an error response rather
     # than silently running the worktree session in the main checkout.
-    options, agents_dict = build_options_from_profile(
+    # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
+    # through the shared sdk_options seam — previously only the WebSocket path
+    # attached hooks here (issue #567).
+    from app.core.sdk_options import build_session_options
+    options, agents_dict = build_session_options(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         api_user_id=api_user_id,
         session_id=session_id,
+        hook_project_id=project_id,
     )
-
-    # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
-    # spawn path too — previously only the WebSocket path did (issue #567).
-    from app.core.hook_service import attach_hooks_to_options
-    attach_hooks_to_options(options, project_id=project_id)
 
     # Resolve virtual @Notes/note-id references to actual content
     prompt = resolve_note_references(prompt)
@@ -1240,14 +1240,15 @@ async def stream_query(
 
     # Build options with user-scoped credential resolution.
     # WorktreeUnavailableError → refuse to run (never silently in main).
+    from app.core.sdk_options import build_session_options
     try:
-        options, agents_dict = build_options_from_profile(
+        options, agents_dict = build_session_options(
             profile=profile,
             project=project,
             overrides=overrides,
             resume_session_id=resume_id,
             api_user_id=api_user_id,
-            session_id=session_id
+            session_id=session_id,
         )
     except (WorktreeUnavailableError, ValueError) as e:
         # Worktree unrecoverable, or the resolved working directory doesn't
@@ -1259,6 +1260,7 @@ async def stream_query(
 
     # Wire plugin + DB hooks (incl. blocking PreToolUse guards) into this
     # spawn path too — previously only the WebSocket path did (issue #567).
+    # Kept outside the build try/except to preserve exception scoping.
     from app.core.hook_service import attach_hooks_to_options
     attach_hooks_to_options(options, project_id=project_id)
 
@@ -1856,18 +1858,20 @@ async def _stream_to_websocket_impl(
     # instead of 401-ing. No-op when the token is still valid or on API-key auth.
     await direct_oauth.ensure_fresh_credentials()
 
-    # Build options once (without callback — callback is set later if needed)
+    # Build options once (without callback — callback is set later if needed).
+    # can_use_tool/hooks default to None inside build_options_from_profile, so
+    # the shared seam yields byte-for-byte identical options; hooks are attached
+    # separately below (after can_use_tool is set, with an stderr callback).
+    from app.core.sdk_options import build_session_options
     _build_opts_start = time.monotonic()
     try:
-        options, agents_dict = build_options_from_profile(
+        options, agents_dict = build_session_options(
             profile=profile,
             project=project,
             overrides=overrides,
             resume_session_id=resume_id,
-            can_use_tool=None,
-            hooks=None,
             api_user_id=api_user_id,
-            session_id=session_id
+            session_id=session_id,
         )
     except (WorktreeUnavailableError, ValueError) as e:
         # A worktree session whose worktree can't be recovered, or a working

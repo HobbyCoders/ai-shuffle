@@ -255,23 +255,25 @@ async def create_session_with_worktree(
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to broadcast first message: {e}")
 
-        # 4. Launch run_query in a detached task. The task is registered in
-        #    _active_chat_sessions so /stop and reconnect-attach work.
+        # 4. Submit a durable ``source=worktree`` turn; ``submit`` kicks the
+        #    scheduler into the ONE spawn path. Called ON the loop (not via
+        #    run_sync) so the kick can schedule the runtime task. ``api_user_id``
+        #    rides the payload for attribution of the server-originated turn.
         try:
-            from app.core.headless_query_runner import launch_headless_query
-            await launch_headless_query(
+            from app.core import turn_manager
+            turn_manager.submit(
+                session["id"],
+                "worktree",
                 prompt=prompt,
-                session_id=session["id"],
                 profile_id=profile_id,
                 project_id=body.project_id,
-                user_id="admin",
-                api_user_id=api_user_id,
                 worktree_id=worktree["id"],
                 overrides=body.overrides,
+                payload={"api_user_id": api_user_id} if api_user_id else None,
             )
             query_started = True
         except Exception as e:  # noqa: BLE001
-            logger.exception(f"Failed to launch headless query: {e}")
+            logger.exception(f"Failed to submit worktree-session turn: {e}")
             # Don't fail the whole endpoint — session + worktree were created
             # successfully, frontend can fall back to WS-based query.
             query_started = False

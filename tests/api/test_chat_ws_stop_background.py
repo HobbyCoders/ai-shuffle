@@ -21,7 +21,20 @@ import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
 import app.core.cloud_relay as cloud_relay_mod
 import app.mcp.builtin_tools as bt
+import pytest
 from app.core.task_registry import task_registry
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_turns_path(monkeypatch):
+    """A6b (v2 turns cutover): pin the LEGACY (flag-off) handler path. Under
+    ``AI_SHUFFLE_V2_TURNS`` (default ON) handle_stop delegates to
+    ``turn_manager.interrupt`` (the stop_background opt-in gate is preserved and
+    covered in tests/api/test_chat_ws_v2_turns.py). The legacy stop-background
+    machinery still SHIPS behind the flag as the PR-A rollback path (this file is
+    slated for PR-B deletion once the flag is removed)."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "v2_turns", False)
 
 
 class _FakeWebSocket:

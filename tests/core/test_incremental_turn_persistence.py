@@ -263,8 +263,7 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
     options = MagicMock()
     options.include_partial_messages = False
     options.cwd = cwd
-    stack.enter_context(patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ))
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))

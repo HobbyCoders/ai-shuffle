@@ -107,8 +107,7 @@ async def test_execute_query_attaches_hooks():
 
     with patch.object(qe, "get_profile", return_value=profile), patch.object(
         qe, "database"
-    ) as mock_db, patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    ) as mock_db, patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ), patch.object(
         qe, "resolve_note_references", side_effect=lambda p: p
     ), patch.object(
@@ -155,8 +154,7 @@ async def test_stream_query_attaches_hooks():
 
     with patch.object(qe, "get_profile", return_value=profile), patch.object(
         qe, "database"
-    ) as mock_db, patch.object(
-        qe, "build_options_from_profile", return_value=(options, {})
+    ) as mock_db, patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ), patch.object(
         qe, "run_sync", fake_run_sync
     ), patch.object(
@@ -207,8 +205,7 @@ async def test_background_query_attaches_hooks():
         # already be attached when the session machinery starts.
         raise SentinelStop()
 
-    with patch.object(qb, "database") as mock_db, patch.object(
-        qb, "build_options_from_profile", return_value=(options, {})
+    with patch.object(qb, "database") as mock_db, patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ), patch.object(
         qb, "run_sync", fake_run_sync
     ), patch.object(
