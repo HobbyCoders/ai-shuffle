@@ -56,6 +56,12 @@ class CloudIntakeRequest(BaseModel):
 class CloudIntakeResponse(BaseModel):
     session_id: str
     project_id: str
+    # V2 projects (Phase 3): the origin-keyed project id of the intake session,
+    # forwarded verbatim from the worker's session row (``NULL`` until the collapse
+    # self-heal binds it). Passthrough only — cloud intake performs no v2
+    # resolution here; the legacy ``project_id`` above stays authoritative for the
+    # run and for un-upgraded installs.
+    project_v2_id: Optional[str] = None
     # Worktree fields are None for the non-worktree ("run in main checkout") path.
     worktree_id: Optional[str] = None
     branch_name: str
@@ -521,6 +527,7 @@ async def run_cloud_intake(
     return CloudIntakeResponse(
         session_id=session["id"],
         project_id=project_id,
+        project_v2_id=session.get("project_v2_id"),
         worktree_id=worktree["id"],
         branch_name=worktree["branch_name"],
         base_branch=worktree.get("base_branch") or body.base_branch,
@@ -616,6 +623,7 @@ async def _run_cloud_intake_main_checkout(
     return CloudIntakeResponse(
         session_id=session["id"],
         project_id=project_id,
+        project_v2_id=session.get("project_v2_id"),
         worktree_id=None,
         branch_name=effective_branch or body.default_branch,
         base_branch=body.base_branch,

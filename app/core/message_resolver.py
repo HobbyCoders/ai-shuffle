@@ -228,6 +228,24 @@ def resolve_working_dir(session: Dict[str, Any]) -> str:
     """
     from app.db import database
     from app.core.project_utils import get_project_working_dir, resolve_existing_worktree_cwd
+    from app.core.config import settings
+
+    # V2 projects: the resolver is the single cwd authority for a session bound to
+    # an origin-keyed project_v2. When it yields a path, use it; when it yields
+    # None (no materializable checkout on this runner) fall straight through to the
+    # default workspace ONLY — NEVER the legacy project-path walk below — so an
+    # unmaterialized checkout surfaces honestly instead of silently running in a
+    # stale legacy path. Sessions without project_v2_id, or flag OFF, take the
+    # unchanged legacy chain.
+    if settings.v2_projects and session.get("project_v2_id"):
+        from app.core import project_resolver
+        # PURE READ: resolve_existing_cwd never materializes (no git worktree
+        # add / clone) — this is an auxiliary history/JSONL reader, not the spawn
+        # path. Materialization is the spawn path's job (query_options).
+        v2_cwd = project_resolver.resolve_existing_cwd(session)
+        if v2_cwd is not None:
+            return v2_cwd
+        return _default_working_dir()
 
     # Check for worktree first — worktree sessions should resolve to the worktree path,
     # not the main project directory. Disk existence is the only gate:

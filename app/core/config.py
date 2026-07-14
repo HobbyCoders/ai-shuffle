@@ -320,6 +320,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # V2 projects cutover (Phase 3). When ON, project/checkout resolution keys
+    # off the origin-keyed ``projects_v2`` + per-runner ``checkouts`` tables
+    # (seeded by the v60 collapse migration) instead of the legacy
+    # ``project_links`` heuristic chains, path-existence cwd fallbacks, and
+    # adopt preflight. Read only at the resolution seams; the legacy and v2 paths
+    # share no in-memory state, so a flag flip is a clean rollback. ON by default
+    # (cutover). Kill switch: AI_SHUFFLE_V2_PROJECTS=false. No reader is wired in
+    # this commit — the seeded rows are dormant until later Phase-3 commits.
+    v2_projects: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_SHUFFLE_V2_PROJECTS", "V2_PROJECTS", "v2_projects"
+        ),
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -51,6 +51,10 @@ export interface Session {
 	controllable?: boolean;  // Live send/interrupt reachable right now
 	project_name?: string | null;  // Resolved server-side (cross-install projects)
 	link_group_id?: string | null;  // Folds same-repo clones into one board group
+	// V2 projects (Phase 3): origin-keyed project identity. `origin` is the board
+	// grouping key (1:1 with link_group_id for grouped projects → identical fold).
+	project_v2_id?: string | null;  // Origin-keyed project (install-independent)
+	origin?: string | null;  // Grouping token (git:… / manual:… / local:<id>)
 	automation_id?: string | null;  // Set when an automation run created this session
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 }

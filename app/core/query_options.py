@@ -93,6 +93,29 @@ class WorktreeUnavailableError(Exception):
         )
 
 
+def _session_bound_to_v2(
+    session_id: Optional[str], session: Optional[Dict[str, Any]] = None
+) -> bool:
+    """True when the v2-projects flag is on and the session is bound to a
+    project_v2.
+
+    The legacy cross-install cwd rebinds (``resolve_runnable_local_project`` →
+    ``recreate_worktree`` / ``set_session_project``) rewrite
+    ``sessions.project_id``; that must be SKIPPED for a v2-bound session because
+    the resolver owns cwd via ``project_v2`` and project_id must stay stable. Uses
+    the already-fetched ``session`` row when given, else looks it up (cold path).
+    """
+    if not settings.v2_projects:
+        return False
+    row = session
+    if row is None and session_id:
+        try:
+            row = database.get_session(session_id)
+        except Exception:  # noqa: BLE001 — a lookup failure must not skip the legacy path
+            return False
+    return bool(row and row.get("project_v2_id"))
+
+
 def _rebind_worktree_cwd_cross_device(
     session_id: str,
     session: Optional[Dict[str, Any]],
@@ -125,6 +148,13 @@ def _rebind_worktree_cwd_cross_device(
     ``WorktreeUnavailableError`` when a clone exists but the rebind fails (e.g.
     the branch can't be recovered), carrying the specific reason.
     """
+    # V2 projects: skip the legacy cross-device rebind entirely — it rewrites
+    # sessions.project_id, which must not fight the origin-keyed resolver that now
+    # owns cwd. Returning (None, None) makes the caller raise the honest
+    # "no working directory" error for a genuinely-missing v2 checkout.
+    if _session_bound_to_v2(session_id, session):
+        return None, None
+
     from app.core.project_links import resolve_runnable_local_project
     from app.core.worktree_manager import (
         WorktreeError,
@@ -550,6 +580,11 @@ def build_options_from_profile(
     worktree_info = None
     working_dir_source = "workspace"
 
+    # The session row, fetched ONCE below and reused by both the v2 resolver seam
+    # and the fail-fast rebind guard (so neither re-fetches). None outside the
+    # session_id branch (e.g. override / project-only spawns).
+    session_row = None
+
     if overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
@@ -559,31 +594,69 @@ def build_options_from_profile(
             execution_mode = "worktree"
             worktree_info = overrides.get("worktree_info")
     elif session_id:
-        # Resolve a worktree cwd if this session is a worktree session. This
-        # raises WorktreeUnavailableError (rather than silently using main) when
-        # the session is worktree-flagged but its worktree can't be recovered.
-        wt_dir, wt_mode, wt_info, rebound_project = _resolve_session_worktree_cwd(
-            session_id, project
-        )
-        if wt_dir is not None:
-            working_dir = wt_dir
-            working_dir_source = "worktree"
-            execution_mode = wt_mode or "worktree"
-            worktree_info = wt_info
-            # A cross-device rebind may have moved this session onto THIS install's
-            # local project row (already persisted in the DB). Adopt that row
-            # in-memory too, so the app-config / builtin-tools MCP servers below
-            # resolve the LOCAL project id on THIS send instead of the foreign one
-            # — which would otherwise only self-heal on the next reload (PR #493
-            # follow-up #3). Returned explicitly (not smuggled through
-            # worktree_info) so nothing can leak into the environment-details prompt.
-            if rebound_project:
-                project = rebound_project
-        elif project:
-            working_dir = get_project_working_dir(project)
-            working_dir_source = "project"
+        # V2 projects: the origin-keyed resolver is the single cwd authority for a
+        # session bound to a project_v2, AND this is the SPAWN path, so it
+        # materializes the checkout (git worktree add) via resolve_cwd. Fetch the
+        # session row ONCE and reuse it for the bound check + the resolver call.
+        # A non-None path wins; None means no materializable checkout on this
+        # runner → fall straight through to the unchanged legacy worktree→project
+        # ladder (whose rebinds are already gated off for v2-bound sessions, so a
+        # genuinely unrecoverable worktree still raises WorktreeUnavailableError).
+        try:
+            session_row = database.get_session(session_id)
+        except Exception:  # noqa: BLE001 — a lookup failure must not skip the legacy ladder
+            session_row = None
+
+        v2_cwd = None
+        if _session_bound_to_v2(session_id, session_row):
+            from app.core import project_resolver
+
+            v2_cwd = project_resolver.resolve_cwd(session_row)
+
+        if v2_cwd is not None:
+            working_dir = v2_cwd
+            working_dir_source = "project-v2"
+            branch = session_row.get("branch") if session_row else None
+            if branch:
+                # A branch-bound v2 checkout is a worktree; record minimal info so
+                # the environment-details prompt reflects the branch. base_branch
+                # comes from the legacy worktree row when the session has one, else
+                # the conventional default.
+                execution_mode = "worktree"
+                base_branch = "main"
+                try:
+                    wt_row = database.get_worktree_by_session(session_id)
+                    if wt_row and wt_row.get("base_branch"):
+                        base_branch = wt_row["base_branch"]
+                except Exception:  # noqa: BLE001 — best-effort base_branch enrichment
+                    pass
+                worktree_info = {"branch": branch, "base_branch": base_branch}
         else:
-            working_dir = str(settings.workspace_dir)
+            # Resolve a worktree cwd if this session is a worktree session. This
+            # raises WorktreeUnavailableError (rather than silently using main) when
+            # the session is worktree-flagged but its worktree can't be recovered.
+            wt_dir, wt_mode, wt_info, rebound_project = _resolve_session_worktree_cwd(
+                session_id, project
+            )
+            if wt_dir is not None:
+                working_dir = wt_dir
+                working_dir_source = "worktree"
+                execution_mode = wt_mode or "worktree"
+                worktree_info = wt_info
+                # A cross-device rebind may have moved this session onto THIS install's
+                # local project row (already persisted in the DB). Adopt that row
+                # in-memory too, so the app-config / builtin-tools MCP servers below
+                # resolve the LOCAL project id on THIS send instead of the foreign one
+                # — which would otherwise only self-heal on the next reload (PR #493
+                # follow-up #3). Returned explicitly (not smuggled through
+                # worktree_info) so nothing can leak into the environment-details prompt.
+                if rebound_project:
+                    project = rebound_project
+            elif project:
+                working_dir = get_project_working_dir(project)
+                working_dir_source = "project"
+            else:
+                working_dir = str(settings.workspace_dir)
     elif project:
         working_dir = get_project_working_dir(project)
         working_dir_source = "project"
@@ -607,7 +680,15 @@ def build_options_from_profile(
             # of the same repo (link group), transparently run there and record
             # the swap so an adopted session keeps working without user action.
             rebound_dir = None
-            if working_dir_source == "project" and project and project.get("id"):
+            # V2 projects: skip the legacy cross-install project rebind (it
+            # rewrites sessions.project_id via set_session_project) — the resolver
+            # owns cwd for a v2-bound session; let the missing dir surface honestly.
+            if (
+                working_dir_source == "project"
+                and project
+                and project.get("id")
+                and not _session_bound_to_v2(session_id, session_row)
+            ):
                 try:
                     from app.core.project_links import resolve_runnable_local_project
 

@@ -561,6 +561,61 @@ class AutomationManager:
             f"here (matching remotes link automatically) so the automation can run anywhere."
         )
 
+    def _resolve_v2_project_here(
+        self, automation_id: str, project_id: str
+    ) -> Optional[str]:
+        """V2 (origin-keyed) project resolution for an automation run.
+
+        When ``settings.v2_projects`` is on AND the automation's legacy
+        ``project_id`` maps to a v2 (origin-keyed) project, the origin/checkout
+        resolver — not the legacy link-group heuristic — owns where the run
+        materializes. The per-runner ``checkouts`` row must already exist on THIS
+        install; a v2 project whose checkout lives only on another runner is the
+        SAME "project not runnable here" failure as a legacy missing clone
+        (``resolve_local_checkout`` is a pure lookup — it never auto-materializes a
+        foreign project, mirroring adopt's 409). ``automations.project_id`` is left
+        intact (hazard 7): the resolver derives project_v2 from it, and the legacy
+        id keeps flowing downstream so an un-upgraded install can still read the row.
+
+        Returns the ``project_v2`` id when the v2 path owns this run (checkout
+        present here) so the caller skips the legacy link-group resolution AND
+        binds the minted session to it; ``None`` when the flag is off or no v2
+        project maps to this legacy id, so the caller runs the unchanged legacy
+        path. Raises ``ValueError`` (missing-project message) when a v2 project
+        maps but has no checkout on this runner.
+        """
+        from app.core.config import settings
+
+        if not settings.v2_projects:
+            return None
+
+        from app.core import project_resolver
+
+        session_row = {"project_id": project_id}
+        try:
+            v2_project = project_resolver.resolve_project_v2(session_row)
+        except Exception:  # noqa: BLE001 — a resolver hiccup degrades to legacy
+            logger.debug(
+                "Automation %s: v2 project resolution failed for %s; using legacy path",
+                automation_id, project_id, exc_info=True,
+            )
+            return None
+
+        if not v2_project:
+            return None
+
+        checkout = project_resolver.resolve_local_checkout(session_row)
+        if checkout is None:
+            raise ValueError(self._missing_project_message(project_id))
+
+        logger.info(
+            "Automation %s: legacy project %s resolves to v2 project %s; running in "
+            "checkout %s (runner %s)",
+            automation_id, project_id, v2_project.get("id"),
+            checkout.get("path"), checkout.get("runner_id"),
+        )
+        return v2_project.get("id")
+
     async def _execute_run(
         self,
         automation: Dict[str, Any],
@@ -606,12 +661,20 @@ class AutomationManager:
             # and persists normal history — instead of the old headless
             # one-shot collect that only surfaced in the run-history UI.
             if has_prompt:
-                from app.core.automation_service import resolve_local_project
-
                 # The stored project row may belong to another install; run
-                # against this install's clone of the same repo (link group).
+                # against this install's checkout/clone of the same repo.
                 project_id = automation.get("project_id")
+                project_v2_id = None
                 if project_id:
+                    project_v2_id = self._resolve_v2_project_here(
+                        automation_id, project_id
+                    )
+                if project_id and not project_v2_id:
+                    # Flag OFF, or no v2 (origin-keyed) project maps to this legacy
+                    # id → unchanged legacy link-group resolution (this install's
+                    # clone of the same repo).
+                    from app.core.automation_service import resolve_local_project
+
                     local_project = resolve_local_project(project_id)
                     if local_project is None:
                         raise ValueError(self._missing_project_message(project_id))
@@ -623,7 +686,8 @@ class AutomationManager:
                         project_id = local_project["id"]
 
                 outcome = await self._run_prompt_as_session(
-                    automation, run_id, rendered_prompt, project_id
+                    automation, run_id, rendered_prompt, project_id,
+                    project_v2_id=project_v2_id,
                 )
                 response_text = outcome["response"]
                 cost = outcome["cost_usd"]
@@ -728,6 +792,7 @@ class AutomationManager:
         run_id: str,
         rendered_prompt: str,
         project_id: Optional[str],
+        project_v2_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the automation prompt as a normal streaming chat session.
 
@@ -761,6 +826,14 @@ class AutomationManager:
             title=title,
             automation_id=automation_id,
         )
+        # Bind the session to its project_v2 when the v2 path owns this run.
+        # create_session does not take the column, so persist it directly (the
+        # NULL-guarded self-heal write in project_resolver). Legacy project_id is
+        # already set above and stays intact.
+        if project_v2_id:
+            from app.core import project_resolver
+
+            project_resolver._persist_session_project_v2(session_id, project_v2_id)
         # Session starts empty until the recorder's first event: the turn
         # recorder persists the prompt as a message.user event at turn start.
 

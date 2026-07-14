@@ -343,7 +343,7 @@
 					{#if currentStep === 'admin'}
 						Create your admin account to get started
 					{:else if currentStep === 'workspace'}
-						Choose where to store your projects
+						Choose where project checkouts will be created on this machine
 					{:else}
 						Connect your development tools
 					{/if}
@@ -502,7 +502,7 @@
 							<div>
 								<h3 class="text-foreground font-medium mb-1">Select Workspace Folder</h3>
 								<p class="text-muted-foreground text-sm">
-									This folder will contain all your projects and files.
+									This is where project checkouts will be created on this machine.
 								</p>
 							</div>
 						</div>

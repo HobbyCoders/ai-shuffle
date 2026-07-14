@@ -367,6 +367,8 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         return
 
     from app.core.config import settings
+    from app.core.project_resolver import origin_for_legacy_project
+    from app.db import projects_v2 as projects_v2_db
     me = settings.effective_instance_id
 
     # Batch: installs registry (id -> row, each carrying an in-DB ``online`` flag
@@ -383,6 +385,11 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     # logical project.
     project_names: dict[str, str] = {}
     project_link_groups: dict[str, Optional[str]] = {}
+    # v2-projects: origin of each legacy project (link_group_id or synth
+    # ``local:<id>``), derived from the SAME already-fetched project row — no
+    # extra DB call. Used to self-heal ``origin``/``project_v2_id`` for sessions
+    # whose ``project_v2_id`` column is still NULL (created before the seed).
+    project_origins: dict[str, str] = {}
     for pid in {s.get("project_id") for s in sessions if s.get("project_id")}:
         try:
             proj = database.get_project(pid)
@@ -391,6 +398,22 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         if proj:
             project_names[pid] = proj.get("name") or proj.get("path") or pid
             project_link_groups[pid] = proj.get("link_group_id")
+            project_origins[pid] = origin_for_legacy_project(proj)
+
+    # v2-projects (behind the flag): resolve each session's origin-keyed project
+    # + origin token via ONE batched pass over ``list_projects_v2`` (never a
+    # per-session DB call — the board fetches every session). ``origin`` is 1:1
+    # with ``link_group_id`` for grouped projects, so the board folds identically.
+    pv2_by_id: dict[str, dict] = {}
+    pv2_origin_to_id: dict[str, str] = {}
+    if settings.v2_projects:
+        try:
+            for row in projects_v2_db.list_projects_v2():
+                pv2_by_id[row["id"]] = row
+                if row.get("origin"):
+                    pv2_origin_to_id[row["origin"]] = row["id"]
+        except Exception:  # noqa: BLE001 — enrichment must never break the listing
+            logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
 
     my_install = installs_map.get(me)
     for session in sessions:
@@ -417,6 +440,26 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             session["project_name"] = project_names[pid]
         if pid and project_link_groups.get(pid):
             session["link_group_id"] = project_link_groups[pid]
+
+        # v2-projects: emit project_v2_id + origin (flag ON only). Authoritative
+        # source is the session's own ``project_v2_id`` column; fall back to the
+        # legacy project's origin for self-heal-pending rows. Both resolved from
+        # the batched ``pv2_by_id`` / ``pv2_origin_to_id`` maps — no per-session
+        # query.
+        if settings.v2_projects:
+            pv2_id = session.get("project_v2_id")
+            origin = None
+            if pv2_id and pv2_id in pv2_by_id:
+                origin = pv2_by_id[pv2_id].get("origin")
+            else:
+                legacy_origin = project_origins.get(pid) if pid else None
+                if legacy_origin and legacy_origin in pv2_origin_to_id:
+                    pv2_id = pv2_origin_to_id[legacy_origin]
+                    origin = legacy_origin
+            if pv2_id:
+                session["project_v2_id"] = pv2_id
+            if origin:
+                session["origin"] = origin
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:

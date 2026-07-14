@@ -255,13 +255,14 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 59 for the V2 Phase-2 turns table (durable per-session turn
-    # queue + live-turn state machine, one live turn per session via a partial
-    # unique index, + one-time queued_messages->turns seed migration). v58 was
-    # the Phase-1 deletion (v2_stream forced TRUE + default flipped); v57 added
-    # the opt-in flag; v56 added the Phase-0 primitives.
-    assert db_version == 59
-    assert pg_version == 59
+    # Bumped to 60 for the V2 Phase-3 projects layer: additive columns
+    # (sessions.project_v2_id, sessions.branch, checkouts.branch) + the one-time
+    # origin-collapse migration seeding projects_v2/checkouts from the legacy
+    # projects rows. v59 added the Phase-2 turns table; v58 was the Phase-1
+    # deletion (v2_stream forced TRUE + default flipped); v57 added the opt-in
+    # flag; v56 added the Phase-0 primitives.
+    assert db_version == 60
+    assert pg_version == 60
     assert db_version == pg_version
 
 

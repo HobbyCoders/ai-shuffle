@@ -105,7 +105,12 @@ def _safe_json(value):
 # 59: turns table (V2 Phase 2 — durable per-session turn queue + live-turn state
 #     machine, one live turn per session via partial unique index) + one-time
 #     migration seeding queued turns from the frozen queued_messages table
-SCHEMA_VERSION = 59
+# 60: V2 Phase 3 (projects) — additive columns (sessions.project_v2_id,
+#     sessions.branch, checkouts.branch) + one-time origin-collapse migration
+#     seeding projects_v2 + checkouts from the frozen legacy `projects` rows and
+#     rebinding sessions onto their project_v2 (deterministic ids, ON CONFLICT DO
+#     NOTHING; legacy `projects`/`link_group_id`/`sessions.project_id` untouched)
+SCHEMA_VERSION = 60
 
 
 def _run_column_migrations(cursor):
@@ -837,6 +842,200 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("checkouts")
+
+    # ------------------------------------------------------------------
+    # V2 Phase 3 (v60) — origin collapse.
+    #
+    # Additive columns + a one-time, idempotent, concurrent-boot-safe seed that
+    # folds the legacy per-install `projects` rows into origin-keyed `projects_v2`
+    # rows with one `checkouts` row per legacy project (its per-install
+    # materialization), then rebinds sessions onto their project_v2. Modeled on
+    # the v-D link_group_id backfill and the v59 turns<-queued_messages seed:
+    # deterministic ids computed in Python (no md5/sha in SQL, no DISTINCT ON) +
+    # ON CONFLICT DO NOTHING make it safe to re-run every boot and safe when two
+    # installs boot Phase-3 code against the shared DB simultaneously.
+    #
+    # Purely additive — the legacy `projects`, `link_group_id`,
+    # `sessions.project_id`, and `sessions.worktree_*` columns are NEVER updated
+    # or dropped, so an un-upgraded install sees exactly the DB it saw before plus
+    # some new columns/rows it ignores. Runs UNCONDITIONALLY (no flag gate): the
+    # seeded rows are dormant until later Phase-3 commits read them.
+
+    # Step A: additive columns (idempotent; guarded so the ALTER never re-runs).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "project_v2_id"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS project_v2_id TEXT")
+        migrations_applied.append("sessions.project_v2_id")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "branch"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch TEXT")
+        migrations_applied.append("sessions.branch")
+    if table_exists(cursor, "checkouts") and not column_exists(cursor, "checkouts", "branch"):
+        cursor.execute("ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS branch TEXT")
+        migrations_applied.append("checkouts.branch")
+
+    # Steps B–D: the collapse. Guarded so it is a no-op when the legacy or v2
+    # tables are absent, and safe when `projects` is empty.
+    if (
+        table_exists(cursor, "projects")
+        and table_exists(cursor, "projects_v2")
+        and table_exists(cursor, "checkouts")
+    ):
+        import hashlib
+
+        def _origin_for(legacy_row) -> str:
+            # origin = the existing link_group_id grouping token
+            # (git:… / manual:…), else a deterministic 'local:<legacy id>' synth
+            # for remote-less rows (project ids are PKs → collision-free).
+            return legacy_row["link_group_id"] or ("local:" + legacy_row["id"])
+
+        def _pv2_id(origin: str) -> str:
+            # Deterministic across installs & re-runs — the same origin always
+            # yields the same projects_v2 id (computed in Python, not SQL).
+            return "pv2-" + hashlib.sha256(origin.encode()).hexdigest()[:24]
+
+        cursor.execute(
+            "SELECT id, name, path, instance_id, link_group_id FROM projects"
+        )
+        legacy_projects = cursor.fetchall()
+
+        # Step B: one projects_v2 row per DISTINCT origin (name = a
+        # representative legacy project name for that origin).
+        representative_name = {}
+        for row in legacy_projects:
+            origin = _origin_for(row)
+            representative_name.setdefault(origin, row["name"])
+        seeded_pv2 = 0
+        for origin, name in representative_name.items():
+            cursor.execute(
+                "INSERT INTO projects_v2 (id, origin, name, settings) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (origin) DO NOTHING",
+                (_pv2_id(origin), origin, name or origin, "{}"),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                seeded_pv2 += 1
+        if seeded_pv2:
+            migrations_applied.append(f"projects_v2<-projects({seeded_pv2})")
+
+        # Step C: one checkout per legacy projects row (its per-install
+        # materialization). runner_id = COALESCE(instance_id,''); branch NULL
+        # (the base checkout, D7). Deterministic id 'ck-<legacy id>'. Bare ON
+        # CONFLICT DO NOTHING (NOT `(id)`-scoped) so BOTH arbiters are honored:
+        # the `id` PK AND the UNIQUE (project_id, runner_id, path). Two legacy
+        # projects rows that share an origin+instance_id+path (duplicate-path
+        # legacy rows exist in the wild) yield distinct `ck-<id>` ids but collide
+        # on the (project_id, runner_id, path) unique — `(id)`-scoped conflict
+        # would raise UniqueViolation and abort EVERY boot; bare skips the dup.
+        seeded_ck = 0
+        for row in legacy_projects:
+            origin = _origin_for(row)
+            cursor.execute(
+                "INSERT INTO checkouts "
+                "(id, project_id, runner_id, path, branch, status) "
+                "VALUES (%s, %s, %s, %s, NULL, 'active') "
+                "ON CONFLICT DO NOTHING",
+                ("ck-" + row["id"], _pv2_id(origin), row["instance_id"] or "", row["path"]),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                seeded_ck += 1
+        if seeded_ck:
+            migrations_applied.append(f"checkouts<-projects({seeded_ck})")
+
+        # Step D: rebind sessions onto project_v2 (only rows not already bound;
+        # NEVER clears the legacy project_id — old code still reads it).
+        if column_exists(cursor, "sessions", "project_v2_id"):
+            rebound = 0
+            for row in legacy_projects:
+                origin = _origin_for(row)
+                cursor.execute(
+                    "UPDATE sessions SET project_v2_id = %s "
+                    "WHERE project_id = %s AND project_v2_id IS NULL",
+                    (_pv2_id(origin), row["id"]),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    rebound += cursor.rowcount
+            if rebound:
+                migrations_applied.append(f"sessions.project_v2_id({rebound})")
+
+        # Steps E–F: seed BRANCH checkouts from the legacy `worktrees` rows and
+        # backfill `sessions.branch`. Steps B–D seed only BASE checkouts, so a
+        # legacy worktree-bound session (worktree_id set, sessions.branch NULL)
+        # would resolve to the base path under the v2 resolver — a cwd
+        # regression. These two steps close that gap.
+        #
+        # A legacy worktree joins to its owning project via
+        # git_repositories.project_id (worktrees.repository_id ->
+        # git_repositories.id -> git_repositories.project_id -> projects.id).
+        # Same guarantees as B–D: table_exists guards, deterministic ids + ON
+        # CONFLICT DO NOTHING (re-run = zero writes), safe on empty tables,
+        # concurrent-boot safe, never touches a legacy column.
+        if table_exists(cursor, "worktrees") and table_exists(cursor, "git_repositories"):
+            # Map legacy project id -> (origin, runner_id) from the rows already
+            # fetched above (reuse, no re-query).
+            project_by_id = {row["id"]: row for row in legacy_projects}
+
+            cursor.execute(
+                "SELECT w.id AS wt_id, w.branch_name AS branch_name, "
+                "w.worktree_path AS worktree_path, gr.project_id AS project_id "
+                "FROM worktrees w "
+                "JOIN git_repositories gr ON gr.id = w.repository_id"
+            )
+            worktree_rows = cursor.fetchall()
+
+            # Step E: one branch checkout per legacy worktree row. STATUS-BLIND —
+            # seed regardless of worktrees.status (the per-device sync sweep flips
+            # it spuriously; checkout_manager stats the dir at use time, the real
+            # check). Deterministic id 'ck-wt-<worktree id>'. Bare ON CONFLICT DO
+            # NOTHING (NOT `(id)`-scoped) so BOTH arbiters are honored: the `id`
+            # PK AND the UNIQUE (project_id, runner_id, path). Two worktree rows
+            # sharing a path+branch under one project yield distinct
+            # `ck-wt-<id>` ids but collide on the (project_id, runner_id, path)
+            # unique — `(id)`-scoped conflict would raise UniqueViolation and
+            # abort EVERY boot; bare skips the dup.
+            seeded_wt = 0
+            for wt in worktree_rows:
+                legacy = project_by_id.get(wt["project_id"])
+                if legacy is None:
+                    # Worktree points at a repo whose project row is gone —
+                    # nothing to key the origin off of; skip defensively.
+                    continue
+                if not wt["worktree_path"] or not wt["branch_name"]:
+                    continue
+                origin = _origin_for(legacy)
+                cursor.execute(
+                    "INSERT INTO checkouts "
+                    "(id, project_id, runner_id, path, branch, status) "
+                    "VALUES (%s, %s, %s, %s, %s, 'active') "
+                    "ON CONFLICT DO NOTHING",
+                    (
+                        "ck-wt-" + wt["wt_id"],
+                        _pv2_id(origin),
+                        legacy["instance_id"] or "",
+                        wt["worktree_path"],
+                        wt["branch_name"],
+                    ),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    seeded_wt += 1
+            if seeded_wt:
+                migrations_applied.append(f"checkouts<-worktrees({seeded_wt})")
+
+            # Step F: backfill sessions.branch per worktree row (only where NULL;
+            # NEVER overwrite a non-NULL branch, NEVER touch worktree_id/
+            # worktree_branch/worktree_path — old code still reads those).
+            if column_exists(cursor, "sessions", "branch"):
+                branch_backfilled = 0
+                for wt in worktree_rows:
+                    if not wt["branch_name"]:
+                        continue
+                    cursor.execute(
+                        "UPDATE sessions SET branch = %s "
+                        "WHERE worktree_id = %s AND branch IS NULL",
+                        (wt["branch_name"], wt["wt_id"]),
+                    )
+                    if cursor.rowcount and cursor.rowcount > 0:
+                        branch_backfilled += cursor.rowcount
+                if branch_backfilled:
+                    migrations_applied.append(f"sessions.branch({branch_backfilled})")
 
     # turns — durable per-session turn queue + live-turn state machine (v59,
     # V2 Phase 2). Idempotent so upgrades from any older version land the table

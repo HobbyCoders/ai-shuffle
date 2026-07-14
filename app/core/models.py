@@ -360,6 +360,13 @@ class Session(SessionBase):
     # response model FastAPI strips it and the board falls back to project_id,
     # rendering the same repo as a separate card per install.
     link_group_id: Optional[str] = None
+    # V2 projects (Phase 3): the origin-keyed project this session belongs to
+    # (install-independent identity) and its origin token. Populated by the API
+    # enrichment layer when ``settings.v2_projects`` is on. ``origin`` is 1:1
+    # with ``link_group_id`` for grouped projects, so the board folds identically
+    # whether it groups by ``origin`` or ``link_group_id`` (no regroup flash).
+    project_v2_id: Optional[str] = None
+    origin: Optional[str] = None
     # V2 streaming path marker. Forced TRUE on every session (V2 Phase 1
     # deletion); the model default stays False for unset/legacy construction.
     v2_stream: bool = False

@@ -638,3 +638,85 @@ describe('SessionsBoard delete-session confirm never opens a new chat', () => {
 		await finish(resolveDelete);
 	});
 });
+
+/**
+ * V2 projects (Phase 3 P6): the board groups sessions by the server-resolved
+ * `origin` token, falling back to `link_group_id` then `project_id`. Because
+ * `origin` is 1:1 with `link_group_id` for grouped projects, the fold is
+ * identical with or without `origin` present — no card splits/merges across the
+ * cutover. Manual-link groups (`manual:…` origins) flow through as ordinary
+ * grouping keys, so their card and drill-in keep working.
+ *
+ * Groups render as `.proj-card` in the overview's project grid; the folded
+ * session count is the card's `.proj-count-pill`.
+ */
+describe('SessionsBoard groups by origin with link_group continuity', () => {
+	function projCards(): HTMLElement[] {
+		return Array.from(document.querySelectorAll('.proj-card')) as HTMLElement[];
+	}
+	function cardByName(name: string): HTMLElement | undefined {
+		return projCards().find((c) => c.querySelector('.proj-name')?.textContent?.trim() === name);
+	}
+	function foldCount(name: string): number {
+		return Number(cardByName(name)?.querySelector('.proj-count-pill')?.textContent?.trim() ?? '0');
+	}
+
+	it('folds two same-origin clones into ONE card (origin is the grouping key)', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+	});
+
+	it('groups identically whether origin is present or only link_group_id (no regroup flash)', () => {
+		// Pass 1 — pre-cutover shape: only link_group_id, no origin.
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', link_group_id: 'git:xyz' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', link_group_id: 'git:xyz' })
+		]);
+		const first = renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+		first.unmount();
+		cleanup();
+
+		// Pass 2 — post-cutover shape: origin === the SAME link_group_id token.
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+	});
+
+	it('keeps distinct origins in separate cards', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Alpha', origin: 'git:alpha', link_group_id: 'git:alpha' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Beta', origin: 'git:beta', link_group_id: 'git:beta' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(2);
+		expect(foldCount('Alpha')).toBe(1);
+		expect(foldCount('Beta')).toBe(1);
+	});
+
+	it('folds manual-linked clones (manual:… origin) into one card and drills in', async () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Fork A one', project_id: 'p-a', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' }),
+			makeSession({ id: 'b', title: 'Fork B one', project_id: 'p-b', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' })
+		]);
+		renderBoard();
+		const card = cardByName('Fork');
+		expect(card).toBeTruthy();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Fork')).toBe(2);
+
+		await fireEvent.click(card as HTMLElement);
+		expect(rowFor('Fork A one')).toBeTruthy();
+		expect(rowFor('Fork B one')).toBeTruthy();
+	});
+});

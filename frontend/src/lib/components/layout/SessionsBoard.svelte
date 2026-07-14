@@ -198,8 +198,11 @@
 		const groups = new Map<string, Session[]>();
 		for (const s of visibleSessions) {
 			// Fold same-repo clones from every install into one logical project
-			// via the server-resolved link group; fall back to the raw project id.
-			const key = s.link_group_id || s.project_id || UNGROUPED;
+			// via the server-resolved origin (v2 projects); fall back to the link
+			// group, then the raw project id. origin is 1:1 with link_group_id for
+			// grouped projects, so the fold is identical with or without it present
+			// (no regroup flash across the cutover).
+			const key = s.origin || s.link_group_id || s.project_id || UNGROUPED;
 			if (!groups.has(key)) groups.set(key, []);
 			groups.get(key)!.push(s);
 		}

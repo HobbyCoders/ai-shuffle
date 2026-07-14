@@ -848,6 +848,15 @@ class AuthService:
         its own workspace path configured (because each machine has a different
         home dir). Docker/non-local instances use a fixed default path, so no
         per-instance workspace is required.
+
+        v2-projects semantics: the ONLY per-install requirement here is choosing
+        this machine's workspace root — the directory under which project
+        *checkouts* materialize (``checkouts.path``). Projects themselves are
+        origin-keyed and install-independent (``projects_v2``), so they need NO
+        per-install registration: a session/automation referencing an origin
+        materializes its checkout lazily under this root. There is deliberately
+        no project-level gate here, and none is added under
+        ``settings.v2_projects`` — the workspace-root pick is the whole gate.
         """
         val = database.get_system_setting("onboarding_complete")
         if val == "true":

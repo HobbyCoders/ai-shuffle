@@ -294,7 +294,28 @@ async def adopt_session_endpoint(
     warning: Optional[str] = None
     local_project_id: Optional[str] = None
     project_id = session.get("project_id")
-    if project_id:
+    if settings.v2_projects and session.get("project_v2_id"):
+        # V2 projects: identity is origin-keyed and install-independent, so the
+        # session's project_v2 is already correct on every runner. Adopt only
+        # confirms a checkout materializes on THIS install; if none, 409 (mirrors
+        # the legacy preflight's one blocker). sessions.project_id is NEVER
+        # rewritten under v2 — the resolver owns cwd via project_v2 — so
+        # local_project_id stays None and the rebind-persist below is skipped.
+        from app.core import project_resolver
+
+        checkout = await run_sync(
+            project_resolver.resolve_local_checkout, session, me
+        )
+        if checkout is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This session's project isn't checked out on this device yet. "
+                    "Create a checkout of the repository here (clone it and open the "
+                    "project), then try again."
+                ),
+            )
+    elif project_id:
         try:
             warning, local_project_id = await run_sync(
                 _adopt_preflight_sync, session, project_id
