@@ -56,7 +56,7 @@ function getShortcutKey(e: KeyboardEvent): string {
 	if (e.metaKey || e.ctrlKey) parts.push('mod');
 	if (e.shiftKey) parts.push('shift');
 	if (e.altKey) parts.push('alt');
-	parts.push(e.key.toLowerCase());
+	parts.push((e.key ?? '').toLowerCase());
 
 	return parts.join('+');
 }
