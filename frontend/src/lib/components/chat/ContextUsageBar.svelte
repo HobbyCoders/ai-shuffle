@@ -1,54 +1,77 @@
 <script lang="ts">
 	/**
-	 * ContextUsageBar - Shows context window usage as a glass pill with percentage,
-	 * plus a click/tap popover that breaks the total down by token type. The pill
-	 * itself stays neutral-coloured (no usage-based colour changes); severity
-	 * colouring lives only on the total row inside the popover.
+	 * ContextUsageBar — the single chat-toolbar usage pill. Merges the former
+	 * ContextUsageBar (context-window %) and UsageLimitIndicator (plan usage
+	 * limits) into ONE glass pill + ONE popover.
 	 *
-	 * Resolves the effective model (override → profile → default) to determine
-	 * whether the context window is 200k (standard) or 1M (extended).
+	 * The pill shows a small circular progress ring (context-window fraction),
+	 * coloured by the severity of MAX(context %, resolved five-hour %), plus the
+	 * rounded context percent. It is ALWAYS visible.
 	 *
-	 * IMPORTANT: Usage comes from $activeSession (contextUsed + the per-type token
-	 * fields), all set by the SSE-fed reducer (feedController → active-session).
-	 * Read only through the $activeSession store so the values track the single
-	 * writer.
+	 * The popover stacks, top → bottom:
+	 *   1. Context window — total row with a collapsible per-category breakdown.
+	 *      The breakdown is fetched from the live SDK (`/context-usage`) when the
+	 *      POPOVER opens and refreshed at turn end (never polled mid-stream); the
+	 *      poller estimate is the fallback before the first fetch lands. Expansion
+	 *      is persisted in localStorage (`aihub.contextBreakdownOpen`).
+	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
+	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
+	 *      and reset countdown. "No usage data yet" when the bucket is empty.
+	 *   3. Footer — breakdown status (left) + effective model label (right).
 	 *
-	 * The popover interaction mirrors UsageLimitIndicator: a wrapper with
-	 * `bind:this`, a document-level click + Escape listener that closes when the
-	 * target is outside — works for desktop click and mobile tap (tap-away closes).
+	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
+	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
+	 * store (fed by the backend poller + live SDK events), resolved to the install
+	 * that OWNS the viewed/composed session — an offloaded session shows the
+	 * worker's usage.
+	 *
+	 * Popover interaction: a wrapper with `bind:this`, a document-level click +
+	 * Escape listener that closes when the target is outside — works for desktop
+	 * click and mobile tap (tap-away closes).
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { getContextMaxForModel } from '$lib/constants/chat';
-	import { getDefaultModel } from '$lib/constants/models';
+	import { getDefaultModel, getModelLabel } from '$lib/constants/models';
 	import { getContextUsage } from '$lib/api/sessions';
 	import {
 		computeContextBreakdown,
 		mapSdkContextUsage,
 		decideBreakdownRefresh,
 		formatTokenCount,
+		usageSeverity,
 		type ContextBreakdown,
 		type BreakdownRefreshState,
+		type UsageSeverity,
 	} from './context-usage';
+	import {
+		rateLimit,
+		orderedWindows,
+		windowLabel,
+		effectivePct,
+		formatCountdown,
+		formatAsOf,
+		resolveBucket,
+		resolveBucketKey,
+		selfBucketKey,
+		isBucketStale,
+		type UsageBucket,
+	} from '$lib/stores/rate-limit';
+	import { usageTargetInstance } from '$lib/stores/usage-target';
 
-	// Resolve effective model: override → profile config → default
+	// ── Effective model → context window (200k / 1M) ──────────────────────
 	const effectiveModel = $derived.by(() => {
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
 		const profile = $profiles.find((p) => p.id === $activeSession.profile);
 		return profile?.config?.model || getDefaultModel();
 	});
-
-	// Full context window (200k or 1M) — shown as the bar maximum so users
-	// understand their position within the real model limit.
+	const effectiveModelLabel = $derived(getModelLabel(effectiveModel));
 	const contextMax = $derived(getContextMaxForModel(effectiveModel));
 
 	// Context usage from activeSession — set by onPollApplied after each poll.
-	// contextUsed = per-turn context tokens (input + cache_creation + cache_read),
-	// NOT cumulative totalTokensIn which would massively overcount.
 	const rawContextUsed = $derived($activeSession.contextUsed ?? 0);
 
-	// Total + per-token-type breakdown (pure module keeps the math testable).
 	const breakdown = $derived(
 		computeContextBreakdown({
 			rawContextUsed,
@@ -60,9 +83,15 @@
 		})
 	);
 
-	// The pill shows the total percent; it stays themed (no severity colouring).
-	// The pill is ALWAYS driven by the poller estimate — never the live fetch.
+	// The pill's ring is driven by the poller estimate — never the live fetch.
 	const contextPercent = $derived(breakdown.totalPercent);
+
+	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
+	const RING_RADIUS = 6;
+	const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+	const ringDashoffset = $derived(
+		RING_CIRCUMFERENCE - (Math.min(Math.max(contextPercent, 0), 100) / 100) * RING_CIRCUMFERENCE
+	);
 
 	// ── Popover open/close (click + tap-away) ─────────────────────────────
 	let open = $state(false);
@@ -72,37 +101,18 @@
 		open = !open;
 	}
 
-	// ── Live SDK breakdown = the single display source for the popover ─────
-	// The breakdown returned by `/context-usage` is the canonical popover display.
-	// It's fetched on open and refreshed when a turn ends — NOT polled while
-	// streaming (the SDK breakdown can't change mid-turn and each call is a real
-	// CLI round-trip). Once fetched it STAYS on screen across streaming poll ticks;
-	// the estimate is only the fallback before the first successful fetch. This is
-	// what removes the old flip-flop: the popover no longer switched modes on every
-	// poll because reading the whole $activeSession store re-ran the fetch effect.
+	// ── Live SDK breakdown = the single display source for the context section ─
 	let richBreakdown = $state<ContextBreakdown | null>(null);
-
-	// Narrow, memoised reads so the refresh effect below only re-runs when one of
-	// these three actually changes — NOT on every streaming token update (which
-	// touches other $activeSession fields). $derived propagates only on value
-	// change, so streaming ticks that leave these equal never wake the effect.
 	const sessionId = $derived($activeSession.sessionId);
 	const isStreaming = $derived($activeSession.isStreaming);
-
-	// What the POPOVER renders: the live breakdown once it arrives, else the
-	// estimate. The pill above is untouched by this.
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
 	const isRich = $derived(richBreakdown !== null);
 
-	// Abort the in-flight fetch when a newer one starts or the popover closes, so a
-	// stale response can never overwrite a fresher breakdown.
 	let currentController: AbortController | null = null;
-
 	function cancelFetch() {
 		currentController?.abort();
 		currentController = null;
 	}
-
 	async function fetchBreakdown(sid: string) {
 		cancelFetch();
 		const controller = new AbortController();
@@ -110,19 +120,14 @@
 		try {
 			const res = await getContextUsage(sid, { signal: controller.signal });
 			if (controller.signal.aborted) return;
-			// Only replace on a usable payload. On `available: false` (not
-			// connected / unsupported / timeout) or error we KEEP the last
-			// breakdown rather than snapping back to the estimate mid-view.
 			if (res.available) richBreakdown = mapSdkContextUsage(res.usage);
 		} catch {
 			// Aborted or network error → keep whatever is on screen.
 		}
 	}
 
-	// Refresh cadence lives in a pure, tested decision function. The effect reads
-	// open + sessionId + isStreaming (all value-stable across streaming ticks) and
-	// acts only on a real transition: fetch on open, refresh on turn-end, clear on
-	// close. `idle` — the streaming case — intentionally does nothing.
+	// Refresh cadence: fetch on open, refresh on turn-end, clear on close. The
+	// breakdown fetch is tied to the POPOVER opening — NOT to the chevron below.
 	let prevRefresh: BreakdownRefreshState = { open: false, sessionId: null, isStreaming: false };
 	$effect(() => {
 		const next: BreakdownRefreshState = { open, sessionId, isStreaming };
@@ -135,14 +140,10 @@
 				richBreakdown = null;
 				break;
 			case 'open-fetch':
-				// Fresh open (or session changed under an open popover): drop any
-				// stale breakdown so the estimate shows until the fetch lands.
 				richBreakdown = null;
 				fetchBreakdown(next.sessionId!);
 				break;
 			case 'refresh':
-				// Turn ended: pull a fresh breakdown, keep the current one visible
-				// until it arrives (no flash back to the estimate).
 				fetchBreakdown(next.sessionId!);
 				break;
 			case 'idle':
@@ -150,6 +151,87 @@
 		}
 	});
 
+	// ── Category breakdown expand state (persisted) ───────────────────────
+	const BREAKDOWN_OPEN_KEY = 'aihub.contextBreakdownOpen';
+	function loadBreakdownOpen(): boolean {
+		try {
+			return localStorage.getItem(BREAKDOWN_OPEN_KEY) === '1';
+		} catch {
+			return false;
+		}
+	}
+	let breakdownOpen = $state(loadBreakdownOpen());
+	function toggleBreakdown() {
+		breakdownOpen = !breakdownOpen;
+		try {
+			localStorage.setItem(BREAKDOWN_OPEN_KEY, breakdownOpen ? '1' : '0');
+		} catch {
+			// best-effort persistence
+		}
+	}
+
+	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
+	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
+	// Runs only while the popover is open; refreshed once otherwise.
+	let now: number = $state(Date.now());
+	$effect(() => {
+		now = Date.now();
+		if (!open) return;
+		const interval = setInterval(() => {
+			now = Date.now();
+		}, 1000);
+		return () => clearInterval(interval);
+	});
+
+	interface WindowItem {
+		type: string;
+		label: string;
+		pct: number;
+		countdown: string;
+		hasReset: boolean;
+	}
+	function itemsFor(bucket: UsageBucket): WindowItem[] {
+		return orderedWindows(bucket.windows).map((w) => ({
+			type: w.type,
+			label: windowLabel(w.type),
+			pct: effectivePct(w, now),
+			countdown: formatCountdown(w.resets_at, now),
+			hasReset: w.resets_at != null,
+		}));
+	}
+
+	const target = $derived($usageTargetInstance);
+	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
+	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
+	const items = $derived.by<WindowItem[]>(() => (resolvedBucket ? itemsFor(resolvedBucket) : []));
+
+	// Five-hour % of the resolved install (null when unknown) — feeds the ring
+	// severity alongside the context percent.
+	const fiveHourPct = $derived<number | null>(items.find((it) => it.type === 'five_hour')?.pct ?? null);
+	const ringSeverity = $derived<UsageSeverity>(
+		usageSeverity(Math.max(contextPercent, fiveHourPct ?? 0))
+	);
+
+	// ── Resolved-install header (device/account label) ────────────────────
+	function staleLineFor(bucket: UsageBucket): string | null {
+		const offline = bucket.online === false;
+		const old = isBucketStale(bucket, now);
+		if (!offline && !old) return null;
+		const age = formatAsOf(bucket.fetchedAt, now);
+		const asOf = age ? `as of ${age}` : 'as of unknown';
+		return offline ? `offline · ${asOf}` : asOf;
+	}
+	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
+	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
+	const accountLabel = $derived(resolvedBucket?.accountName ?? resolvedBucket?.accountEmail ?? null);
+	const staleLine = $derived(resolvedBucket ? staleLineFor(resolvedBucket) : null);
+	// Show the header when we know who this belongs to, or when it's a resolved
+	// remote install. A bucket-less (no data) resolve shows no header.
+	const showSectionHeader = $derived(
+		!!resolvedBucket && (!!(deviceLabel || accountLabel) || !isSelf)
+	);
+
+	// ── Document-level click/tap-away + Escape ────────────────────────────
 	function handleClickOutside(e: MouseEvent) {
 		if (open && wrapperRef && !wrapperRef.contains(e.target as Node)) {
 			open = false;
@@ -174,27 +256,62 @@
 	<button
 		type="button"
 		class="usage-indicator"
-		title="{formatTokenCount(breakdown.totalUsed)} / {formatTokenCount(contextMax)} tokens — click for breakdown"
+		title="{formatTokenCount(breakdown.totalUsed)} / {formatTokenCount(contextMax)} tokens — click for details"
+		aria-label="Context and usage"
 		aria-haspopup="dialog"
 		aria-expanded={open}
 		onclick={toggle}
 	>
-		<div class="usage-bar">
-			<div class="usage-fill" style="width: {contextPercent}%"></div>
-		</div>
+		<svg class="usage-ring {ringSeverity}" viewBox="0 0 16 16" aria-hidden="true">
+			<circle class="ring-track" cx="8" cy="8" r={RING_RADIUS} fill="none" stroke-width="2" />
+			<circle
+				class="ring-progress"
+				cx="8"
+				cy="8"
+				r={RING_RADIUS}
+				fill="none"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-dasharray={RING_CIRCUMFERENCE}
+				stroke-dashoffset={ringDashoffset}
+			/>
+		</svg>
 		<span class="usage-text">{Math.round(contextPercent)}%</span>
 	</button>
 
 	{#if open}
-		<div class="usage-popover" role="dialog" aria-label="Context usage">
-			<div class="popover-title">Context usage</div>
-
-			<div class="popover-row">
-				<div class="row-head">
+		<div class="usage-popover" role="dialog" aria-label="Context and usage">
+			<!-- ═══ Context window ═══ -->
+			<div class="ctx-section">
+				<div class="ctx-header">
 					<span class="row-label">Context window</span>
-					<span class="row-pct {displayBreakdown.severity}"
-						>{Math.round(displayBreakdown.totalPercent)}%</span
-					>
+					<div class="ctx-summary">
+						<span class="ctx-tokens">
+							{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
+								displayBreakdown.contextMax
+							)}
+							(<span class="ctx-pct {displayBreakdown.severity}"
+								>{Math.round(displayBreakdown.totalPercent)}%</span
+							>)
+						</span>
+						<button
+							type="button"
+							class="ctx-chevron"
+							class:expanded={breakdownOpen}
+							aria-expanded={breakdownOpen}
+							aria-label={breakdownOpen ? 'Hide breakdown' : 'Show breakdown'}
+							onclick={toggleBreakdown}
+						>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="2"
+									d="M19 9l-7 7-7-7"
+								/>
+							</svg>
+						</button>
+					</div>
 				</div>
 				<div class="row-bar">
 					<div
@@ -202,33 +319,83 @@
 						style="width: {displayBreakdown.totalPercent}%"
 					></div>
 				</div>
-				<div class="row-reset">
-					{formatTokenCount(displayBreakdown.totalUsed)} of
-					{formatTokenCount(displayBreakdown.contextMax)} tokens
-				</div>
+
+				{#if breakdownOpen}
+					{#each displayBreakdown.rows as row (row.key)}
+						<div class="popover-row breakdown-row">
+							<div class="row-head">
+								<span class="row-label">{row.label}</span>
+								<span class="row-pct">{formatTokenCount(row.tokens)}</span>
+							</div>
+							<div class="row-bar">
+								<div class="row-fill" style="width: {row.barPercent}%"></div>
+							</div>
+							{#if row.subline}
+								<div class="row-reset">{row.subline}</div>
+							{/if}
+						</div>
+					{/each}
+				{/if}
 			</div>
 
-			{#each displayBreakdown.rows as row (row.key)}
-				<div class="popover-row">
-					<div class="row-head">
-						<span class="row-label">{row.label}</span>
-						<span class="row-pct">{formatTokenCount(row.tokens)}</span>
+			<div class="popover-divider"></div>
+
+			<!-- ═══ Plan usage limits ═══ -->
+			<div class="popover-title">Plan usage limits</div>
+			{#if showSectionHeader}
+				<div class="popover-section">
+					<div class="section-head">
+						{#if deviceLabel}
+							<span class="section-device">{deviceLabel}</span>
+						{/if}
+						{#if accountLabel}
+							<span class="section-account">{accountLabel}</span>
+						{/if}
+						{#if !deviceLabel && !accountLabel}
+							<span class="section-device">{isSelf ? 'This device' : 'Other device'}</span>
+						{/if}
 					</div>
-					<div class="row-bar">
-						<div class="row-fill" style="width: {row.barPercent}%"></div>
-					</div>
-					{#if row.subline}
-						<div class="row-reset">{row.subline}</div>
+					{#if staleLine}
+						<div class="section-stale">{staleLine}</div>
 					{/if}
 				</div>
-			{/each}
+			{/if}
+			{#if items.length > 0}
+				{#each items as item (item.type)}
+					{@const rowSeverity = usageSeverity(item.pct)}
+					<div class="popover-row">
+						<div class="row-head">
+							<span class="row-label">{item.label}</span>
+							<span class="row-pct {rowSeverity}">{item.pct}%</span>
+						</div>
+						<div class="row-bar">
+							<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
+						</div>
+						<div class="row-reset">
+							{#if item.countdown}
+								resets in {item.countdown}
+							{:else if item.hasReset}
+								resets soon
+							{:else}
+								no reset window
+							{/if}
+						</div>
+					</div>
+				{/each}
+			{:else}
+				<div class="row-reset no-data">No usage data yet</div>
+			{/if}
 
+			<!-- ═══ Footer ═══ -->
 			<div class="popover-footer">
-				{#if isRich}
-					{isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown'}
-				{:else}
-					estimated from last turn
-				{/if}
+				<span class="footer-status">
+					{#if isRich}
+						{isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown'}
+					{:else}
+						estimated from last turn
+					{/if}
+				</span>
+				<span class="footer-model">{effectiveModelLabel}</span>
 			</div>
 		</div>
 	{/if}
@@ -245,7 +412,7 @@
 	.usage-indicator {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		padding: 4px 8px;
 		background: var(--glass-bg);
 		backdrop-filter: blur(var(--glass-blur, 12px));
@@ -260,19 +427,26 @@
 		background: color-mix(in oklch, var(--glass-bg) 80%, var(--foreground) 6%);
 	}
 
-	.usage-bar {
-		width: 40px;
-		height: 4px;
-		background: color-mix(in oklch, var(--muted) 50%, var(--background));
-		border-radius: calc(var(--radius, 0.75rem) * 0.17);
-		overflow: hidden;
+	/* ===== Circular progress ring (context-window fraction) ===== */
+	.usage-ring {
+		width: 15px;
+		height: 15px;
+		flex-shrink: 0;
+		transform: rotate(-90deg);
+		transform-origin: center;
 	}
-
-	.usage-fill {
-		height: 100%;
-		background: var(--primary);
-		border-radius: calc(var(--radius, 0.75rem) * 0.17);
-		transition: width 0.3s ease;
+	.ring-track {
+		stroke: color-mix(in oklch, var(--muted) 50%, var(--background));
+	}
+	.ring-progress {
+		stroke: var(--primary);
+		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
+	}
+	.usage-ring.warning .ring-progress {
+		stroke: var(--warning);
+	}
+	.usage-ring.danger .ring-progress {
+		stroke: var(--destructive);
 	}
 
 	.usage-text {
@@ -307,6 +481,75 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		color: var(--muted-foreground);
+	}
+
+	/* ===== Context section ===== */
+	.ctx-section {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.ctx-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+	}
+	.ctx-summary {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.ctx-tokens {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+	}
+	.ctx-pct {
+		font-family: var(--font-mono);
+		font-weight: 600;
+	}
+	.ctx-pct.warning {
+		color: var(--warning);
+	}
+	.ctx-pct.danger {
+		color: var(--destructive);
+	}
+	.ctx-chevron {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		padding: 0;
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		cursor: pointer;
+		color: var(--muted-foreground);
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+	.ctx-chevron:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+	.ctx-chevron svg {
+		width: 14px;
+		height: 14px;
+		transition: transform 0.2s ease;
+	}
+	.ctx-chevron.expanded svg {
+		transform: rotate(180deg);
+	}
+
+	.breakdown-row {
+		margin-top: 2px;
+	}
+
+	.popover-divider {
+		height: 1px;
+		background: var(--glass-border, var(--border));
+		margin: 0 -10px;
 	}
 
 	.popover-row {
@@ -365,28 +608,53 @@
 		font-size: 10.5px;
 		color: var(--muted-foreground);
 	}
-
-	/* Mode line — distinguishes the live SDK breakdown from the estimate. */
-	.popover-footer {
-		font-size: 10px;
+	.row-reset.no-data {
 		font-style: italic;
+		opacity: 0.8;
+	}
+
+	/* Resolved-install header — device/account label (shown when named or remote). */
+	.popover-section {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.section-head {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+	.section-device {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--foreground);
+	}
+	.section-account {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	.section-stale {
+		font-size: 10px;
+		color: var(--warning);
+	}
+
+	/* Footer — breakdown status (left) + effective model label (right). */
+	.popover-footer {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 10px;
 		letter-spacing: 0.02em;
 		color: var(--muted-foreground);
 		opacity: 0.75;
-		text-align: right;
 	}
-
-	/* Responsive: mobile layout adjustments */
-	@media (max-width: 639px) {
-		/* Hide the usage bar on mobile, only show percentage (popover unaffected) */
-		.usage-bar {
-			display: none;
-		}
-
-		/* Make usage indicator more compact */
-		.usage-indicator {
-			padding: 4px 6px;
-			gap: 0;
-		}
+	.footer-status {
+		font-style: italic;
+	}
+	.footer-model {
+		font-family: var(--font-mono);
+		white-space: nowrap;
 	}
 </style>

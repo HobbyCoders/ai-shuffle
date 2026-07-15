@@ -8,7 +8,6 @@
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
-	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
 	import { Monitor } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
@@ -126,7 +125,6 @@
 	<!-- Left: Usage Indicator -->
 	<div class="controls-left">
 		<ContextUsageBar />
-		<UsageLimitIndicator />
 	</div>
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->

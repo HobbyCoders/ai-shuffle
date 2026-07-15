@@ -1,11 +1,12 @@
 /**
- * UsageLimitIndicator — the pill follows the RESOLVED install's bucket.
+ * ContextUsageBar — the plan-usage-limits section follows the RESOLVED install.
  *
  * The 5-hour window is per account, and each install runs a different account.
- * The pill must track the bucket of the install that owns the viewed session —
- * an offloaded (remote) session shows the worker's usage, and a remote target
- * with no snapshot yet must show NOTHING (never borrow the local account's
- * numbers). Here we mock `usage-target` to drive the resolved install directly.
+ * The limits section must track the bucket of the install that owns the viewed
+ * session — an offloaded (remote) session shows the worker's usage, and a remote
+ * target with no snapshot yet shows "No usage data yet" (never the local
+ * account's numbers). Here we mock `usage-target` to drive the resolved install
+ * directly.
  */
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,10 +31,15 @@ vi.mock('$lib/stores/usage-target', () => ({
 	},
 }));
 
-import UsageLimitIndicator from './UsageLimitIndicator.svelte';
+import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
+
+function openPopover(container: HTMLElement) {
+	const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
+	return fireEvent.click(pill);
+}
 
 function twoInstallSnapshot() {
 	rateLimit.applySnapshot({
@@ -61,39 +67,38 @@ function twoInstallSnapshot() {
 
 beforeEach(() => {
 	setTarget(null);
-	// Full store reset — snapshots now MERGE (buckets from a prior test would
-	// otherwise leak into the next one).
+	localStorage.clear();
 	rateLimit.__resetForTests();
 });
 afterEach(() => cleanup());
 
-describe('UsageLimitIndicator — resolved target', () => {
-	it('headline follows the resolved bucket (self vs remote)', () => {
+describe('ContextUsageBar — resolved target', () => {
+	it('limits section follows the resolved bucket (self vs remote)', async () => {
 		twoInstallSnapshot();
 
 		setTarget('worker');
-		const remote = render(UsageLimitIndicator);
-		expect(remote.container.querySelector('.usage-text')?.textContent).toBe('88%');
+		const remote = render(ContextUsageBar);
+		await openPopover(remote.container);
+		expect(remote.container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
 		cleanup();
 
 		setTarget(null); // self → primary
-		const local = render(UsageLimitIndicator);
-		expect(local.container.querySelector('.usage-text')?.textContent).toBe('12%');
+		const local = render(ContextUsageBar);
+		await openPopover(local.container);
+		expect(local.container.querySelector('.popover-row .row-pct')?.textContent).toBe('12%');
 	});
 
 	it('popover shows ONLY the remote install for a remote target', async () => {
 		twoInstallSnapshot();
 		setTarget('worker');
-		const { container } = render(UsageLimitIndicator);
-		// Pill already tracks the worker (88%).
-		expect(container.querySelector('.usage-text')?.textContent).toBe('88%');
-
-		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
-		// A single section for the resolved remote install — never the self one.
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		// A single section + row for the resolved remote install — never the self one.
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Worker');
 		expect(container.textContent).toContain('b@example.com');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
 		// The self install (Studio / a@example.com / 12%) must NOT appear.
 		expect(container.textContent).not.toContain('Studio');
 		expect(container.textContent).not.toContain('a@example.com');
@@ -103,19 +108,20 @@ describe('UsageLimitIndicator — resolved target', () => {
 	it('popover shows ONLY the self install for a local target', async () => {
 		twoInstallSnapshot();
 		setTarget(null); // self → primary
-		const { container } = render(UsageLimitIndicator);
-		await fireEvent.click(container.querySelector('.usage-indicator') as HTMLButtonElement);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Studio');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('12%');
 		// The worker install must NOT appear.
 		expect(container.textContent).not.toContain('Worker');
 		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('shows nothing for a remote target with no snapshot yet', () => {
+	it('shows "No usage data yet" for a remote target with no snapshot yet', async () => {
 		// Only the self install is known; the viewed session runs on an install we
-		// have no bucket for → the pill must NOT fall back to the self numbers.
+		// have no bucket for → the limits section must NOT fall back to self numbers.
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -130,7 +136,14 @@ describe('UsageLimitIndicator — resolved target', () => {
 			],
 		});
 		setTarget('ghost-worker');
-		const { container } = render(UsageLimitIndicator);
-		expect(container.querySelector('.usage-indicator')).toBeNull();
+		const { container } = render(ContextUsageBar);
+		// The pill is always present now.
+		expect(container.querySelector('.usage-indicator')).not.toBeNull();
+		await openPopover(container);
+		expect(container.textContent).toContain('No usage data yet');
+		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+		// Never borrow the self install's window/label.
+		expect(container.textContent).not.toContain('Studio');
+		expect(container.textContent).not.toContain('12%');
 	});
 });
