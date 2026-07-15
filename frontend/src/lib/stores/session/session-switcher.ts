@@ -64,8 +64,6 @@ interface LiveSnapshot {
 		worktree_deleted?: boolean;
 		execution_mode?: string;
 		cloud_branch?: string | null;
-		controllable?: boolean;
-		relay_error?: string;
 	};
 }
 
@@ -117,7 +115,7 @@ export function getPersistedProject(): string {
 export function getPersistedExecutionMode(): ExecutionMode {
 	if (typeof window !== 'undefined') {
 		const stored = localStorage.getItem('aihub_executionMode');
-		if (stored === 'worktree' || stored === 'cloud') return stored;
+		if (stored === 'worktree') return stored;
 	}
 	return 'local';
 }
@@ -386,13 +384,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
-			// Reset to controllable; the /live metadata snapshot flips it false
-				// only if the target is a remote session whose owner is offline.
-				remoteControllable: true,
-				// Clear any stale relay-error reason from the leaving session; the
-				// metadata snapshot re-stamps it if the target's owner is unreachable.
-				relayError: undefined,
-				// Per-session runtime state — MUST be reset on every switch so the
+			// Per-session runtime state — MUST be reset on every switch so the
 			// leaving session's values never bleed into the target. These mirror
 			// the resets in newChat()/defaultState(); omitting them caused e.g. the
 			// previous session's profile (sessionProfileId), next-query profile
@@ -458,17 +450,17 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		persistSession();
 
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
-		// flag, tasks and usage, but NOT the lifecycle/control metadata. Fetch it
-		// once from /live so preserve_background_on_interrupt, remote
-		// controllability, and worktree/cloud fields are correct on switch-in.
+		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
+		// /live so preserve_background_on_interrupt and worktree/cloud fields are
+		// correct on switch-in.
 		void applyMetadataSnapshot(sessionId, generation);
 	}
 
 	/**
 	 * Fetch the `/live` snapshot once and fold the metadata the SSE feed does not
 	 * carry into activeSession — closing the v2 metadata gap
-	 * (preserve_background_on_interrupt, remoteControllable/relayError, usage
-	 * totals, and server-authoritative worktree/cloud fields). Never touches
+	 * (preserve_background_on_interrupt, usage totals, and server-authoritative
+	 * worktree/cloud fields). Never touches
 	 * messages / isStreaming / activeTasks (the feed owns those). Guarded on the
 	 * switch generation + active sessionId so a stale response can't write into a
 	 * session the user already left.
@@ -518,14 +510,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (meta.cloud_branch !== undefined && meta.cloud_branch !== null) {
 				patch.cloudBranch = meta.cloud_branch;
 			}
-			// Cross-install control reachability: absent for local sessions → true.
-			const controllable = meta.controllable !== false;
-			patch.remoteControllable = controllable;
-			patch.relayError = controllable ? undefined : meta.relay_error;
-		} else {
-			// Local session with no meta block — always controllable.
-			patch.remoteControllable = true;
-			patch.relayError = undefined;
 		}
 
 		update(s => (s.sessionId === sessionId ? { ...s, ...patch } : s));

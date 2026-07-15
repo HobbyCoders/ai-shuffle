@@ -46,12 +46,6 @@ export async function listInstalls(): Promise<InstallsResponse> {
 	return api.get<InstallsResponse>('/cluster/installs');
 }
 
-/** A device is a valid cloud offload target only when it's online and
- *  advertises a reachable base_url. Excludes this install. */
-export function offloadTargets(installs: Install[]): Install[] {
-	return installs.filter((i) => !i.is_self && i.online && !!i.base_url);
-}
-
 /** Rename a device (the friendly name shown on its sessions). */
 export async function renameInstall(id: string, device_name: string): Promise<Install> {
 	return api.patch<Install>(`/cluster/installs/${id}`, { device_name });

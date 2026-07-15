@@ -133,4 +133,4 @@ export interface Project {
 }
 
 // Execution mode for chat sessions
-export type ExecutionMode = 'local' | 'worktree' | 'cloud';
+export type ExecutionMode = 'local' | 'worktree';

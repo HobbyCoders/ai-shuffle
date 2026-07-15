@@ -1,11 +1,11 @@
 /**
  * Tests for the chat header's local git-actions visibility gate.
  *
- * Regression guard for the "git action buttons show 'Init Repo' for cloud
- * sessions on another device" bug: a cloud/offloaded session's repo lives on the
+ * Regression guard for the "git action buttons show 'Init Repo' for remote
+ * sessions on another device" bug: a remote-placed session's repo lives on the
  * owning install, so the LOCAL /git/status reports no repo and the header would
  * fall back to the misleading "Init Repo" state. The gate must suppress the local
- * git actions for cloud sessions while leaving local/worktree sessions unchanged.
+ * git actions for remote sessions while leaving local/worktree sessions unchanged.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -21,7 +21,7 @@ function base(overrides: Partial<HeaderGitActionsInput> = {}): HeaderGitActionsI
 		hasProject: true,
 		githubAuthenticated: true,
 		worktreeDeleted: false,
-		executionMode: 'local',
+		isRemote: false,
 		...overrides
 	};
 }
@@ -31,14 +31,14 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base())).toBe(true);
 	});
 
-	it('shows local git actions for a worktree session', () => {
-		expect(shouldShowHeaderGitActions(base({ executionMode: 'worktree' }))).toBe(true);
+	it('shows local git actions for a local (non-remote) session', () => {
+		expect(shouldShowHeaderGitActions(base({ isRemote: false }))).toBe(true);
 	});
 
-	it('HIDES local git actions for a cloud session (repo is on the owning install)', () => {
+	it('HIDES local git actions for a remote session (repo is on the owning install)', () => {
 		// The core bug: without this, the local /git/status → is_git_repo:false
 		// surfaces the "Init Repo" fallback for a remote session's repo.
-		expect(shouldShowHeaderGitActions(base({ executionMode: 'cloud' }))).toBe(false);
+		expect(shouldShowHeaderGitActions(base({ isRemote: true }))).toBe(false);
 	});
 
 	it('hides when not a chat view', () => {

@@ -53,6 +53,10 @@ export interface Session {
 	device_online?: boolean;  // Owning install seen recently (heartbeat)
 	is_remote?: boolean;  // Owned by another install (not this one)
 	controllable?: boolean;  // Live send/interrupt reachable right now
+	// V2 Q7: transient, derived server-side (never persisted). True when the
+	// session has a queued turn but no capable runner is online — it's waiting,
+	// read-only, until an owning device returns.
+	degraded?: boolean;
 	project_name?: string | null;  // Resolved server-side (cross-install projects)
 	link_group_id?: string | null;  // Folds same-repo clones into one board group
 	// V2 projects (Phase 3): origin-keyed project identity. `origin` is the board

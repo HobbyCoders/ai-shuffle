@@ -24,6 +24,15 @@ from app.api.cluster import (
     cluster_pending_questions,
     cluster_question_response,
 )
+from app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _legacy_placement(monkeypatch):
+    """The cluster HTTP relay is the legacy (flag-OFF) cross-install path; the V2
+    Phase 4 cutover defaults ``v2_placement`` ON and bypasses relay entirely.
+    Pin it OFF so these relay-endpoint tests exercise the legacy path."""
+    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 async def _passthrough_run_sync(fn, *args, **kwargs):

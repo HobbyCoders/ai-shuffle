@@ -380,7 +380,7 @@ class TestGetAutomationStats:
 
 
 # =============================================================================
-# Cross-install project resolution & scheduled-runner election
+# Scheduled-runner election (V2 placement — capable_runners)
 # =============================================================================
 
 ME = "install-me"
@@ -388,10 +388,10 @@ OTHER = "install-other"
 EARLY = "install-aaa"  # sorts before both ME and OTHER
 
 
-def _proj(pid, instance_id=None, link_group_id=None, path="/p"):
+def _proj(pid, instance_id=None, path="/p"):
     return {
         "id": pid, "name": pid, "path": path, "settings": {},
-        "instance_id": instance_id, "link_group_id": link_group_id,
+        "instance_id": instance_id,
     }
 
 
@@ -400,28 +400,31 @@ def _installs(*specs):
     return {iid: {"id": iid, "device_name": iid, "online": online} for iid, online in specs}
 
 
+def _pv2(pid="proj-A"):
+    return {"id": f"pv2-{pid}", "name": pid}
+
+
 @pytest.fixture
 def svc_env():
     """Patch the service's database facade and pin this install's id to ME.
 
-    The cross-install ELECTION helpers (``_local_candidate`` /
-    ``_link_group_siblings`` / ``resolve_runnable_local_project``) live in
-    ``app.core.project_links`` and read ``database``/``settings`` from THAT
-    module, so patch both modules to the same mocks — ``should_run_scheduled_here``
-    still calls them plus its own ``database``/``settings`` in automation_service.
+    ``should_run_scheduled_here`` reads ``database``/``settings`` from
+    ``automation_service`` (the install registry + this install's id) and lazily
+    imports ``resolve_project_v2`` / ``placement.capable_runners`` /
+    ``get_project_working_dir`` at call time — the tests patch those three at their
+    definition modules.
     """
     with patch("app.core.automation_service.database") as db, \
-         patch("app.core.automation_service.settings") as st, \
-         patch("app.core.project_links.database", db), \
-         patch("app.core.project_links.settings", st):
+         patch("app.core.automation_service.settings") as st:
         st.effective_instance_id = ME
-        db.get_projects_in_link_group.return_value = []
         yield db
 
 
 class TestShouldRunScheduledHere:
     def _auto(self, project_id=None):
         return {"id": "auto-1", "project_id": project_id}
+
+    # ── projectless arm (byte-equivalent to the pre-cutover behavior) ──────────
 
     def test_empty_registry_runs_locally(self, svc_env):
         from app.core.automation_service import should_run_scheduled_here
@@ -446,107 +449,97 @@ class TestShouldRunScheduledHere:
         assert should_run is False
         assert EARLY in reason
 
-    def test_project_owner_online_wins(self, svc_env):
-        from app.core.automation_service import should_run_scheduled_here
-        # Owner is online; we have a clone but must defer even though ME sorts first.
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
-        should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is False
-        assert OTHER in reason
-
-    def test_owner_offline_failover_to_local_clone(self, svc_env):
-        """The core scenario: creating install is shut down, we have the repo."""
-        from app.core.automation_service import should_run_scheduled_here
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        sibling = _proj("proj-B", instance_id=ME, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign, sibling]
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is True
-
-    def test_owner_offline_other_clone_wins_tiebreak(self, svc_env):
-        from app.core.automation_service import should_run_scheduled_here
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [
-            foreign,
-            _proj("proj-B", instance_id=ME, link_group_id="git:abc"),
-            _proj("proj-C", instance_id=EARLY, link_group_id="git:abc"),
-        ]
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False), (EARLY, True))
-        should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is False
-        assert EARLY in reason
-
-    def test_install_without_project_never_elected(self, svc_env):
-        from app.core.automation_service import should_run_scheduled_here
-        # We are online but have no clone; owner offline; nobody else → skip.
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign]
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is False
-
-    def test_no_online_candidates_but_locally_resolvable(self, svc_env):
-        from app.core.automation_service import should_run_scheduled_here
-        # Our own heartbeat lags (we look offline) but we own the project.
-        mine = _proj("proj-A", instance_id=ME)
-        svc_env.get_project.return_value = mine
-        svc_env.get_installs_map.return_value = _installs((ME, False), (OTHER, False))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is True
-
-    def test_legacy_project_without_owner_runs_where_path_exists(self, svc_env, tmp_path):
-        from app.core.automation_service import should_run_scheduled_here
-        legacy = _proj("proj-A", instance_id=None, path=str(tmp_path))
-        svc_env.get_project.return_value = legacy
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is True
-
-    def test_legacy_project_without_owner_skips_where_path_missing(self, svc_env):
-        from app.core.automation_service import should_run_scheduled_here
-        legacy = _proj("proj-A", instance_id=None, path="/does/not/exist")
-        svc_env.get_project.return_value = legacy
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
-        assert should_run is False
-
-    def test_missing_project_row_elects_single_runner(self, svc_env):
-        """One install surfaces the missing-project error, not all of them."""
-        from app.core.automation_service import should_run_scheduled_here
-        svc_env.get_project.return_value = None
-        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
-        should_run, _ = should_run_scheduled_here(self._auto("proj-gone"))
-        assert should_run is True  # "install-me" sorts first
-
-        svc_env.get_installs_map.return_value = _installs((ME, True), (EARLY, True))
-        should_run, reason = should_run_scheduled_here(self._auto("proj-gone"))
-        assert should_run is False
-        assert EARLY in reason
-
-    def test_counts_self_online_despite_stale_heartbeat(self, svc_env):
+    def test_projectless_counts_self_online_despite_stale_heartbeat(self, svc_env):
         """A stale own-heartbeat row must not make every install defer."""
         from app.core.automation_service import should_run_scheduled_here
         svc_env.get_installs_map.return_value = _installs((ME, False), (OTHER, True))
         should_run, _ = should_run_scheduled_here(self._auto())
         assert should_run is True  # ME counts itself online and sorts first
 
-    def test_no_runner_anywhere_records_last_error_once(self, svc_env):
+    # ── pv2 unresolvable → surface the error on exactly one runner ─────────────
+
+    def test_pv2_unresolvable_elects_single_runner(self, svc_env):
+        """A legacy project row missing / unresolvable to a project_v2 elects the
+        lowest-id online install to surface the error, not all of them."""
         from app.core.automation_service import should_run_scheduled_here
-        foreign = _proj("proj-A", instance_id=OTHER, link_group_id="git:abc")
-        svc_env.get_project.return_value = foreign
-        svc_env.get_projects_in_link_group.return_value = [foreign]
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=None):
+            should_run, _ = should_run_scheduled_here(self._auto("proj-gone"))
+        assert should_run is True  # "install-me" sorts first
+
+        svc_env.get_installs_map.return_value = _installs((ME, True), (EARLY, True))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=None):
+            should_run, reason = should_run_scheduled_here(self._auto("proj-gone"))
+        assert should_run is False
+        assert EARLY in reason
+
+    # ── capable_runners election ───────────────────────────────────────────────
+
+    def test_owner_online_preferred_over_lowest(self, svc_env):
+        """When the legacy owner holds a checkout it wins even if ME sorts first."""
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = _proj("proj-A", instance_id=OTHER)
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[ME, OTHER]):
+            should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+        assert OTHER in reason
+
+    def test_owner_online_is_me_runs(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = _proj("proj-A", instance_id=ME)
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[ME, OTHER]):
+            should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+
+    def test_owner_offline_lowest_candidate_wins(self, svc_env):
+        """Owner holds no active checkout (offline) → the lowest-id capable runner
+        is elected."""
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = _proj("proj-A", instance_id=OTHER)
+        svc_env.get_installs_map.return_value = _installs((ME, True), (EARLY, True), (OTHER, False))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[EARLY, ME]):
+            should_run, reason = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is False
+        assert EARLY in reason
+
+    def test_owner_offline_me_is_lowest_runs(self, svc_env):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = _proj("proj-A", instance_id=OTHER)
         svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, False))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[ME]):
+            should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+
+    # ── zero capable runners → local-path fail-open + visibility ───────────────
+
+    def test_no_candidates_local_path_exists_runs(self, svc_env, tmp_path):
+        from app.core.automation_service import should_run_scheduled_here
+        svc_env.get_project.return_value = _proj("proj-A", path=str(tmp_path))
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[]), \
+             patch("app.core.project_utils.get_project_working_dir", return_value=str(tmp_path)):
+            should_run, _ = should_run_scheduled_here(self._auto("proj-A"))
+        assert should_run is True
+        svc_env.update_automation.assert_not_called()
+
+    def test_no_candidates_no_local_path_skips_and_records(self, svc_env, tmp_path):
+        from app.core.automation_service import should_run_scheduled_here
+        missing = str(tmp_path / "nope")
+        svc_env.get_project.return_value = _proj("proj-A", path=missing)
+        svc_env.get_installs_map.return_value = _installs((ME, True), (OTHER, True))
 
         auto = self._auto("proj-A")
-        should_run, _ = should_run_scheduled_here(auto)
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[]), \
+             patch("app.core.project_utils.get_project_working_dir", return_value=missing):
+            should_run, _ = should_run_scheduled_here(auto)
         assert should_run is False
         svc_env.update_automation.assert_called_once()
         _, kwargs = svc_env.update_automation.call_args
@@ -555,6 +548,9 @@ class TestShouldRunScheduledHere:
         # Already recorded → no repeat write on subsequent fires.
         svc_env.update_automation.reset_mock()
         auto["last_error"] = kwargs["last_error"]
-        should_run, _ = should_run_scheduled_here(auto)
+        with patch("app.core.project_resolver.resolve_project_v2", return_value=_pv2()), \
+             patch("app.core.placement.capable_runners", return_value=[]), \
+             patch("app.core.project_utils.get_project_working_dir", return_value=missing):
+            should_run, _ = should_run_scheduled_here(auto)
         assert should_run is False
         svc_env.update_automation.assert_not_called()

@@ -166,18 +166,6 @@ export interface ActiveSessionState {
 	 *  If the interrupt fails/times out, ChatInput restores this to the editor
 	 *  so the user doesn't lose their message. Cleared on success or session switch. */
 	pendingInterruptPrompt: string | null;
-	/** Cross-install (cloud) sessions: whether the owning device is reachable for
-	 *  live control. Defaults true (local sessions are always controllable). Set
-	 *  false when a remote session's /live response is served from shared-DB
-	 *  history because the owner is offline — the chat is read-only then. */
-	remoteControllable: boolean;
-	/** Cross-install (cloud) sessions: a short, human-readable reason the owning
-	 *  device could not be reached for live control (e.g. "device is unreachable",
-	 *  "authentication rejected by device"). Present only when the /live relay
-	 *  actively FAILED (registry-online owner but unreachable / peer-error), so the
-	 *  read-only banner can explain WHY. undefined for a cleanly-offline owner
-	 *  (plain "view only") and for controllable sessions. */
-	relayError: string | undefined;
 	/** True from the moment init() adopts a persisted sessionId until that
 	 *  session's history has been fetched (onConnected's loadSession settles).
 	 *  During this window the UI looks like "New Chat" (messages=[]) while
@@ -277,8 +265,6 @@ function defaultState(): ActiveSessionState {
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		pendingInterruptPrompt: null,
-		remoteControllable: true,
-		relayError: undefined,
 		isRestoringSession: false,
 		isLoadingSession: false,
 	};
@@ -663,14 +649,14 @@ export const activeSession = {
 	setExecutionMode(mode: ExecutionMode) {
 		// Remember the toggle so new sessions reopen in the same mode
 		setPersistedExecutionMode(mode);
-		// Leaving cloud mode clears any chosen offload target + branch so they
-		// can't leak into a later cloud session for a different device set.
+		// ExecutionMode is now local|worktree only. Any vestigial cloud offload
+		// target + branch are cleared so they can't leak into a later flow.
 		_update(s => ({
 			...s,
 			executionMode: mode,
-			cloudTargetInstanceId: mode === 'cloud' ? s.cloudTargetInstanceId : null,
-			cloudBranch: mode === 'cloud' ? s.cloudBranch : null,
-			cloudCreateNewBranch: mode === 'cloud' ? s.cloudCreateNewBranch : false,
+			cloudTargetInstanceId: null,
+			cloudBranch: null,
+			cloudCreateNewBranch: false,
 		}));
 	},
 	setCloudTarget(instanceId: string | null) {
@@ -718,9 +704,6 @@ export const activeSession = {
 
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
-
-	startCloudSession: (prompt: string, pendingUploadPaths?: string[], autoStash?: boolean) =>
-		messageSender.startCloudSession(prompt, pendingUploadPaths, autoStash),
 
 	// ── Queued Messages (delegated to message-sender) ──────────────
 

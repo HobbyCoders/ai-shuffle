@@ -163,10 +163,10 @@
 
 	$effect(() => {
 		// Only track the WS state as "disconnected" while the banner is
-		// actually eligible to show (an active, remote-controllable session).
-		// Otherwise treat it as connected so the grace timer never arms for a
-		// session that wouldn't show the banner anyway.
-		const eligible = Boolean($activeSession.sessionId) && $activeSession.remoteControllable !== false;
+		// actually eligible to show (an active session). Otherwise treat it as
+		// connected so the grace timer never arms for a session that wouldn't
+		// show the banner anyway.
+		const eligible = Boolean($activeSession.sessionId);
 		connectionBannerGrace.setConnected(!eligible || $activeWsConnected);
 	});
 </script>
@@ -222,19 +222,6 @@
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</div>
-				{/if}
-				{#if $activeSession.sessionId && $activeSession.remoteControllable === false}
-					<!-- Cross-install (cloud) session whose owning device isn't reachable:
-					     history is still readable from the shared DB, but live control
-					     can't reach it right now. Non-blocking, view-only notice.
-					     When the /live relay actively FAILED (owner registry-online but
-					     unreachable / peer-error), `relayError` carries a short reason —
-					     surface it so the user knows WHY, vs. a plain "offline". -->
-					{#if $activeSession.relayError}
-						<Banner severity="warning" message={`Could not reach the device — showing read-only history (${$activeSession.relayError}). You can read this chat, but can't send until it reconnects.`} />
-					{:else}
-						<Banner severity="warning" message="Device offline — view only. You can read this chat, but can't send until the device reconnects." />
-					{/if}
 				{/if}
 				{#if $activeSession.sessionId}
 					<TeamStatusBar sessionId={$activeSession.sessionId} />

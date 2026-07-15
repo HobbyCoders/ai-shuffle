@@ -320,6 +320,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # V2 placement cutover (Phase 4, Q3). When on, turn execution is governed
+    # by the sessions.placement resolver (app.core.placement): remote-placed
+    # turns are enqueued durably and claimed by the owning runner's
+    # turn_claim loop over the shared runs lease — the legacy HTTP cloud_relay
+    # dispatch is bypassed. When off, the entire legacy relay path
+    # (cloud_relay.relay_message / relay_interrupt / relay_queue_message) runs
+    # byte-identically and the claim loop never starts. Kill switch:
+    # AI_SHUFFLE_V2_PLACEMENT=false.
+    v2_placement: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_SHUFFLE_V2_PLACEMENT", "V2_PLACEMENT", "v2_placement"
+        ),
+    )
+
     # V2 projects cutover (Phase 3) is COMPLETE. Project/checkout resolution keys
     # unconditionally off the origin-keyed ``projects_v2`` + per-runner
     # ``checkouts`` tables (seeded by the v60 collapse migration) for any session

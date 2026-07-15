@@ -413,6 +413,49 @@ def pop_ready(session_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
+def list_claimable_sessions() -> List[str]:
+    """Return the DISTINCT session ids that have at least one ``queued`` turn and
+    NO live run lease — the candidate set for the cross-runner claim loop
+    (V2 Phase 4).
+
+    The anti-join treats an ``active`` run with a LAPSED lease as absent: a
+    crashed owner's stale row must not block another runner from claiming — the
+    claimer's ``runs.claim_run`` reaps it atomically on the way in. Sessions
+    only (not turns): the claim loop resolves placement per SESSION and kicks
+    the scheduler, which orders the queue itself.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT t.session_id FROM turns t "
+            "LEFT JOIN runs r ON r.session_id = t.session_id "
+            "AND r.state = 'active' AND r.lease_expires_at >= NOW() "
+            "WHERE t.state = 'queued' AND r.id IS NULL",
+        )
+        rows = cursor.fetchall()
+    return [r["session_id"] if isinstance(r, dict) else r[0] for r in rows]
+
+
+def list_interrupting_for_runner(runner_id: str) -> List[Dict[str, Any]]:
+    """Return the ``interrupting`` turns this runner is executing (V2 Phase 4
+    interrupt-observe pass).
+
+    ``instance_id`` on a live turn is stamped exclusively by ``start_turn`` with
+    the EXECUTING runner's id (verified Q3-E1), so this filter is exactly "my
+    in-flight turns whose durable interrupt intent was flipped" — including
+    flips made by a FOREIGN install's WS handler, which the in-process interrupt
+    executor cannot deliver across installs.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE state='interrupting' AND instance_id=%s",
+            (runner_id,),
+        )
+        rows = cursor.fetchall()
+    return _rows(rows)
+
+
 # ---------------------------------------------------------------------------
 # Reaping dead-lease live turns
 # ---------------------------------------------------------------------------

@@ -29,14 +29,25 @@
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import { computeContextBadge, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { activeSession } from '$lib/stores/active-session';
-	import { projects } from '$lib/stores/app-data.svelte';
+	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
-	import { FolderClosed, GitBranch, Cloud } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Monitor, MonitorOff } from 'lucide-svelte';
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
 	);
+
+	// The sessions-board summary row for the active session — source of the
+	// server-derived ownership/health fields (degraded, is_remote, device name +
+	// online) the read-only context badge reads.
+	const sessionRow = $derived(
+		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
+	);
+
+	// V2 Q7: the active session's server-derived degraded flag (queued work, no
+	// runner online).
+	const degraded = $derived(sessionRow?.degraded ?? false);
 
 	// New-session state: no messages yet. Here the execution-mode toggle (+ branch
 	// picker) is shown next to the profile pill so the user can choose Local vs
@@ -80,7 +91,11 @@
 			executionMode: $activeSession.executionMode,
 			selectedWorktreeBranch: $activeSession.selectedWorktreeBranch,
 			worktreeBranch: $activeSession.worktreeBranch,
-			githubAuthenticated: $githubAuthenticated
+			githubAuthenticated: $githubAuthenticated,
+			degraded,
+			isRemote: sessionRow?.is_remote ?? false,
+			deviceName: sessionRow?.device_name ?? null,
+			deviceOnline: sessionRow?.device_online ?? false
 		})
 	);
 
@@ -107,21 +122,31 @@
 	{:else if badge}
 		<span
 			class="context-badge"
-			class:cloud={badge.cloud}
+			class:runner={badge.runner}
+			class:degraded={badge.degraded}
 			title={badge.title}
 		>
-			{#if projectName}
-				<FolderClosed size={13} strokeWidth={1.5} />
-				<span class="pill-label project-name">{projectName}</span>
-				{#if badge.branch || badge.cloud}<span class="separator">/</span>{/if}
-			{/if}
-			{#if badge.cloud}
-				<Cloud size={13} strokeWidth={1.5} />
-				<span class="pill-label">Cloud</span>
-			{/if}
-			{#if badge.branch}
-				<GitBranch size={13} strokeWidth={1.5} />
-				<span class="pill-label branch-name">{badge.branch}</span>
+			{#if badge.degraded}
+				<MonitorOff size={13} strokeWidth={1.5} />
+				<span class="pill-label">Read-only — no runner online</span>
+			{:else}
+				{#if projectName}
+					<FolderClosed size={13} strokeWidth={1.5} />
+					<span class="pill-label project-name">{projectName}</span>
+					{#if badge.branch || badge.runner}<span class="separator">/</span>{/if}
+				{/if}
+				{#if badge.runner}
+					{#if badge.runner.online}
+						<Monitor size={13} strokeWidth={1.5} />
+					{:else}
+						<MonitorOff size={13} strokeWidth={1.5} />
+					{/if}
+					<span class="pill-label">{badge.runner.deviceName}</span>
+				{/if}
+				{#if badge.branch}
+					<GitBranch size={13} strokeWidth={1.5} />
+					<span class="pill-label branch-name">{badge.branch}</span>
+				{/if}
 			{/if}
 		</span>
 	{/if}
@@ -166,11 +191,20 @@
 		cursor: default;
 	}
 
-	/* Cloud session: subtle accent so it's distinguishable from local/worktree. */
-	.context-badge.cloud {
+	/* Remote-placed session: subtle accent so the runner indicator is
+	   distinguishable from a local/worktree branch badge. */
+	.context-badge.runner {
 		color: var(--primary);
 		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
 		background: color-mix(in oklch, var(--primary) 8%, var(--background));
+	}
+
+	/* V2 Q7 degraded session: read-only, no runner online. Warning accent so it
+	   reads as an advisory (informational — there is no adopt/action here). */
+	.context-badge.degraded {
+		color: var(--warning);
+		border-color: color-mix(in oklch, var(--warning) 40%, var(--border));
+		background: color-mix(in oklch, var(--warning) 10%, var(--background));
 	}
 
 	.context-badge :global(svg) {

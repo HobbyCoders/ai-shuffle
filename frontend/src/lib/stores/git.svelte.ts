@@ -18,7 +18,6 @@ export type {
 	CommitNode,
 	Worktree,
 	GitStatus,
-	CreateWorktreeRequest,
 	DiffStats,
 	PullResponse,
 	FileChangeInfo,
@@ -682,38 +681,6 @@ export const git = {
 			_update((s) => ({
 				...s,
 				error: error.detail || 'Failed to pull'
-			}));
-			throw e;
-		}
-	},
-
-	async createWorktree(
-		branchName: string,
-		createNew?: boolean,
-		baseBranch?: string,
-		profileId?: string
-	): Promise<gitApi.Worktree | undefined> {
-		if (!_state.projectId) return undefined;
-
-		_update((s) => ({ ...s, loading: true, error: null }));
-
-		try {
-			const response = await gitApi.createWorktree(_state.projectId, {
-				branch_name: branchName,
-				create_new_branch: createNew,
-				base_branch: baseBranch,
-				profile_id: profileId
-			});
-			await git.loadWorktrees();
-			await git.loadBranches();
-			_update((s) => ({ ...s, loading: false }));
-			return response.worktree || undefined;
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({
-				...s,
-				loading: false,
-				error: error.detail || 'Failed to create worktree'
 			}));
 			throw e;
 		}

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.contract import events as contract
+from app.core import artifact_ingest, artifact_store
 from app.core.config import settings
 from app.db import runs as runs_db
 from app.db import session_events as session_events_db
@@ -163,11 +164,17 @@ def _translate_shared(
         )]
 
     if etype == "tool_result":
+        raw_hashes = event.get("artifact_hashes")
+        artifact_hashes = (
+            [h for h in raw_hashes if isinstance(h, str)]
+            if isinstance(raw_hashes, list) else []
+        )
         return [_build_event(
             contract.ToolResult, session_id,
             tool_use_id=event.get("tool_use_id") or "",
             is_error=bool(event.get("is_error")),
             content_preview=_truncate(event.get("output")),
+            artifact_hashes=artifact_hashes,
             **kw,
         )]
 
@@ -327,6 +334,10 @@ class TurnRecorder:
         # Serializes buffer mutation + appends (on_event vs. the flush timer)
         # so log order always reflects pump order.
         self._lock = asyncio.Lock()
+        # In-flight fire-and-forget screenshot-artifact stores (Q5). Held so the
+        # loop keeps a strong ref (asyncio only weak-refs tasks) and ``close``
+        # can drain them, making the bytes durable before teardown.
+        self._artifact_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -489,6 +500,12 @@ class TurnRecorder:
                 exc_info=True,
             )
         finally:
+            # Drain in-flight screenshot stores so the bytes are durable before
+            # teardown (Q5). Errors are already swallowed inside each task.
+            if self._artifact_tasks:
+                await asyncio.gather(
+                    *list(self._artifact_tasks), return_exceptions=True
+                )
             self._cancel_task(self._flush_task)
             self._flush_task = None
             self._cancel_task(self._renew_task)
@@ -609,12 +626,95 @@ class TurnRecorder:
             ))
             self._terminal_recorded = True
         else:
+            # Q5: content-address a tool_result screenshot BEFORE translation so
+            # the ToolResult carries its artifact_hashes; append artifact.created
+            # first (no-op for every non-screenshot event / flag OFF).
+            events.extend(self._maybe_ingest_screenshot(event))
             events.extend(_translate_shared(
                 event, self.session_id,
                 turn_id=self.turn_id, command_id=self.command_id,
             ))
 
         await self._append(events)
+
+    # ------------------------------------------------------------------
+    # screenshot artifact ingest (Q5)
+    # ------------------------------------------------------------------
+
+    def _maybe_ingest_screenshot(
+        self, event: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Content-address a tool_result screenshot (flag-gated, fire-and-forget).
+
+        On a ``tool_result`` pump event carrying a decoded screenshot data URI
+        (top-level Claude-in-Chrome / computer-use image results — surfaced at
+        both ``query_engine`` pump sites), and only when
+        ``settings.v2_placement`` is on, decode + hash the bytes synchronously,
+        stamp ``artifact_hashes`` onto the pump event (so ``_translate_shared``
+        carries the reference into the recorded ``tool.result``), schedule a
+        fire-and-forget disk/DB store, and return an ``artifact.created`` event
+        to append in the same batch.
+
+        Returns ``[]`` (a no-op) for every other event, when the flag is off, or
+        when the screenshot is not a well-formed base64 data URI. Never raises:
+        a decode/scheduling failure degrades to no ingest, never breaking the
+        pump (the recorder isolation invariant).
+        """
+        try:
+            if not settings.v2_placement:
+                return []
+            if event.get("type") != "tool_result":
+                return []
+            parsed = artifact_ingest.parse_screenshot_data_uri(
+                event.get("screenshot")
+            )
+            if parsed is None:
+                return []
+            data, mime = parsed
+            digest = artifact_ingest.content_hash(data)
+            # Stamp the content address onto the pump event so the ToolResult
+            # append references it. Idempotent + dedup-friendly.
+            existing = event.get("artifact_hashes")
+            hashes = list(existing) if isinstance(existing, list) else []
+            if digest not in hashes:
+                hashes.append(digest)
+            event["artifact_hashes"] = hashes
+            filename = artifact_ingest.filename_for(digest, mime)
+            self._spawn_artifact_store(data, mime, filename, digest)
+            return [self._event(
+                contract.ArtifactCreated,
+                hash=digest, mime=mime, filename=filename, size=len(data),
+            )]
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] screenshot ingest failed for %s",
+                self.session_id, exc_info=True,
+            )
+            return []
+
+    def _spawn_artifact_store(
+        self, data: bytes, mime: str, filename: str, digest: str
+    ) -> None:
+        """Fire-and-forget the blocking disk/DB store off the pump loop."""
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(
+                    artifact_store.store_bytes,
+                    data,
+                    mime=mime,
+                    filename=filename,
+                    created_by_session=self.session_id,
+                    runner_id=self.runner_id,
+                )
+            except Exception:
+                logger.warning(
+                    "[TurnRecorder] artifact store failed for %s hash %s",
+                    self.session_id, digest, exc_info=True,
+                )
+
+        task = asyncio.create_task(_run())
+        self._artifact_tasks.add(task)
+        task.add_done_callback(self._artifact_tasks.discard)
 
     # ------------------------------------------------------------------
     # delta batching

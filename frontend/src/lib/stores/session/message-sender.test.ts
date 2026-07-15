@@ -9,7 +9,6 @@ import { reopenWorktree } from '$lib/api/git';
 // rest are stubbed so the import binding resolves.
 vi.mock('$lib/api/git', () => ({
 	reopenWorktree: vi.fn(async () => {}),
-	migrateUploadsToWorktree: vi.fn(async () => {}),
 	generateBranchName: vi.fn(async () => ({ branch_name: 'auto/x' })),
 	generateBranchNameLocal: vi.fn(() => 'auto/x'),
 }));
@@ -76,7 +75,6 @@ function makeDeps(initial: ActiveSessionState) {
 
 	const autoCreateWorktree = vi.fn(async () => {});
 	const createWorktree = vi.fn(async () => {});
-	const startCloudSession = vi.fn(async () => {});
 	const innerSendMessage = vi.fn(async () => true);
 
 	const deps: MessageSenderDeps = {
@@ -92,11 +90,10 @@ function makeDeps(initial: ActiveSessionState) {
 			sendMessage: innerSendMessage,
 			createWorktree,
 			autoCreateWorktree,
-			startCloudSession,
 		}),
 	};
 
-	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree, startCloudSession };
+	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
 
 describe('message-sender worktree send backstop', () => {

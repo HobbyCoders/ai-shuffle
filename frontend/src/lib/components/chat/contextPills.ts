@@ -25,6 +25,18 @@ export interface ContextBadgeInput {
 	worktreeBranch: string | null;
 	/** Whether GitHub CLI is authenticated (gates the interactive branch pill). */
 	githubAuthenticated: boolean;
+	/**
+	 * V2 Q7: the active session has a queued turn but no capable runner online
+	 * (server-derived). When true, a read-only "no runner online" badge takes
+	 * precedence over the normal project/branch context.
+	 */
+	degraded?: boolean;
+	/** V2 Q8: the session is owned by (placed on) another install (is_remote). */
+	isRemote?: boolean;
+	/** V2 Q8: friendly name of the owning device (only meaningful when isRemote). */
+	deviceName?: string | null;
+	/** V2 Q8: whether the owning device is currently online (only when isRemote). */
+	deviceOnline?: boolean;
 }
 
 export interface ContextBadge {
@@ -32,8 +44,14 @@ export interface ContextBadge {
 	branch: string | null;
 	/** Tooltip text. */
 	title: string;
-	/** True for cloud sessions (renders a cloud indicator instead of a branch). */
-	cloud?: boolean;
+	/**
+	 * V2 Q8: present for a remote-placed session — renders a device indicator
+	 * (which install the session runs on, and whether it is online) instead of a
+	 * local branch.
+	 */
+	runner?: { deviceName: string; online: boolean };
+	/** V2 Q7: true for the read-only "no runner online" degraded badge. */
+	degraded?: boolean;
 }
 
 /**
@@ -49,21 +67,42 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 		executionMode,
 		selectedWorktreeBranch,
 		worktreeBranch,
-		githubAuthenticated
+		githubAuthenticated,
+		degraded,
+		isRemote,
+		deviceName,
+		deviceOnline
 	} = input;
 
 	// The empty/new-session state is owned by the execution-mode toggle, not a
 	// context badge — so a badge only ever applies once a chat is active.
 	if (messageCount === 0) return null;
 
-	// Cloud sessions always show a read-only "cloud" badge so it's clear the
-	// work is running on the configured second install (there's no local branch).
-	if (executionMode === 'cloud') {
+	// V2 Q7: a degraded session (queued work, no runner online) is read-only.
+	// Surface that as its own badge with top precedence over any project/branch
+	// context, regardless of GitHub-auth gating. It only applies once a chat is
+	// active (above) — the empty/new-session compose case is covered by the board
+	// chip, so the badge stays in-chat only.
+	if (degraded) {
+		return {
+			branch: null,
+			degraded: true,
+			title: 'Read-only — no runner online for this session'
+		};
+	}
+
+	// V2 Q8: a remote-placed session runs on another install. Surface which
+	// device it runs on (and whether that device is online) as a read-only badge
+	// in place of local branch context — the viewer's local checkout isn't where
+	// the work runs. Derived from the session's ownership fields, never from the
+	// execution mode.
+	if (isRemote) {
+		const name = deviceName || 'another device';
 		const prefix = projectName ? `${projectName} · ` : '';
 		return {
 			branch: null,
-			cloud: true,
-			title: `${prefix}Running on the cloud install`
+			runner: { deviceName: name, online: !!deviceOnline },
+			title: `${prefix}Running on ${name}${deviceOnline ? '' : ' (offline)'}`
 		};
 	}
 
@@ -127,8 +166,7 @@ export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): bo
 	// A non-git project has no branches to pick — hide the branch pill entirely.
 	if (!isGitRepo) return false;
 	// Only local mode has a working branch to pick here. Worktree mode's branch
-	// picker lives in the ExecutionModeBar, and cloud mode lets the worker pick
-	// the branch — so neither shows the local branch pill.
+	// picker lives in the ExecutionModeBar, so it doesn't show the local branch pill.
 	if (executionMode !== 'local') return false;
 	return true;
 }

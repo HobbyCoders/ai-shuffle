@@ -124,12 +124,21 @@ def submit(
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
+    no_kick: bool = False,
 ) -> str:
     """Enqueue a new turn for ``session_id`` and kick the scheduler.
 
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
     work is never lost — a later kick or the periodic reap sweep starts it.
+
+    ``no_kick=True`` skips the in-process kick entirely — used by the V2
+    placement submit seam (Phase 4) when the session is placed on ANOTHER
+    runner: the durable queued row is the whole hand-off (that runner's
+    turn_claim loop picks it up via NOTIFY wake or its 5s poll), and a local
+    kick would only lose the placement-gate race in session_runtime.execute.
+    The skip is an optimization, not a correctness gate — the execute-side
+    placement check is the backstop either way.
     """
     turn = turns.enqueue_turn(
         session_id,
@@ -144,7 +153,8 @@ def submit(
         parent_turn_id=parent_turn_id,
         instance_id=instance_id,
     )
-    _kick(session_id)
+    if not no_kick:
+        _kick(session_id)
     return turn["id"]
 
 

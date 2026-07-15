@@ -7,6 +7,7 @@ into focused, testable functions.
 
 import asyncio
 import logging
+import sys
 import time
 from typing import List
 
@@ -515,6 +516,27 @@ def install_v2_turns_wiring() -> None:
     turn_manager.register_interrupt_executor(_route_interrupt)
     logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
 
+    # Cross-runner turn-claim loop (V2 Phase 4, Q3) — flag-gated. Started here
+    # (not start_background_tasks) so it is alive BEFORE the boot reconcile
+    # sweep: turns recovered on boot for sessions placed on THIS runner are
+    # claimed on the first tick instead of waiting out the reconcile's kicks.
+    # Flag OFF ⇒ the module is never imported and the legacy relay dispatch
+    # path is untouched.
+    from app.core.config import settings
+
+    if settings.v2_placement:
+        from app.core import turn_claim
+
+        turn_claim.start()
+
+        # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
+        # loop that flips lapsed permission/question rows to ``expired`` and
+        # wakes their waiters. Belt to the in-process waiter's own local
+        # deadline (interaction_wait). Flag OFF ⇒ never imported.
+        from app.core import interaction_sweeper
+
+        interaction_sweeper.start()
+
 
 # Process-wide "we are tearing down" flag. Set FIRST inside shutdown_services
 # (before any teardown step runs) and never cleared for the process lifetime.
@@ -545,6 +567,28 @@ async def shutdown_services() -> None:
     """
     global is_shutting_down
     is_shutting_down = True
+
+    # Stop the V2 cross-runner claim loop FIRST (rF4): it kicks the scheduler,
+    # and a pass racing the pool shutdown below could start new work
+    # mid-teardown. Looked up via sys.modules (not imported) so a flag-OFF
+    # process — which never imports the module — stays import-free here too.
+    try:
+        turn_claim_mod = sys.modules.get("app.core.turn_claim")
+        if turn_claim_mod is not None:
+            await turn_claim_mod.stop()
+            logger.info("V2 turn-claim loop stopped")
+    except Exception:
+        pass
+
+    # Stop the pending-interaction sweeper (Q4-4) alongside the claim loop.
+    # Looked up via sys.modules so a flag-OFF process stays import-free.
+    try:
+        sweeper_mod = sys.modules.get("app.core.interaction_sweeper")
+        if sweeper_mod is not None:
+            await sweeper_mod.stop()
+            logger.info("V2 interaction sweeper stopped")
+    except Exception:
+        pass
 
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:

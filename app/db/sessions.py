@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, get_cursor, row_to_dict, rows_to_list, logger
@@ -75,6 +76,7 @@ class SessionRow(TypedDict):
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
+    working_set_ref: Optional[str]
 
 
 class SessionSearchResult(TypedDict):
@@ -603,24 +605,65 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
 
     Backs the sessions-board "Resume here" action: on a shared database a
     session created by another install can be taken over locally by rewriting
-    its ``instance_id`` to this install's id. Only the owning-install column is
-    touched — ``sdk_session_id`` / ``worktree_id`` / ``worktree_branch`` stay
-    put so history resumes and the existing ``recreate_worktree`` adopt-on-disk
-    path (worktree_manager) rebinds any worktree. ``updated_at`` IS bumped so the
-    adopted session surfaces at the top of the board on the new device. Returns
-    the updated row, or ``None`` if no such session exists.
+    its ``instance_id`` to this install's id. V2 Phase 4 (A12): the same UPDATE
+    also dual-writes ``placement = {"where": "runner:<instance_id>"}`` —
+    unconditionally, matching the unconditional ``instance_id`` rewrite and
+    applying even to ``"anywhere"`` sessions, because adopt MEANS "resume
+    locally". Without this, the v61 backfill's ``runner:<old-owner>`` pin would
+    survive the adopt and the placement resolver would keep routing turns to
+    the OLD owner. ``sdk_session_id`` / ``worktree_id`` / ``worktree_branch``
+    stay put so history resumes and the existing ``recreate_worktree``
+    adopt-on-disk path (worktree_manager) rebinds any worktree; ``cloud_branch``
+    is deliberately NEVER written (OD-9 amendment). ``updated_at`` IS bumped so
+    the adopted session surfaces at the top of the board on the new device.
+    Returns the updated row, or ``None`` if no such session exists.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
+    placement_json = json.dumps({"where": f"runner:{instance_id}"})
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET instance_id = {_ph}, updated_at = {_ph} WHERE id = {_ph}",
-            (instance_id, now, session_id),
+            f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
+            f"updated_at = {_ph} WHERE id = {_ph}",
+            (instance_id, placement_json, now, session_id),
         )
         if cursor.rowcount == 0:
             return None
     return get_session(session_id)
+
+
+def pin_session_placement(session_id: str, runner_id: str) -> bool:
+    """Sticky-pin a session to ``runner_id`` (V2 Phase 4, OD-6 + OD-9).
+
+    One UPDATE writes both halves of the dual-write: ``placement`` becomes the
+    canonical ``{"where": "runner:<id>"}`` pin AND the legacy ``instance_id``
+    owner column is re-pointed so every un-migrated reader (board filters,
+    relay routing while the flag is off elsewhere) agrees with the new truth.
+    ``cloud_branch`` is deliberately NEVER written (OD-9 amendment).
+
+    Called by the FIRST winner of ``start_turn`` on an "anywhere"/capability
+    placement — after this the session is runner-pinned and stays put (CLI
+    state now lives on that runner's disk). Any capability ``constraints`` in
+    the prior placement are INTENTIONALLY dropped at pin time (rF3): per OD-6 a
+    pin means "the CLI conversation state lives here", and per A10 pins are
+    validated by online + capability only at resolve time — capability
+    re-validation does not apply to pins, so carrying the constraints forward
+    would add nothing and could wedge a session whose winner later loses an
+    incidental capability. ``updated_at`` is not bumped: a claim is not a
+    user-visible edit and must not resort the board. Returns True if a row was
+    updated.
+    """
+    _ph = ph()
+    placement_json = json.dumps({"where": f"runner:{runner_id}"})
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET placement = {_ph}, instance_id = {_ph} "
+            f"WHERE id = {_ph}",
+            (placement_json, runner_id, session_id),
+        )
+        return cursor.rowcount > 0
 
 
 def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow]:
@@ -705,12 +748,64 @@ def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
         return cursor.rowcount > 0
 
 
+def set_working_set_ref(session_id: str, value: Optional[str]) -> bool:
+    """Persist (or clear, with ``None``) the session's working-set scratch-ref
+    pointer (V2 Phase 4, Q6).
+
+    Non-NULL is a JSON blob (``{"ref", "sha", "runner_id"}``) recording the
+    dangling stash the last runner pushed to ``origin`` for this session;
+    ``None`` clears it once a restore consumes the changes. Like
+    :func:`set_session_parked_task_kind` this deliberately does NOT touch
+    ``updated_at`` — a working-set pointer write is machinery, not a
+    user-visible edit, and must not reorder the sessions board. Returns True if
+    a row was updated."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET working_set_ref = {_ph} WHERE id = {_ph}",
+            (value, session_id),
+        )
+        return cursor.rowcount > 0
+
+
 def delete_session(session_id: str) -> bool:
     """Delete a session and its messages"""
+    # V2 Phase 4 (Q6): best-effort scratch-ref cleanup before the row dies, so a
+    # hard-deleted session leaves no dangling working-set ref on origin. Fully
+    # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
+    # commands, and any git failure never blocks the delete.
+    _cleanup_working_set_ref(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(f"DELETE FROM sessions WHERE id = {ph()}", (session_id,))
         return cursor.rowcount > 0
+
+
+def _cleanup_working_set_ref(session_id: str) -> None:
+    """Delete the session's working-set scratch ref (local + origin) on hard
+    delete. No-op unless V2 placement is on AND the row actually carries a ref,
+    so the flag-off path makes no new git calls. Swallows everything."""
+    try:
+        from app.core.config import settings
+
+        if not settings.v2_placement:
+            return
+        row = get_session(session_id)
+        if not row or not row.get("working_set_ref"):
+            return
+        from app.core import project_resolver
+        from app.core import working_set
+
+        cwd = project_resolver.resolve_existing_cwd(row)
+        if not cwd:
+            return
+        working_set.delete_scratch_ref(session_id, Path(cwd))
+    except Exception:  # pragma: no cover - best-effort cleanup
+        logger.debug(
+            "sessions: working-set ref cleanup failed for %s",
+            session_id, exc_info=True,
+        )
 
 
 def toggle_session_favorite(session_id: str) -> Optional[SessionRow]:

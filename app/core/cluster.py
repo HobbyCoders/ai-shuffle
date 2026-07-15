@@ -253,6 +253,23 @@ def default_device_name() -> str:
     return name or settings.effective_instance_id
 
 
+def _build_capabilities(source: str) -> dict:
+    """Registry ``capabilities`` blob: the advertise-URL source (existing key)
+    merged with this runner's detected placement capabilities (V2 Phase 4).
+
+    Detection is best-effort and never raises (``runner_capabilities``), so a
+    detection miss degrades to the base blob and never blocks registration or a
+    heartbeat.
+    """
+    caps: dict = {"advertise_url_source": source}
+    try:
+        from app.core.runner_capabilities import detect_capabilities
+        caps.update(detect_capabilities())
+    except Exception:  # noqa: BLE001 — capability detection must never block startup
+        logger.debug("Capability detection failed; registering base caps only", exc_info=True)
+    return caps
+
+
 def register_self() -> None:
     """Self-register this install's registry row (called once on startup)."""
     url, source = advertise_url()
@@ -263,7 +280,7 @@ def register_self() -> None:
             base_url=url,
             platform=("docker" if not settings.is_local_mode() else "local"),
             version=settings.version,
-            capabilities={"advertise_url_source": source},
+            capabilities=_build_capabilities(source),
         )
         logger.info(
             "Registered install %s in cluster registry (base_url=%s, source=%s)",
@@ -276,8 +293,18 @@ def register_self() -> None:
 
 
 def heartbeat_self() -> None:
-    """Bump this install's last_seen (called periodically by the heartbeat task)."""
+    """Bump this install's last_seen AND refresh its capabilities (called
+    periodically by the heartbeat task).
+
+    Re-detecting on every beat means a runner that gains/loses Chrome, a
+    display, or a Claude account is reflected in the registry within one
+    heartbeat window (OD-8). Only last_seen + capabilities are touched;
+    device_name/base_url are left to ``register_self`` so a user rename survives.
+    """
     try:
-        database.touch_install_last_seen(settings.effective_instance_id)
+        _, source = advertise_url()
+        database.touch_install_heartbeat(
+            settings.effective_instance_id, _build_capabilities(source)
+        )
     except Exception:  # noqa: BLE001
         logger.debug("Cluster heartbeat failed", exc_info=True)

@@ -360,6 +360,12 @@ class Session(SessionBase):
     device_online: bool = True  # Owning install seen recently (heartbeat)
     is_remote: bool = False  # Owned by another install (not this one)
     controllable: bool = True  # Live send/interrupt reachable (owner online + has base_url)
+    # V2 Q7: transient, derive-on-read (never persisted). True when a session has
+    # a queued turn but NO capable runner is online to execute it — i.e. it is
+    # waiting, read-only, until an owning device comes back. Derived by the API
+    # enrichment layer via ``placement.resolve_placement`` (the single oracle) and
+    # only when the ``v2_placement`` flag is ON; the model default is False.
+    degraded: bool = False
     project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
     # Folds same-repo project clones across installs into ONE sessions-board card.
     # Derived from the git remote so every install agrees; without it on the

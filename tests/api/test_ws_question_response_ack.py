@@ -31,12 +31,22 @@ import pytest
 
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
+from app.core.config import settings
 
 from tests.api.test_ws_pending_questions_relay import (
     _FakeWebSocket,
     _frames_of_type,
     _REMOTE_SESSION,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_placement(monkeypatch):
+    """Drives the legacy (flag-OFF) relay/local-respond ack shapes in
+    handle_user_question_response. The V2 Phase 4 cutover defaults
+    ``v2_placement`` ON (shared-table answer, covered by
+    test_interaction_placement.py); pin it OFF so the branch under test runs."""
+    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 def _patch_route(stack: ExitStack, *, is_remote: bool, relay_mock=None, respond_mock=None):

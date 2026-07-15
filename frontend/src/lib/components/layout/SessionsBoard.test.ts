@@ -720,3 +720,23 @@ describe('SessionsBoard groups by origin with link_group continuity', () => {
 		expect(rowFor('Fork B one')).toBeTruthy();
 	});
 });
+
+describe('SessionsBoard degraded (V2 Q7) chip', () => {
+	it('renders the "Waiting — device offline" chip only on degraded rows', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Waiting one', degraded: true }),
+			makeSession({ id: 'b', title: 'Fine one', degraded: false })
+		]);
+		renderBoard();
+		// The chip surfaces exactly once — on the degraded row, not the healthy one.
+		expect(screen.getAllByText('Waiting — device offline')).toHaveLength(1);
+		expect(rowFor('Waiting one').textContent).toContain('Waiting — device offline');
+		expect(rowFor('Fine one').textContent).not.toContain('Waiting — device offline');
+	});
+
+	it('shows no degraded chip when nothing is degraded', () => {
+		mocks.sessions.set([makeSession({ id: 'a', title: 'Fine one' })]);
+		renderBoard();
+		expect(screen.queryByText('Waiting — device offline')).toBeNull();
+	});
+});

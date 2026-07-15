@@ -66,7 +66,9 @@ def create_interaction(
             ),
         )
         row = cursor.fetchone()
-    return _parse_row(dict(row))
+    parsed = _parse_row(dict(row))
+    assert parsed is not None  # RETURNING * always yields exactly one row
+    return parsed
 
 
 def answer_interaction(
@@ -109,6 +111,74 @@ def expire_due_interactions() -> int:
         return cursor.rowcount
 
 
+def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
+    """Expire every pending interaction past its TTL, returning the swept rows
+    (id, session_id, kind) so the sweeper can NOTIFY each affected session."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE pending_interactions SET state='expired' "
+            "WHERE state='pending' AND expires_at < NOW() "
+            "RETURNING id, session_id, kind"
+        )
+        rows = rows_to_list(cursor.fetchall())
+    return rows
+
+
+def get_answered_interactions(session_id: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List a session's answered interactions oldest-first (optionally by kind).
+
+    Used by the v2 permission adapter to derive the *deferred* set: rows
+    answered with ``decision == 'defer'`` that have not been requeued.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if kind is None:
+            cursor.execute(
+                "SELECT * FROM pending_interactions "
+                "WHERE session_id=%s AND state='answered' ORDER BY created_at",
+                (session_id,),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM pending_interactions "
+                "WHERE session_id=%s AND state='answered' AND kind=%s "
+                "ORDER BY created_at",
+                (session_id, kind),
+            )
+        rows = rows_to_list(cursor.fetchall())
+    return [r for r in (_parse_row(row) for row in rows) if r is not None]
+
+
+def mark_interaction_requeued(interaction_id: str) -> bool:
+    """Stamp ``requeued: true`` into an answered interaction's answer JSON.
+
+    Requeue of a deferred permission (Q4-2 ruling, option a) creates a NEW
+    pending row carrying the same FE request_id; this stamp on the OLD
+    answered-defer row keeps it out of the derived deferred set so the FE
+    never sees the same request as both deferred and pending. Read-modify-write
+    in Python (not a JSONB ``||``) so the SQLite test shim stays compatible.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT answer FROM pending_interactions "
+            "WHERE id=%s AND state='answered'",
+            (interaction_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        answer = _parse_json(row["answer"]) or {}
+        answer["requeued"] = True
+        cursor.execute(
+            "UPDATE pending_interactions SET answer=%s "
+            "WHERE id=%s AND state='answered'",
+            (json.dumps(answer), interaction_id),
+        )
+        return cursor.rowcount > 0
+
+
 def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:
     """List a session's pending, unexpired interactions oldest-first."""
     with get_db() as conn:
@@ -120,7 +190,7 @@ def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:
             (session_id,),
         )
         rows = rows_to_list(cursor.fetchall())
-    return [_parse_row(row) for row in rows]
+    return [r for r in (_parse_row(row) for row in rows) if r is not None]
 
 
 def get_interaction(interaction_id: str) -> Optional[Dict[str, Any]]:

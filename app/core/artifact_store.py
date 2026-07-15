@@ -21,7 +21,7 @@ from app.db.artifacts import upsert_artifact
 
 ARTIFACTS_DIR: Path = settings.effective_data_dir / "artifacts"
 
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def store_bytes(
@@ -29,26 +29,47 @@ def store_bytes(
     mime: Optional[str] = None,
     filename: Optional[str] = None,
     created_by_session: Optional[str] = None,
+    runner_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Store ``data`` content-addressed and register its metadata row.
 
     Idempotent for identical bytes. Sync function — callers wrap in
     ``asyncio.to_thread``. Returns the stored ``artifacts`` row.
+
+    ``runner_id`` records which install holds the bytes on disk (v61 holder
+    attribution) so a non-holder install can 307-redirect a download to the
+    holder. First-writer-wins with the hash primary key.
     """
     digest = hashlib.sha256(data).hexdigest()
     path = ARTIFACTS_DIR / digest[:2] / digest
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        except OSError:
+            # Lost a concurrent race storing the SAME content hash (two identical
+            # screenshots in one turn each fire a store): on Windows the losing
+            # os.replace can raise while the winner holds the destination. If the
+            # blob now exists the store is a benign idempotent no-op; otherwise
+            # it is a genuine failure. Either way never orphan our temp file.
+            if not path.exists():
+                raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
     return upsert_artifact(
         hash=digest,
         size=len(data),
         mime=mime,
         filename=filename,
         created_by_session=created_by_session,
+        runner_id=runner_id,
     )
 
 

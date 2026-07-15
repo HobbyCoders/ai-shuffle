@@ -213,6 +213,43 @@ async def test_handle_query_command_persisted_as_command_role(mock_db):
     ]
 
 
+async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
+    """A NEW-session query that still carries a legacy ``worktree_id`` key is
+    accepted as an ordinary session create: the key is IGNORED — no worktree
+    lookup runs, the created session has no legacy worktree columns, and the
+    turn is submitted WITHOUT a worktree_id kwarg (Q9-1 intake deletion)."""
+    with _Patches():
+        with patch.object(cwh.database, "get_worktree", MagicMock()) as get_wt, \
+             patch.object(cwh.turn_manager, "submit", MagicMock()) as submit:
+            handler = _make_handler()
+            await handler.handle_query({
+                "prompt": "new session please",
+                "session_id": None,
+                "profile": "default",
+                "project": None,
+                "worktree_id": "wt-legacy-1",
+            })
+
+    # the legacy key triggered NO worktree resolution
+    get_wt.assert_not_called()
+
+    # a session was created and echoed WITHOUT a worktree_id key
+    created = _sent(handler, "session_created")
+    assert len(created) == 1
+    new_sid = created[0]["session_id"]
+    assert "worktree_id" not in created[0]
+
+    # persisted session carries no legacy worktree columns
+    sess = database.get_session(new_sid)
+    assert sess.get("worktree_id") is None
+    assert sess.get("worktree_branch") is None
+    assert sess.get("worktree_path") is None
+
+    # submit invoked without a worktree_id kwarg
+    submit.assert_called_once()
+    assert "worktree_id" not in submit.call_args.kwargs
+
+
 # ═══ handle_queue_message — submit(queue) ════════════════════════════════════
 
 

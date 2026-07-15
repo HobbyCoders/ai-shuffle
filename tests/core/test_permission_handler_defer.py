@@ -13,12 +13,22 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
 
+from app.core.config import settings
 from app.core.permission_handler import (
     PermissionDecision,
     PermissionRequest,
     PermissionHandler,
     _DeferSentinel,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_placement(monkeypatch):
+    """This module asserts the legacy (flag-OFF) in-memory defer/requeue path.
+    The V2 Phase 4 cutover defaults ``v2_placement`` ON (the shared
+    ``pending_interactions`` adapter, covered by test_interaction_placement.py);
+    pin it OFF here so these tests exercise the legacy else-branch."""
+    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 # ---------------------------------------------------------------------------

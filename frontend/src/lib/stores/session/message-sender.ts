@@ -8,10 +8,9 @@
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
-import { api, isApiError } from '$lib/api/client';
-import { toast } from '$lib/stores/toast';
+import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
-import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
+import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 
@@ -110,7 +109,6 @@ export interface MessageSenderDeps {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
 		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<void>;
 		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
-		startCloudSession: (prompt: string, pendingUploadPaths?: string[], autoStash?: boolean) => Promise<void>;
 	};
 }
 
@@ -199,25 +197,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			const _state = getState();
 
-			// Remote (cloud) session whose owning device is currently offline: live
-			// control can't reach it, so block the send with a clear message instead
-			// of letting the relay fail opaquely. History stays readable (view-only).
-			// Only applies to an already-open remote session (sessionId committed).
-			if (_state.sessionId && _state.remoteControllable === false) {
-				update(s => ({ ...s, error: 'This session runs on a device that is offline right now. Reconnect the device to send.' }));
-				return false;
-			}
-
 			// Worktree sessions never block on send: the backend resolves/validates
 			// the cwd on the query path (worktreeDeleted is a display-only badge).
-
-			// Cloud setup on first message — offload to the configured second
-			// install. Subsequent messages flow through the normal WS query path
-			// (the backend forwards them to the worker).
-			if (!options?.skipWorktreeSetup && _state.executionMode === 'cloud' && !_state.sessionId && _state.messages.length === 0) {
-				await getActiveSession().startCloudSession(prompt, options?.pendingUploadPaths);
-				return true;
-			}
 
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
@@ -494,18 +475,24 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			try {
 				const response = await api.post<{
-					session_id: string; worktree_id: string; branch_name: string;
+					session_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
+					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {
 					project_id: projectId,
 					branch_name: branchName,
 					base_branch: _state.worktreeBaseBranch || 'main',
 					profile_id: queryProfileId,
 					create_new_branch: _state.worktreeCreateNewBranch,
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 				});
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
+
+				if (response.upload_migration_errors?.length) {
+					console.warn('[Worktree] Upload migration had errors:', response.upload_migration_errors);
+				}
 
 				if (creationGen !== internal.worktreeCreationGeneration) {
 					console.debug('[Worktree] User navigated away during createWorktree, sending query in background');
@@ -516,7 +503,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
-							worktree_id: response.worktree_id,
 						});
 					}
 					return;
@@ -525,7 +511,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				update(s => ({
 					...s,
 					sessionId: response.session_id,
-					worktreeId: response.worktree_id,
 					isCreatingWorktree: false,
 					// Reset on session commit (PR #448): this fresh worktree session has
 					// no running tasks yet — clear any strip inherited from the previous
@@ -534,14 +519,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}));
 
 				persistSession();
-
-				if (pendingUploadPaths?.length && projectId) {
-					try {
-						await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
-					} catch (e) {
-						console.warn('[Worktree] Failed to migrate uploads:', e);
-					}
-				}
 
 				if (prompt) {
 					if (!wsConn.isConnected()) {
@@ -557,7 +534,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
-							worktree_id: response.worktree_id,
 						});
 						return;
 					}
@@ -645,7 +621,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				const response = await api.post<{
-					session_id: string; worktree_id: string; branch_name: string;
+					session_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
 					query_started?: boolean;
 					upload_migration_errors?: string[] | null;
@@ -682,7 +658,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
-							worktree_id: response.worktree_id,
 							overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 						});
 					}
@@ -700,7 +675,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				update(s => ({
 					...s,
 					sessionId: response.session_id,
-					worktreeId: response.worktree_id,
 					selectedWorktreeBranch: response.branch_name,
 					isCreatingWorktree: false,
 					// Reset on session commit (PR #448): the freshly auto-created
@@ -737,16 +711,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return;
 				}
 
-				// Fallback path: backend failed to spawn the query (rare).
-				// Migrate uploads client-side if backend didn't, then send via WS.
-				if (pendingUploadPaths?.length && projectId) {
-					try {
-						await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
-					} catch (e) {
-						console.warn('[Worktree] Failed to migrate uploads:', e);
-					}
-				}
-
+				// Fallback path: backend failed to spawn the query (rare). The
+				// backend already migrated uploads server-side before the turn
+				// submit, so nothing to do here but send the query via WS.
 				if (!wsConn.isConnected()) {
 					wsConn.connect();
 					await waitForConnectionVoid();
@@ -759,7 +726,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						session_id: response.session_id,
 						profile: queryProfileId,
 						project: projectId,
-						worktree_id: response.worktree_id,
 					});
 					return;
 				}
@@ -782,138 +748,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					worktreeError: formatted,
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
-			}
-		},
-
-		// ── Cloud offload (run on a second install) ─────────────────────
-
-		async startCloudSession(prompt: string, pendingUploadPaths?: string[], autoStash = false) {
-			prompt = prompt.trim();
-			const _state = getState();
-			if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
-			if (!_state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
-
-			const queryProfileId = _state.profile;
-			const projectId = _state.project;
-			const userMsgId = `user-${Date.now()}`;
-			const creationGen = internal.worktreeCreationGeneration;
-
-			const overridesPayload: Record<string, string> = {};
-			if (_state.modelOverride) overridesPayload.model = _state.modelOverride;
-			if (_state.permissionModeOverride) overridesPayload.permission_mode = _state.permissionModeOverride;
-			if (_state.effortLevelOverride) overridesPayload.effort = _state.effortLevelOverride;
-
-			// Branch targeting — "Cloud = Local on another device". We send explicit
-			// flags so the worker never has to guess intent from an empty field:
-			//   • use_worktree=false → run a normal session in the remote's MAIN
-			//     checkout. `branch_name` is the branch to be on there: the remote's
-			//     currently-checked-out one (no-op), another existing branch (checkout,
-			//     stash-retry on dirty), or a brand-new branch (create_new_branch).
-			//   • use_worktree=true → spin up an isolated worktree, exactly like local
-			//     worktree mode: check out the selected existing branch, create the
-			//     staged new branch, or (no branch chosen) auto-name one from the prompt.
-			// Same GitHub repo means the picked branch names resolve on the remote.
-			const useWorktree = _state.cloudWorktree;
-			const branchName = _state.cloudBranch || undefined;
-			const createNewBranch = _state.cloudCreateNewBranch;
-
-			// Optimistically show the prompt + a creating/streaming state.
-			update(s => ({
-				...s,
-				isCreatingWorktree: true,
-				error: null,
-				title: s.title === 'New Chat'
-					? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
-					: s.title,
-				messages: [...s.messages, {
-					id: userMsgId,
-					role: 'user' as const,
-					content: prompt,
-					profileId: queryProfileId,
-					timestamp: new Date().toISOString(),
-				}],
-			}));
-
-			try {
-				const response = await api.post<{
-					session_id: string; remote_session_id: string; remote_url: string;
-					project_id: string; status: string; query_started?: boolean;
-				}>('/sessions/cloud', {
-					project_id: projectId,
-					prompt,
-					profile_id: queryProfileId,
-					use_worktree: useWorktree,
-					branch_name: branchName,
-					create_new_branch: createNewBranch,
-					auto_stash: autoStash,
-					// Registry-targeted offload: when the device picker chose an install,
-					// the session runs there and is owned by it (no local proxy row).
-					target_instance_id: _state.cloudTargetInstanceId || undefined,
-					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
-					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
-				}, { keepalive: true });
-
-				appData.loadSessions();
-				appData.loadApiUserSessions();
-
-				// User navigated away mid-request: the worker is already running
-				// the query, so leave the (switched) view untouched.
-				if (creationGen !== internal.worktreeCreationGeneration) {
-					console.debug('[Cloud] User navigated away — worker query running in background');
-					return;
-				}
-
-				update(s => ({
-					...s,
-					sessionId: response.session_id,
-					isCreatingWorktree: false,
-					isStreaming: true,
-					error: null,
-				}));
-
-				persistSession();
-
-				// The worker runs the query headlessly; the live SSE event log is
-				// the transcript authority, so start the feed immediately.
-				feedController.start(response.session_id);
-
-				// Connect WS for follow-up messages / interrupt forwarding.
-				if (!wsConn.isConnected()) {
-					wsConn.connect();
-					await waitForConnectionVoid();
-				}
-			} catch (error) {
-				if (creationGen !== internal.worktreeCreationGeneration) return;
-
-				// Dirty tree on the remote main checkout (409): the worker refused to
-				// switch branches over uncommitted changes. Mirror the local
-				// branch-switch flow (gitCheckoutAction.ts) — surface the worker's
-				// message in a toast with a "Stash & switch" action that retries the
-				// whole offload with auto_stash=true. Only the first attempt offers it.
-				// A 409 here is ONLY a dirty-tree conflict: an unreachable device
-				// comes back as 503, so this never offers stash for an offline peer.
-				const isDirtyConflict = !autoStash && isApiError(error) && error.status === 409;
-				const rawError = isApiError(error)
-					? error.detail
-					: ((error as { message?: string }).message || 'Failed to start cloud session.');
-				update(s => ({
-					...s,
-					isCreatingWorktree: false,
-					error: isDirtyConflict ? null : rawError,
-					messages: s.messages.filter(m => m.id !== userMsgId),
-				}));
-
-				if (isDirtyConflict) {
-					toast.push(rawError, {
-						tone: 'error',
-						action: {
-							label: 'Stash & switch',
-							onClick: () => {
-								void getActiveSession().startCloudSession(prompt, pendingUploadPaths, true);
-							},
-						},
-					});
-				}
 			}
 		},
 

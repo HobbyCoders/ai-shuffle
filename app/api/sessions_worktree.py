@@ -193,27 +193,29 @@ async def _create_v2_branch_session(
     query_started = False
     upload_migration_errors: Optional[List[str]] = None
 
+    # Migrate pending uploads into the materialized checkout — BEFORE any turn
+    # submit and regardless of whether a prompt was supplied (a promptless
+    # compose still needs its attachments to land, else real data loss).
+    if body.pending_upload_paths:
+        try:
+            upload_migration_errors = await run_sync(
+                _migrate_uploads_to_dir,
+                body.project_id,
+                Path(checkout_path),
+                body.pending_upload_paths,
+            ) or None
+            if upload_migration_errors:
+                logger.warning(
+                    f"Upload migration partial for checkout {checkout_path}: "
+                    f"{upload_migration_errors}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Upload migration failed: {e}")
+            upload_migration_errors = [str(e)]
+
     prompt = (body.prompt or "").strip()
     if prompt:
-        # 1. Migrate pending uploads into the materialized checkout.
-        if body.pending_upload_paths:
-            try:
-                upload_migration_errors = await run_sync(
-                    _migrate_uploads_to_dir,
-                    body.project_id,
-                    Path(checkout_path),
-                    body.pending_upload_paths,
-                ) or None
-                if upload_migration_errors:
-                    logger.warning(
-                        f"Upload migration partial for checkout {checkout_path}: "
-                        f"{upload_migration_errors}"
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Upload migration failed: {e}")
-                upload_migration_errors = [str(e)]
-
-        # 2. Persist the user message + title backfill.
+        # 1. Persist the user message + title backfill.
         title = prompt[:100].strip()
         if len(prompt) > 100:
             title = title.rsplit(' ', 1)[0] + "..."
@@ -233,7 +235,7 @@ async def _create_v2_branch_session(
 
         await run_sync(_persist_first_message)
 
-        # 3. Broadcast the user message + title.
+        # 2. Broadcast the user message + title.
         try:
             from app.core.sync_engine import sync_engine
             await sync_engine.broadcast_message_added(
@@ -250,7 +252,7 @@ async def _create_v2_branch_session(
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to broadcast first message: {e}")
 
-        # 4. Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
+        # 3. Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
         #    path resolves cwd via the origin resolver off sessions.branch +
         #    project_v2_id (materializing the same checkout idempotently).
         try:

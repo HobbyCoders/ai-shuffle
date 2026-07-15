@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 60
+SCHEMA_VERSION = 61
 
 
 def create_postgres_schema(cursor) -> None:
@@ -197,6 +197,8 @@ def create_postgres_schema(cursor) -> None:
             v2_stream BOOLEAN NOT NULL DEFAULT TRUE,
             project_v2_id TEXT,
             branch TEXT,
+            placement JSONB,
+            working_set_ref TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
@@ -1496,6 +1498,7 @@ def create_postgres_schema(cursor) -> None:
             mime TEXT,
             filename TEXT,
             created_by_session TEXT,
+            runner_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)

@@ -122,6 +122,26 @@ def touch_install_last_seen(install_id: str) -> None:
         )
 
 
+def touch_install_heartbeat(
+    install_id: str, capabilities: Optional[Dict[str, Any]] = None
+) -> None:
+    """Heartbeat: bump last_seen AND refresh capabilities (V2 Phase 4).
+
+    Capabilities are re-detected and rewritten every beat so a runner that
+    gains/loses a capability (Chrome, display, account) is reflected within one
+    heartbeat window. Only ``last_seen`` and ``capabilities`` are touched — a
+    user rename (``device_name``) and the published ``base_url`` are left to
+    ``register_install`` so they survive between beats.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE installs SET last_seen = %s, capabilities = %s WHERE id = %s",
+            (now, json.dumps(capabilities or {}), install_id),
+        )
+
+
 def set_install_name(install_id: str, device_name: str) -> Optional[InstallRow]:
     """Rename an install (used by the Devices settings panel)."""
     now = datetime.now(timezone.utc).isoformat()

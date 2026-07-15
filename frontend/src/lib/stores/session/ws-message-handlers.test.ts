@@ -132,8 +132,6 @@ function mockState(): ActiveSessionState {
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		pendingInterruptPrompt: null,
-		remoteControllable: true,
-		relayError: undefined,
 		isRestoringSession: false,
 		isLoadingSession: false,
 	};

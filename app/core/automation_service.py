@@ -142,46 +142,51 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
             return True, "elected runner (projectless)"
         return False, f"install {winner} is the elected runner"
 
-    project = database.get_project(project_id)
-    if not project:
-        # Elect one install to run and fail visibly — N installs producing
-        # N identical failed runs per fire would bury the signal.
+    # V2 placement election: map the automation's project onto its origin-keyed
+    # project_v2 and elect from the runners that actually hold an ACTIVE checkout
+    # (``capable_runners`` = online ∩ active-checkout holders). resolve_project_v2
+    # lazily seeds the base ``checkouts`` row for legacy projects.
+    from pathlib import Path
+
+    from app.core import placement
+    from app.core.project_resolver import resolve_project_v2
+    from app.core.project_utils import get_project_working_dir
+
+    pv2 = resolve_project_v2({"project_id": project_id})
+    if not pv2:
+        # Legacy project row missing / unresolvable: elect one install to run and
+        # fail visibly — N installs producing N identical failed runs per fire
+        # would bury the signal.
         winner = sorted(online)[0]
         if winner == me:
-            return True, "project row missing; elected to surface the error"
-        return False, f"project row missing; install {winner} will surface the error"
+            return True, "project unresolvable; elected to surface the error"
+        return False, f"project unresolvable; install {winner} will surface the error"
 
-    siblings = _link_group_siblings(project)
-    owner = project.get("instance_id")
-    candidates = {s["instance_id"] for s in siblings if s.get("instance_id")}
-    if owner:
-        candidates.add(owner)
-    local = _local_candidate(project, siblings)
+    project = database.get_project(project_id)
+    candidates = placement.capable_runners(pv2["id"], {})
 
     if not candidates:
-        # Legacy rows with no recorded owner anywhere: no shared state to
-        # elect from — run wherever the path exists (pre-instance-id behavior).
-        if local is not None:
-            return True, "project has no recorded owner; resolvable locally"
-        return False, "project has no recorded owner and no local clone"
-
-    online_candidates = sorted(candidates & online)
-    if not online_candidates:
-        # Registry says nobody with the project is online. Run iff we can —
-        # e.g. the stored path exists here even though no row is ours.
-        if local is not None:
-            return True, "no online candidate per registry; resolvable locally"
+        # No runner holds an active checkout for this project. Fail open: run
+        # wherever the stored project path exists locally (pre-placement behavior).
+        working_dir = get_project_working_dir(project) if project else None
+        if working_dir and Path(working_dir).is_dir():
+            return True, "no capable runner; resolvable locally"
         # Loud + surfaced on the automation, not a failed run: every online
         # install hits this every fire and run-record spam buries the signal.
         logger.warning(
-            "Automation %s: no online install has project %s — scheduled fire skipped everywhere "
-            "until an install with the project comes online",
+            "Automation %s: no capable runner holds project %s — scheduled fire skipped "
+            "everywhere until an install with the project comes online",
             automation.get("id"), project_id,
         )
-        _record_no_runner(automation, project)
-        return False, "no online install has this project"
+        if project:
+            _record_no_runner(automation, project)
+        return False, "no capable runner holds this project"
 
-    winner = owner if owner in online_candidates else online_candidates[0]
+    # ``candidates`` is already sorted (deterministic across installs). Prefer the
+    # legacy owner when it holds a checkout, else the lowest-id capable runner.
+    # (Frozen-table READ of ``projects`` for owner preference is deliberate.)
+    owner = project.get("instance_id") if project else None
+    winner = owner if owner in candidates else candidates[0]
     if winner == me:
         return True, "elected runner"
     return False, f"install {winner} is the elected runner"

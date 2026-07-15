@@ -391,8 +391,8 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "EnterWorktree",
-        "Create (or reuse) an isolated git worktree for the current project and return its details. "
-        "The worktree path can be used as cwd for subsequent tool calls. Requires an active project.",
+        "Materialize (or resolve) the current project's persistent branch checkout and return its path. "
+        "The checkout path can be used as cwd for subsequent tool calls. Requires an active project.",
         {
             "type": "object",
             "properties": {
@@ -410,29 +410,43 @@ def create_builtin_tools_server(
         if not branch:
             return _err("branch_name is required.")
         try:
-            from app.core.worktree_manager import worktree_manager
-            wt = await asyncio.to_thread(
-                worktree_manager.create_worktree,
-                project_id=project_id,
-                branch_name=branch,
-                create_new_branch=bool(args.get("create_new_branch")),
-                base_branch=args.get("base_branch"),
+            from app.core.project_resolver import resolve_project_v2
+            from app.core import checkout_manager
+            pv2 = await asyncio.to_thread(
+                resolve_project_v2, {"project_id": project_id}
             )
+            if not pv2:
+                return _err(
+                    "This project is not resolvable to a v2 checkout on this device."
+                )
+            checkout_path = await asyncio.to_thread(
+                checkout_manager.ensure_checkout,
+                pv2,
+                branch,
+                base_branch=args.get("base_branch"),
+                create_new_branch=bool(args.get("create_new_branch")),
+            )
+            if not checkout_path:
+                return _err(
+                    f"Branch '{branch}' is not materializable on this device "
+                    "(no base checkout here, or the branch exists nowhere and "
+                    "create_new_branch was not set)."
+                )
             return _ok({
-                "worktree_id": wt.get("id"),
-                "branch_name": wt.get("branch_name"),
-                "worktree_path": wt.get("worktree_path"),
-                "status": wt.get("status"),
+                "branch_name": branch,
+                "worktree_path": checkout_path,
+                "status": "active",
             })
         except Exception as e:
             logger.exception("EnterWorktree failed")
-            return _err(f"create worktree failed: {e}")
+            return _err(f"enter checkout failed: {e}")
 
     all_tools.append(enter_worktree)
 
     @tool(
         "ExitWorktree",
-        "Clean up a worktree by ID. Optionally keep the underlying branch.",
+        "Clean up a LEGACY git worktree by ID. Optionally keep the underlying branch. "
+        "Applies only to legacy worktrees — v2 project checkouts are persistent and need no cleanup.",
         {
             "type": "object",
             "properties": {

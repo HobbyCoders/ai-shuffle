@@ -31,6 +31,7 @@ from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
     get_worktree_working_dir_as_path
 )
+from app.db import checkouts as checkouts_db
 from app.db import database
 from app.db.base import WorktreeStatus
 
@@ -460,6 +461,15 @@ class WorktreeManager:
                 for wt in active_worktrees
                 if wt["id"] not in {c["id"] for c in cleaned_up}
             }
+            # V2 placement checkouts are tracked in the ``checkouts`` table and
+            # must never be imported as legacy ``worktrees`` rows. Build the set
+            # of active checkout paths + this runner's checkout root once.
+            v2_paths = {
+                os.path.normpath(p) for p in checkouts_db.list_all_active_checkout_paths()
+            }
+            v2_checkout_root = os.path.normpath(
+                str(Path(settings.effective_workspace_dir) / "checkouts")
+            )
             for git_wt in git_worktrees:
                 if git_wt.get("is_main"):
                     continue
@@ -470,6 +480,16 @@ class WorktreeManager:
                 if not Path(git_path).exists():
                     continue
                 normalized_git_path = os.path.normpath(git_path)
+                # Skip V2 placement checkouts: they are owned by the ``checkouts``
+                # table and must never become legacy ``worktrees`` rows. The
+                # root-prefix check also covers the mid-materialization race where
+                # the dir exists before its checkouts row commits.
+                if (
+                    normalized_git_path in v2_paths
+                    or normalized_git_path == v2_checkout_root
+                    or normalized_git_path.startswith(v2_checkout_root + os.sep)
+                ):
+                    continue
                 if normalized_git_path not in db_paths:
                     try:
                         # Store the absolute path so it resolves consistently
@@ -1626,6 +1646,15 @@ class WorktreeManager:
             for wt in db_worktrees
             if wt.get("worktree_path")
         }
+        # V2 placement checkouts are tracked in the ``checkouts`` table and must
+        # never be imported as legacy ``worktrees`` rows. Build the set of active
+        # checkout paths + this runner's checkout root once.
+        v2_paths = {
+            os.path.normpath(p) for p in checkouts_db.list_all_active_checkout_paths()
+        }
+        v2_checkout_root = os.path.normpath(
+            str(Path(settings.effective_workspace_dir) / "checkouts")
+        )
         for git_wt in git_worktrees:
             if git_wt.get("is_main"):
                 continue  # Skip main worktree
@@ -1637,6 +1666,16 @@ class WorktreeManager:
             if not Path(git_path).exists():
                 continue
             normalized_git_path = os.path.normpath(git_path)
+            # Skip V2 placement checkouts: they are owned by the ``checkouts``
+            # table and must never become legacy ``worktrees`` rows. The
+            # root-prefix check also covers the mid-materialization race where the
+            # dir exists before its checkouts row commits.
+            if (
+                normalized_git_path in v2_paths
+                or normalized_git_path == v2_checkout_root
+                or normalized_git_path.startswith(v2_checkout_root + os.sep)
+            ):
+                continue
             if (
                 normalized_git_path not in db_paths
                 and os.path.basename(normalized_git_path) not in db_basenames

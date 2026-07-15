@@ -93,8 +93,6 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		pendingInterruptPrompt: null,
-		remoteControllable: true,
-		relayError: undefined,
 		isRestoringSession: false,
 		isLoadingSession: false,
 		...overrides,

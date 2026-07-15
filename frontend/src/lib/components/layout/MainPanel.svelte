@@ -8,7 +8,7 @@
 	import { untrack } from 'svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { projects } from '$lib/stores/app-data.svelte';
+	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore } from '$lib/stores/git.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -180,14 +180,16 @@
 			: null
 	);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
-	// Cloud/offloaded session: the repo lives on the OWNING install, not on this
-	// device's filesystem. The backend /live endpoint stamps execution_mode='cloud'
-	// on every cross-install session (reachable or offline). Loading/polling the
-	// LOCAL git status for such a session finds no repo at the project path and
-	// would surface a bogus "Init Repo" state — so we skip local git entirely for
-	// cloud sessions and suppress the header's local git actions (the ContextPillBar
-	// shows the read-only "Cloud" branch context instead).
-	const activeIsCloud = $derived(activeTab?.executionMode === 'cloud');
+	// Remote-placed session: the repo lives on the OWNING install, not on this
+	// device's filesystem. The backend annotates every cross-install session as
+	// remote (reachable or offline) via the session row's `is_remote`. Loading/
+	// polling the LOCAL git status for such a session finds no repo at the project
+	// path and would surface a bogus "Init Repo" state — so we skip local git
+	// entirely for remote sessions and suppress the header's local git actions (the
+	// ContextPillBar shows the read-only runner branch context instead).
+	const activeIsRemote = $derived(
+		$sessions.find((s) => s.id === activeSessionId)?.is_remote ?? false
+	);
 
 	// Debounce rapid project changes (e.g., clicking through chats quickly)
 	// to prevent cascading git loads that break commit/branch buttons.
@@ -196,7 +198,7 @@
 		const project = activeProject;
 		const worktreeId = activeWorktreeId;
 		const authenticated = $githubAuthenticated;
-		const isCloud = activeIsCloud;
+		const isRemote = activeIsRemote;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
@@ -207,7 +209,7 @@
 			_projectDebounceTimer = null;
 		}
 
-		if (project && authenticated && !isCloud) {
+		if (project && authenticated && !isRemote) {
 			// IMMEDIATE: restore cached state so UI updates within the same frame
 			const mode = worktreeId ? 'worktree' : 'project';
 			git.restoreCacheImmediate(project, worktreeId, mode);
@@ -336,7 +338,7 @@
 	function handleVisibilityChange() {
 		if (document.hidden) {
 			stopGitPoll();
-		} else if (_gitPollProject === null && activeProject && $githubAuthenticated && !activeIsCloud) {
+		} else if (_gitPollProject === null && activeProject && $githubAuthenticated && !activeIsRemote) {
 			startGitPoll(activeProject);
 			gitPollNow(); // Immediate refresh on return
 		}
@@ -349,17 +351,17 @@
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
 		const authenticated = $githubAuthenticated;
-		const isCloud = activeIsCloud;
+		const isRemote = activeIsRemote;
 
 		// Clear stale PR state immediately when any dependency changes.
 		branchPR = null;
 
 		stopGitPoll();
 
-		// Never poll local git for a cloud session — the repo lives on the owning
-		// install, so the local status is meaningless (and would spam bogus
+		// Never poll local git for a remote-placed session — the repo lives on the
+		// owning install, so the local status is meaningless (and would spam bogus
 		// is_git_repo:false polls).
-		if (project && authenticated && !isCloud && !document.hidden) {
+		if (project && authenticated && !isRemote && !document.hidden) {
 			startGitPoll(project);
 		}
 
@@ -755,7 +757,7 @@
 						hasProject: !!activeTab.project,
 						githubAuthenticated: $githubAuthenticated,
 						worktreeDeleted: !!activeTab.worktreeDeleted,
-						executionMode: activeTab.executionMode
+						isRemote: activeIsRemote
 					})}
 						<div class="git-actions-host">
 							<GitHeaderActions

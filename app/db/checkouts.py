@@ -152,6 +152,20 @@ def list_checkouts(project_id: str) -> List[Dict[str, Any]]:
     return _rows(rows)
 
 
+def list_all_active_checkout_paths() -> List[str]:
+    """Return the ``path`` of every ACTIVE checkout across all projects/runners.
+
+    A flat list of the raw path strings (no row normalization) — used by the
+    legacy worktree sync to recognize (and skip) V2 placement checkout dirs so
+    they never get imported as legacy ``worktrees`` rows.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT path FROM checkouts WHERE status = 'active'")
+        rows = cursor.fetchall()
+    return [dict(r)["path"] for r in rows]
+
+
 def set_checkout_status(checkout_id: str, status: str) -> Optional[Dict[str, Any]]:
     """Set a checkout's ``status`` (e.g. ``'active'`` → ``'archived'``).
 

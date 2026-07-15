@@ -109,24 +109,76 @@ describe('computeContextBadge', () => {
 		).toBeNull();
 	});
 
-	it('shows a cloud badge for an active cloud session (even when authenticated)', () => {
-		// Cloud sessions run on the second install; the badge marks that clearly
-		// regardless of GitHub auth, and carries no local branch.
-		const badge = computeContextBadge(
-			base({ executionMode: 'cloud', worktreeBranch: null, selectedWorktreeBranch: null })
-		);
+	// V2 Q7: a degraded session (queued work, no runner online) is read-only.
+	it('shows the read-only degraded badge when degraded is true', () => {
+		const badge = computeContextBadge(base({ degraded: true }));
 		expect(badge).not.toBeNull();
-		expect(badge!.cloud).toBe(true);
+		expect(badge!.degraded).toBe(true);
 		expect(badge!.branch).toBeNull();
-		expect(badge!.title).toBe('my-app · Running on the cloud install');
+		expect(badge!.title).toBe('Read-only — no runner online for this session');
 	});
 
-	it('cloud badge drops the project prefix when the name is unknown', () => {
-		const badge = computeContextBadge(
-			base({ executionMode: 'cloud', projectName: null })
+	it('degraded badge takes precedence over branch context and GitHub auth', () => {
+		// Authenticated worktree with a branch would normally hand the slot to the
+		// interactive branch pill (null badge); degraded overrides that entirely.
+		const badge = computeContextBadge(base({ degraded: true, githubAuthenticated: true }));
+		expect(badge!.degraded).toBe(true);
+		expect(badge!.branch).toBeNull();
+	});
+
+	it('returns null in the empty/new-session state even when degraded', () => {
+		// The empty/new-session compose case is owned by the execution-mode toggle
+		// and covered by the board chip — the in-chat degraded badge only surfaces
+		// once a chat is active (messageCount > 0).
+		expect(computeContextBadge(base({ degraded: true, messageCount: 0 }))).toBeNull();
+	});
+
+	it('is not degraded when the flag is absent/false (normal badge behavior)', () => {
+		// degraded omitted → falls through to the usual gating (branch-pill case).
+		expect(computeContextBadge(base())).toBeNull();
+		expect(computeContextBadge(base({ degraded: false, githubAuthenticated: false }))!.title).toBe(
+			'my-app · Worktree branch: feat/login'
 		);
-		expect(badge!.cloud).toBe(true);
-		expect(badge!.title).toBe('Running on the cloud install');
+	});
+
+	// V2 Q8: a remote-placed session runs on another install — a read-only runner
+	// badge names the owning device (and whether it's online) instead of a branch.
+	it('shows the runner badge for a remote-placed session on an online device', () => {
+		const badge = computeContextBadge(
+			base({ isRemote: true, deviceName: 'Worker', deviceOnline: true })
+		);
+		expect(badge).not.toBeNull();
+		expect(badge!.runner).toEqual({ deviceName: 'Worker', online: true });
+		expect(badge!.branch).toBeNull();
+		expect(badge!.title).toContain('Running on Worker');
+		expect(badge!.title).not.toContain('(offline)');
+	});
+
+	it('marks the runner badge offline when the owning device is offline', () => {
+		const badge = computeContextBadge(
+			base({ isRemote: true, deviceName: 'Worker', deviceOnline: false })
+		);
+		expect(badge!.runner).toEqual({ deviceName: 'Worker', online: false });
+		expect(badge!.title).toContain('(offline)');
+	});
+
+	it('falls back to "another device" when the remote device has no name', () => {
+		const badge = computeContextBadge(base({ isRemote: true, deviceOnline: true }));
+		expect(badge!.runner!.deviceName).toBe('another device');
+		expect(badge!.title).toContain('Running on another device');
+	});
+
+	it('degraded badge wins over the remote runner badge', () => {
+		const badge = computeContextBadge(
+			base({ degraded: true, isRemote: true, deviceName: 'Worker', deviceOnline: true })
+		);
+		expect(badge!.degraded).toBe(true);
+		expect(badge!.runner).toBeUndefined();
+		expect(badge!.branch).toBeNull();
+	});
+
+	it('returns null for a remote-placed session before the first message', () => {
+		expect(computeContextBadge(base({ messageCount: 0, isRemote: true }))).toBeNull();
 	});
 });
 
@@ -148,10 +200,6 @@ describe('shouldShowEmptyStateBranchPill', () => {
 
 	it('hides in worktree mode — the ExecutionModeBar owns the branch picker there', () => {
 		expect(shouldShowEmptyStateBranchPill(branchBase({ executionMode: 'worktree' }))).toBe(false);
-	});
-
-	it('hides in cloud mode — the worker picks the branch', () => {
-		expect(shouldShowEmptyStateBranchPill(branchBase({ executionMode: 'cloud' }))).toBe(false);
 	});
 
 	it('hides once a chat is active (branch pill / context badge owns that slot)', () => {

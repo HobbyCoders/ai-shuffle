@@ -21,6 +21,7 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+from app.core.config import settings
 from app.core.permission_handler import (
     PermissionDecision,
     RememberScope,
@@ -30,6 +31,16 @@ from app.core.permission_handler import (
     permission_handler,
     _DeferSentinel,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_placement(monkeypatch):
+    """This module asserts the legacy (flag-OFF) in-memory permission path. The
+    V2 Phase 4 cutover defaults ``v2_placement`` ON, which routes prompts through
+    the shared ``pending_interactions`` adapter (covered separately by
+    tests/core/test_interaction_placement.py); pin it OFF here so these tests
+    keep exercising the byte-identical legacy else-branch they were written for."""
+    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 # =============================================================================

@@ -12,9 +12,7 @@
  * Resolution order:
  *   1. `activeSession.sessionId` set → look the row up in the sessions store;
  *      target = `row.instance_id ?? null` (null → local/self).
- *   2. No sessionId (new chat) → if composing a cloud session with a chosen
- *      offload target (`executionMode === 'cloud' && cloudTargetInstanceId`),
- *      that install; otherwise self (null).
+ *   2. No sessionId (new chat) → self (null).
  *   3. Row not found → self (null).
  *
  * Plain `.ts` (no $state runes) — see KNOWN_ISSUES.md Root Cause 10.
@@ -37,10 +35,6 @@ export function resolveTargetInstance(
 		const row = sessionRows.find((r) => r.id === active.sessionId);
 		if (!row) return null; // Not in the list (yet) → assume local/self.
 		return row.instance_id ?? null;
-	}
-	// New chat: an offloaded cloud composition targets the chosen install.
-	if (active.executionMode === 'cloud' && active.cloudTargetInstanceId) {
-		return active.cloudTargetInstanceId;
 	}
 	return null;
 }

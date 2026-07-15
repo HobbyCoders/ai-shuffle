@@ -59,3 +59,14 @@ def test_artifact_path_rejects_bad_hash(artifacts_dir):
     assert artifact_store.artifact_path("Z" * 64) is None  # non-hex
     # Well-formed but absent on disk.
     assert artifact_store.artifact_path("a" * 64) is None
+
+
+def test_hash_re_rejects_trailing_newline():
+    """The ``\\Z`` anchor (not ``$``) must reject a trailing newline: with ``$``
+    a 64-hex hash followed by ``\\n`` would still match (``$`` matches before a
+    final newline), letting a smuggled newline through the content-hash gate."""
+    valid = "a" * 64
+    assert artifact_store._HASH_RE.match(valid) is not None
+    assert artifact_store._HASH_RE.match(valid + "\n") is None
+    # And artifact_path (which uses the regex) rejects the newline form too.
+    assert artifact_store.artifact_path(valid + "\n") is None

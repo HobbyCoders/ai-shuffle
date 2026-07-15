@@ -1,24 +1,24 @@
 <script lang="ts">
 	/**
-	 * ExecutionModeBar - Local/Worktree/Cloud selector with branch management
+	 * ExecutionModeBar - Local/Worktree selector with branch management
 	 *
 	 * Positioned below the chat input island. Shows a single dropdown
 	 * pill for execution mode (the current mode's icon + label + chevron;
-	 * clicking opens an upward menu of the available modes) with an inline
-	 * branch selector when worktree mode is active. Includes "New Branch"
-	 * creation modal.
+	 * clicking opens an upward menu with Local as the base mode and an
+	 * orthogonal Worktree checkbox) with an inline branch selector when
+	 * worktree mode is active. Includes "New Branch" creation modal.
 	 *
 	 * Uses the git store for worktree/branch data and syncWorktrees()
-	 * to clean up stale DB records on project change.
+	 * to clean up stale DB records on project change. Worktree creation is
+	 * deferred to send time (POST /sessions/with-worktree via message-sender);
+	 * picking a branch here only stages it.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
-	import { syncWorktrees, createWorktree as createWorktreeApi, getCloudGitState, type Worktree, type Branch, type CloudGitState } from '$lib/api/git';
+	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
-	import { isApiError } from '$lib/api/client';
-	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud, Server, Check } from 'lucide-svelte';
+	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack } from 'svelte';
-	import { listInstalls, offloadTargets as computeOffloadTargets, type Install } from '$lib/api/installs';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 
@@ -34,93 +34,9 @@
 
 	// --- New branch modal state ---
 	let showCreateModal = $state(false);
-	let creatingWorktree = $state(false);
-	let localWorktreeError = $state<string | null>(null);
-
-	// --- Cloud offload targets (registered installs) ---
-	// `installs` is null while loading. Cloud offload targets a *registered*
-	// install picked from a device dropdown (auto-registered on the shared DB).
-	// The Cloud pill stays hidden until at least one valid target (online +
-	// reachable base_url) resolves.
-	let installs = $state<Install[] | null>(null);
-	let cloudLoaded = $state(false);
-
-	// Device-picker dropdown (shown next to the mode pill when Cloud is active).
-	let showDeviceDropdown = $state(false);
-	let deviceDropdownRef = $state<HTMLDivElement | null>(null);
-
-	// Cloud branch-picker dropdown (shown next to the device picker when Cloud is
-	// active). Lets the user pick which branch the remote device runs on. The list
-	// mirrors the *remote* device's own branch selector — loaded from that device
-	// via getCloudGitState — so "Cloud = Local on another device".
-	let showCloudBranchDropdown = $state(false);
-	let cloudBranchRef = $state<HTMLDivElement | null>(null);
-	let loadingCloudBranches = $state(false);
-	// The target device's git state (its branches + currently checked-out branch).
-	let cloudGitState = $state<CloudGitState | null>(null);
-	let cloudGitStateError = $state<string | null>(null);
-	// Identifies the (project, device) the loaded/loading state belongs to, so the
-	// loader dedupes and stale responses for a since-changed target are dropped.
-	let cloudStateKey = $state<string | null>(null);
-	// Separate modal instance for staging a new branch on the remote (deferred —
-	// the worker creates it on send), distinct from the local worktree modal.
-	let showCloudCreateModal = $state(false);
-
-	const offloadTargets = $derived(installs ? computeOffloadTargets(installs) : []);
-	const cloudAvailable = $derived(offloadTargets.length > 0);
-
-	async function loadCloudConfig() {
-		if (cloudLoaded) return;
-		cloudLoaded = true;
-		// Load registered offload targets — Cloud mode is available when at least
-		// one online, reachable device is registered.
-		try {
-			const resp = await listInstalls();
-			installs = resp.installs;
-		} catch {
-			installs = [];
-		}
-	}
-
-	$effect(() => {
-		// Load offload targets on mount so we know whether to show the Cloud option.
-		loadCloudConfig();
-		// Once it resolves: if Cloud isn't available but a stale persisted preference
-		// left this session in cloud mode, fall back to local — the Cloud pill is
-		// hidden, so the toggle would otherwise have no active option.
-		if (cloudLoaded && !cloudAvailable && untrack(() => $activeSession.executionMode) === 'cloud') {
-			setMode('local');
-		}
-	});
-
-	// Auto-pick a default offload target when entering Cloud mode so the user can
-	// fire off a session without a manual selection. Prefers the currently-chosen
-	// target if still valid; else the first online reachable device.
-	$effect(() => {
-		if ($activeSession.executionMode !== 'cloud') return;
-		const targets = offloadTargets;
-		if (targets.length === 0) return;
-		const current = untrack(() => $activeSession.cloudTargetInstanceId);
-		if (current && targets.some((t) => t.id === current)) return;
-		// No valid selection yet: default to the first online reachable device.
-		activeSession.setCloudTarget(targets[0].id);
-	});
-
-	// The device whose name shows on the picker pill.
-	const selectedTarget = $derived(
-		offloadTargets.find((t) => t.id === $activeSession.cloudTargetInstanceId) ?? null
-	);
-	const deviceLabel = $derived(
-		selectedTarget ? selectedTarget.device_name : 'Pick device'
-	);
-
-	function selectDevice(install: Install | null) {
-		activeSession.setCloudTarget(install ? install.id : null);
-		showDeviceDropdown = false;
-	}
 
 	// --- Git-repo gating ---
-	// Worktree/Cloud modes and the branch selector only make sense for a git
+	// Worktree mode and the branch selector only make sense for a git
 	// repository. Reuse the existing git-status signal (loaded by MainPanel's git
 	// store effect for the active project) rather than inventing a new one — the
 	// same `is_git_repo !== false` convention GitHeaderActions uses, so non-git
@@ -130,8 +46,8 @@
 
 	$effect(() => {
 		// A non-git project can only run Local. If a stale persisted preference (or
-		// a switch from a git project) left this session in a hidden Worktree/Cloud
-		// mode, fall back to Local so the toggle always has a visible active option.
+		// a switch from a git project) left this session in a hidden Worktree mode,
+		// fall back to Local so the toggle always has a visible active option.
 		if (!isGitRepo && untrack(() => $activeSession.executionMode) !== 'local') {
 			setMode('local');
 		}
@@ -175,8 +91,8 @@
 	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Auto');
 	const isAutoMode = $derived(!$activeSession.selectedWorktreeBranch && !$activeSession.worktreeBranch && !$activeSession.worktreeId);
 
-	// Combined worktree error from store or local eager-creation
-	const worktreeError = $derived($activeSession.worktreeError || localWorktreeError);
+	// Worktree error surfaced from the store (send-time creation via message-sender).
+	const worktreeError = $derived($activeSession.worktreeError);
 
 	// --- Effects ---
 
@@ -202,175 +118,26 @@
 
 	// --- Execution-mode dropdown ---
 	//
-	// `executionMode` stays the canonical 3-value enum (local/worktree/cloud) that
-	// the rest of the app dispatches on, but the dropdown now presents it as a base
-	// mode (Local or Cloud) plus an orthogonal Worktree checkbox at the bottom (G).
-	// The four UI states map onto the enum like so:
-	//   Local,  no worktree → 'local'
-	//   Local + worktree    → 'worktree'
-	//   Cloud,  no worktree → 'cloud'  (cloudWorktree = false)
-	//   Cloud + worktree    → 'cloud'  (cloudWorktree = true)
-	const baseMode = $derived($activeSession.executionMode === 'cloud' ? 'cloud' : 'local');
-	const worktreeOn = $derived(
-		$activeSession.executionMode === 'worktree' ||
-		($activeSession.executionMode === 'cloud' && $activeSession.cloudWorktree)
-	);
-
-	// Trigger pill reflects the effective state: base-mode icon/label, plus a small
-	// worktree marker when the checkbox is on.
-	const BaseModeIcon = $derived(baseMode === 'cloud' ? Cloud : Monitor);
-	const baseModeLabel = $derived(baseMode === 'cloud' ? 'Cloud' : 'Local');
+	// `executionMode` is the canonical enum ('local' | 'worktree') the rest of the
+	// app dispatches on. The dropdown presents it as a base mode (Local) plus an
+	// orthogonal Worktree checkbox:
+	//   Local, no worktree → 'local'
+	//   Local + worktree   → 'worktree'
+	const worktreeOn = $derived($activeSession.executionMode === 'worktree');
 
 	function toggleModeDropdown() {
 		showModeDropdown = !showModeDropdown;
 	}
 
-	function selectBaseMode(mode: 'local' | 'cloud') {
-		if (mode !== baseMode) {
-			// Preserve the worktree checkbox across a base switch so the modifier
-			// behaves as orthogonal state rather than getting reset each time.
-			const keepWorktree = worktreeOn;
-			if (mode === 'cloud') {
-				activeSession.setExecutionMode('cloud');
-				activeSession.setCloudWorktree(keepWorktree);
-			} else {
-				// Local base encodes worktree directly in the enum.
-				activeSession.setExecutionMode(keepWorktree ? 'worktree' : 'local');
-			}
-		}
+	function selectBaseMode() {
+		// Local is the only base mode; clicking it just closes the menu (the
+		// worktree checkbox is the orthogonal modifier).
 		showModeDropdown = false;
 	}
 
 	function toggleWorktree() {
-		const next = !worktreeOn;
-		if (baseMode === 'cloud') {
-			activeSession.setCloudWorktree(next);
-		} else {
-			activeSession.setExecutionMode(next ? 'worktree' : 'local');
-		}
+		activeSession.setExecutionMode(worktreeOn ? 'local' : 'worktree');
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
-	}
-
-	// --- Cloud branch picker ---
-	// The selectable branches mirror the *remote* device's own selector: loaded
-	// from that device (getCloudGitState), deduped by effective name (a remote
-	// `origin/foo` collapses to `foo`, which the worker checks out via DWIM). When
-	// the repo isn't cloned on the target yet (`present:false`) only the default
-	// branch is offered — the worker clones and runs there on send.
-	const cloudBranchOptions = $derived.by(() => {
-		const st = cloudGitState;
-		if (!st) return [] as { name: string; remote: boolean }[];
-		if (!st.present) return [{ name: st.defaultBranch, remote: false }];
-		const seen = new Set<string>();
-		const out: { name: string; remote: boolean }[] = [];
-		for (const b of st.branches) {
-			const name = b.remote ? b.name.replace(/^[^\/]+\//, '') : b.name;
-			if (seen.has(name)) continue;
-			seen.add(name);
-			out.push({ name, remote: b.remote });
-		}
-		return out;
-	});
-
-	// Pill label: no-worktree always runs on a concrete branch (preselected to the
-	// remote's current branch), so never "Auto". Worktree mode keeps the local-style
-	// "Auto (from message)" when no branch is pinned. A staged new branch shows "+name".
-	const cloudBranchLabel = $derived.by(() => {
-		const b = $activeSession.cloudBranch;
-		if ($activeSession.cloudCreateNewBranch && b) return `+ ${b}`;
-		if (b) return b;
-		return worktreeOn ? 'Auto' : '…';
-	});
-
-	const cloudBranchTitle = $derived.by(() => {
-		const b = $activeSession.cloudBranch;
-		if ($activeSession.cloudCreateNewBranch && b) {
-			return `Create branch '${b}' on the cloud device and run there`;
-		}
-		if (b) {
-			return worktreeOn
-				? `New worktree for '${b}' on the cloud device`
-				: `Check out '${b}' on the cloud device and run there`;
-		}
-		return worktreeOn
-			? 'A new branch will be auto-generated from your message on the cloud device. Click to pick a base.'
-			: 'Pick which branch the cloud device runs on.';
-	});
-
-	/** Load the target device's git state (its branches + current branch). Dedupes
-	 *  on (project, device) and drops responses for a since-changed target. */
-	async function loadCloudGitState(projectId: string, targetId: string, force = false) {
-		const key = `${projectId}::${targetId}`;
-		if (!force && key === cloudStateKey && cloudGitState) return;
-		cloudStateKey = key;
-		loadingCloudBranches = true;
-		cloudGitStateError = null;
-		try {
-			const state = await getCloudGitState(projectId, targetId);
-			if (cloudStateKey !== key) return; // a newer target won the race
-			cloudGitState = state;
-		} catch (e) {
-			if (cloudStateKey !== key) return;
-			cloudGitState = null;
-			cloudGitStateError = isApiError(e) ? e.detail : 'Failed to load the device’s branches';
-		} finally {
-			if (cloudStateKey === key) loadingCloudBranches = false;
-		}
-	}
-
-	// Load (and reload on device/project change) the remote git state whenever
-	// cloud mode is active and a device is chosen.
-	$effect(() => {
-		if ($activeSession.executionMode !== 'cloud') return;
-		const project = $activeSession.project;
-		const target = $activeSession.cloudTargetInstanceId;
-		if (!project || !target) {
-			cloudGitState = null;
-			cloudStateKey = null;
-			return;
-		}
-		loadCloudGitState(project, target);
-	});
-
-	// Preselect the remote's current branch in no-worktree mode (its default), and
-	// keep the selection valid. Worktree mode defaults to "Auto" (null); a staged
-	// new branch is left untouched.
-	$effect(() => {
-		if ($activeSession.executionMode !== 'cloud') return;
-		if ($activeSession.cloudWorktree) return;
-		if ($activeSession.cloudCreateNewBranch) return;
-		const st = cloudGitState;
-		if (!st) return;
-		const names = new Set(cloudBranchOptions.map((o) => o.name));
-		const cur = $activeSession.cloudBranch;
-		if (cur && names.has(cur)) return; // valid selection kept
-		const def = st.present ? st.currentBranch || st.defaultBranch : st.defaultBranch;
-		if (def && def !== cur) activeSession.setCloudBranch(def);
-	});
-
-	function toggleCloudBranchDropdown() {
-		showCloudBranchDropdown = !showCloudBranchDropdown;
-		if (showCloudBranchDropdown && $activeSession.project && $activeSession.cloudTargetInstanceId) {
-			// Refresh on open so a branch created/switched on the device since the
-			// last load shows up.
-			loadCloudGitState($activeSession.project, $activeSession.cloudTargetInstanceId, true);
-		}
-	}
-
-	function selectCloudBranch(name: string | null) {
-		activeSession.setCloudBranch(name);
-		showCloudBranchDropdown = false;
-	}
-
-	function openCloudCreateModal() {
-		showCloudBranchDropdown = false;
-		showCloudCreateModal = true;
-	}
-
-	function handleCloudBranchCreated(branchName: string) {
-		// Stage the new branch — the remote worker creates it on send.
-		activeSession.setCloudNewBranch(branchName);
-		showCloudCreateModal = false;
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -382,97 +149,11 @@
 		showBranchDropdown = false;
 		const branchName = branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name;
 
-		// Update session state
+		// Stage the branch — the worktree is created at send time
+		// (POST /sessions/with-worktree in message-sender).
 		activeSession.setWorktreeBranch(branchName);
 		activeSession.setWorktreeMode('new');
 		activeSession.setWorktreeCreateNewBranch(false);
-
-		// Eagerly create the worktree directory
-		eagerCreateWorktree(branchName, false);
-	}
-
-	async function eagerCreateWorktree(branchName: string, createNew: boolean, base?: string) {
-		if (!$activeSession.project) return;
-		creatingWorktree = true;
-		localWorktreeError = null;
-		activeSession.clearWorktreeError();
-		try {
-			const response = await createWorktreeApi($activeSession.project, {
-				branch_name: branchName,
-				create_new_branch: createNew,
-				base_branch: base
-			});
-			if (response.success && response.worktree) {
-				activeSession.selectWorktreeBranch(branchName, response.worktree.id);
-				// Refresh so new worktree appears in list
-				await git.loadWorktrees();
-			} else {
-				localWorktreeError = response.message || `Failed to create worktree for branch '${branchName}'`;
-			}
-		} catch (err: any) {
-			const rawMsg = err?.detail || err?.message || '';
-			localWorktreeError = formatLocalWorktreeError(rawMsg, branchName, err?.status);
-		} finally {
-			creatingWorktree = false;
-		}
-	}
-
-	/** Format worktree creation errors into actionable user-facing messages */
-	function formatLocalWorktreeError(raw: string, branchName: string, httpStatus?: number): string {
-		const lower = raw.toLowerCase();
-
-		// Git-specific errors
-		if (lower.includes('already checked out') || lower.includes('is already used by worktree')) {
-			return `Branch '${branchName}' already has an active worktree. Select it from the dropdown instead.`;
-		}
-		if (lower.includes('not a valid branch') || lower.includes('branch not found') ||
-			lower.includes('unknown revision') || (lower.includes('pathspec') && lower.includes('did not match'))) {
-			return `Branch '${branchName}' doesn't exist. Fetch from remote first or create a new branch.`;
-		}
-		if (lower.includes('already exists') && (lower.includes('path') || lower.includes('folder') || lower.includes('directory'))) {
-			return `A folder already exists at the worktree path for '${branchName}'. Try a different branch name.`;
-		}
-		if (lower.includes('.lock') || lower.includes('unable to lock') || lower.includes('index.lock')) {
-			return 'A git operation is in progress. Wait a moment and try again.';
-		}
-		if (lower.includes('permission denied') || lower.includes('access denied')) {
-			return 'Permission denied creating worktree. Check folder permissions on the server.';
-		}
-		if (lower.includes('not a git repository')) {
-			return 'The project directory is not a git repository. Initialize git first.';
-		}
-		if (lower.includes('dirty') || lower.includes('uncommitted') || lower.includes('unstaged')) {
-			return 'Uncommitted changes detected. Commit or stash your changes before creating a worktree.';
-		}
-
-		// HTTP-level errors
-		if (httpStatus === 404) {
-			return `Project not found. The project may have been deleted or moved.`;
-		}
-		if (httpStatus === 401 || httpStatus === 403) {
-			return 'Authentication error. Try refreshing the page and logging in again.';
-		}
-		if (httpStatus && httpStatus >= 500) {
-			return raw
-				? `Server error creating worktree: ${raw}`
-				: 'Server error creating worktree. Check the backend logs for details.';
-		}
-
-		// Network errors (no HTTP status = fetch itself failed)
-		if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network')) {
-			return 'Network error — cannot reach the server. Check your connection.';
-		}
-		if (lower.includes('timeout') || lower.includes('aborted')) {
-			return 'Request timed out creating worktree. The server may be overloaded.';
-		}
-
-		// If we have a raw message, include it with context
-		if (raw) {
-			return `Failed to create worktree for '${branchName}': ${raw}`;
-		}
-
-		// True last resort — should rarely hit this after API client improvements
-		return `Failed to create worktree for '${branchName}'. Check the backend logs for details.`;
 	}
 
 	function toggleDropdown() {
@@ -501,12 +182,6 @@
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
 			showModeDropdown = false;
 		}
-		if (showDeviceDropdown && deviceDropdownRef && !deviceDropdownRef.contains(e.target as Node)) {
-			showDeviceDropdown = false;
-		}
-		if (showCloudBranchDropdown && cloudBranchRef && !cloudBranchRef.contains(e.target as Node)) {
-			showCloudBranchDropdown = false;
-		}
 	}
 
 	// --- New Branch modal ---
@@ -517,14 +192,12 @@
 	}
 
 	function handleBranchCreated(branchName: string) {
-		// Set up the new branch as a worktree
-		// Branch was already created by CreateBranchModal, so use create_new_branch=false
+		// Branch was already created by CreateBranchModal; stage it as the worktree
+		// branch (create_new_branch=false). The worktree itself is created at send
+		// time (POST /sessions/with-worktree in message-sender).
 		activeSession.setWorktreeBranch(branchName);
 		activeSession.setWorktreeMode('new');
 		activeSession.setWorktreeCreateNewBranch(false);
-
-		// Create the worktree for the already-created branch
-		eagerCreateWorktree(branchName, false);
 	}
 </script>
 
@@ -532,24 +205,22 @@
 
 <div class="execution-mode-bar">
 	<div class="mode-bar-row">
-		<!-- Mode dropdown pill: shows the base mode (Local/Cloud) plus a worktree
-		     marker, and on click opens an upward menu with the base modes as radios
-		     and a Worktree checkbox at the bottom (combinable with either base mode).
-		     Cloud is gated to a git repo with a configured second install; Worktree
-		     to any git repo. For a non-git project only Local is offered and the
-		     mode is forced to Local above. -->
+		<!-- Mode dropdown pill: shows the base mode (Local) plus a worktree marker,
+		     and on click opens an upward menu with Local as a radio and a Worktree
+		     checkbox at the bottom. Worktree is gated to any git repo; for a non-git
+		     project only Local is offered and the mode is forced to Local above. -->
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
 				class="mode-trigger"
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
-				title={baseMode === 'cloud' ? 'Offload this session to another registered AI Shuffle device (GitHub repos only)' : 'Run this session on this device'}
+				title="Run this session on this device"
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
-				<BaseModeIcon size={13} strokeWidth={1.5} />
-				<span class="mode-trigger-label">{baseModeLabel}</span>
+				<Monitor size={13} strokeWidth={1.5} />
+				<span class="mode-trigger-label">Local</span>
 				{#if worktreeOn}
 					<GitFork size={12} strokeWidth={1.5} class="wt-marker" />
 				{/if}
@@ -561,41 +232,23 @@
 					<!-- Base mode: Local -->
 					<button
 						type="button"
-						class="branch-item"
-						class:active={baseMode === 'local'}
-						onclick={() => selectBaseMode('local')}
+						class="branch-item active"
+						onclick={() => selectBaseMode()}
 						role="menuitemradio"
-						aria-checked={baseMode === 'local'}
+						aria-checked="true"
 					>
 						<Monitor size={13} strokeWidth={1.5} />
 						<span class="branch-item-name">Local</span>
 					</button>
 
-					<!-- Base mode: Cloud (git repo + a reachable second install) -->
-					{#if isGitRepo && cloudAvailable}
-						<button
-							type="button"
-							class="branch-item"
-							class:active={baseMode === 'cloud'}
-							onclick={() => selectBaseMode('cloud')}
-							title="Offload this session to another registered AI Shuffle device (GitHub repos only)"
-							role="menuitemradio"
-							aria-checked={baseMode === 'cloud'}
-						>
-							<Cloud size={13} strokeWidth={1.5} />
-							<span class="branch-item-name">Cloud</span>
-						</button>
-					{/if}
-
-					<!-- Worktree modifier: orthogonal checkbox at the bottom, combinable
-					     with either base mode (G). -->
+					<!-- Worktree modifier: orthogonal checkbox at the bottom. -->
 					{#if isGitRepo}
 						<div class="branch-divider"></div>
 						<button
 							type="button"
 							class="branch-item wt-check-item"
 							onclick={toggleWorktree}
-							title="Run in an isolated git worktree. Combine with Local or Cloud."
+							title="Run in an isolated git worktree."
 							role="menuitemcheckbox"
 							aria-checked={worktreeOn}
 						>
@@ -618,14 +271,9 @@
 				class="branch-trigger"
 				class:auto-mode={isAutoMode}
 				onclick={toggleDropdown}
-				disabled={creatingWorktree}
 				title={isAutoMode ? 'Branch will be auto-generated from your message. Click to select a specific branch.' : `Current branch: ${currentBranch}`}
 			>
-				{#if creatingWorktree}
-					<Loader2 size={12} strokeWidth={1.5} class="animate-spin" />
-				{:else}
-					<GitBranch size={12} strokeWidth={1.5} />
-				{/if}
+				<GitBranch size={12} strokeWidth={1.5} />
 				<span class="branch-name">{currentBranch}</span>
 				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
@@ -706,148 +354,12 @@
 			{/if}
 		</div>
 		{/if}
-
-		<!-- Cloud branch selector (shown when cloud mode active) — pick which branch
-		     the remote device runs on. The list mirrors the *remote* device's own
-		     selector (loaded from that device): in no-worktree mode picking a branch
-		     checks it out there and runs on it; in worktree mode "Auto (from message)"
-		     forks a fresh branch from the prompt, else the pick is the worktree base.
-		     "New branch…" stages a branch the worker creates on send. -->
-		{#if baseMode === 'cloud'}
-			<div class="branch-selector" bind:this={cloudBranchRef}>
-				<button
-					type="button"
-					class="branch-trigger"
-					class:auto-mode={!$activeSession.cloudBranch}
-					onclick={toggleCloudBranchDropdown}
-					title={cloudBranchTitle}
-					aria-haspopup="menu"
-					aria-expanded={showCloudBranchDropdown}
-				>
-					{#if worktreeOn || $activeSession.cloudCreateNewBranch}
-						<GitFork size={12} strokeWidth={1.5} />
-					{:else}
-						<GitBranch size={12} strokeWidth={1.5} />
-					{/if}
-					<span class="branch-name">{cloudBranchLabel}</span>
-					<ChevronDown size={12} strokeWidth={1.5} />
-				</button>
-
-				{#if showCloudBranchDropdown}
-					<div class="branch-dropdown" role="menu">
-						{#if loadingCloudBranches}
-							<div class="branch-loading">
-								<Loader2 size={14} class="animate-spin" />
-								<span>Loading...</span>
-							</div>
-						{:else if cloudGitStateError}
-							<p class="branch-empty">{cloudGitStateError}</p>
-						{:else}
-							<!-- Worktree mode keeps the local-style "Auto (from message)".
-							     No-worktree mode has no Auto — it always runs on a concrete
-							     branch (preselected to the remote's current one). -->
-							{#if worktreeOn}
-								<button
-									type="button"
-									class="branch-item auto-item"
-									class:active={!$activeSession.cloudBranch}
-									onclick={() => selectCloudBranch(null)}
-									role="menuitemradio"
-									aria-checked={!$activeSession.cloudBranch}
-								>
-									<GitFork size={13} strokeWidth={1.5} />
-									<span class="branch-item-name">Auto</span>
-									<span class="auto-hint">from message</span>
-								</button>
-							{/if}
-
-							{#if cloudBranchOptions.length > 0}
-								{#if worktreeOn}
-									<div class="branch-divider"></div>
-								{/if}
-								<div class="branch-section-label">
-									{cloudGitState?.present === false ? 'Default branch' : 'Branches'}
-								</div>
-								{#each cloudBranchOptions as b (b.name)}
-									<button
-										type="button"
-										class="branch-item"
-										class:active={!$activeSession.cloudCreateNewBranch && $activeSession.cloudBranch === b.name}
-										onclick={() => selectCloudBranch(b.name)}
-										role="menuitemradio"
-										aria-checked={!$activeSession.cloudCreateNewBranch && $activeSession.cloudBranch === b.name}
-									>
-										<GitBranch size={13} strokeWidth={1.5} />
-										<span class="branch-item-name">{b.name}</span>
-										{#if cloudGitState?.present !== false && b.name === cloudGitState?.currentBranch}
-											<span class="auto-hint">current</span>
-										{:else}
-											<span class="branch-location-badge" class:remote={b.remote}>
-												{b.remote ? 'remote' : 'local'}
-											</span>
-										{/if}
-									</button>
-								{/each}
-							{:else}
-								<p class="branch-empty">No branches available</p>
-							{/if}
-
-							<div class="branch-divider"></div>
-							<button type="button" class="branch-item create-branch-item" onclick={openCloudCreateModal}>
-								<Plus size={13} strokeWidth={1.5} />
-								<span class="branch-item-name">New branch...</span>
-							</button>
-						{/if}
-					</div>
-				{/if}
-			</div>
-		{/if}
-
-		<!-- Device picker (shown when cloud mode active) — choose which registered
-		     install runs the offload. Mirrors the branch selector pill. -->
-		{#if $activeSession.executionMode === 'cloud' && offloadTargets.length > 0}
-			<div class="device-selector" bind:this={deviceDropdownRef}>
-				<button
-					type="button"
-					class="branch-trigger"
-					onclick={() => (showDeviceDropdown = !showDeviceDropdown)}
-					title={selectedTarget ? `Offload to ${selectedTarget.device_name}` : 'Choose the device to offload to'}
-					aria-haspopup="menu"
-					aria-expanded={showDeviceDropdown}
-				>
-					<Server size={12} strokeWidth={1.5} />
-					<span class="branch-name">{deviceLabel}</span>
-					<ChevronDown size={12} strokeWidth={1.5} />
-				</button>
-
-				{#if showDeviceDropdown}
-					<div class="branch-dropdown" role="menu">
-						<div class="branch-section-label">Devices</div>
-						{#each offloadTargets as t (t.id)}
-							<button
-								type="button"
-								class="branch-item"
-								class:active={$activeSession.cloudTargetInstanceId === t.id}
-								onclick={() => selectDevice(t)}
-								role="menuitemradio"
-								aria-checked={$activeSession.cloudTargetInstanceId === t.id}
-							>
-								<Server size={13} strokeWidth={1.5} />
-								<span class="branch-item-name">{t.device_name}</span>
-								{#if t.platform}<span class="device-platform">{t.platform}</span>{/if}
-								<span class="device-online-dot"></span>
-							</button>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		{/if}
 	</div>
 
 	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
 	{#if $activeSession.executionMode === 'worktree' && worktreeError}
 		<div class="wt-error-row">
-			<Banner severity="error" message={worktreeError} dismissible onDismiss={() => { localWorktreeError = null; activeSession.clearWorktreeError(); }} />
+			<Banner severity="error" message={worktreeError} dismissible onDismiss={() => { activeSession.clearWorktreeError(); }} />
 		</div>
 	{/if}
 </div>
@@ -857,15 +369,6 @@
 	projectId={$activeSession.project}
 	onClose={() => showCreateModal = false}
 	onCreated={handleBranchCreated}
-/>
-
-<!-- Cloud "New branch…": staged only — the remote worker creates it on send. -->
-<CreateBranchModal
-	open={showCloudCreateModal}
-	projectId={$activeSession.project}
-	stageOnly={true}
-	onClose={() => showCloudCreateModal = false}
-	onCreated={handleCloudBranchCreated}
 />
 
 <style>
@@ -974,29 +477,6 @@
 	.branch-selector {
 		position: relative;
 		min-width: 0;
-	}
-
-	/* Device picker (cloud mode) — shares the branch pill/dropdown visuals */
-	.device-selector {
-		position: relative;
-		min-width: 0;
-	}
-	.device-platform {
-		font-size: 0.5625rem;
-		font-weight: 500;
-		padding: 1px 5px;
-		border-radius: 4px;
-		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
-		color: var(--muted-foreground);
-		text-transform: capitalize;
-	}
-	.device-online-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		flex-shrink: 0;
-		background: color-mix(in oklch, var(--primary) 70%, #22c55e);
-		box-shadow: 0 0 4px color-mix(in oklch, var(--primary) 50%, #22c55e);
 	}
 
 	.branch-trigger {
@@ -1219,8 +699,7 @@
 		   (relatively-positioned) .execution-mode-bar and stretch it edge-to-edge
 		   within the viewport. The bar is wider in worktree mode (mode + branch
 		   pills), which is the only state this dropdown appears in. */
-		.branch-selector,
-		.device-selector {
+		.branch-selector {
 			position: static;
 		}
 

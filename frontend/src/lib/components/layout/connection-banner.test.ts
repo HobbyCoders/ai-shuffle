@@ -17,37 +17,30 @@ afterEach(() => {
 });
 
 // Mirrors ChatView's gate:
-//   sessionId && remoteControllable !== false && !wsConnected
+//   sessionId && !wsConnected
 function shouldShowConnectionBanner(s: {
 	sessionId: string | null;
-	remoteControllable: boolean;
 	wsConnected: boolean;
 }): boolean {
-	return !!s.sessionId && s.remoteControllable !== false && !s.wsConnected;
+	return !!s.sessionId && !s.wsConnected;
 }
 
 describe('ChatView connection-banner gate', () => {
 	it('shows when a live session is disconnected', () => {
 		expect(
-			shouldShowConnectionBanner({ sessionId: 'sess-1', remoteControllable: true, wsConnected: false })
+			shouldShowConnectionBanner({ sessionId: 'sess-1', wsConnected: false })
 		).toBe(true);
 	});
 
 	it('hides while connected', () => {
 		expect(
-			shouldShowConnectionBanner({ sessionId: 'sess-1', remoteControllable: true, wsConnected: true })
+			shouldShowConnectionBanner({ sessionId: 'sess-1', wsConnected: true })
 		).toBe(false);
 	});
 
 	it('hides when there is no active session (empty / new chat)', () => {
 		expect(
-			shouldShowConnectionBanner({ sessionId: null, remoteControllable: true, wsConnected: false })
-		).toBe(false);
-	});
-
-	it('hides for a cross-install offline session (its own banner owns that case)', () => {
-		expect(
-			shouldShowConnectionBanner({ sessionId: 'sess-1', remoteControllable: false, wsConnected: false })
+			shouldShowConnectionBanner({ sessionId: null, wsConnected: false })
 		).toBe(false);
 	});
 });

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.core.config import settings
@@ -342,6 +343,12 @@ class SessionRuntime:
         self._drain_after_cancel = False
         # stop_reason override for an escalation-forced abort.
         self._abort_reason: Optional[str] = None
+        # Idempotency guard for the interrupt-observe pass (V2 Phase 4, O4):
+        # once interrupt() has been driven for THIS turn, later observers
+        # (claim-loop pass, duplicate executor fire) are no-ops. Per-turn by
+        # construction — a SessionRuntime instance executes exactly one turn
+        # row, and the next turn gets a fresh instance with a fresh guard.
+        self._interrupt_driving = False
 
     # ------------------------------------------------------------------
     # execute
@@ -355,6 +362,42 @@ class SessionRuntime:
         sid = self.session_id
         tid = self.turn_id
         runner_id = settings.effective_instance_id
+
+        # 0. Placement gate (V2 Phase 4, flag ON). A session explicitly placed
+        #    on ANOTHER runner must not be executed here even if this install's
+        #    kick fired first — leave the turn queued for that runner's claim
+        #    loop. FAIL-OPEN: a resolver error must never block local execution
+        #    (the run lease below still guarantees single-runner exclusivity).
+        #    ``kind == "none"`` (pinned owner offline / no capable runner) also
+        #    leaves the turn queued — degraded state, resolved when the owner
+        #    returns or the reap sweep routes it.
+        session_row: Optional[Dict[str, Any]] = None
+        if settings.v2_placement:
+            decision = None
+            try:
+                from app.core import placement as placement_mod
+                from app.db import database as database_mod
+
+                session_row = await asyncio.to_thread(database_mod.get_session, sid)
+                if session_row is not None:
+                    decision = placement_mod.resolve_placement(session_row)
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: placement resolution failed for %s — "
+                    "failing open to local execution", sid, exc_info=True,
+                )
+            if decision is not None and decision.kind == "runner" and decision.runner_id != runner_id:
+                logger.info(
+                    "SessionRuntime: session %s is placed on %s (%s) — turn %s stays "
+                    "queued for its claim loop", sid, decision.runner_id, decision.reason, tid,
+                )
+                return None
+            if decision is not None and decision.kind == "none":
+                logger.info(
+                    "SessionRuntime: no capable runner for session %s (%s) — turn %s "
+                    "stays queued", sid, decision.reason, tid,
+                )
+                return None
 
         # 1. Claim the run lease — MANDATORY. No claim ⇒ another runner owns the
         #    session; leave the turn queued for a later kick/reap.
@@ -396,6 +439,30 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
+
+            # 3. Sticky pin (V2 Phase 4, OD-6/OD-9): the FIRST winner of an
+            #    "anywhere"/capability placement pins the session to itself
+            #    (placement + legacy instance_id dual-write) so every later
+            #    turn lands on this runner's disk-resident CLI state. NULL
+            #    placement stays NULL (the local-default, A9) and an existing
+            #    runner pin is never rewritten. Best-effort: a pin failure
+            #    must not kill the turn (the lease already makes us exclusive).
+            if settings.v2_placement:
+                try:
+                    await asyncio.to_thread(
+                        self._maybe_pin_placement, sid, runner_id, session_row
+                    )
+                except Exception:
+                    logger.warning(
+                        "SessionRuntime: sticky pin failed for %s", sid, exc_info=True
+                    )
+
+                # 3b. Working-set restore (V2 Phase 4, Q6): the session's dirty
+                #     working tree may have been snapshotted to a scratch ref by
+                #     a PRIOR turn on ANOTHER runner. Bring it onto this runner's
+                #     clean checkout before the pump starts. Best-effort — a git
+                #     failure must never delay/kill the turn.
+                await self._restore_working_set(sid)
 
             # 4. Per-turn bookkeeping + acquire the reader token; stop any idle
             #    reader so this pump is the session's single reader.
@@ -517,6 +584,11 @@ class SessionRuntime:
                 prompt=prompt,
                 session_id=self.session_id,
                 profile_id=self.turn.get("profile_id"),
+                # The LEGACY project id deliberately stays live here — it still
+                # keys the project-existence gate, the app-config/builtins MCP
+                # servers, the DB project hooks, and agent-memory sync, none of
+                # which are project_v2-keyed yet (OD-7 amended; that migration is
+                # post-V2 backlog).
                 project_id=self.turn.get("project_id"),
                 overrides=self.turn.get("overrides") or None,
                 broadcast_func=self._broadcast,
@@ -626,6 +698,10 @@ class SessionRuntime:
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
+            # Working-set snapshot (V2 Phase 4, Q6): a turn that ended (even
+            # aborted) may leave in-progress edits the next runner needs. NEVER
+            # on the parked arm above (the session is still working here).
+            await self._snapshot_working_set(sid)
             return "aborted", settled is not None
 
         settled = None
@@ -633,6 +709,7 @@ class SessionRuntime:
             settled = await asyncio.to_thread(turns_db.settle_turn, tid, "completed")
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
+        await self._snapshot_working_set(sid)
         return "completed", settled is not None
 
     # ------------------------------------------------------------------
@@ -665,9 +742,20 @@ class SessionRuntime:
         Returns the expected resulting turn state
         (``completed|aborted|parked|draining``) — best-effort on the
         escalation paths, where settlement is asynchronous.
+
+        Idempotent per turn (O4): the durable ``interrupting`` flip can be
+        observed by BOTH the in-process executor and the cross-runner
+        turn_claim observe pass — the second driver must not re-signal the SDK
+        or start a second escalation clock. The check-and-set below runs
+        synchronously before the first ``await``, so two same-loop callers
+        cannot both pass it.
         """
         sid = self.session_id
         tid = self.turn_id
+
+        if self._interrupt_driving:
+            return "interrupting"
+        self._interrupt_driving = True
 
         try:
             await record_interrupting(sid, mode)  # turn.interrupting event
@@ -718,6 +806,153 @@ class SessionRuntime:
         task = self._pump_task
         if task is not None and not task.done():
             task.cancel()
+
+    @staticmethod
+    def _maybe_pin_placement(
+        session_id: str,
+        runner_id: str,
+        session_row: Optional[Dict[str, Any]],
+    ) -> None:
+        """Sticky-pin an "anywhere"/capability-placed session to this runner
+        (V2 Phase 4, OD-6) — sync, called via ``to_thread``.
+
+        Pin rules (A9 + OD-6):
+          * NULL/blank placement  → leave alone (stays NULL; the resolver's A11
+            fallback treats the row's ``instance_id`` as an implicit pin at
+            read time, so no explicit pin is invented here).
+          * ``runner:<id>`` pin   → leave alone (already pinned; the placement
+            gate + resolver ensured it points here or we would not be running).
+          * anything else ("anywhere", a capability token, bare constraints)
+            → pin to ``runner_id`` via the dual-write helper. Any capability
+            ``constraints`` are INTENTIONALLY dropped by the pin (rF3): per
+            OD-6 a pin means "the CLI conversation state lives here", and per
+            A10 pins are re-validated by online + capability only at resolve
+            time — the constraint set has served its purpose (electing this
+            winner) and carrying it forward would add nothing.
+        ``session_row`` is the row the placement gate already fetched; when the
+        gate failed open (row None) we refetch rather than skip, so a transient
+        gate error does not silently strand an "anywhere" session unpinned.
+        """
+        from app.core import placement as placement_mod
+        from app.db import database as database_mod
+
+        row = session_row
+        if row is None:
+            row = database_mod.get_session(session_id)
+            if row is None:
+                return
+        placement = placement_mod._normalize_placement(row.get("placement"))
+        if not placement:
+            # NULL placement stays NULL (A9): never invent an explicit pin —
+            # the resolver's A11 instance_id fallback covers routing.
+            return
+        where = (placement.get("where") or "").strip()
+        if where.startswith("runner:"):
+            return  # already pinned — first claim happened long ago.
+        from app.db import sessions as sessions_db
+
+        if sessions_db.pin_session_placement(session_id, runner_id):
+            logger.info(
+                "SessionRuntime: sticky-pinned session %s to runner %s "
+                "(was placement=%r)", session_id, runner_id, where or placement,
+            )
+
+    # ------------------------------------------------------------------
+    # working-set sync (V2 Phase 4, Q6)
+    # ------------------------------------------------------------------
+
+    async def _snapshot_working_set(self, sid: str) -> None:
+        """PUSH hook: snapshot this session's dirty working tree to its scratch
+        ref at turn end. Flag-gated; best-effort — a git failure must NEVER fail
+        or delay turn finalization beyond this call. Silent no-op when the
+        session has no on-disk checkout here or a ``local:`` origin."""
+        if not settings.v2_placement:
+            return
+        try:
+            from app.core import project_resolver
+            from app.core.working_set import snapshot_out
+            from app.db import database as database_mod
+
+            row = await asyncio.to_thread(database_mod.get_session, sid)
+            if row is None:
+                return
+            cwd = await asyncio.to_thread(
+                project_resolver.resolve_existing_cwd, row
+            )
+            if not cwd:
+                return
+            is_local = self._is_local_origin(row)
+            await asyncio.to_thread(
+                snapshot_out, sid, Path(cwd),
+                settings.effective_instance_id, is_local,
+            )
+        except Exception:
+            logger.warning(
+                "SessionRuntime: working-set snapshot failed for %s", sid,
+                exc_info=True,
+            )
+
+    async def _restore_working_set(self, sid: str) -> None:
+        """RESTORE hook: if a prior turn on another runner snapshotted this
+        session's working set, apply it onto this runner's clean checkout and
+        surface the resulting note as a system event. Flag-gated; best-effort.
+
+        ALWAYS re-fetches the session row fresh (never trusts a row read before
+        the run lease was claimed): a stale pre-claim read can MISS a snapshot
+        committed between that read and the lease grant, or RE-APPLY an already-
+        consumed ref value."""
+        if not settings.v2_placement:
+            return
+        try:
+            from app.core import project_resolver
+            from app.core.working_set import restore_in
+            from app.db import database as database_mod
+
+            row = await asyncio.to_thread(database_mod.get_session, sid)
+            if row is None:
+                return
+            stored = row.get("working_set_ref")
+            if not stored:
+                return
+            cwd = await asyncio.to_thread(
+                project_resolver.resolve_existing_cwd, row
+            )
+            if not cwd:
+                return
+            is_local = self._is_local_origin(row)
+            note = await asyncio.to_thread(
+                restore_in, sid, Path(cwd),
+                settings.effective_instance_id, stored, is_local,
+            )
+            if note:
+                from app.core.turn_recorder import record_drained_event
+
+                await record_drained_event(sid, {
+                    "type": "system",
+                    "subtype": "working_set",
+                    "data": {"content": note},
+                })
+        except Exception:
+            logger.warning(
+                "SessionRuntime: working-set restore failed for %s", sid,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _is_local_origin(session_row: Dict[str, Any]) -> bool:
+        """Whether the session's project has a ``local:`` origin (no shared
+        remote to sync a working set through). Pure read; False on any error so
+        a resolution hiccup never masks a real remote."""
+        try:
+            from app.core import project_resolver
+
+            project = project_resolver.resolve_project_v2(session_row)
+            return bool(
+                project
+                and str(project.get("origin") or "").startswith("local:")
+            )
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # plumbing

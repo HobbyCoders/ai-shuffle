@@ -34,6 +34,17 @@ from fastapi.websockets import WebSocketState
 
 import app.api.chat_ws_handler as cwh
 import app.api.websocket as ws_mod
+from app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _legacy_placement(monkeypatch):
+    """This module drives the legacy (flag-OFF) cross-install relay branches in
+    handle_get_pending_questions / handle_user_question_response. The V2 Phase 4
+    cutover defaults ``v2_placement`` ON and answers the shared table directly
+    (covered by test_interaction_placement.py); pin it OFF here so the relay
+    branch under test is actually reached."""
+    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 # ---------------------------------------------------------------------------

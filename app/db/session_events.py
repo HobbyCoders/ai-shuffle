@@ -242,3 +242,37 @@ def get_max_seq(session_id: str) -> int:
         )
         row = cursor.fetchone()
     return int(row["next_seq"]) if row else 0
+
+
+def notify_session(session_id: str) -> None:
+    """Fire a best-effort NOTIFY tick on the events channel WITHOUT appending
+    an event (V2 Phase 4 turn-claim wake).
+
+    Used by the placement submit/interrupt seams to wake peer runners' claim
+    loops instantly instead of waiting out their 5s slow poll. The payload
+    carries the session's REAL current max_seq so every existing consumer of
+    the channel (SSE re-checks, busy-status re-derivation) sees an honest,
+    at-worst-redundant tick — never a fabricated seq. Purely a latency
+    optimization: correctness rides the slow poll, so failure here (SQLite
+    shim, transient conn error) is swallowed.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT next_seq FROM session_event_counters WHERE session_id = %s",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            max_seq = int(row["next_seq"]) if row else 0
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (
+                    NOTIFY_CHANNEL,
+                    json.dumps({"session_id": session_id, "max_seq": max_seq}),
+                ),
+            )
+    except Exception:
+        logger.debug(
+            "notify_session on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True
+        )

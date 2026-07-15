@@ -6,15 +6,13 @@
 	 * Shows the project + current branch and opens a dropdown (upward, since the
 	 * pill bar sits just above the input near the bottom of the viewport) for
 	 * switching branches. In worktree mode the branch is fixed, so the pill is a
-	 * read-only display of the worktree's branch. In cloud mode the work runs on
-	 * the second install (which owns its own branch), so the pill is locked and
-	 * shows a cloud icon in place of the dropdown chevron.
+	 * read-only display of the worktree's branch.
 	 *
 	 * Reads project/branch context from the shared git + active-session stores,
 	 * so it works wherever it is rendered (no projectId prop needed).
 	 */
 	import { onDestroy } from 'svelte';
-	import { GitBranch, ChevronDown, Check, Plus, Loader2, Lock, FolderClosed, Cloud } from 'lucide-svelte';
+	import { GitBranch, ChevronDown, Check, Plus, Loader2, Lock, FolderClosed } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git.svelte';
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
@@ -31,9 +29,6 @@
 
 	// Worktree mode locks the branch to the session's worktree branch.
 	const isWorktreeMode = $derived($activeSession.executionMode === 'worktree' || $gitMode === 'worktree');
-	// Cloud mode runs on the second install, which owns its own worktree branch —
-	// the pill is a locked, read-only cloud indicator (no local branch to switch).
-	const isCloudMode = $derived($activeSession.executionMode === 'cloud');
 	const worktreeBranch = $derived(
 		$activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null
 	);
@@ -60,24 +55,10 @@
 			: ($gitStatus?.current_branch ?? null)
 	);
 
-	// Cloud mode runs on the second install, so the local checkout is irrelevant —
-	// show the branch the work actually runs on there. Both sub-modes are covered:
-	// cloud+worktree exposes its (possibly auto-named) branch via the shared
-	// worktree row → `worktreeBranch`; cloud+no-worktree records the checked-out
-	// branch on the session row at intake → `cloudBranch` (surfaced via /live). With
-	// neither resolved yet, fall back to "Auto" (a cloud worktree will auto-generate
-	// one from the message) or "…" (branch not yet known).
-	const cloudBranchLabel = $derived.by(() => {
-		const running = worktreeBranch || $activeSession.cloudBranch;
-		if (running) return running;
-		return $activeSession.cloudWorktree ? 'Auto' : '…';
-	});
+	// The branch text shown in the pill.
+	const displayBranch = $derived(currentBranch);
 
-	// The branch text shown in the pill. Cloud mode reads the cloud worker's branch
-	// rather than the local checkout (which isn't where the work runs).
-	const displayBranch = $derived(isCloudMode ? cloudBranchLabel : currentBranch);
-
-	const branchLocked = $derived(isCloudMode || isWorktreeMode || isStreaming || checkingOut);
+	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
 
 	// Local branches for the dropdown (exclude remotes).
 	const localBranches = $derived($branchStore.filter((b) => !b.remote));
@@ -160,17 +141,13 @@
 		class:locked={branchLocked}
 		onclick={toggleDropdown}
 		disabled={branchLocked}
-		title={isCloudMode
-			? displayBranch && displayBranch !== '…'
-				? `Cloud branch: ${displayBranch} — managed by the worker`
-				: 'Running on the cloud install — branch managed by the worker'
-			: isWorktreeMode
-				? `Worktree branch: ${currentBranch ?? 'unknown'}`
-				: isStreaming
-					? 'Branch locked during streaming'
-					: currentBranch
-						? `Branch: ${currentBranch}`
-						: 'Select branch'}
+		title={isWorktreeMode
+			? `Worktree branch: ${currentBranch ?? 'unknown'}`
+			: isStreaming
+				? 'Branch locked during streaming'
+				: currentBranch
+					? `Branch: ${currentBranch}`
+					: 'Select branch'}
 	>
 		{#if projectName}
 			<FolderClosed size={13} strokeWidth={1.5} />
@@ -183,8 +160,6 @@
 		{/if}
 		{#if checkingOut}
 			<Loader2 size={11} strokeWidth={2} class="spin" />
-		{:else if isCloudMode}
-			<Cloud size={12} strokeWidth={1.5} />
 		{:else if isWorktreeMode}
 			<Lock size={10} strokeWidth={1.5} />
 		{:else if isStreaming}

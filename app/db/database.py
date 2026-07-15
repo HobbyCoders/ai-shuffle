@@ -110,7 +110,13 @@ def _safe_json(value):
 #     seeding projects_v2 + checkouts from the frozen legacy `projects` rows and
 #     rebinding sessions onto their project_v2 (deterministic ids, ON CONFLICT DO
 #     NOTHING; legacy `projects`/`link_group_id`/`sessions.project_id` untouched)
-SCHEMA_VERSION = 60
+# 61: V2 Phase 4 (placement) — additive columns (sessions.placement JSONB,
+#     sessions.working_set_ref, artifacts.runner_id) + one-time placement
+#     backfill pinning every session with a non-empty instance_id to its owning
+#     runner (deterministic/boot-order-independent; stickiness per OD-6); legacy
+#     instance_id/cloud_branch/worktree_* NEVER written (sessions with no
+#     instance_id stay NULL = local-default)
+SCHEMA_VERSION = 61
 
 
 def _run_column_migrations(cursor):
@@ -1115,6 +1121,73 @@ def _run_column_migrations(cursor):
         if cursor.rowcount and cursor.rowcount > 0:
             migrations_applied.append("sessions.v2_stream=TRUE")
 
+    # ------------------------------------------------------------------
+    # V2 Phase 4 (v61) — placement replaces cloud.
+    #
+    # Additive columns + a one-time, idempotent, concurrent-boot-safe placement
+    # backfill so no in-flight session is orphaned at cutover (recon hazard 1).
+    # Purely additive: the legacy `instance_id`, `cloud_branch`, and
+    # `worktree_*` columns are NEVER updated or dropped, so an un-upgraded
+    # install sees exactly the DB it saw before plus new columns it ignores.
+    # Runs UNCONDITIONALLY every boot (guarded by column_exists + WHERE
+    # placement IS NULL for idempotency). Modeled on the v60 collapse backfill:
+    # Python-loop UPDATEs (no DISTINCT ON, no md5/sha in SQL) so the SQLite test
+    # shim executes it verbatim, and re-running writes zero rows.
+
+    # Step A: additive columns (idempotent; guarded so the ALTER never re-runs).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "placement"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS placement JSONB")
+        migrations_applied.append("sessions.placement")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "working_set_ref"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS working_set_ref TEXT")
+        migrations_applied.append("sessions.working_set_ref")
+    if table_exists(cursor, "artifacts") and not column_exists(cursor, "artifacts", "runner_id"):
+        cursor.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS runner_id TEXT")
+        migrations_applied.append("artifacts.runner_id")
+
+    # Step B: placement backfill (hazard 1; A9 ruling, 07-14). Single
+    # deterministic arm — idempotent via WHERE placement IS NULL:
+    #   * Every session with a non-empty `instance_id` (this install's own
+    #     included) is pinned to its owner: {"where": "runner:<instance_id>"}.
+    #     The rule depends ONLY on row data, so it is boot-order INDEPENDENT —
+    #     whichever install migrates first produces the identical result
+    #     (§2.2's determinism requirement; the earlier `instance_id <> me`
+    #     self-exclusion violated it because the first migrator left its own
+    #     rows unpinned). Pinning is also required for stickiness (OD-6): an
+    #     existing session's Claude CLI conversation state already lives on the
+    #     owner's local disk, so a fresh claim by another runner would lose
+    #     context — "anywhere" is only valid for NEW sessions before their
+    #     first claim (Q3 pins on first claim), never for existing ones, so
+    #     there is deliberately no "anywhere" arm here.
+    #   * Sessions with no/empty `instance_id` stay NULL — a NULL placement IS
+    #     the local-default (the resolver runs it on the local runner).
+    # Composition with v40: on any DB at schema >=v40 every session row already
+    # carries instance_id (orphan NULL rows were adopted locally by the v40
+    # backfill earlier in this function, ~line 372-385), so Step B honors
+    # instance_id as-found and stays a pure function of row data — that local
+    # adoption is v40's long-established semantic, not nondeterminism Phase 4
+    # introduces.
+    # `instance_id` / `cloud_branch` / `worktree_*` are NEVER written here.
+    if table_exists(cursor, "sessions") and column_exists(cursor, "sessions", "placement"):
+        import json as _json_placement
+
+        cursor.execute(
+            "SELECT id, instance_id FROM sessions "
+            "WHERE placement IS NULL "
+            "AND instance_id IS NOT NULL AND instance_id <> ''"
+        )
+        pinned = 0
+        for row in cursor.fetchall():
+            placement_json = _json_placement.dumps({"where": "runner:" + row["instance_id"]})
+            cursor.execute(
+                "UPDATE sessions SET placement = %s WHERE id = %s AND placement IS NULL",
+                (placement_json, row["id"]),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                pinned += cursor.rowcount
+        if pinned:
+            migrations_applied.append(f"sessions.placement=runner({pinned})")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -1591,6 +1664,7 @@ from app.db.mobile import (  # noqa: F401
 from app.db.installs import (  # noqa: F401
     register_install,
     touch_install_last_seen,
+    touch_install_heartbeat,
     set_install_name,
     set_install_base_url,
     get_install,

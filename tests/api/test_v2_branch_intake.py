@@ -15,6 +15,7 @@ Everything is mocked at the handler/DB boundary — no app, no DB, no git, no
 network.
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -128,6 +129,33 @@ async def test_create_with_branch_persists_branch_and_no_worktree_row(monkeypatc
     assert resp.branch_name == "feature/x"
     assert resp.worktree_path == "/ws/checkouts/proj-A/feature-x"
     assert resp.query_started is False
+
+
+async def test_promptless_compose_migrates_pending_uploads(monkeypatch):
+    """A promptless compose (pending_upload_paths, NO prompt) still migrates the
+    uploads into the materialized checkout — the migration is hoisted out of the
+    prompt block, so attachments land even when no turn is submitted."""
+    m = _wire_v2(monkeypatch)
+    migrate = MagicMock(return_value=[])
+    monkeypatch.setattr(worktree_api, "_migrate_uploads_to_dir", migrate)
+
+    resp = await worktree_api._create_v2_branch_session(
+        request=MagicMock(),
+        body=_body(prompt=None, pending_upload_paths=["/ws/proj-A/a.png"]),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+
+    # Migration ran against the materialized checkout path with the pending files.
+    migrate.assert_called_once()
+    assert migrate.call_args.args[0] == "proj-A"
+    assert migrate.call_args.args[1] == Path("/ws/checkouts/proj-A/feature-x")
+    assert migrate.call_args.args[2] == ["/ws/proj-A/a.png"]
+
+    # No prompt → no turn submitted, but the session (and its uploads) still exist.
+    m["submit"].assert_not_called()
+    assert resp.query_started is False
+    assert resp.upload_migration_errors is None
 
 
 async def test_spawn_materializes_deterministic_checkout_and_submits_worktree_turn(

@@ -19,9 +19,16 @@ from enum import Enum
 
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+from app.core.config import settings
 from app.db import database
 
 logger = logging.getLogger(__name__)
+
+# V2 Phase 4 (Q4): permission prompts persist as ``pending_interactions`` rows
+# of this kind under ``settings.v2_placement``, so any install answers them
+# relay-free. TTL is the durable form of the legacy 300s auto-deny (OD-2/Q4-5).
+PERMISSION_KIND = "permission"
+PERMISSION_TTL_SECONDS = 300
 
 
 class PermissionDecision(str, Enum):
@@ -187,6 +194,23 @@ class PermissionHandler:
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
         """
+        if settings.v2_placement:
+            return await self._request_permission_v2(
+                request_id=request_id,
+                session_id=session_id,
+                profile_id=profile_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                broadcast_func=broadcast_func,
+                tool_use_id=tool_use_id,
+                agent_id=agent_id,
+                title=title,
+                display_name=display_name,
+                description=description,
+                decision_reason=decision_reason,
+                blocked_path=blocked_path,
+            )
+
         # Check saved rules first
         rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
         if rule:
@@ -275,6 +299,480 @@ class PermissionHandler:
         else:
             return PermissionResultDeny(message="No response received")
 
+    # ------------------------------------------------------------------
+    # V2 Phase 4 (Q4) — pending_interactions-backed permission flow
+    #
+    # Under ``settings.v2_placement`` the durable ``pending_interactions`` row
+    # is the single source of truth: the executing runner blocks on it via
+    # ``interaction_wait.await_interaction`` while ANY install answers it
+    # directly against the shared table (no cloud_relay). The in-memory
+    # ``_pending_requests`` / ``_deferred`` dicts are NOT used on this path;
+    # ``_session_rules`` (a purely local convenience) still short-circuits
+    # future prompts on the executing runner exactly as before. All frontend
+    # WebSocket shapes are byte-identical to the legacy path.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_permission_payload(
+        request_id: str,
+        profile_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: Optional[str],
+        agent_id: Optional[str],
+        title: Optional[str],
+        display_name: Optional[str],
+        description: Optional[str],
+        decision_reason: Optional[str],
+        blocked_path: Optional[str],
+    ) -> Dict[str, Any]:
+        """Assemble the JSONB payload persisted on a permission interaction row.
+
+        Carries everything the answer/broadcast/rule-match paths need: the FE
+        ``request_id`` (matched Python-side, Q4-3), the rule-match keys
+        (``profile_id``/``tool_name``/``tool_input``), and the SDK enrichment
+        fields. ``profile_id`` is internal-only and never surfaced in a WS event.
+        """
+        payload: Dict[str, Any] = {
+            "request_id": request_id,
+            "profile_id": profile_id,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }
+        for key, value in (
+            ("tool_use_id", tool_use_id),
+            ("agent_id", agent_id),
+            ("title", title),
+            ("display_name", display_name),
+            ("description", description),
+            ("decision_reason", decision_reason),
+            ("blocked_path", blocked_path),
+        ):
+            if value is not None:
+                payload[key] = value
+        return payload
+
+    @staticmethod
+    def _v2_pending_permissions(session_id: str) -> List[Dict[str, Any]]:
+        """This session's pending, unexpired permission interaction rows."""
+        from app.db import interactions
+
+        return [
+            r
+            for r in interactions.get_pending_interactions(session_id)
+            if r.get("kind") == PERMISSION_KIND
+        ]
+
+    def _v2_pending_count(self, session_id: str) -> int:
+        return len(self._v2_pending_permissions(session_id))
+
+    def _payload_row_to_dict(self, row: Dict[str, Any], state: str) -> Dict[str, Any]:
+        """Serialize a permission interaction row to the legacy request dict
+        shape (matches :meth:`_request_to_dict`)."""
+        payload = row.get("payload") or {}
+        created = row.get("created_at")
+        if hasattr(created, "isoformat"):
+            created_at = created.isoformat()
+        elif created is not None:
+            created_at = str(created)
+        else:
+            created_at = ""
+        d: Dict[str, Any] = {
+            "session_id": row.get("session_id"),
+            "request_id": payload.get("request_id"),
+            "tool_name": payload.get("tool_name"),
+            "tool_input": payload.get("tool_input"),
+            "created_at": created_at,
+            "state": state,
+        }
+        for key in (
+            "tool_use_id",
+            "agent_id",
+            "title",
+            "display_name",
+            "description",
+            "decision_reason",
+            "blocked_path",
+        ):
+            if payload.get(key) is not None:
+                d[key] = payload[key]
+        return d
+
+    async def _request_permission_v2(
+        self,
+        request_id: str,
+        session_id: str,
+        profile_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        broadcast_func: "callable",
+        tool_use_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        title: Optional[str] = None,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        decision_reason: Optional[str] = None,
+        blocked_path: Optional[str] = None,
+    ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
+        """Table-backed request_permission (V2 Phase 4)."""
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        # Saved rules still short-circuit on the executing runner (identical to
+        # legacy — profile rules are shared-DB, session rules are local).
+        rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
+        if rule:
+            logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
+            if rule.decision == PermissionDecision.ALLOW:
+                return PermissionResultAllow(updated_input=tool_input)
+            else:
+                return PermissionResultDeny(message="Denied by saved rule")
+
+        payload = self._build_permission_payload(
+            request_id, profile_id, tool_name, tool_input, tool_use_id,
+            agent_id, title, display_name, description, decision_reason,
+            blocked_path,
+        )
+        row = await asyncio.to_thread(
+            interactions.create_interaction,
+            session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS,
+        )
+        interaction_id = row["id"]
+
+        # Queue position counts this session's pending permission rows (the row
+        # just created is included) — matches legacy len(_pending_requests).
+        queue_position = self._v2_pending_count(session_id)
+
+        # Broadcast the SAME permission_request event as legacy (transient
+        # request object, never registered in _pending_requests).
+        request = PermissionRequest(
+            request_id=request_id,
+            session_id=session_id,
+            profile_id=profile_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            agent_id=agent_id,
+            title=title,
+            display_name=display_name,
+            description=description,
+            decision_reason=decision_reason,
+            blocked_path=blocked_path,
+        )
+        await self._broadcast_permission_request(request, queue_position, broadcast_func)
+
+        # Notify watching mobile devices (verbatim from the legacy path).
+        try:
+            from app.services.push_notification import fire_and_forget_notify
+
+            fire_and_forget_notify(
+                title="Permission needed",
+                body=f"Approve {display_name or tool_name}?",
+                data={
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                },
+            )
+        except Exception:
+            pass
+
+        logger.debug(f"Permission request persisted (v2): {request_id} for {tool_name}")
+
+        # Block on the durable row: a peer install's answer wakes us via the
+        # gateway NOTIFY; a local answer wakes us in-process. The adapter also
+        # honours its own local expires_at deadline so a dead sweeper never
+        # wedges the turn (Q4-4).
+        result_row = await interaction_wait.await_interaction(
+            interaction_id, session_id, float(PERMISSION_TTL_SECONDS)
+        )
+
+        state = (result_row or {}).get("state")
+        if result_row is None or state in ("expired", "pending"):
+            # Timed out — durably expired, or the local deadline lapsed with the
+            # row still pending. Dismiss the modal + deny (legacy timeout arm).
+            try:
+                await broadcast_func({
+                    "type": "permission_timeout",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                })
+            except Exception:
+                pass
+            return PermissionResultDeny(message="Permission request timed out")
+        if state == "cancelled":
+            return PermissionResultDeny(message="Request cancelled")
+
+        answer = result_row.get("answer") or {}
+        # A14: a ``remember: "session"`` answered on ANY install stamps
+        # remember/pattern onto the shared row; replay it into THIS runner's local
+        # session rules (BEFORE returning the decision) so identical follow-up
+        # requests short-circuit via _check_rules. Idempotent, and a no-op unless
+        # a pattern rode along (profile-remember is DB-shared, needs no replay).
+        if answer.get("remember") == "session" and answer.get("pattern"):
+            payload_row = result_row.get("payload") or {}
+            self._add_session_rule_idempotent(
+                session_id,
+                payload_row.get("tool_name", ""),
+                answer.get("pattern"),
+                answer.get("decision", "allow"),
+            )
+        decision = answer.get("decision")
+        if decision == "defer":
+            return _DeferSentinel()
+        if decision == "allow" or answer.get("behavior") == "allow":
+            return PermissionResultAllow(
+                updated_input=answer.get("updatedInput", tool_input)
+            )
+        return PermissionResultDeny(
+            message=answer.get("message", "Permission denied")
+        )
+
+    async def _respond_v2(
+        self,
+        request_id: str,
+        session_id: str,
+        decision: Literal["allow", "deny", "defer"],
+        remember: Optional[Literal["none", "session", "profile"]],
+        pattern: Optional[str],
+        broadcast_func: Optional["callable"],
+        answered_by_device: Optional[str],
+    ) -> Dict[str, Any]:
+        """Table-backed respond (V2 Phase 4). Resolves against the shared row so
+        any install can answer relay-free (Q4-3/Q4-6)."""
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        row = next(
+            (
+                r
+                for r in self._v2_pending_permissions(session_id)
+                if (r.get("payload") or {}).get("request_id") == request_id
+            ),
+            None,
+        )
+        if row is None:
+            return {"error": "Request not found"}
+        payload = row.get("payload") or {}
+
+        # Defer (Q4-2, option a): answer THIS row {decision: defer}; the requeue
+        # path later mints a fresh pending row with the same request_id. The
+        # awaiting request_permission translates the answered-defer row to a
+        # _DeferSentinel, exactly as the legacy in-memory defer did.
+        if decision == "defer":
+            if not interactions.answer_interaction(
+                row["id"], {"decision": "defer"}, answered_by_device
+            ):
+                # A15: lost the TOCTOU — a concurrent responder already answered
+                # this row. A defer must not report success or broadcast when it
+                # did not actually resolve anything.
+                return {"error": "Request not found"}
+            interaction_wait.notify_changed(session_id)
+            if broadcast_func:
+                await broadcast_func({
+                    "type": "permission_queue_update",
+                    "session_id": session_id,
+                    "resolved_ids": [request_id],
+                    "deferred_ids": [request_id],
+                    "remaining_count": self._v2_pending_count(session_id),
+                })
+            return {
+                "resolved": True,
+                "deferred": True,
+                "auto_resolved_count": 0,
+                "auto_resolved_ids": [],
+            }
+
+        tool_input = payload.get("tool_input") or {}
+        if decision == "allow":
+            answer = {"decision": "allow", "behavior": "allow", "updatedInput": tool_input}
+        else:
+            answer = {"decision": "deny", "behavior": "deny", "message": "User denied permission"}
+        # A14: ride a session-remember hint on the shared answer JSONB so the
+        # EXECUTING runner (possibly a different install than the one answering)
+        # learns the rule and short-circuits identical follow-ups. Stamp BEFORE
+        # the guarded update so A15's False branch discards it with every other
+        # side effect. (profile rules are DB-persisted and already shared.)
+        if remember == "session":
+            answer["remember"] = "session"
+            answer["pattern"] = pattern
+        if not interactions.answer_interaction(row["id"], answer, answered_by_device):
+            # A15: lost the TOCTOU — a concurrent responder already answered this
+            # row, or it expired between the pending read and here. Report the
+            # not-resolved shape and leave NO side effects: no remember rule, no
+            # defer requeue, no wake.
+            return {"error": "Request not found"}
+        interaction_wait.notify_changed(session_id)
+
+        resolved_ids: List[str] = []
+        if remember and remember != "none":
+            profile_id = payload.get("profile_id") or ""
+            rule = PermissionRule(
+                id=f"rule-{datetime.now().timestamp()}",
+                session_id=session_id if remember == "session" else None,
+                profile_id=profile_id if remember == "profile" else None,
+                tool_name=payload.get("tool_name", ""),
+                tool_pattern=pattern,
+                decision=PermissionDecision(decision),
+            )
+            if remember == "session":
+                # Session rules are executing-runner-local (as in legacy); a
+                # rule created on a peer install does not reach the owner.
+                self._session_rules.setdefault(session_id, []).append(rule)
+            else:
+                database.add_permission_rule(
+                    profile_id=profile_id,
+                    tool_name=rule.tool_name,
+                    tool_pattern=rule.tool_pattern,
+                    decision=rule.decision.value,
+                )
+            resolved_ids = self._v2_resolve_matching(session_id, rule, answered_by_device)
+            if resolved_ids:
+                interaction_wait.notify_changed(session_id)
+                if broadcast_func:
+                    await broadcast_func({
+                        "type": "permission_queue_update",
+                        "session_id": session_id,
+                        "resolved_ids": resolved_ids,
+                        "remaining_count": self._v2_pending_count(session_id),
+                    })
+
+        return {
+            "resolved": True,
+            "auto_resolved_count": len(resolved_ids),
+            "auto_resolved_ids": resolved_ids,
+        }
+
+    def _v2_resolve_matching(
+        self,
+        session_id: str,
+        rule: PermissionRule,
+        answered_by_device: Optional[str],
+    ) -> List[str]:
+        """Answer every OTHER pending permission row matching ``rule`` (table
+        analogue of :meth:`_resolve_matching_requests`)."""
+        from app.db import interactions
+
+        resolved: List[str] = []
+        for r in self._v2_pending_permissions(session_id):
+            payload = r.get("payload") or {}
+            if not rule.matches(payload.get("tool_name", ""), payload.get("tool_input") or {}):
+                continue
+            if rule.decision == PermissionDecision.ALLOW:
+                answer = {
+                    "decision": "allow",
+                    "behavior": "allow",
+                    "updatedInput": payload.get("tool_input") or {},
+                }
+            else:
+                answer = {"decision": "deny", "behavior": "deny", "message": "Denied by rule"}
+            # A14: when the triggering rule is a session-remember (session_id set;
+            # profile rules leave it None), stamp the same hint onto each
+            # batch-resolved row so the executing runner installs the rule when
+            # that row's waiter wakes — matching the direct-answer stamping.
+            if rule.session_id is not None:
+                answer["remember"] = "session"
+                answer["pattern"] = rule.tool_pattern
+            if interactions.answer_interaction(r["id"], answer, answered_by_device):
+                rid = payload.get("request_id")
+                if rid is not None:
+                    resolved.append(rid)
+        return resolved
+
+    def _add_session_rule_idempotent(
+        self,
+        session_id: str,
+        tool_name: str,
+        pattern: Optional[str],
+        decision: str,
+    ) -> None:
+        """Install a session-scoped rule locally if an identical one is absent (A14).
+
+        A ``remember: "session"`` answer stamps its rule hint into the shared
+        interaction row; the EXECUTING runner — which need not be the install that
+        answered — replays it here so identical follow-up requests short-circuit in
+        :meth:`_check_rules`. Idempotent: repeated waiter wakes add no duplicate.
+        The rule shape matches the local one stored by the legacy/respond path.
+        """
+        rules = self._session_rules.setdefault(session_id, [])
+        for existing in rules:
+            if (
+                existing.tool_name == tool_name
+                and existing.tool_pattern == pattern
+                and existing.decision.value == decision
+            ):
+                return
+        rules.append(
+            PermissionRule(
+                id=f"rule-{datetime.now().timestamp()}",
+                session_id=session_id,
+                profile_id=None,
+                tool_name=tool_name,
+                tool_pattern=pattern,
+                decision=PermissionDecision(decision),
+            )
+        )
+
+    async def _requeue_deferred_v2(
+        self,
+        session_id: str,
+        broadcast_func: Optional["callable"],
+    ) -> List[str]:
+        """Table-backed requeue (V2 Phase 4, Q4-2): mint a fresh pending row
+        (same request_id, fresh TTL) for each not-yet-requeued deferred row."""
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        requeued_ids: List[str] = []
+        new_payloads: List[Dict[str, Any]] = []
+        for r in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
+            answer = r.get("answer") or {}
+            if answer.get("decision") != "defer" or answer.get("requeued"):
+                continue
+            payload = r.get("payload") or {}
+            interactions.mark_interaction_requeued(r["id"])
+            interactions.create_interaction(
+                session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS
+            )
+            rid = payload.get("request_id")
+            if rid is not None:
+                requeued_ids.append(rid)
+            new_payloads.append(payload)
+
+        if requeued_ids:
+            interaction_wait.notify_changed(session_id)
+
+        # Re-broadcast each requeued request + the queue update (mirrors the
+        # legacy requeue_deferred broadcasts exactly).
+        if broadcast_func:
+            for payload in new_payloads:
+                queue_position = self._v2_pending_count(session_id)
+                request = PermissionRequest(
+                    request_id=payload.get("request_id", ""),
+                    session_id=session_id,
+                    profile_id=payload.get("profile_id", ""),
+                    tool_name=payload.get("tool_name", ""),
+                    tool_input=payload.get("tool_input") or {},
+                    tool_use_id=payload.get("tool_use_id"),
+                    agent_id=payload.get("agent_id"),
+                    title=payload.get("title"),
+                    display_name=payload.get("display_name"),
+                    description=payload.get("description"),
+                    decision_reason=payload.get("decision_reason"),
+                    blocked_path=payload.get("blocked_path"),
+                )
+                await self._broadcast_permission_request(request, queue_position, broadcast_func)
+
+            if requeued_ids:
+                await broadcast_func({
+                    "type": "permission_queue_update",
+                    "session_id": session_id,
+                    "requeued_ids": requeued_ids,
+                    "remaining_count": self._v2_pending_count(session_id),
+                })
+
+        return requeued_ids
+
     async def _broadcast_permission_request(
         self,
         request: "PermissionRequest",
@@ -316,7 +814,8 @@ class PermissionHandler:
         decision: Literal["allow", "deny", "defer"],
         remember: Optional[Literal["none", "session", "profile"]] = None,
         pattern: Optional[str] = None,
-        broadcast_func: Optional[callable] = None
+        broadcast_func: Optional[callable] = None,
+        answered_by_device: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Respond to a permission request.
@@ -331,10 +830,23 @@ class PermissionHandler:
             remember: Scope to remember the decision (ignored when decision == "defer")
             pattern: Optional pattern for the rule (ignored when decision == "defer")
             broadcast_func: Function to broadcast queue updates
+            answered_by_device: Device id of the answering install (V2 Phase 4,
+                Q4-6). Ignored on the legacy path.
 
         Returns:
             Info about resolved requests
         """
+        if settings.v2_placement:
+            return await self._respond_v2(
+                request_id=request_id,
+                session_id=session_id,
+                decision=decision,
+                remember=remember,
+                pattern=pattern,
+                broadcast_func=broadcast_func,
+                answered_by_device=answered_by_device,
+            )
+
         async with self._lock:
             if session_id not in self._pending_requests:
                 return {"error": "Session not found"}
@@ -491,6 +1003,12 @@ class PermissionHandler:
 
     def get_pending_requests(self, session_id: str) -> List[Dict[str, Any]]:
         """Get all pending permission requests for a session"""
+        if settings.v2_placement:
+            return [
+                self._payload_row_to_dict(row, "pending")
+                for row in self._v2_pending_permissions(session_id)
+            ]
+
         if session_id not in self._pending_requests:
             return []
 
@@ -501,6 +1019,17 @@ class PermissionHandler:
 
     def get_deferred_requests(self, session_id: str) -> List[Dict[str, Any]]:
         """Get all deferred permission requests for a session (Slice B)"""
+        if settings.v2_placement:
+            from app.db import interactions
+
+            out: List[Dict[str, Any]] = []
+            for row in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
+                answer = row.get("answer") or {}
+                if answer.get("decision") != "defer" or answer.get("requeued"):
+                    continue
+                out.append(self._payload_row_to_dict(row, "deferred"))
+            return out
+
         return [
             self._request_to_dict(req)
             for req in self._deferred.get(session_id, {}).values()
@@ -542,6 +1071,9 @@ class PermissionHandler:
 
         Returns the list of requeued request_ids.
         """
+        if settings.v2_placement:
+            return await self._requeue_deferred_v2(session_id, broadcast_func)
+
         requeued_ids: List[str] = []
 
         async with self._lock:
@@ -579,10 +1111,31 @@ class PermissionHandler:
 
     def get_queue_count(self, session_id: str) -> int:
         """Get count of pending requests for a session"""
+        if settings.v2_placement:
+            return self._v2_pending_count(session_id)
         return len(self._pending_requests.get(session_id, {}))
 
     async def cancel_request(self, request_id: str, session_id: str) -> bool:
         """Cancel a pending permission request"""
+        if settings.v2_placement:
+            from app.core import interaction_wait
+            from app.db import interactions
+
+            row = next(
+                (
+                    r
+                    for r in self._v2_pending_permissions(session_id)
+                    if (r.get("payload") or {}).get("request_id") == request_id
+                ),
+                None,
+            )
+            if row is None:
+                return False
+            cancelled = interactions.cancel_interaction(row["id"])
+            if cancelled:
+                interaction_wait.notify_changed(session_id)
+            return cancelled
+
         async with self._lock:
             if session_id not in self._pending_requests:
                 return False
@@ -600,6 +1153,19 @@ class PermissionHandler:
 
     async def cancel_all_requests(self, session_id: str) -> int:
         """Cancel all pending requests for a session"""
+        if settings.v2_placement:
+            from app.core import interaction_wait
+            from app.db import interactions
+
+            rows = self._v2_pending_permissions(session_id)
+            count = 0
+            for row in rows:
+                if interactions.cancel_interaction(row["id"]):
+                    count += 1
+            if count:
+                interaction_wait.notify_changed(session_id)
+            return count
+
         async with self._lock:
             if session_id not in self._pending_requests:
                 return 0

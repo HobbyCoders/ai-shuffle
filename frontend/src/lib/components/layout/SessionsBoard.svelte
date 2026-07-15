@@ -12,7 +12,7 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, Link2, Unlink, Check, CalendarClock, Trash2 } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2 } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -830,6 +830,18 @@
 						<span class="row-device-name">{session.device_name || 'This device'}</span>
 					</span>
 				{/if}
+				{#if session.degraded}
+					<!-- V2 Q7: a queued turn with no capable runner online. Pure
+					     informational — read-only until an owning device returns.
+					     Warning tokens; visually distinct from the awaiting-input pill. -->
+					<span
+						class="row-degraded"
+						title="This session has queued work but no device is online to run it — read-only until one returns"
+					>
+						<MonitorOff size={11} strokeWidth={1.6} />
+						<span class="row-degraded-label">Waiting — device offline</span>
+					</span>
+				{/if}
 				{#if showProject}
 					<span class="row-proj">{projectName(session)}</span>
 				{/if}
@@ -1366,6 +1378,28 @@
 		background: color-mix(in oklch, var(--muted) 45%, transparent);
 	}
 	.row-device :global(svg) { flex-shrink: 0; }
+
+	/* V2 Q7 degraded chip — queued work, no runner online. Warning tokens, but a
+	   static outlined pill (no pulse) so it reads as an informational state, not
+	   the action-needed awaiting-input pill. */
+	.row-degraded {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+		max-width: 180px;
+		padding: 1px 7px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in oklch, var(--warning) 40%, transparent);
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+	}
+	.row-degraded :global(svg) { flex-shrink: 0; }
+	.row-degraded-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 	.row-device-name {
 		overflow: hidden;
 		text-overflow: ellipsis;

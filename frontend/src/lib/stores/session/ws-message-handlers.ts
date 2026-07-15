@@ -505,10 +505,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
-			// Cloud sessions run on a second install: the backend acks a forwarded
-			// prompt with 'cloud_forwarded' (no local stream). Treat it exactly
-			// like 'start' — the SSE feed mirrors the remote stream.
-			case 'cloud_forwarded':
 			case 'start': {
 				if (!data.session_id) break;
 				const sessionId = data.session_id as string;

@@ -138,3 +138,97 @@ def test_sync_worktrees_imports_detached(manager, tmp_path):
     db.create_worktree.assert_called_once()
     kwargs = db.create_worktree.call_args.kwargs
     assert kwargs["branch_name"] == f"detached-{DETACHED_SHA[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# V2 placement checkouts (tracked in the ``checkouts`` table) must NEVER be
+# imported as legacy ``worktrees`` rows by either sync path.
+# ---------------------------------------------------------------------------
+
+from app.db import checkouts as checkouts_db
+from app.db import projects_v2
+
+
+@pytest.fixture
+def v2_project(_auto_db_shim):
+    """A real project_v2 row so ``checkouts`` FK inserts satisfy the constraint."""
+    return projects_v2.upsert_project("git:repo", name="My Cool Repo")
+
+
+@pytest.fixture
+def workspace_root(tmp_path, monkeypatch):
+    """Redirect the runner's workspace root (hence V2 checkout root) to tmp_path."""
+    from app.core import config
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", root)
+    return root
+
+
+def _listing_with_external(tmp_path: Path, ext_path: Path):
+    """git listing: main worktree + one external (non-detached) worktree that
+    exists on disk at ``ext_path``."""
+    ext_path.mkdir(parents=True, exist_ok=True)
+    return [
+        {"path": str(tmp_path), "branch": "main", "head": "1" * 40,
+         "is_main": True, "is_bare": False, "is_detached": False},
+        {"path": str(ext_path), "branch": "feature-x", "head": "2" * 40,
+         "is_main": False, "is_bare": False, "is_detached": False},
+    ]
+
+
+def _stub_db(db, tmp_path):
+    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
+    db.get_git_repository_by_project.return_value = {"id": "repo-1", "default_branch": "main"}
+    db.get_active_worktrees_for_repository.return_value = []
+    db.get_worktrees_for_repository.return_value = []
+
+
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+def test_v2_checkout_with_active_row_is_not_imported(manager, tmp_path, workspace_root, v2_project, sync_fn):
+    mgr, db = manager
+    _stub_db(db, tmp_path)
+    # A V2 checkout materialized at {workspace}/checkouts/{slug}/{branch} with an
+    # ACTIVE checkouts row at that exact path.
+    checkout_path = workspace_root / "checkouts" / "my-slug" / "feature-x"
+    checkouts_db.upsert_checkout(v2_project["id"], "runnerA", str(checkout_path))
+    mgr.git_service.list_worktrees.return_value = _listing_with_external(tmp_path, checkout_path)
+
+    getattr(mgr, sync_fn)("proj-1")
+
+    # The V2 checkout must NOT become a legacy worktrees row.
+    db.create_worktree.assert_not_called()
+
+
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+def test_dir_under_checkout_root_without_row_is_not_imported(manager, tmp_path, workspace_root, sync_fn):
+    mgr, db = manager
+    _stub_db(db, tmp_path)
+    # Mid-materialization race: the dir exists under the checkout root but its
+    # checkouts row has not committed yet (no active row for this path).
+    checkout_path = workspace_root / "checkouts" / "my-slug" / "racing-branch"
+    mgr.git_service.list_worktrees.return_value = _listing_with_external(tmp_path, checkout_path)
+
+    getattr(mgr, sync_fn)("proj-1")
+
+    db.create_worktree.assert_not_called()
+
+
+@pytest.mark.parametrize("sync_fn", ["sync_worktrees_for_project", "sync_worktrees"])
+def test_genuine_external_worktree_outside_checkout_root_still_imports(
+    manager, tmp_path, workspace_root, v2_project, sync_fn
+):
+    mgr, db = manager
+    _stub_db(db, tmp_path)
+    # An unrelated ACTIVE checkout row exists, but the git worktree lives OUTSIDE
+    # the checkout root → it is still a genuine external worktree and imports.
+    checkouts_db.upsert_checkout(
+        v2_project["id"], "runnerA", str(workspace_root / "checkouts" / "other" / "b")
+    )
+    ext_path = tmp_path / "external_wt"
+    mgr.git_service.list_worktrees.return_value = _listing_with_external(tmp_path, ext_path)
+
+    getattr(mgr, sync_fn)("proj-1")
+
+    db.create_worktree.assert_called_once()
+    assert db.create_worktree.call_args.kwargs["branch_name"] == "feature-x"
