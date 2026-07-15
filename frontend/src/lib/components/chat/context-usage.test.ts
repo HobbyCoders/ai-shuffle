@@ -185,6 +185,51 @@ describe('mapSdkContextUsage', () => {
 		expect(b.rows[0].barPercent).toBe(0);
 		expect(b.totalPercent).toBe(0);
 	});
+
+	it('folds the autocompact buffer into the total and recomputes the percentage', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'System prompt', tokens: 4_000, color: '#111' },
+					{ name: 'MCP tools', tokens: 20_000, color: '#222' },
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+					{ name: 'Autocompact buffer', tokens: 33_000, color: '#555', isDeferred: true },
+					{ name: 'Free space', tokens: 67_000, color: '#444' },
+				],
+				totalTokens: 127_600,
+				maxTokens: 200_000,
+				percentage: 64,
+			})
+		);
+		expect(b.totalUsed).toBe(160_600);
+		expect(b.totalPercent).toBeCloseTo(80.3, 5);
+		expect(b.severity).toBe('warning');
+		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeDefined();
+	});
+
+	it('falls back to the raw total/percentage when no autocompact category is present', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [{ name: 'Messages', tokens: 76_000, color: '#333' }],
+				totalTokens: 76_000,
+				maxTokens: 200_000,
+				percentage: 38,
+			})
+		);
+		expect(b.totalUsed).toBe(76_000);
+		expect(b.totalPercent).toBeCloseTo(38, 5);
+
+		const withoutMax = mapSdkContextUsage(
+			sdk({
+				categories: [{ name: 'Messages', tokens: 76_000, color: '#333' }],
+				totalTokens: 76_000,
+				maxTokens: 0,
+				percentage: 38,
+			})
+		);
+		expect(withoutMax.totalUsed).toBe(76_000);
+		expect(withoutMax.totalPercent).toBe(38);
+	});
 });
 
 describe('decideBreakdownRefresh', () => {

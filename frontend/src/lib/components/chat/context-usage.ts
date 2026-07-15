@@ -190,15 +190,23 @@ export function decideBreakdownRefresh(
  * popover already renders, so the component can swap the estimate for the real
  * per-category breakdown without any layout change.
  *
- * - total: usage.totalTokens / usage.maxTokens, percentage clamped 0–100, with
- *   the existing severity thresholds.
+ * - total: the SDK excludes the "Autocompact buffer" category from both
+ *   usage.totalTokens and usage.percentage, so folding it back in here means
+ *   the total matches effective usage (buffer + free space + total = max).
+ *   Percentage is recomputed client-side from the folded total rather than
+ *   trusting usage.percentage, with the existing severity thresholds applied
+ *   on top.
  * - rows: one per category (label = name, bar relative to maxTokens). Deferred
  *   categories get a "deferred" subline. Zero/negative-token categories are
- *   dropped EXCEPT "Free space", which is always kept when present.
+ *   dropped EXCEPT "Free space", which is always kept when present. The
+ *   "Autocompact buffer" row (if present) still renders as its own row.
  */
 export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	const max = usage.maxTokens;
-	const totalPercent = Math.min(Math.max(usage.percentage, 0), 100);
+	const autocompact = usage.categories.find((c) => c.name.toLowerCase() === 'autocompact buffer');
+	const totalUsed = usage.totalTokens + Math.max(autocompact?.tokens ?? 0, 0);
+	const totalPercent =
+		max > 0 ? barPercent(totalUsed, max) : Math.min(Math.max(usage.percentage, 0), 100);
 
 	const rows: ContextBreakdownRow[] = usage.categories
 		.filter((c) => c.tokens > 0 || c.name === 'Free space')
@@ -211,7 +219,7 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		}));
 
 	return {
-		totalUsed: usage.totalTokens,
+		totalUsed,
 		contextMax: max,
 		totalPercent,
 		severity: usageSeverity(totalPercent),
