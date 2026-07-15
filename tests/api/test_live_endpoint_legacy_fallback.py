@@ -44,7 +44,6 @@ def _owner_path_patches(session, lifecycle=None):
     return [
         patch("app.api.sessions.require_session", new=AsyncMock(return_value=session)),
         patch("app.api.sessions.enrich_session_worktree_meta", new=MagicMock(return_value={})),
-        patch("app.core.cloud_relay.is_remote_session", new=MagicMock(return_value=False)),
         patch("app.core.lifecycle_state.compute",
               new=AsyncMock(return_value=lifecycle or _lifecycle_stub())),
         patch("app.core.streaming_status.has_active_run", new=MagicMock(return_value=False)),

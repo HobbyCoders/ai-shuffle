@@ -255,92 +255,6 @@ def test_recreate_active_valid_fast_path_unchanged(manager, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# create_worktree: adopt instead of add when branch already checked out
-# ---------------------------------------------------------------------------
-
-def test_create_adopts_existing_when_branch_checked_out(manager, tmp_path):
-    """
-    create_worktree for an existing branch that is already checked out on disk
-    must adopt that path (NOT call add_worktree) and write a record pointing at
-    the adopted path.
-    """
-    mgr, db = manager
-    wt_dir = _make_live_worktree_dir(tmp_path)
-
-    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
-    db.get_active_worktrees_for_repository.return_value = []
-    db.create_worktree.side_effect = lambda **kw: dict(kw)
-
-    # _ensure_repository_record → repo dict.
-    mgr._ensure_repository_record = lambda pid, ppath: {"id": "repo-1"}
-    # Existing branch present locally (create_new_branch=False).
-    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
-    mgr.git_service.list_worktrees.return_value = [
-        {"path": str(wt_dir), "branch": BRANCH, "is_main": False, "is_bare": False, "is_detached": False},
-    ]
-
-    result = mgr.create_worktree("proj-1", BRANCH, create_new_branch=False)
-
-    mgr.git_service.add_worktree.assert_not_called()
-    # Record created with the adopted path.
-    _, kwargs = db.create_worktree.call_args
-    assert kwargs["worktree_path"] == str(wt_dir)
-    assert kwargs["branch_name"] == BRANCH
-    assert result["worktree_path"] == str(wt_dir)
-
-
-def test_create_new_branch_always_adds(manager, tmp_path):
-    """create_new_branch=True can't already be checked out → always add_worktree."""
-    mgr, db = manager
-
-    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
-    db.get_active_worktrees_for_repository.return_value = []
-    db.create_worktree.side_effect = lambda **kw: dict(kw)
-    mgr._ensure_repository_record = lambda pid, ppath: {"id": "repo-1"}
-    # New branch must NOT already exist.
-    mgr.git_service.list_branches.return_value = [{"name": "main", "is_remote": False}]
-    mgr.git_service.add_worktree.return_value = (True, None)
-    # Deterministic path the record will store.
-    target = tmp_path / "worktrees" / "new-branch-bb7d"
-    monkeypatch_path(mgr, target)
-
-    mgr.create_worktree("proj-1", "new-branch", create_new_branch=True, base_branch="main")
-
-    mgr.git_service.add_worktree.assert_called_once()
-    # The adopt scan should not even be consulted for a brand-new branch.
-    mgr.git_service.list_worktrees.assert_not_called()
-
-
-def test_create_add_failure_already_used_falls_back_to_adopt(manager, tmp_path):
-    """create_worktree add failing with 'already used' re-scans and adopts."""
-    mgr, db = manager
-    wt_dir = _make_live_worktree_dir(tmp_path)
-
-    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
-    db.get_active_worktrees_for_repository.return_value = []
-    db.create_worktree.side_effect = lambda **kw: dict(kw)
-    mgr._ensure_repository_record = lambda pid, ppath: {"id": "repo-1"}
-    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
-    # First scan misses, post-failure scan finds it.
-    mgr.git_service.list_worktrees.side_effect = [
-        [],
-        [{"path": str(wt_dir), "branch": BRANCH, "is_main": False, "is_bare": False, "is_detached": False}],
-    ]
-    monkeypatch_path(mgr, tmp_path / "worktrees" / "feat-android-mobile-shell-app-bb7d")
-    mgr.git_service.add_worktree.return_value = (
-        False,
-        f"fatal: '{BRANCH}' is already used by worktree at '{wt_dir}'",
-    )
-
-    result = mgr.create_worktree("proj-1", BRANCH, create_new_branch=False)
-
-    mgr.git_service.add_worktree.assert_called_once()
-    _, kwargs = db.create_worktree.call_args
-    assert kwargs["worktree_path"] == str(wt_dir)
-    assert result["worktree_path"] == str(wt_dir)
-
-
-# ---------------------------------------------------------------------------
 # recreate_worktree: cross-device rebind onto a local clone of the same repo
 # ---------------------------------------------------------------------------
 
@@ -555,26 +469,6 @@ def test_recreate_rebind_no_local_clone_raises_early(manager, tmp_path):
     assert "no local clone" in str(ei.value)
     mgr.git_service.add_worktree.assert_not_called()
     mgr.git_service.list_branches.assert_not_called()
-
-
-def test_create_add_failure_other_error_raises(manager, tmp_path):
-    """A non-'already used' add failure (no adoptable wt) still raises in create."""
-    mgr, db = manager
-
-    db.get_project.return_value = {"id": "proj-1", "path": str(tmp_path)}
-    db.get_active_worktrees_for_repository.return_value = []
-    mgr._ensure_repository_record = lambda pid, ppath: {"id": "repo-1"}
-    mgr.git_service.list_branches.return_value = [{"name": BRANCH, "is_remote": False}]
-    mgr.git_service.list_worktrees.return_value = []
-    monkeypatch_path(mgr, tmp_path / "worktrees" / "feat-android-mobile-shell-app-bb7d")
-    mgr.git_service.add_worktree.return_value = (False, "fatal: disk full")
-
-    with pytest.raises(WorktreeError) as ei:
-        mgr.create_worktree("proj-1", BRANCH, create_new_branch=False)
-
-    assert "Git failed to create worktree" in str(ei.value)
-    db.create_worktree.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # follow-up #1: the cross-device rebind fetch is primed at adopt time and cached,

@@ -1403,7 +1403,6 @@ from app.db.sessions import (  # noqa: F401
     delete_session,
     toggle_session_favorite,
     set_session_favorite,
-    set_session_cloud_branch,
     set_session_parked_task_kind,
     adopt_session,
     set_session_project,

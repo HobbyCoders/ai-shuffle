@@ -56,7 +56,7 @@ def mock_database():
 
     The sessions router is split across several modules (`sessions`,
     `sessions_helpers`, `sessions_export`, `sessions_fork`,
-    `sessions_worktree`, `sessions_cloud`), each with its own `database`
+    `sessions_worktree`), each with its own `database`
     import. Patch all of them to the same mock so helpers like
     `require_session` and the fork/worktree endpoints resolve through the
     mock instead of a real pool.
@@ -65,8 +65,7 @@ def mock_database():
             patch("app.api.sessions_helpers.database", mock_db), \
             patch("app.api.sessions_export.database", mock_db), \
             patch("app.api.sessions_fork.database", mock_db), \
-            patch("app.api.sessions_worktree.database", mock_db), \
-            patch("app.api.sessions_cloud.database", mock_db):
+            patch("app.api.sessions_worktree.database", mock_db):
         # Set up default returns
         mock_db.get_session_tags.return_value = []
         mock_db.session_has_forks.return_value = False
@@ -91,7 +90,6 @@ def mock_api_user():
             patch("app.api.sessions_helpers.get_api_user_from_request", new=mock), \
             patch("app.api.sessions_fork.get_api_user_from_request", new=mock), \
             patch("app.api.sessions_worktree.get_api_user_from_request", new=mock), \
-            patch("app.api.sessions_cloud.get_api_user_from_request", new=mock), \
             patch("app.api.sessions_export.get_api_user_from_request", new=mock):
         mock.return_value = None  # Default to admin (no api user)
         yield mock

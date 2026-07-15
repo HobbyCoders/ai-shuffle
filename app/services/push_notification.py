@@ -520,23 +520,15 @@ def fire_and_forget_notify(
     endpoint. Schedules the broadcast as a background task and swallows/logs all
     errors. No-op if called outside a running event loop.
 
-    On a cluster (multiple installs sharing one database) the event is also
-    fanned out to every other online install, so a phone connected to *any*
-    install in the cluster is notified about activity on this one. Single-install
-    deployments have no peers, so the fan-out is a no-op.
+    Device subscriptions live in the shared ``mobile_devices`` table, so a single
+    ``deliver_local_notification`` reaches every registered phone cluster-wide —
+    no cross-install HTTP fan-out is needed (that legacy relay was removed with
+    the V2 placement cutover).
     """
     import asyncio
 
     async def _run() -> None:
-        # Local devices first — the phone may be connected to this very install.
         await deliver_local_notification(title, body, data)
-        # Then fan out to other cluster installs (no-op when there are none).
-        try:
-            from app.core.cloud_relay import fanout_mobile_notify
-
-            await fanout_mobile_notify(title, body, data)
-        except Exception as e:  # noqa: BLE001 — fan-out must never break local
-            logger.debug(f"Cluster mobile-notify fan-out failed: {e}")
 
     try:
         loop = asyncio.get_running_loop()

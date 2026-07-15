@@ -16,7 +16,6 @@ type Rows = Parameters<typeof resolveTargetInstance>[1];
 const active = (over: Partial<Active> = {}): Active => ({
 	sessionId: null,
 	executionMode: 'local',
-	cloudTargetInstanceId: null,
 	...over,
 });
 
@@ -41,7 +40,7 @@ describe('resolveTargetInstance', () => {
 
 	it('an active session takes precedence over stale compose fields', () => {
 		const rows: Rows = [{ id: 's1', instance_id: null }];
-		const a = active({ sessionId: 's1', cloudTargetInstanceId: 'worker' });
+		const a = active({ sessionId: 's1' });
 		// Viewing an existing local session → self, regardless of stale compose state.
 		expect(resolveTargetInstance(a, rows)).toBeNull();
 	});

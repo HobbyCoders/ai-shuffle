@@ -77,10 +77,6 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		scrollTop: 250,
 		streamStartTime: 123456,
 		executionMode: 'local',
-		cloudTargetInstanceId: null,
-		cloudWorktree: false,
-		cloudBranch: null,
-		cloudCreateNewBranch: false,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: true,
@@ -204,7 +200,6 @@ describe('session-switcher · switchSession isolation', () => {
 			selectedWorktreeBranch: null,
 			worktreeMode: 'new',
 			worktreeDeleted: false,
-			cloudBranch: null,
 		});
 
 		await switcher.switchSession('session-B');

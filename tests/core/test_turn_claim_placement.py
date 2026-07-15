@@ -538,33 +538,6 @@ def _sent(handler, ftype):
     ]
 
 
-async def test_flag_off_query_takes_legacy_relay_path(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-    _seed_session("s-rel", placement_val=None, instance_id=OTHER)
-
-    relay = AsyncMock(name="relay_message")
-    with _handler_env(), \
-            patch("app.core.cloud_relay.is_remote_session", return_value=True), \
-            patch("app.core.cloud_relay.relay_message", new=relay):
-        handler = _make_handler()
-        await handler.handle_query({
-            "prompt": "hello",
-            "session_id": "s-rel",
-            "profile": "claude-code",
-            "project": None,
-        })
-
-    # Legacy dispatch, verbatim: relayed (sentinel stripped), forwarded ack,
-    # NOTHING enqueued locally.
-    relay.assert_awaited_once()
-    assert relay.await_args.args[1] == "hello"
-    assert relay.await_args.args[2] is None  # 'claude-code' stripped
-    assert _sent(handler, "cloud_forwarded") == [
-        {"type": "cloud_forwarded", "session_id": "s-rel"}
-    ]
-    assert turns_db.get_queued_turns("s-rel") == []
-
-
 async def test_flag_off_claim_once_is_inert(mock_db, monkeypatch):
     monkeypatch.setattr(settings, "v2_placement", False)
 
@@ -587,9 +560,7 @@ async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
     monkeypatch.setattr(
         "app.core.turn_claim.notify_turns_changed", lambda sid: notifies.append(sid)
     )
-    relay = AsyncMock(name="relay_message")
-    with _handler_env(), \
-            patch("app.core.cloud_relay.relay_message", new=relay):
+    with _handler_env():
         handler = _make_handler()
         await handler.handle_query({
             "prompt": "run remotely",
@@ -598,7 +569,6 @@ async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
             "project": None,
         })
 
-    relay.assert_not_awaited()  # the relay dispatch is fully replaced
     queued = turns_db.get_queued_turns("s-place")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "run remotely")]
     assert queued[0]["profile_id"] is None  # sentinel never crosses installs
@@ -627,9 +597,7 @@ async def test_flag_on_own_instance_null_placement_query_runs_local(
     monkeypatch.setattr(
         "app.core.turn_claim.notify_turns_changed", lambda sid: notifies.append(sid)
     )
-    relay = AsyncMock(name="relay_message")
-    with _handler_env(), \
-            patch("app.core.cloud_relay.relay_message", new=relay):
+    with _handler_env():
         handler = _make_handler()
         await handler.handle_query({
             "prompt": "run here",
@@ -638,7 +606,6 @@ async def test_flag_on_own_instance_null_placement_query_runs_local(
             "project": None,
         })
 
-    relay.assert_not_awaited()
     queued = turns_db.get_queued_turns("s-own")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "run here")]
     assert queued[0]["profile_id"] == "claude-code"  # local turns keep the sentinel

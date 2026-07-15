@@ -18,7 +18,6 @@ from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
 from app.db import database
-from app.core import cloud_relay
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access, format_file_size, api_error_handler
 
@@ -555,12 +554,6 @@ async def upload_file(
     is uploaded to the worktree's working directory instead of the main project path.
     If worktree_id is provided directly (e.g. before a session exists), it is used
     as a fallback to resolve the worktree.
-
-    In cluster mode a session may be OWNED by a different install (shared DB,
-    separate disks). Writing the attachment to *this* install's disk would leave
-    the agent — which runs on the owning install — with an unreadable path. So
-    when the session is remote we relay the bytes to the owning install and
-    return the owner-rooted paths it reports.
     """
     # Check Content-Length header for early rejection
     content_length = request.headers.get("content-length")
@@ -581,40 +574,6 @@ async def upload_file(
     # Read the bytes (enforcing the size limit) before deciding local vs relay so
     # oversized files are rejected here and never carried over the peer channel.
     content = await _read_upload_within_limit(file)
-
-    # Cluster mode: relay to the install that owns the session so the file lands
-    # where the agent can read it (and the message references the owner's path).
-    if session_id:
-        session = database.get_session(session_id)
-        if session and cloud_relay.is_remote_session(session):
-            try:
-                return await cloud_relay.relay_project_upload(
-                    session,
-                    content=content,
-                    filename=file.filename or "upload",
-                    path=path,
-                    worktree_id=worktree_id,
-                )
-            except cloud_relay.InstallOffline as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        "The device that owns this session is offline, so the "
-                        "attachment can't be delivered to where the agent runs. "
-                        "Upload from that device, or use 'Resume here' to take "
-                        "over the session first."
-                    ),
-                ) from e
-            except cloud_relay.CloudRelayError as e:
-                code = (
-                    e.status_code
-                    if e.status_code and 400 <= e.status_code < 500
-                    else status.HTTP_502_BAD_GATEWAY
-                )
-                raise HTTPException(
-                    status_code=code,
-                    detail=e.detail or "Failed to relay the upload to the owning device.",
-                ) from e
 
     async with api_error_handler("save uploaded file"):
         return _perform_project_upload(

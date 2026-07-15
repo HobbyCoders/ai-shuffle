@@ -63,7 +63,6 @@ interface LiveSnapshot {
 		worktree_branch?: string | null;
 		worktree_deleted?: boolean;
 		execution_mode?: string;
-		cloud_branch?: string | null;
 	};
 }
 
@@ -177,7 +176,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
 			worktreeDeleted: state.worktreeDeleted,
-			cloudBranch: state.cloudBranch,
 		};
 	}
 
@@ -428,9 +426,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
-			// No-worktree cloud branch: restore from ephemeral so the pill shows it
-			// immediately on switch; the next /live poll refreshes it authoritatively.
-			cloudBranch: ephemeral?.cloudBranch ?? null,
 			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 
@@ -506,9 +501,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			}
 			if (meta.execution_mode !== undefined) {
 				patch.executionMode = meta.execution_mode as ExecutionMode;
-			}
-			if (meta.cloud_branch !== undefined && meta.cloud_branch !== null) {
-				patch.cloudBranch = meta.cloud_branch;
 			}
 		}
 

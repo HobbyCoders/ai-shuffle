@@ -34,35 +34,6 @@ from app.api.ws_utils import safe_ws_send, WSPayloadEncodeError
 logger = logging.getLogger(__name__)
 
 
-def _normalize_relay_remember(remember: Any) -> Optional[str]:
-    """Coerce a `remember` value to the strict cluster enum before relaying.
-
-    The local ``permission_handler.respond`` accepts a loose ``remember`` (a
-    boolean from legacy callers), but the owning install's cluster endpoint
-    validates it against Literal 'none'|'session'|'profile' and 422s otherwise.
-    Match local respond() semantics EXACTLY so a relayed decision behaves the
-    same as a local one:
-
-    * ``None`` / ``'none'`` (or any falsy) → ``'none'`` (no rule created).
-      respond() short-circuits on ``if remember and remember != "none"``.
-    * ``'session'`` / ``'profile'`` → passed through (valid enum strings).
-    * boolean ``True`` (or any truthy non-enum value) → ``'profile'``.
-      In respond(), a truthy non-"session" value enters the rule branch and,
-      not matching ``remember == "session"``, falls to the profile-persist
-      else — i.e. legacy ``remember=True`` means "remember for this profile".
-    """
-    if remember is None:
-        return None
-    if remember in ("none", "session", "profile"):
-        return remember  # already a valid enum string
-    if not remember:
-        # falsy (False, "", 0) → local respond() creates no rule
-        return "none"
-    # truthy but not an enum string (legacy remember=True) → profile scope
-    return "profile"
-
-
-
 # v2 core (Phase 2 A6b): the command layer + durable turns table the WS handlers
 # delegate to. The v2 turns path is now unconditional (the legacy pipeline and
 # its gating flag are gone). Lightweight modules (no import cycle: turn_manager
@@ -539,82 +510,49 @@ class ChatWebSocketHandler:
 
         # Where does this session EXECUTE?
         #
-        # V2 placement (Phase 4, flag ON): resolve via sessions.placement. A
-        # session placed on ANOTHER runner still takes the LOCAL enqueue path
-        # below — the durable queued turn (submitted with ``no_kick``) IS the
-        # whole hand-off; the owning runner's turn_claim loop picks it up via
-        # the NOTIFY wake (or its 5s poll) and rendering rides the shared SSE
-        # feed exactly like a local turn. No HTTP dispatch (OD-1).
-        #
-        # Flag OFF: the legacy cloud-relay dispatch runs byte-identically.
-        # Headless handlers do neither (websocket is None) — a headless query
-        # always runs locally.
+        # V2 placement: resolve via sessions.placement. A session placed on
+        # ANOTHER runner still takes the LOCAL enqueue path below — the durable
+        # queued turn (submitted with ``no_kick``) IS the whole hand-off; the
+        # owning runner's turn_claim loop picks it up via the NOTIFY wake (or
+        # its 5s poll) and rendering rides the shared SSE feed exactly like a
+        # local turn. No HTTP dispatch (OD-1). Headless handlers do neither
+        # (websocket is None) — a headless query always runs locally.
         placed_remote = False
         if session_id and self.websocket is not None:
             cloud_sess = await run_sync(database.get_session, session_id)
-            if settings.v2_placement:
-                if cloud_sess:
-                    from app.core import placement as placement_mod
-                    decision = None
-                    try:
-                        decision = await run_sync(
-                            placement_mod.resolve_placement, cloud_sess
-                        )
-                    except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
-                        logger.warning(
-                            f"Placement resolution failed for {session_id} — "
-                            f"treating as local", exc_info=True,
-                        )
-                    if decision is not None and decision.kind == "none":
-                        # Honest degraded state (hazard 3): the pinned runner is
-                        # offline / no capable runner exists. The session stays
-                        # readable; sending resumes when the runner returns.
-                        await self.send_json({
-                            "type": "error",
-                            "message": "No capable device online for this session "
-                                       "— its runner is offline or lacks the "
-                                       "required capabilities.",
-                        })
-                        return
-                    if (
-                        decision is not None
-                        and decision.kind == "runner"
-                        and decision.runner_id != settings.effective_instance_id
-                    ):
-                        placed_remote = True
-            else:
-                # Cross-install (cluster) session: owned by another install on
-                # the shared DB. Forward the follow-up prompt there; its /live
-                # stream is mirrored back via the poller.
-                from app.core import cloud_relay
-                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                    if session_id != self.current_session_id:
-                        if self.current_session_id:
-                            await sync_engine.unregister_device(self.device_id, self.current_session_id)
-                        await sync_engine.register_device(self.device_id, session_id, self.websocket)
-                        self.current_session_id = session_id
-                    try:
-                        # 'claude-code' is this handler's "no explicit profile"
-                        # default, not a real profile row — never send it across
-                        # the relay (the owner would fail get_profile on it).
-                        await cloud_relay.relay_message(
-                            cloud_sess, prompt,
-                            profile_id if profile_id != "claude-code" else None,
-                            overrides,
-                        )
-                        await self.send_json({"type": "cloud_forwarded", "session_id": session_id})
-                    except cloud_relay.InstallOffline as e:
-                        await self.send_json({
-                            "type": "error",
-                            "message": f"Device offline — cannot send: {e}",
-                        })
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"Cluster relay_message failed for {session_id}: {e}")
-                        await self.send_json({
-                            "type": "error",
-                            "message": f"Could not reach owning device: {e}",
-                        })
+            # V2 placement: resolve via sessions.placement. A session placed on
+            # ANOTHER runner still takes the LOCAL enqueue path below — the
+            # durable queued turn IS the whole hand-off (PR-B collapsed the
+            # legacy cloud-relay dispatch unconditionally).
+            if cloud_sess:
+                from app.core import placement as placement_mod
+                decision = None
+                try:
+                    decision = await run_sync(
+                        placement_mod.resolve_placement, cloud_sess
+                    )
+                except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
+                    logger.warning(
+                        f"Placement resolution failed for {session_id} — "
+                        f"treating as local", exc_info=True,
+                    )
+                if decision is not None and decision.kind == "none":
+                    # Honest degraded state (hazard 3): the pinned runner is
+                    # offline / no capable runner exists. The session stays
+                    # readable; sending resumes when the runner returns.
+                    await self.send_json({
+                        "type": "error",
+                        "message": "No capable device online for this session "
+                                   "— its runner is offline or lacks the "
+                                   "required capabilities.",
+                    })
                     return
+                if (
+                    decision is not None
+                    and decision.kind == "runner"
+                    and decision.runner_id != settings.effective_instance_id
+                ):
+                    placed_remote = True
 
         # Create or get session
         if not session_id:
@@ -853,34 +791,10 @@ class ChatWebSocketHandler:
 
         session_id = data.get("session_id") or self.current_session_id
         if session_id:
-            # Cross-install (cluster) session: relay the interrupt to the
-            # owning install. A silent skip when offline is fine — there is
-            # nothing running here to stop. PARITY: like the closure, this
-            # returns BEFORE the _stopped_sessions latch add, so a remote stop
-            # never latches locally. Headless handlers never relay
-            # (websocket is None).
-            #
-            # V2 placement (flag ON) drops the relay entirely: the durable
+            # V2 placement drops any relay entirely: the durable
             # running->interrupting flip below is visible to whichever runner
             # executes the turn (its turn_claim observe pass drives the live
             # runtime), so stop needs no HTTP hop.
-            if self.websocket is not None and not settings.v2_placement:
-                cloud_sess = await run_sync(database.get_session, session_id)
-                from app.core import cloud_relay
-                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                    try:
-                        await cloud_relay.relay_interrupt(cloud_sess)
-                    except cloud_relay.InstallOffline as e:
-                        logger.debug(f"Cluster interrupt skipped (offline) for {session_id}: {e}")
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"Cluster relay_interrupt failed for {session_id}: {e}")
-                    # NOTE: the `stop_background` opt-in is NOT propagated to
-                    # remote-owned sessions — the relay protocol carries only the
-                    # bare interrupt. The safe default (keep background agents) is
-                    # preserved on the owning install; the "also stop them" opt-in
-                    # is a known cross-install gap tracked for a follow-up.
-                    return
-
             from app.core.query_engine import stop_all_background_tasks
             from app.core.cli_interrupt_patch import is_patch_active
 
@@ -907,7 +821,7 @@ class ChatWebSocketHandler:
             flipped = turn_manager.interrupt(
                 session_id, "stop", stop_background=stop_background
             )
-            if settings.v2_placement and flipped is not None:
+            if flipped is not None:
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor
@@ -936,36 +850,11 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": "No active session"})
             return
 
-        # Cross-install (cluster) session: relay the interrupt to the owner,
-        # then confirm so the frontend sends the replacement query (also
-        # relayed). Headless handlers never relay (websocket is None).
-        #
-        # V2 placement (flag ON) drops the relay: the durable interrupt flip +
-        # the drain-wait below both act on the SHARED turns row, so they are
+        # V2 placement drops any relay: the durable interrupt flip + the
+        # drain-wait below both act on the SHARED turns row, so they are
         # cross-runner-correct as-is (the owner's observe pass drives its
         # runtime; our poll sees the row settle/drain).
-        if self.websocket is not None and not settings.v2_placement:
-            cloud_sess = await run_sync(database.get_session, session_id)
-            from app.core import cloud_relay
-            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                try:
-                    await cloud_relay.relay_interrupt(cloud_sess)
-                    await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
-                except cloud_relay.InstallOffline as e:
-                    await self.send_json({
-                        "type": "interrupt_failed",
-                        "session_id": session_id,
-                        "message": f"Device offline: {e}",
-                    })
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Cluster interrupt_for_query failed for {session_id}: {e}")
-                    await self.send_json({
-                        "type": "interrupt_failed",
-                        "session_id": session_id,
-                        "message": f"Could not reach owning device: {e}",
-                    })
-                return
-
+        #
         # v2 turns cutover (two-phase send-now). Flip the live turn
         # running->interrupting with mode=send_now and fire the executor (SDK
         # interrupt + escalation in the runtime), then wait — with today's drain
@@ -977,7 +866,7 @@ class ChatWebSocketHandler:
         # the frontend's replacement query is unblocked.
         try:
             flipped = turn_manager.interrupt(session_id, "send_now")
-            if settings.v2_placement and flipped is not None:
+            if flipped is not None:
                 # Cross-runner wake (see handle_stop) — latency only.
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
@@ -1297,118 +1186,26 @@ class ChatWebSocketHandler:
             eff_remember = remember if decision != "defer" else None
             eff_pattern = pattern if decision != "defer" else None
 
-            if settings.v2_placement:
-                # V2 Phase 4: the prompt is a shared ``pending_interactions``
-                # row — ANY install answers it directly against the table, no
-                # cloud_relay. The owning runner's awaiting SDK callback wakes
-                # via NOTIFY (or in-process fast path when we ARE the owner).
-                # Stamp the answering device (Q4-6). Ack uses the local shape.
-                result = await permission_handler.respond(
-                    request_id=request_id,
-                    session_id=response_session_id,
-                    decision=decision,
-                    remember=eff_remember,
-                    pattern=eff_pattern,
-                    broadcast_func=self.send_json,
-                    answered_by_device=self.device_id,
-                )
-                logger.debug(f"Permission response processed (v2): {result}")
-                await self.send_json({
-                    "type": "permission_response_ack",
-                    "session_id": response_session_id,
-                    "request_id": request_id,
-                    "result": result,
-                })
-                return
-
-            # Protocol asymmetry guard: the local respond() tolerates loose
-            # `remember` values (a boolean, per legacy callers) but the OWNER's
-            # cluster endpoint validates `remember` against the strict Literal
-            # 'none'|'session'|'profile' (hardened in 061dc947), so a boolean
-            # forwarded verbatim 422s and — without this — collapses to the
-            # RETRYABLE 'relay_offline' ack, making the frontend re-send the
-            # same rejected payload forever. Normalize to the enum string here,
-            # matching local respond() semantics exactly: falsy → no rule
-            # ('none'); truthy-but-not-an-enum-string → the profile scope (a
-            # legacy remember=True persists a profile-level rule, since
-            # respond() enters the rule branch, isn't "session", and so falls
-            # to the profile-persist else). Real enum strings pass through.
-            eff_remember = _normalize_relay_remember(eff_remember)
-
-            # Cross-install session: the pending permission request and the
-            # coroutine awaiting it live on the OWNING install, so responding
-            # locally would just log "Request not found" and the owner's prompt
-            # would sit until its 300s auto-deny. Relay the decision to the owner
-            # to unblock its waiter. On failure the ack carries WHY, so the
-            # frontend can tell a retryable delivery failure ('relay_offline' —
-            # keep the modal so the decision isn't lost) from an authoritative
-            # "no such pending request" ('not_pending' — dismiss the stale
-            # modal). Headless handlers never relay (websocket is None).
-            fail_reason = None
-            cloud_sess = None
-            if self.websocket is not None:
-                cloud_sess = await run_sync(database.get_session, response_session_id)
-            from app.core import cloud_relay
-            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                success = False
-                try:
-                    success = await cloud_relay.relay_permission_response(
-                        cloud_sess,
-                        request_id=request_id,
-                        decision=decision,
-                        remember=eff_remember,
-                        pattern=eff_pattern,
-                    )
-                    if not success:
-                        fail_reason = "not_pending"
-                except cloud_relay.InstallOffline as e:
-                    fail_reason = "relay_offline"
-                    logger.debug(f"Cluster relay_permission_response offline for {response_session_id}: {e}")
-                except cloud_relay.CloudRelayError as e:
-                    # The peer was REACHED but rejected the request. A 4xx is an
-                    # authoritative, non-retryable verdict (schema rejection /
-                    # gone request) — surfacing it as 'relay_offline' would make
-                    # the frontend re-send the same doomed payload forever. Only
-                    # a 5xx (or an unknown status) is retryable → 'relay_offline'.
-                    status = getattr(e, "status_code", None)
-                    if status is not None and 400 <= status < 500:
-                        fail_reason = "invalid_response"
-                    else:
-                        fail_reason = "relay_offline"
-                    logger.warning(
-                        f"Cluster relay_permission_response rejected for "
-                        f"{response_session_id} (status={status}): {e}"
-                    )
-                except Exception as e:  # noqa: BLE001
-                    fail_reason = "relay_offline"
-                    logger.warning(f"Cluster relay_permission_response failed for {response_session_id}: {e}")
-                result = success
-            else:
-                result = await permission_handler.respond(
-                    request_id=request_id,
-                    session_id=response_session_id,
-                    decision=decision,
-                    remember=eff_remember,
-                    pattern=eff_pattern,
-                    broadcast_func=self.send_json
-                )
-            logger.debug(f"Permission response processed: {result}")
-
-            # Send confirmation back. Mirrors user_question_response_ack: a
-            # remote relay reports success + optional reason; a local respond
-            # returns its richer result dict for backward compatibility.
-            ack = {
+            # The prompt is a shared ``pending_interactions`` row — ANY install
+            # answers it directly against the table, no cloud_relay. The owning
+            # runner's awaiting SDK callback wakes via NOTIFY (or in-process fast
+            # path when we ARE the owner). Stamp the answering device (Q4-6).
+            result = await permission_handler.respond(
+                request_id=request_id,
+                session_id=response_session_id,
+                decision=decision,
+                remember=eff_remember,
+                pattern=eff_pattern,
+                broadcast_func=self.send_json,
+                answered_by_device=self.device_id,
+            )
+            logger.debug(f"Permission response processed (v2): {result}")
+            await self.send_json({
                 "type": "permission_response_ack",
                 "session_id": response_session_id,
                 "request_id": request_id,
-            }
-            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                ack["success"] = bool(result)
-                if fail_reason:
-                    ack["reason"] = fail_reason
-            else:
-                ack["result"] = result
-            await self.send_json(ack)
+                "result": result,
+            })
         else:
             await self.send_json({
                 "type": "error",
@@ -1422,57 +1219,15 @@ class ChatWebSocketHandler:
     async def handle_get_pending_permissions(self, data: dict) -> None:
         """Handle 'get_pending_permissions' message type."""
         if self.current_session_id:
-            if settings.v2_placement:
-                # V2 Phase 4: pending/deferred are read straight from the shared
-                # ``pending_interactions`` table, which every install sees — no
-                # relay, so the reply is always authoritative (never `stale`).
-                await self.send_json({
-                    "type": "pending_permissions",
-                    "session_id": self.current_session_id,
-                    "pending": permission_handler.get_pending_requests(self.current_session_id),
-                    "deferred": permission_handler.get_deferred_requests(self.current_session_id),
-                })
-                return
-
-            # Cross-install session: the pending permission request lives in the
-            # OWNING install's in-memory handler, so the local handler is always
-            # empty here. Relay the read to the owner. A SUCCESSFUL relay (even
-            # with zero requests) is authoritative and replaces the local set.
-            # But a FAILED relay (owner offline / error) leaves us with the local
-            # empty set, which is NOT authoritative — replying with bare empty
-            # lists would let the frontend wipe a locally-open permission modal on
-            # every reconnect/switch resync. So on relay failure we flag the reply
-            # `stale` and keep what we have; a stale-aware frontend leaves its
-            # modal untouched. Mirrors handle_get_pending_questions. Headless
-            # handlers never relay (websocket is None).
-            pending = permission_handler.get_pending_requests(self.current_session_id)
-            deferred = permission_handler.get_deferred_requests(self.current_session_id)
-            stale = False
-            if self.websocket is not None:
-                cloud_sess = await run_sync(database.get_session, self.current_session_id)
-                from app.core import cloud_relay
-                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                    try:
-                        payload = await cloud_relay.relay_get_pending_permissions(cloud_sess)
-                        pending = payload.get("pending", [])
-                        deferred = payload.get("deferred", [])
-                    except cloud_relay.InstallOffline as e:
-                        stale = True
-                        logger.debug(f"Cluster relay_get_pending_permissions offline for {self.current_session_id}: {e}")
-                    except Exception as e:  # noqa: BLE001
-                        stale = True
-                        logger.warning(f"Cluster relay_get_pending_permissions failed for {self.current_session_id}: {e}")
-            reply = {
+            # Pending/deferred are read straight from the shared
+            # ``pending_interactions`` table, which every install sees — no
+            # relay, so the reply is always authoritative (never `stale`).
+            await self.send_json({
                 "type": "pending_permissions",
                 "session_id": self.current_session_id,
-                "pending": pending,
-                "deferred": deferred,
-            }
-            # Only mark a FAILED relay. A success (even empty) omits the key so
-            # old clients keep clearing stale modals.
-            if stale:
-                reply["stale"] = True
-            await self.send_json(reply)
+                "pending": permission_handler.get_pending_requests(self.current_session_id),
+                "deferred": permission_handler.get_deferred_requests(self.current_session_id),
+            })
 
     # ------------------------------------------------------------------
     # handle_requeue_deferred_permissions
@@ -1510,74 +1265,25 @@ class ChatWebSocketHandler:
         answers = data.get("answers", {})
 
         if response_session_id and request_id and answers:
-            if settings.v2_placement:
-                # V2 Phase 4: the question is a shared ``pending_interactions``
-                # row — answer it directly against the table (no cloud_relay);
-                # the owning runner's awaiting SDK callback wakes via NOTIFY.
-                # Stamp the answering device (Q4-6).
-                result = await user_question_handler.respond(
-                    request_id=request_id,
-                    session_id=response_session_id,
-                    answers=answers,
-                    answered_by_device=self.device_id,
-                )
-                logger.debug(f"User question response processed (v2): {request_id} -> {result}")
-                ack = {
-                    "type": "user_question_response_ack",
-                    "session_id": response_session_id,
-                    "request_id": request_id,
-                    "success": result,
-                }
-                if not result:
-                    ack["reason"] = "not_pending"
-                await self.send_json(ack)
-                return
-
-            # Cross-install session: the pending question and its awaiting
-            # coroutine live on the OWNING install, so responding locally would
-            # just log "no pending question". Relay the answer to the owner to
-            # unblock its waiter. On failure the ack carries WHY, so the
-            # frontend can tell a retryable delivery failure ('relay_offline' —
-            # keep the modal so the answer isn't lost) from an authoritative
-            # "no such pending question" ('not_pending' — dismiss the stale
-            # modal). Headless handlers never relay (websocket is None).
-            fail_reason = None
-            cloud_sess = None
-            if self.websocket is not None:
-                cloud_sess = await run_sync(database.get_session, response_session_id)
-            from app.core import cloud_relay
-            if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                result = False
-                try:
-                    result = await cloud_relay.relay_question_response(
-                        cloud_sess, request_id, answers
-                    )
-                    if not result:
-                        fail_reason = "not_pending"
-                except cloud_relay.InstallOffline as e:
-                    fail_reason = "relay_offline"
-                    logger.debug(f"Cluster relay_question_response offline for {response_session_id}: {e}")
-                except Exception as e:  # noqa: BLE001
-                    fail_reason = "relay_offline"
-                    logger.warning(f"Cluster relay_question_response failed for {response_session_id}: {e}")
-            else:
-                result = await user_question_handler.respond(
-                    request_id=request_id,
-                    session_id=response_session_id,
-                    answers=answers
-                )
-                if not result:
-                    fail_reason = "not_pending"
-            logger.debug(f"User question response processed: {request_id} -> {result}")
-
+            # The question is a shared ``pending_interactions`` row — answer it
+            # directly against the table (no cloud_relay); the owning runner's
+            # awaiting SDK callback wakes via NOTIFY. Stamp the answering device
+            # (Q4-6).
+            result = await user_question_handler.respond(
+                request_id=request_id,
+                session_id=response_session_id,
+                answers=answers,
+                answered_by_device=self.device_id,
+            )
+            logger.debug(f"User question response processed (v2): {request_id} -> {result}")
             ack = {
                 "type": "user_question_response_ack",
                 "session_id": response_session_id,
                 "request_id": request_id,
-                "success": result
+                "success": result,
             }
-            if fail_reason:
-                ack["reason"] = fail_reason
+            if not result:
+                ack["reason"] = "not_pending"
             await self.send_json(ack)
         else:
             await self.send_json({
@@ -1592,53 +1298,14 @@ class ChatWebSocketHandler:
     async def handle_get_pending_questions(self, data: dict) -> None:
         """Handle 'get_pending_questions' message type."""
         if self.current_session_id:
-            if settings.v2_placement:
-                # V2 Phase 4: pending questions are read straight from the shared
-                # ``pending_interactions`` table, which every install sees — no
-                # relay, so the reply is always authoritative (never `stale`).
-                await self.send_json({
-                    "type": "pending_questions",
-                    "session_id": self.current_session_id,
-                    "questions": user_question_handler.get_pending_questions(self.current_session_id),
-                })
-                return
-
-            # Cross-install session: the pending question lives in the OWNING
-            # install's in-memory handler, so the local handler is always
-            # empty here. Relay the read to the owner. A SUCCESSFUL relay
-            # (even with zero questions) is authoritative and must clear any
-            # stale modal. But a FAILED relay (owner offline / error) leaves
-            # us with the local empty set, which is NOT authoritative —
-            # replying with a bare empty list would let the frontend wipe a
-            # locally-open question modal (and its in-progress answer) on
-            # every reconnect/switch resync. So on relay failure we flag the
-            # reply `stale` and keep the questions we have; the frontend
-            # leaves its modal untouched when it sees the marker. Headless
-            # handlers never relay (websocket is None).
-            pending = user_question_handler.get_pending_questions(self.current_session_id)
-            stale = False
-            if self.websocket is not None:
-                cloud_sess = await run_sync(database.get_session, self.current_session_id)
-                from app.core import cloud_relay
-                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                    try:
-                        pending = await cloud_relay.relay_get_pending_questions(cloud_sess)
-                    except cloud_relay.InstallOffline as e:
-                        stale = True
-                        logger.debug(f"Cluster relay_get_pending_questions offline for {self.current_session_id}: {e}")
-                    except Exception as e:  # noqa: BLE001
-                        stale = True
-                        logger.warning(f"Cluster relay_get_pending_questions failed for {self.current_session_id}: {e}")
-            reply = {
+            # Pending questions are read straight from the shared
+            # ``pending_interactions`` table, which every install sees — no
+            # relay, so the reply is always authoritative (never `stale`).
+            await self.send_json({
                 "type": "pending_questions",
                 "session_id": self.current_session_id,
-                "questions": pending
-            }
-            # Only mark a FAILED relay. A success (even empty) omits the key
-            # so old clients keep clearing stale modals.
-            if stale:
-                reply["stale"] = True
-            await self.send_json(reply)
+                "questions": user_question_handler.get_pending_questions(self.current_session_id),
+            })
 
     # ------------------------------------------------------------------
     # handle_tabs_update
@@ -1700,76 +1367,40 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "No session for queue"})
             return
 
-        # Cross-install (cloud) session: it runs on the owning install, where
-        # the worktree/working dir live. Relay the queue op there — it stores
-        # the message in the shared queue and drains it on the owner when
-        # idle. Draining here would try to run the query against a worktree
-        # this install does not have (the original "cloud mode queue" error).
-        # The queue lives in the shared DB, so we read it back to update this
-        # device's queue UI immediately (and to reconcile away the frontend's
-        # optimistic entry on a relay failure). PARITY: returns BEFORE the
-        # _stopped_sessions.discard below — a remote queue op never touches
-        # the local latch. Headless handlers never relay (websocket is None).
-        # V2 placement (flag ON): the durable queued turn IS the hand-off (see
+        # V2 placement: the durable queued turn IS the hand-off (see
         # handle_message) — enqueue locally with no kick and wake the owner's
-        # claim loop. Flag OFF: legacy relay, byte-identical.
+        # claim loop. A session placed on ANOTHER runner still takes the LOCAL
+        # enqueue path below (PR-B collapsed the legacy cloud-relay dispatch
+        # unconditionally). Headless handlers never place remotely.
         placed_remote = False
         if self.websocket is not None:
             cloud_sess = await run_sync(database.get_session, session_id)
-            if settings.v2_placement:
-                if cloud_sess:
-                    from app.core import placement as placement_mod
-                    decision = None
-                    try:
-                        decision = await run_sync(
-                            placement_mod.resolve_placement, cloud_sess
-                        )
-                    except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
-                        logger.warning(
-                            f"Placement resolution failed for {session_id} — "
-                            f"treating as local", exc_info=True,
-                        )
-                    if decision is not None and decision.kind == "none":
-                        await self.send_json({
-                            "type": "error",
-                            "message": "No capable device online for this session "
-                                       "— its runner is offline or lacks the "
-                                       "required capabilities.",
-                        })
-                        return
-                    if (
-                        decision is not None
-                        and decision.kind == "runner"
-                        and decision.runner_id != settings.effective_instance_id
-                    ):
-                        placed_remote = True
-            else:
-                from app.core import cloud_relay
-                if cloud_sess and cloud_relay.is_remote_session(cloud_sess):
-                    relay_error: Optional[str] = None
-                    try:
-                        # Strip the 'claude-code' no-profile sentinel here too —
-                        # the queued row's profile drives the owner-side drain.
-                        await cloud_relay.relay_queue_message(
-                            cloud_sess, content,
-                            profile_id if profile_id != "claude-code" else None,
-                            project_id,
-                        )
-                    except cloud_relay.InstallOffline as e:
-                        relay_error = f"Device offline — cannot queue: {e}"
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"Cluster relay_queue_message failed for {session_id}: {e}")
-                        relay_error = f"Could not reach owning device: {e}"
-                    queue = await run_sync(_v2_queue_view, session_id)
+            if cloud_sess:
+                from app.core import placement as placement_mod
+                decision = None
+                try:
+                    decision = await run_sync(
+                        placement_mod.resolve_placement, cloud_sess
+                    )
+                except Exception:  # noqa: BLE001 — resolver trouble ⇒ run local
+                    logger.warning(
+                        f"Placement resolution failed for {session_id} — "
+                        f"treating as local", exc_info=True,
+                    )
+                if decision is not None and decision.kind == "none":
                     await self.send_json({
-                        "type": "sync",
-                        "event_type": "queue_updated",
-                        "session_id": session_id,
-                        "data": {"queued_messages": queue},
+                        "type": "error",
+                        "message": "No capable device online for this session "
+                                   "— its runner is offline or lacks the "
+                                   "required capabilities.",
                     })
-                    if relay_error:
-                        await self.send_json({"type": "error", "message": relay_error})
                     return
+                if (
+                    decision is not None
+                    and decision.kind == "runner"
+                    and decision.runner_id != settings.effective_instance_id
+                ):
+                    placed_remote = True
 
         # v2 turns cutover: enqueue a durable ``source=queue`` turn instead of a
         # ``queued_messages`` row. ``submit`` kicks the scheduler, which starts it

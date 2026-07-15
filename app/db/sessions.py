@@ -582,24 +582,6 @@ def update_session(
     return get_session(session_id)
 
 
-def set_session_cloud_branch(session_id: str, cloud_branch: Optional[str]) -> bool:
-    """Record the branch a cloud (no-worktree) session runs on.
-
-    Persisted by the primary right after cloud intake so the branch the worker
-    checked out survives reloads and can be shown in the UI. Returns True if a
-    row was updated (the shared-DB session row created by the worker). A no-op
-    miss (rowcount 0) is harmless — e.g. on a non-shared database.
-    """
-    _ph = ph()
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"UPDATE sessions SET cloud_branch = {_ph} WHERE id = {_ph}",
-            (cloud_branch, session_id),
-        )
-        return cursor.rowcount > 0
-
-
 def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     """Re-point a session's owning install to ``instance_id`` (cross-device adopt).
 

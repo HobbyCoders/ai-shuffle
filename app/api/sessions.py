@@ -110,11 +110,6 @@ from app.api.sessions_worktree import (  # noqa: F401 — re-exports
     create_session_with_worktree,
 )
 
-from app.api.sessions_cloud import (  # noqa: F401 — re-exports
-    cloud_router,
-    create_cloud_session,
-)
-
 # ---------------------------------------------------------------------------
 # Router setup — include sub-routers so all endpoints are served
 # ---------------------------------------------------------------------------
@@ -122,7 +117,6 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
-router.include_router(cloud_router)
 
 
 # ============================================================================
@@ -788,26 +782,6 @@ async def _legacy_db_messages(session_id: str) -> list:
     return messages
 
 
-def _describe_relay_error(err: Exception) -> str:
-    """Map a live-relay failure to a short, human-readable, secret-free reason.
-
-    Used to stamp ``session_meta.relay_error`` when the owning install is
-    registry-online but the relay itself fails, so the UI can explain WHY control
-    is unavailable. Never includes URLs, secrets, or raw peer bodies — just a
-    coarse category derived from the error's ``status_code`` when present.
-    (InstallOffline is handled by the caller; this maps the peer-error and
-    transport-failure CloudRelayError cases.)
-    """
-    status = getattr(err, "status_code", None)
-    if status in (401, 403):
-        return "authentication rejected by device"
-    if status is not None:
-        return f"device returned an error ({status})"
-    # No HTTP status → transport-level failure (timeout / connection refused) or a
-    # non-JSON body from a proxy sitting in front of the peer.
-    return "device is unreachable"
-
-
 def _reconcile_subagent_status(store_messages: list, active_tasks: list) -> None:
     """Force ``agentStatus = "running"`` on store-loaded sub-agent cards whose
     ``toolId`` matches a still-running registry task.
@@ -900,70 +874,6 @@ async def get_live_session(
     # is on, the same way the flags above are attached to every path.
     v2_stream = bool(session.get("v2_stream"))
 
-    # Cross-install session: owned by another install on the shared DB. History
-    # is already in the shared DB, so there is ALWAYS something to show. When the
-    # owning install is reachable we relay its live stream (fully controllable);
-    # when it is offline/view-only we fall through to serve the persisted history
-    # flagged view-only, so the session opens with a "device offline" badge
-    # instead of an unopenable error / 503 poll spam.
-    from app.core import cloud_relay
-    remote_unreachable = False
-    relay_error: Optional[str] = None
-    if cloud_relay.is_remote_session(session):
-        try:
-            code, data = await cloud_relay.relay_live(session, 0)
-        except cloud_relay.InstallOffline as e:
-            # Owner is offline/unregistered/view-only per the registry — a clean,
-            # expected "not reachable" state. The message is already user-safe
-            # (device name only, no URLs/secrets). Degrade to read-only history.
-            logger.debug(
-                "Cluster live unavailable for %s: %s — serving shared-DB history",
-                session_id, e,
-            )
-            remote_unreachable = True
-            relay_error = str(e)
-        except cloud_relay.CloudRelayError as e:
-            # Owner is registry-online but the relay itself failed: a peer HTTP
-            # error (auth mismatch, 5xx), a non-JSON body, or a connect/read
-            # timeout wrapped as a transport error. Degrade to read-only history
-            # rather than 503 so the chat stays openable, and surface a short,
-            # secret-free reason so the UI can say WHY control is unavailable.
-            logger.debug(
-                "Cluster live relay failed for %s: %s — serving shared-DB history",
-                session_id, e,
-            )
-            remote_unreachable = True
-            relay_error = _describe_relay_error(e)
-        except Exception as e:  # noqa: BLE001
-            # Belt-and-suspenders: any UNEXPECTED relay failure (bad JSON, DB
-            # hiccup reading the registry/secret, etc.) must NOT 500 the load.
-            # Cross-install history lives in the shared DB, so we can always fall
-            # back to read-only rather than leave the chat unopenable.
-            logger.warning(
-                "Unexpected cluster live error for %s: %s — serving shared-DB history",
-                session_id, e,
-            )
-            remote_unreachable = True
-            relay_error = "unexpected error reaching device"
-        else:
-            if code == 304 or data is None:
-                return Response(status_code=304)
-            # Live relay succeeded: the device is online and controllable.
-            meta = data.get("session_meta") or {}
-            meta["execution_mode"] = "cloud"
-            meta["device_online"] = True
-            meta["controllable"] = True
-            if session.get("title"):
-                meta.setdefault("title", session.get("title"))
-            # Surface the branch the worker runs on. cloud+worktree sessions carry
-            # it in the relayed worktree_branch; for no-worktree cloud, fall back to
-            # the branch persisted on the shared-DB row at intake (cloud_branch).
-            cloud_branch = session.get("cloud_branch")
-            if cloud_branch and not meta.get("worktree_branch"):
-                meta["cloud_branch"] = cloud_branch
-            data["session_meta"] = meta
-            return data
-
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.
     session_meta = {}
@@ -981,26 +891,6 @@ async def get_live_session(
         session_meta["worktree_branch"] = wt_meta["worktree_branch"]
         session_meta["worktree_deleted"] = wt_meta["worktree_deleted"]
         session_meta["execution_mode"] = wt_meta["execution_mode"]
-
-    # No-worktree cloud branch persisted at intake — surfaced so the UI can show
-    # which branch the session runs on even when served from shared-DB history
-    # (e.g. the owning device is offline). cloud+worktree uses worktree_branch.
-    cloud_branch = session.get("cloud_branch")
-    if cloud_branch and not session_meta.get("worktree_branch"):
-        session_meta["cloud_branch"] = cloud_branch
-
-    # Cross-install session served from local history because the owner is
-    # unreachable: flag it view-only so the UI shows a "device offline" badge and
-    # disables sending instead of erroring the load.
-    if remote_unreachable:
-        session_meta["execution_mode"] = "cloud"
-        session_meta["device_online"] = False
-        session_meta["controllable"] = False
-        # Short, secret-free reason WHY the owning device couldn't be reached, so
-        # the UI can say "Could not reach <device> — showing read-only history
-        # (<reason>)" instead of the ambiguous plain "Device offline — view only".
-        if relay_error:
-            session_meta["relay_error"] = relay_error
 
     # V2: no in-memory live overlay — the persistent loader chain below is the
     # single transcript source; live render deltas ride the event feed (SSE).

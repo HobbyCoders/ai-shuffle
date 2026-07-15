@@ -907,8 +907,6 @@ class TestLiveActiveTasks:
         fake_session = {"id": session_id, "title": "T"}
         with patch.object(
             sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
-        ), patch(
-            "app.core.cloud_relay.is_remote_session", return_value=False
         ):
             return await sessions_api.get_live_session(
                 request=object(),

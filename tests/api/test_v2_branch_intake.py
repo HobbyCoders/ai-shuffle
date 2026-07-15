@@ -78,11 +78,6 @@ def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/featu
     submit = MagicMock(return_value="turn-w")
     monkeypatch.setattr(turn_manager, "submit", submit)
 
-    # A worktree row must NEVER be created on the v2 path.
-    import app.core.worktree_manager as wm
-    create_wt = MagicMock(side_effect=AssertionError("legacy worktree row created!"))
-    monkeypatch.setattr(wm.worktree_manager, "create_worktree_session", create_wt)
-
     return {
         "pv2": pv2,
         "resolve_pv2": resolve_pv2,
@@ -90,7 +85,6 @@ def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/featu
         "create_session": create_session,
         "set_session_branch": set_session_branch,
         "submit": submit,
-        "create_worktree_session": create_wt,
     }
 
 
@@ -120,9 +114,6 @@ async def test_create_with_branch_persists_branch_and_no_worktree_row(monkeypatc
     sb_args = m["set_session_branch"].call_args.args
     assert sb_args[1] == "feature/x"
     assert sb_args[2] == "pv2-abc123"
-
-    # No legacy worktrees row was created (mock would have raised).
-    m["create_worktree_session"].assert_not_called()
 
     # Response reports branch mode with a NULL worktree_id.
     assert resp.worktree_id is None
@@ -302,10 +293,7 @@ async def test_missing_branch_non_new_raises_409_with_branch_message(monkeypatch
 
 async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
     """``create_session_with_worktree`` unconditionally routes to
-    ``_create_v2_branch_session`` (after the project-exists / access checks);
-    the legacy ``worktree_manager.create_worktree_session`` is never called."""
-    import app.core.worktree_manager as wm
-
+    ``_create_v2_branch_session`` (after the project-exists / access checks)."""
     monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
     monkeypatch.setattr(
         worktree_api.database, "get_project", lambda pid: {"id": pid, "settings": {}}
@@ -315,11 +303,6 @@ async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
     v2_helper = AsyncMock(return_value="v2-response")
     monkeypatch.setattr(worktree_api, "_create_v2_branch_session", v2_helper)
 
-    legacy_create = MagicMock(
-        side_effect=AssertionError("legacy worktree path taken!")
-    )
-    monkeypatch.setattr(wm.worktree_manager, "create_worktree_session", legacy_create)
-
     resp = await worktree_api.create_session_with_worktree(
         request=MagicMock(),
         body=_body(prompt=""),
@@ -327,5 +310,4 @@ async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
     )
 
     v2_helper.assert_awaited_once()
-    legacy_create.assert_not_called()
     assert resp == "v2-response"

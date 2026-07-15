@@ -132,25 +132,6 @@ export interface ActiveSessionState {
 	scrollTop: number;
 	streamStartTime: number | null;
 	executionMode: ExecutionMode;
-	/** When executionMode === 'cloud': the registered install to offload onto.
-	 *  Required for cloud sessions — the device picker selects it. */
-	cloudTargetInstanceId: string | null;
-	/** When executionMode === 'cloud': whether to spin up an isolated worktree on
-	 *  the remote device (vs. running directly on the chosen branch). Orthogonal
-	 *  modifier surfaced as the "Worktree" checkbox, mirroring local worktree mode
-	 *  for cloud sessions. */
-	cloudWorktree: boolean;
-	/** When executionMode === 'cloud': the branch to run on the remote device.
-	 *  In no-worktree cloud this is an existing branch on the *remote* (the worker
-	 *  checks it out), or — with `cloudCreateNewBranch` — a new branch to create
-	 *  there. In worktree cloud, null = let the remote auto-derive a fresh branch
-	 *  from the message; otherwise the branch to fork the worktree from. Sourced
-	 *  from the remote device's branch list (`getCloudGitState`). */
-	cloudBranch: string | null;
-	/** When executionMode === 'cloud' && !cloudWorktree: the chosen `cloudBranch`
-	 *  is a NEW branch to create on the remote device (off its current branch),
-	 *  rather than an existing one to check out. Always false in worktree mode. */
-	cloudCreateNewBranch: boolean;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -249,10 +230,6 @@ function defaultState(): ActiveSessionState {
 		scrollTop: 0,
 		streamStartTime: null,
 		executionMode: getPersistedExecutionMode(),
-		cloudTargetInstanceId: null,
-		cloudWorktree: false,
-		cloudBranch: null,
-		cloudCreateNewBranch: false,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -595,10 +572,6 @@ export const activeSession = {
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			executionMode: getPersistedExecutionMode(),
-			// The chosen cloud branch is project-specific; drop it on project switch
-			// (the worktree preference itself is kept, like executionMode).
-			cloudBranch: null,
-			cloudCreateNewBranch: false,
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -649,38 +622,10 @@ export const activeSession = {
 	setExecutionMode(mode: ExecutionMode) {
 		// Remember the toggle so new sessions reopen in the same mode
 		setPersistedExecutionMode(mode);
-		// ExecutionMode is now local|worktree only. Any vestigial cloud offload
-		// target + branch are cleared so they can't leak into a later flow.
 		_update(s => ({
 			...s,
 			executionMode: mode,
-			cloudTargetInstanceId: null,
-			cloudBranch: null,
-			cloudCreateNewBranch: false,
 		}));
-	},
-	setCloudTarget(instanceId: string | null) {
-		// The branch list is per-device; switching the target device invalidates
-		// the chosen branch so it can't carry over to a device that may not have
-		// it (the selector reloads the new device's branches and re-defaults).
-		_update(s => ({
-			...s,
-			cloudTargetInstanceId: instanceId,
-			cloudBranch: instanceId === s.cloudTargetInstanceId ? s.cloudBranch : null,
-			cloudCreateNewBranch:
-				instanceId === s.cloudTargetInstanceId ? s.cloudCreateNewBranch : false,
-		}));
-	},
-	setCloudWorktree(val: boolean) {
-		_update(s => ({ ...s, cloudWorktree: val }));
-	},
-	setCloudBranch(branch: string | null) {
-		// Selecting an existing branch clears any pending "create new" intent.
-		_update(s => ({ ...s, cloudBranch: branch, cloudCreateNewBranch: false }));
-	},
-	setCloudNewBranch(branch: string) {
-		// Stage a not-yet-created branch: the worker creates it on send.
-		_update(s => ({ ...s, cloudBranch: branch, cloudCreateNewBranch: true }));
 	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },

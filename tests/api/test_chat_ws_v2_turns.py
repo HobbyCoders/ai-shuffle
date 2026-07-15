@@ -68,11 +68,6 @@ class _Patches:
             return fn(*a, **k)
 
         s.enter_context(patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_run_sync)))
-
-        # No cross-install relay in these tests.
-        s.enter_context(
-            patch("app.core.cloud_relay.is_remote_session", MagicMock(return_value=False))
-        )
         return self
 
     def __exit__(self, *exc):
