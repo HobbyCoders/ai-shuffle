@@ -6,7 +6,9 @@
 	 * pill for execution mode (the current mode's icon + label + chevron;
 	 * clicking opens an upward menu with Local as the base mode and an
 	 * orthogonal Worktree checkbox) with an inline branch selector when
-	 * worktree mode is active. Includes "New Branch" creation modal.
+	 * worktree mode is active. Includes "New Branch" creation modal. In Auto
+	 * mode a second pill lets the user pick the base branch the auto-created
+	 * worktree branch forks from.
 	 *
 	 * Uses the git store for worktree/branch data and syncWorktrees()
 	 * to clean up stale DB records on project change. Worktree creation is
@@ -29,6 +31,9 @@
 	// dropdown above; its own container ref so outside-click closes it independently).
 	let showModeDropdown = $state(false);
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
+	// Separate dropdown for the base-branch picker (only shown in Auto mode).
+	let showBaseDropdown = $state(false);
+	let baseDropdownRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
 	let lastSyncedProject = $state<string | null>(null);
 
@@ -90,6 +95,29 @@
 	// to indicate that a branch will be auto-generated from the user's message
 	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Auto');
 	const isAutoMode = $derived(!$activeSession.selectedWorktreeBranch && !$activeSession.worktreeBranch && !$activeSession.worktreeId);
+
+	// Base branch an auto-created worktree branch forks FROM (defaults to 'main').
+	const baseBranch = $derived($activeSession.worktreeBaseBranch || 'main');
+
+	// Branches valid as a fork base. Unlike `filteredBranches` this keeps main/master,
+	// the checked-out branch, and branches that already have worktrees (any branch is a
+	// valid base); it only drops remote branches shadowed by a local counterpart and
+	// dedupes by effective display name.
+	const baseBranchOptions = $derived.by(() => {
+		const seen = new Set<string>();
+		return $branchStore.filter(b => {
+			// Skip remote branches that have a local counterpart
+			if (b.remote) {
+				const localName = b.name.replace(/^[^\/]+\//, '');
+				if ($branchStore.some(lb => !lb.remote && lb.name === localName)) return false;
+			}
+			// Deduplicate by effective display name
+			const effectiveName = b.remote ? b.name.replace(/^[^\/]+\//, '') : b.name;
+			if (seen.has(effectiveName)) return false;
+			seen.add(effectiveName);
+			return true;
+		});
+	});
 
 	// Worktree error surfaced from the store (send-time creation via message-sender).
 	const worktreeError = $derived($activeSession.worktreeError);
@@ -163,6 +191,19 @@
 		}
 	}
 
+	function toggleBaseDropdown() {
+		showBaseDropdown = !showBaseDropdown;
+		if (showBaseDropdown && $activeSession.project) {
+			refreshWorktrees();
+		}
+	}
+
+	function selectBaseBranch(branch: Branch) {
+		const name = branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name;
+		activeSession.setWorktreeBaseBranch(name);
+		showBaseDropdown = false;
+	}
+
 	async function refreshWorktrees() {
 		loading = true;
 		try {
@@ -181,6 +222,9 @@
 		}
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
 			showModeDropdown = false;
+		}
+		if (showBaseDropdown && baseDropdownRef && !baseDropdownRef.contains(e.target as Node)) {
+			showBaseDropdown = false;
 		}
 	}
 
@@ -353,6 +397,54 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Base-branch picker: only shown in Auto mode, since the base branch only
+		     affects the NEW branch auto-created at send time. Once a specific branch
+		     or existing worktree is staged, there's nothing to fork from a base. -->
+		{#if isAutoMode}
+			<div class="branch-selector" bind:this={baseDropdownRef}>
+				<button
+					type="button"
+					class="branch-trigger"
+					onclick={toggleBaseDropdown}
+					title={`New worktree branch will be created from ${baseBranch}. Click to change the base branch.`}
+				>
+					<GitBranch size={12} strokeWidth={1.5} />
+					<span class="branch-name">from {baseBranch}</span>
+					<ChevronDown size={12} strokeWidth={1.5} />
+				</button>
+
+				{#if showBaseDropdown}
+					<div class="branch-dropdown">
+						{#if loading}
+							<div class="branch-loading">
+								<Loader2 size={14} class="animate-spin" />
+								<span>Loading...</span>
+							</div>
+						{:else}
+							<div class="branch-section-label">Base branch</div>
+							{#each baseBranchOptions as branch}
+								<button
+									type="button"
+									class="branch-item"
+									class:active={(branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name) === baseBranch}
+									onclick={() => selectBaseBranch(branch)}
+								>
+									<GitBranch size={13} strokeWidth={1.5} />
+									<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
+									<span class="branch-location-badge" class:remote={branch.remote}>
+										{branch.remote ? 'remote' : 'local'}
+									</span>
+								</button>
+							{/each}
+							{#if baseBranchOptions.length === 0}
+								<p class="branch-empty">No branches available</p>
+							{/if}
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
 		{/if}
 	</div>
 
