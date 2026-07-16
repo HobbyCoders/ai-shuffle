@@ -6,8 +6,10 @@
 	 * lists those installs (online state, platform/version, reachability), lets the
 	 * user rename or prune a device, and shows/rotates the shared cluster secret
 	 * that authorizes cross-install control. Sessions from every install show up in
-	 * the sidebar; an online, reachable device can be driven from here or chosen as
-	 * a cloud-offload target.
+	 * the sidebar and any online install can be driven from here — send/interrupt
+	 * ride the shared DB (runs lease + pending_interactions), so control needs no
+	 * ``base_url``. A device's advertised address only governs whether its artifact
+	 * links open on other devices.
 	 */
 	import { onMount } from 'svelte';
 	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe } from 'lucide-svelte';
@@ -197,7 +199,7 @@
 		<h3><MonitorSmartphone />Devices
 			<span class="b b-muted">{onlineCount}/{installs.length} online</span>
 		</h3>
-		<p>Every AI&nbsp;Shuffle install on this shared database registers itself here. Their sessions appear in your sidebar; an online, reachable device can be controlled from here or chosen as a <strong>Cloud</strong> offload target — no manual server setup.</p>
+		<p>Every AI&nbsp;Shuffle install on this shared database registers itself here. Their sessions appear in your sidebar, and any <strong>online</strong> device can be controlled from here — no manual server setup. A device's advertised address only affects whether its artifact links open on your other devices.</p>
 	</div>
 
 	{#if loading}
@@ -234,7 +236,7 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4><Globe size={13} /> This install's address</h4>
-				<p>How other devices reach this install for live control. {#if advertise?.env_pinned}Pinned via <code>CLUSTER_ADVERTISE_URL</code>.{:else if advertise?.source === 'guess'}Auto-detected — override if peers can't reach it.{:else if advertise && !advertise.url}Not reachable — sessions here are view-only to other devices.{/if}</p>
+				<p>The address other devices use to open artifact links served by this install. {#if advertise?.env_pinned}Pinned via <code>CLUSTER_ADVERTISE_URL</code>.{:else if advertise?.source === 'guess'}Auto-detected — override if other devices can't reach it.{:else if advertise && !advertise.url}Not advertised — artifact links from here may not open on your other devices.{/if}</p>
 			</div>
 			<div class="ctl secret-ctl">
 				<input
@@ -264,9 +266,9 @@
 		<!-- Reachability warning + self-test result for the advertised address -->
 		{#if !advertise?.env_pinned && advertise && !advertise.url}
 			<div class="adv-warn" role="status">
-				This install has no peer-reachable address, so its sessions are
-				<strong>view-only</strong> to other devices. Set a
-				<code>http://&lt;lan-ip&gt;:port</code> URL above so peers can control it.
+				This install has no advertised address, so <strong>artifact links</strong>
+				it serves may not open on your other devices. Set a
+				<code>http://&lt;lan-ip&gt;:port</code> URL above so they resolve.
 			</div>
 		{/if}
 		{#if reachability}
@@ -297,7 +299,7 @@
 								{:else}
 									<span class="dev-name">{inst.device_name}</span>
 									{#if inst.id === selfId}<span class="b b-on">This install</span>{/if}
-									{#if !inst.base_url}<span class="b b-muted" title="No reachable URL — visible & readable, but can't be controlled">View-only</span>{/if}
+									{#if !inst.base_url}<span class="b b-muted" title="No address advertised — artifact links from this device may not open on your other devices">No address</span>{/if}
 								{/if}
 							</div>
 							<div class="dev-line2">

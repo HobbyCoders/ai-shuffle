@@ -359,7 +359,7 @@ class Session(SessionBase):
     device_name: Optional[str] = None  # Human-friendly owning-device name
     device_online: bool = True  # Owning install seen recently (heartbeat)
     is_remote: bool = False  # Owned by another install (not this one)
-    controllable: bool = True  # Live send/interrupt reachable (owner online + has base_url)
+    controllable: bool = True  # Live send/interrupt available (owner install online; DB-relayed, no base_url)
     # V2 Q7: transient, derive-on-read (never persisted). True when a session has
     # a queued turn but NO capable runner is online to execute it — i.e. it is
     # waiting, read-only, until an owning device comes back. Derived by the API

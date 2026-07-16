@@ -415,8 +415,10 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     from app.db import projects_v2 as projects_v2_db
     me = settings.effective_instance_id
 
-    # Batch: installs registry (id -> row, each carrying an in-DB ``online`` flag
-    # and the peer-reachable base_url that gates control).
+    # Batch: installs registry (id -> row, each carrying an in-DB ``online``
+    # flag). Control (send/interrupt) flows through the shared DB — the ``runs``
+    # lease claim loop and durable ``pending_interactions`` — so it depends only
+    # on the owning install being online, never on its ``base_url``.
     try:
         installs_map = database.get_installs_map()
     except Exception:  # noqa: BLE001 — annotation must never break the listing
@@ -493,9 +495,10 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             online = bool(install.get("online")) if install else False
             session["device_name"] = install.get("device_name") if install else None
             session["device_online"] = online
-            # Controllable only when the owner is online AND advertises a URL we
-            # can relay to; otherwise history stays readable but read-only.
-            session["controllable"] = bool(online and install and install.get("base_url"))
+            # Controllable whenever the owning install is online: send/interrupt
+            # ride the shared DB (runs lease + pending_interactions), which needs
+            # no ``base_url``. Offline owner → history stays readable but read-only.
+            session["controllable"] = bool(online and install)
         else:
             # Local or legacy (NULL instance_id): always controllable from here.
             session["device_name"] = my_install.get("device_name") if my_install else None

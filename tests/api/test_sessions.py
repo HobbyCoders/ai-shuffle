@@ -305,6 +305,71 @@ class TestEnrichSessionsWithTags:
         mock_tags.assert_not_called()
 
 
+class TestControllableAnnotation:
+    """Truth table for the cross-install ``controllable`` flag.
+
+    Control (send/interrupt) rides the shared DB (runs lease +
+    pending_interactions), so it depends ONLY on the owning install being
+    online — never on its ``base_url`` (which is now used solely for artifact
+    redirects). See ``_annotate_cluster_fields``.
+    """
+
+    def _annotate(self, sessions, installs_map, me="me-install"):
+        from app.api import sessions_helpers
+
+        mock_settings = MagicMock()
+        mock_settings.effective_instance_id = me
+        mock_settings.v2_placement = False
+        with patch("app.api.sessions_helpers.database") as mock_db, \
+                patch("app.core.config.settings", mock_settings), \
+                patch("app.db.projects_v2.list_projects_v2", return_value=[]):
+            mock_db.get_installs_map.return_value = installs_map
+            mock_db.get_project.return_value = None
+            sessions_helpers._annotate_cluster_fields(sessions)
+        return sessions
+
+    def test_remote_online_no_base_url_is_controllable(self):
+        """Online owner without an advertised URL is STILL controllable (new)."""
+        installs = {"B": {"online": True, "device_name": "Worker", "base_url": None}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is True
+        assert sessions[0]["device_online"] is True
+        assert sessions[0]["controllable"] is True
+
+    def test_remote_online_with_base_url_is_controllable(self):
+        """Online owner with a URL remains controllable."""
+        installs = {"B": {"online": True, "device_name": "Worker",
+                          "base_url": "http://10.0.0.200:8000"}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["controllable"] is True
+
+    def test_remote_offline_is_not_controllable(self):
+        """Offline owner → history stays readable but read-only."""
+        installs = {"B": {"online": False, "device_name": "Worker",
+                          "base_url": "http://10.0.0.200:8000"}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["device_online"] is False
+        assert sessions[0]["controllable"] is False
+
+    def test_remote_missing_install_is_not_controllable(self):
+        """Owner absent from the registry → not controllable."""
+        sessions = [{"id": "s1", "instance_id": "C"}]
+        self._annotate(sessions, {})
+        assert sessions[0]["controllable"] is False
+
+    def test_local_session_is_controllable(self):
+        """A session owned by this install is always controllable."""
+        installs = {"me-install": {"online": True, "device_name": "Primary",
+                                   "base_url": None}}
+        sessions = [{"id": "s1", "instance_id": "me-install"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is False
+        assert sessions[0]["controllable"] is True
+
+
 # =============================================================================
 # Test List Sessions Endpoint
 # =============================================================================
