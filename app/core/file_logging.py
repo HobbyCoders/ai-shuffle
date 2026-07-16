@@ -215,6 +215,29 @@ def install_asyncio_exception_handler(loop: Optional[asyncio.AbstractEventLoop] 
     def _handler(loop_, context):
         msg = context.get("message", "Unhandled exception in asyncio loop")
         exc = context.get("exception")
+        # Benign Windows-only artifact: the CPython proactor event loop raises
+        # ConnectionResetError (WinError 10054) from
+        # ``_ProactorBasePipeTransport._call_connection_lost`` during ordinary
+        # transport teardown when the peer resets the connection. It is a
+        # documented, harmless quirk (see CPython issue bpo tracking of
+        # ``_ProactorBasePipeTransport._call_connection_lost``). Logging it at
+        # ERROR — and chaining to the default handler, which re-logs and feeds
+        # the error_log DB — is pure noise. Match TIGHTLY so any genuine
+        # ConnectionResetError from elsewhere keeps the ERROR path below.
+        if isinstance(exc, ConnectionResetError):
+            is_winerror_10054 = getattr(exc, "winerror", None) == 10054
+            marker = f"{msg} {context.get('source_traceback') or ''}"
+            is_proactor_teardown = (
+                "_ProactorBasePipeTransport._call_connection_lost" in marker
+            )
+            if is_winerror_10054 or is_proactor_teardown:
+                logger.debug(
+                    "Ignoring benign proactor transport-teardown "
+                    "ConnectionResetError (WinError 10054): %s",
+                    msg,
+                    exc_info=exc,
+                )
+                return
         if exc is not None:
             logger.error(msg, exc_info=exc)
         else:

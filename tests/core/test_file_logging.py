@@ -344,3 +344,91 @@ def test_asyncio_exception_handler_warns_without_running_loop(fake_settings, cap
     with caplog.at_level(logging.WARNING, logger=file_logging.logger.name):
         file_logging.install_asyncio_exception_handler()
     assert any("no running event loop" in r.getMessage() for r in caplog.records)
+
+
+def _install_and_capture_handler(loop):
+    """Install the loop handler on ``loop`` and return (handler, calls list).
+
+    The fresh loop has no pre-existing handler, so ``_handler`` chains to
+    ``loop.default_exception_handler``; we stub that to record chaining without
+    the noisy default output. Returns the installed handler and the list its
+    stub appends to.
+    """
+    calls = []
+    loop.default_exception_handler = lambda ctx: calls.append(ctx)  # type: ignore[method-assign]
+    file_logging.install_asyncio_exception_handler(loop)
+    handler = loop.get_exception_handler()
+    assert handler is not None
+    return handler, calls
+
+
+def test_proactor_connreset_winerror_10054_is_debug_not_chained(fake_settings, caplog):
+    """The known Windows proactor teardown artifact: no ERROR, no chaining."""
+    fake_settings()
+    loop = asyncio.new_event_loop()
+    try:
+        handler, calls = _install_and_capture_handler(loop)
+        exc = ConnectionResetError(10054, "An existing connection was forcibly closed")
+        # On Linux CI ``winerror`` is not populated by the constructor; set it
+        # explicitly to mirror the Windows attribute the predicate keys off.
+        exc.winerror = 10054
+        with caplog.at_level(logging.DEBUG, logger=file_logging.logger.name):
+            handler(loop, {"message": "Fatal error on transport", "exception": exc})
+        # Downgraded to DEBUG, never ERROR.
+        assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+        assert any(r.levelno == logging.DEBUG for r in caplog.records)
+        # RETURNED without chaining to the default handler (which would re-log
+        # at ERROR and feed the error_log DB).
+        assert calls == []
+    finally:
+        loop.close()
+
+
+def test_proactor_marker_in_message_is_debug_not_chained(fake_settings, caplog):
+    """The proactor source marker (no winerror) also downgrades + does not chain."""
+    fake_settings()
+    loop = asyncio.new_event_loop()
+    try:
+        handler, calls = _install_and_capture_handler(loop)
+        exc = ConnectionResetError("Connection lost")  # no winerror set
+        ctx = {
+            "message": "Error on transport _ProactorBasePipeTransport._call_connection_lost",
+            "exception": exc,
+        }
+        with caplog.at_level(logging.DEBUG, logger=file_logging.logger.name):
+            handler(loop, ctx)
+        assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+        assert calls == []
+    finally:
+        loop.close()
+
+
+def test_plain_connreset_without_marker_still_errors_and_chains(fake_settings, caplog):
+    """Regression guard: a ConnectionResetError from anywhere else keeps ERROR + chain."""
+    fake_settings()
+    loop = asyncio.new_event_loop()
+    try:
+        handler, calls = _install_and_capture_handler(loop)
+        exc = ConnectionResetError("peer reset during app request")  # no winerror, no marker
+        ctx = {"message": "Unhandled connection reset", "exception": exc}
+        with caplog.at_level(logging.DEBUG, logger=file_logging.logger.name):
+            handler(loop, ctx)
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        assert calls == [ctx]  # chained to the default handler
+    finally:
+        loop.close()
+
+
+def test_other_exception_unchanged_errors_and_chains(fake_settings, caplog):
+    """Any non-ConnectionResetError is unaffected: ERROR + chain as before."""
+    fake_settings()
+    loop = asyncio.new_event_loop()
+    try:
+        handler, calls = _install_and_capture_handler(loop)
+        ctx = {"message": "boom", "exception": RuntimeError("kaboom")}
+        with caplog.at_level(logging.DEBUG, logger=file_logging.logger.name):
+            handler(loop, ctx)
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        assert calls == [ctx]
+    finally:
+        loop.close()
