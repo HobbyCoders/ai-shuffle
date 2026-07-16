@@ -32,6 +32,20 @@ class GitWorktreeMixin:
             - is_bare: True if bare repository
             - is_detached: True if HEAD is detached
         """
+        # Shared-DB clusters (a primary + a worker sharing one Postgres) carry
+        # project/worktree rows whose repo paths belong to another install — e.g.
+        # the primary's Windows path ``D:\Projects\ai-shuffle`` reaching a Linux
+        # worker. That path cannot exist locally, so running git with it as cwd
+        # raises FileNotFoundError, which previously surfaced as a repeated
+        # ERROR-level stack ("Error listing worktrees"). A foreign install's
+        # checkout simply has no worktrees here: skip quietly and return empty.
+        if not os.path.isdir(working_dir):
+            logger.debug(
+                "Skipping worktree listing: repo path not present on this install: %s",
+                working_dir,
+            )
+            return []
+
         try:
             result = self._run_git(
                 working_dir,

@@ -11,6 +11,8 @@ sync. The fix derives a ``detached-<short-sha>`` sentinel from the HEAD SHA.
 Git/DB access is patched at the same boundaries as test_worktree_manager_adopt.
 """
 
+import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +78,42 @@ def test_list_worktrees_detached_has_none_branch_and_head(tmp_path):
     assert detached["is_detached"] is True
     assert detached["branch"] is None  # setdefault fills the key with None
     assert detached["head"] == DETACHED_SHA
+
+
+# ---------------------------------------------------------------------------
+# Issue #581: cross-install repo path (belongs to another install, absent
+# locally) must NOT reach git — enumeration returns [] and logs at DEBUG,
+# never an ERROR-level "Error listing worktrees" stack.
+# ---------------------------------------------------------------------------
+
+class _ExplodingGitService(GitWorktreeMixin):
+    """Fails the test if git is ever invoked for a non-local path."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def _run_git(self, working_dir, args, timeout=10):
+        self.calls += 1
+        raise FileNotFoundError(2, "No such file or directory", working_dir)
+
+
+def test_list_worktrees_foreign_path_returns_empty_without_running_git(caplog):
+    # A path that cannot exist on this machine (another install's checkout).
+    foreign_path = "D:\\Projects\\ai-shuffle" if os.name != "nt" else "/workspace/does-not-exist"
+    svc = _ExplodingGitService()
+
+    with caplog.at_level(logging.DEBUG, logger="app.core.git_worktree_ops"):
+        result = svc.list_worktrees(foreign_path)
+
+    assert result == []
+    # git was never invoked → no FileNotFoundError could have been raised.
+    assert svc.calls == 0
+    # No ERROR-level record for this skip; a DEBUG skip line is emitted.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        r.levelno == logging.DEBUG and "not present on this install" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
