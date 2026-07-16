@@ -171,17 +171,21 @@
 	});
 </script>
 
-<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
+<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={isEmptyState}>
 	{#if isEmptyState}
-		<!-- Empty state: Workspace selector + centered input -->
-		<div class="empty-state">
+		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
+		     NOT rendered here — it lives in the always-mounted .input-slot below so
+		     its subtree (Tiptap draft, open context-usage popover, VoiceRecorder,
+		     dropdowns) survives the empty → active flip instead of being destroyed
+		     and remounted (#665). -->
+		<div class="empty-hero">
 			{#if $activeSession.error}
 				<div class="empty-error-overlay">
 					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
 				</div>
 			{/if}
 
-			<div class="empty-state-content">
+			<div class="empty-hero-content">
 				{#if isClearedSession}
 					<!-- Bound existing session with an empty transcript (cleared via the
 					     sessions-board broom, #558). Show its OWN title + a cleared
@@ -200,13 +204,11 @@
 						onSelectProject={handleProjectSelect}
 					/>
 				{/if}
-				<div class="empty-input-wrapper">
-					<ChatInput />
-				</div>
 			</div>
 		</div>
 	{:else}
-		<!-- Active chat: Messages + input -->
+		<!-- Active chat: message column. The input lives in the shared .input-slot
+		     below, not here — see the #665 note above. -->
 		<div class="chat-column">
 			<div class="message-area-wrapper">
 				{#if showConnectionBanner}
@@ -238,62 +240,80 @@
 			{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
 				<QueuedMessages />
 			{/if}
+		</div>
+	{/if}
 
-			<div class="input-wrapper">
-				<!-- In-flight background tasks (sub-agents + shell subprocesses).
-				     Renders nothing when empty; appears during a turn — and notably
-				     while the turn is PARKED waiting on tasks — so the user can see
-				     what's pending. -->
-				{#if $activeSession.activeTasks && $activeSession.activeTasks.length > 0}
-					<div class="active-tasks-strip">
-						<ActiveTasks tasks={$activeSession.activeTasks} onStop={handleStopTask} />
-					</div>
-				{/if}
-				<!-- Slice B: deferred-only strip when there are no active requests to
-				     review (when there are, the strip is rendered inside the modal
-				     PermissionQueue above). -->
-				{#if (!$activeSession.pendingPermissions || $activeSession.pendingPermissions.length === 0) && $activeSession.deferredPermissions && $activeSession.deferredPermissions.length > 0}
-					<div class="inline-deferred-strip">
+	<!-- Persistent input slot. Rendered ONCE across empty/active states so the
+	     ChatInput subtree (draft, context-usage popover, VoiceRecorder, dropdowns)
+	     is never torn down at the isEmptyState boundary (#665). Only the `compact`
+	     prop and the surrounding layout classes change between states; the
+	     conditional strips below are siblings of ChatInput, not ancestors, so they
+	     never remount it. -->
+	<div class="input-slot" class:input-wrapper={!isEmptyState} class:empty-input-layout={isEmptyState}>
+		{#if !isEmptyState}
+			<!-- In-flight background tasks (sub-agents + shell subprocesses).
+			     Renders nothing when empty; appears during a turn — and notably
+			     while the turn is PARKED waiting on tasks — so the user can see
+			     what's pending. -->
+			{#if $activeSession.activeTasks && $activeSession.activeTasks.length > 0}
+				<div class="active-tasks-strip">
+					<ActiveTasks tasks={$activeSession.activeTasks} onStop={handleStopTask} />
+				</div>
+			{/if}
+			<!-- Slice B: deferred-only strip when there are no active requests to
+			     review (when there are, the strip is rendered inside the modal
+			     PermissionQueue below). -->
+			{#if (!$activeSession.pendingPermissions || $activeSession.pendingPermissions.length === 0) && $activeSession.deferredPermissions && $activeSession.deferredPermissions.length > 0}
+				<div class="inline-deferred-strip">
+					<PermissionQueue
+						requests={[]}
+						deferred={$activeSession.deferredPermissions}
+						onRespond={handlePermissionResponse}
+						onRequeueDeferred={handleRequeueDeferred}
+					/>
+				</div>
+			{/if}
+		{/if}
+		<ChatInput compact={!isEmptyState} />
+	</div>
+
+	{#if isEmptyState}
+		<!-- Balances the flex:1 hero above so the hero + persistent input pair sits
+		     vertically centered — reproduces the old .empty-state
+		     justify-content:center grouping without wrapping the input in a
+		     state-specific ancestor (#665). -->
+		<div class="empty-bottom-spacer" aria-hidden="true"></div>
+	{/if}
+
+	<!-- Modal Overlay for Permission/Question Queues. Now anchored to .chat-view
+	     (position:absolute; inset:0; z-index:50) so it still overlays the whole
+	     surface, including the persistent input. Active-state only. -->
+	{#if !isEmptyState && (($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
+		<div class="modal-overlay">
+			<div class="modal-backdrop"></div>
+			<div class="modal-content">
+				{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
+					<div class="modal-card-wrapper">
 						<PermissionQueue
-							requests={[]}
-							deferred={$activeSession.deferredPermissions}
+							requests={$activeSession.pendingPermissions}
+							deferred={$activeSession.deferredPermissions ?? []}
 							onRespond={handlePermissionResponse}
 							onRequeueDeferred={handleRequeueDeferred}
 						/>
 					</div>
 				{/if}
-				<ChatInput compact />
-			</div>
 
-			<!-- Modal Overlay for Permission/Question Queues -->
-			{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
-				<div class="modal-overlay">
-					<div class="modal-backdrop"></div>
-					<div class="modal-content">
-						{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
-							<div class="modal-card-wrapper">
-								<PermissionQueue
-									requests={$activeSession.pendingPermissions}
-									deferred={$activeSession.deferredPermissions ?? []}
-									onRespond={handlePermissionResponse}
-									onRequeueDeferred={handleRequeueDeferred}
-								/>
-							</div>
-						{/if}
-
-						{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
-							<div class="modal-card-wrapper space-y-3">
-								{#each $activeSession.pendingQuestions as question (question.request_id)}
-									<UserQuestion
-										data={question}
-										onRespond={handleQuestionResponse}
-									/>
-								{/each}
-							</div>
-						{/if}
+				{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
+					<div class="modal-card-wrapper space-y-3">
+						{#each $activeSession.pendingQuestions as question (question.request_id)}
+							<UserQuestion
+								data={question}
+								onRespond={handleQuestionResponse}
+							/>
+						{/each}
 					</div>
-				</div>
-			{/if}
+				{/if}
+			</div>
 		</div>
 	{/if}
 </div>
@@ -356,6 +376,13 @@
 		flex-direction: column;
 	}
 
+	/* The input slot is always rendered (see #665). It never shrinks in either
+	   state; the empty-state layout (centering / width cap) is applied via
+	   .empty-input-layout below, the active-state via .input-wrapper. */
+	.input-slot {
+		flex-shrink: 0;
+	}
+
 	.input-wrapper {
 		flex-shrink: 0;
 	}
@@ -393,23 +420,32 @@
 	   EMPTY STATE
 	   ======================================== */
 
-	.empty-state {
+	/* Hero region (workspace picker / cleared hint). Takes the top flex space with
+	   its content bottom-anchored; the .empty-bottom-spacer below the input takes
+	   the matching bottom flex space, so the hero + persistent input pair sits
+	   vertically centered — reproducing the old .empty-state justify-content:center
+	   grouping without wrapping the input in a state-specific ancestor (#665). */
+	.empty-hero {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		justify-content: center;
-		padding: 1rem;
+		justify-content: flex-end;
+		width: 100%;
+		padding: 1rem 1rem 0;
 		position: relative;
 	}
 
-	.empty-state-content {
+	.empty-hero-content {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 0.5rem;
 		width: 100%;
 		max-width: 640px;
+	}
+
+	.empty-bottom-spacer {
+		flex: 1;
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */
@@ -421,8 +457,21 @@
 		z-index: 5;
 	}
 
-	.empty-input-wrapper {
+	/* Empty-state layout for the persistent input slot: centered, capped at the
+	   same content width as the hero, with a 1rem horizontal gutter. Tailwind
+	   preflight makes box-sizing:border-box global, so the cap is 640px + 2rem of
+	   padding — this keeps the input's rendered content width pixel-identical to
+	   the old markup, where the 640px cap sat on .empty-state-content and the 1rem
+	   padding lived on the .empty-state parent (outside the cap). The 0.5rem
+	   margin-top reproduces the old .empty-state-content gap between hero and
+	   input. */
+	.input-slot.empty-input-layout {
+		align-self: center;
 		width: 100%;
+		max-width: calc(640px + 2rem);
+		padding-left: 1rem;
+		padding-right: 1rem;
+		margin-top: 0.5rem;
 	}
 
 	/* Cleared/empty existing-session hero. Reuses WorkspaceSelector's tokens
