@@ -757,6 +757,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── System messages ─────────────────────────────────────────────
 		case 'system.note': {
+			// `background_tasks_changed` is a CLI/SDK bookkeeping event that
+			// exists only to drive the active-tasks strip (which is fed from
+			// `task.updated` -> activeTaskSummaries, NOT from this note). It
+			// carries no conversation content, so mapping it to a transcript
+			// message renders its raw JSON payload as a "Background Tasks
+			// Changed" card (issue #638). Filter it here -- the earliest
+			// mapping point -- so no message is ever created. activeTasks
+			// state is untouched (this event never feeds it).
+			if (str(event.subtype) === 'background_tasks_changed') return state;
 			const data = obj(event.data);
 			const msg: ChatMessage = {
 				id: event.id,

@@ -412,6 +412,40 @@ describe('system + unknown events', () => {
 		expect(s.messages[0]).toMatchObject({ role: 'system', type: 'system', content: 'note!', systemSubtype: 'info' });
 	});
 
+	it('system.note background_tasks_changed produces NO transcript message (#638)', () => {
+		// This CLI/SDK bookkeeping event drives the active-tasks strip only; its
+		// raw payload must never reach the transcript as a system card.
+		const s = fold([
+			ev('turn.started'),
+			ev('system.note', {
+				id: 'btc1',
+				subtype: 'background_tasks_changed',
+				data: { type: 'system', uuid: 'c020e825', tasks: [{ task_id: 'behdrcouf', task_type: 'local_bash', description: 'Sleep for 45 seconds' }] },
+			}),
+		]);
+		expect(s.messages).toHaveLength(0);
+	});
+
+	it('background_tasks_changed does not disturb activeTaskSummaries (fed by task.updated) (#638)', () => {
+		// The active-tasks strip is fed from task.updated -> activeTaskSummaries,
+		// NOT from the background_tasks_changed note. Filtering the note must
+		// leave that state intact.
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'Sleep for 45 seconds' }),
+			ev('system.note', {
+				id: 'btc1',
+				subtype: 'background_tasks_changed',
+				data: { type: 'system', tasks: [{ task_id: 'bg-1' }] },
+			}),
+		]);
+		// The note created no message.
+		expect(s.messages).toHaveLength(0);
+		// activeTaskSummaries still carries the running task from task.updated.
+		expect(s.activeTaskSummaries).toHaveLength(1);
+		expect(s.activeTaskSummaries[0]).toMatchObject({ id: 'bg-1', status: 'running' });
+	});
+
 	it('compaction_boundary renders a system marker', () => {
 		const s = fold([ev('system.compaction_boundary', { id: 'cb1' })]);
 		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
