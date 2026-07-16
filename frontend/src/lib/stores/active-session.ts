@@ -330,11 +330,22 @@ const wsConn: WsConnection = createWsConnection({
 			wsConn.send({ type: 'get_pending_questions' });
 
 			// The feed controller owns the transcript + streaming state (fed from
-			// the SSE event log). Start it on (re)connect / boot-restore; permissions
-			// and questions still flow over legacy WS above. The SSE feed replays
-			// from_seq=0, so any messages missed during the disconnect window are
-			// re-delivered.
-			feedController.start(sessionId);
+			// the SSE event log). Start it here ONLY when nothing is feeding this
+			// session yet — the boot-restore path (first connect after a reload)
+			// adopts the persisted sessionId without starting the feed, so this is
+			// where it comes alive. Permissions and questions still flow over the
+			// legacy WS above.
+			//
+			// Do NOT restart unconditionally on WS re-connect: the SSE feed owns its
+			// own reconnect/backoff and replays from from_seq=lastSeq (see
+			// sse-feed.ts), so a WS drop does not mean the feed lost events. An
+			// unconditional restart tore down a healthy feed (stop + reducer reset +
+			// full re-backfill), causing a visible transcript repaint ~1s after every
+			// session open (#637). Mirror the isFeeding guard used at the session_created
+			// / start call sites in ws-message-handlers.ts.
+			if (!feedController.isFeeding(sessionId)) {
+				feedController.start(sessionId);
+			}
 			if (_state.isRestoringSession) {
 				_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));
 			}
