@@ -160,15 +160,16 @@ def test_concurrent_execute_vs_close_no_crash_no_deadlock():
     def hammer():
         started.set()
         while True:
-            cur = ShimConnection(raw).cursor()
             try:
+                cur = ShimConnection(raw).cursor()
                 cur.execute("SELECT 1")
                 cur.fetchone()
             except ShimConnectionClosedError:
                 observed_clean_close.set()
                 return
             except sqlite3.ProgrammingError:
-                # e.g. "Cannot operate on a closed database" — also clean.
+                # e.g. "Cannot operate on a closed database" — also clean;
+                # covers cursor creation on an already-closed connection.
                 observed_clean_close.set()
                 return
             except Exception as exc:  # pragma: no cover - unexpected
