@@ -507,6 +507,13 @@ def _ensure_branch_checkout(
     checkouts_db.upsert_checkout(
         project_id, runner_id, dest_str, branch=branch, status="active"
     )
+    logger.info(
+        "checkout_manager: materialized branch checkout for project %s "
+        "(branch %r) at %s",
+        project_id,
+        branch,
+        dest_str,
+    )
     return dest_str
 
 
