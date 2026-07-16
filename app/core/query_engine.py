@@ -452,6 +452,62 @@ def _looks_like_subagent_launch_ack(output: Any) -> bool:
     return any(phrase in low for phrase in _SUBAGENT_LAUNCH_ACK_PHRASES)
 
 
+def _should_defer_subagent_done(
+    session_id: Optional[str],
+    tool_use_id: Optional[str],
+    task_info: Dict[str, Any],
+    output: Any,
+) -> str:
+    """Classify a Task/Agent launch ToolResult → ``"suppress"``|``"defer"``|``"emit"``.
+
+    Hardens the #660 gate: the ONLY thing that used to stop a background-launch
+    ACK from firing a premature ``subagent_done`` was the phrase sniffer, so a
+    reworded CLI ACK failed both the ``run_in_background`` arming AND the
+    suppression together — persisting a false terminal completion at launch. This
+    classifier replaces the raw ``not (run_in_background or ack)`` guard with a
+    defer-don't-terminate policy that writes a terminal event ONLY on positive
+    evidence of foreground, and DEFERS every ambiguous case. Priority:
+
+    (a) ``suppress`` — the launch is explicitly backgrounded: the ``run_in_background``
+        input flag, the cross-turn seed, or one of the in-stream ACK arms above
+        already pinned ``task_info["run_in_background"]``.
+    (b) ``suppress`` — registry evidence the launch is a running background task:
+        ``was_background_launch`` / ``was_subagent_background_launch`` (armed this
+        or a prior turn) OR the reverse lookup
+        ``running_background_task_for_tool_use`` (a cross-turn launch still in
+        flight). When this fires, pin the turn-local flag AND
+        ``mark_background_launch`` so every later frame this turn agrees.
+    (c) ``suppress`` — the phrase sniffer still recognises the ACK text (belt: the
+        in-stream ACK arms already fired for a matching top-level/sub-agent
+        launch; this covers the residual shapes). Sniffer kept EXACTLY as-is.
+    (d) ``defer`` — no evidence either way: park the entry, keep the node RUNNING,
+        emit nothing. A genuine synchronous foreground launch settles at the
+        end-of-turn drain flush; a background launch whose ACK was reworded
+        settles on its eventual terminal TaskNotificationMessage.
+    """
+    # (a) explicit background flag / cross-turn seed / already-armed ACK.
+    if task_info.get("run_in_background"):
+        return "suppress"
+    # (b) registry evidence — arm turn-local + durable gate for consistency.
+    if (
+        session_id
+        and tool_use_id
+        and (
+            task_registry.was_background_launch(session_id, tool_use_id)
+            or task_registry.was_subagent_background_launch(session_id, tool_use_id)
+            or task_registry.running_background_task_for_tool_use(session_id, tool_use_id)
+        )
+    ):
+        task_info["run_in_background"] = True
+        task_registry.mark_background_launch(session_id, tool_use_id)
+        return "suppress"
+    # (c) phrase-sniffer fallback (unchanged).
+    if _looks_like_subagent_launch_ack(output):
+        return "suppress"
+    # (d) ambiguous — DEFER.
+    return "defer"
+
+
 def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
     """Convert a drained sub-agent inner message into ``subagent_*`` events.
 
@@ -2357,6 +2413,20 @@ async def _stream_to_websocket_impl(
         # top-level rows (they'd be orphaned without their parent context).
         subagent_children: Dict[str, List[Dict[str, Any]]] = {}
         task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
+        # #660 defer-don't-terminate gate. A launch ToolResult with no evidence
+        # of being background OR foreground is PARKED here instead of firing a
+        # (possibly premature) subagent_done: tool_use_id -> {output, is_error,
+        # agent_type}. ``task_started_tool_use_ids`` records every tool_use_id
+        # whose TaskStartedMessage arrived in-stream THIS turn. Reconciliation:
+        # a parked entry whose TaskStarted arrives is DROPPED (it settles on its
+        # terminal TaskNotificationMessage via the #617 tool_use_id join); at a
+        # NORMAL end-of-turn drain, a surviving parked entry that never saw
+        # TaskStarted and isn't in any background set is a genuine synchronous
+        # foreground launch → flushed as subagent_done. On interrupt/error the
+        # flush is skipped and parked entries are dropped (R1: never persist a
+        # terminal on an aborted path).
+        deferred_subagent_done: Dict[str, Dict[str, Any]] = {}
+        task_started_tool_use_ids: set = set()
         # Seed cross-turn BACKGROUND sub-agents. Background sub-agents
         # (run_in_background=true) OUTLIVE the turn that launched them: in a
         # FOLLOW-UP turn their StreamEvents/AssistantMessages still arrive with
@@ -2505,6 +2575,16 @@ async def _stream_to_websocket_impl(
                     "usage": usage_data,
                 }
             elif isinstance(message, TaskStartedMessage):
+                # #660: a TaskStarted for a parked launch confirms the task is a
+                # real registered task — DROP the deferred entry (it now settles
+                # on its terminal TaskNotificationMessage via the #617 tool_use_id
+                # join). Record the id so the end-of-turn drain flush never
+                # flushes a launch that DID start (only a synchronous foreground
+                # launch — one that emitted NO in-stream TaskStarted — is flushed).
+                _ts_tuid = getattr(message, "tool_use_id", None)
+                if _ts_tuid:
+                    task_started_tool_use_ids.add(_ts_tuid)
+                    deferred_subagent_done.pop(_ts_tuid, None)
                 yield {
                     "type": "task_started",
                     "task_id": message.task_id,
@@ -3092,7 +3172,13 @@ async def _stream_to_websocket_impl(
                             # (its inner activity streams via parent_tool_use_id and it
                             # completes on the terminal TaskNotificationMessage). Only a
                             # foreground Task/Agent's ToolResult is the final result.
-                            if not (task_info.get("run_in_background") or _looks_like_subagent_launch_ack(output)):
+                            # #660 defer-don't-terminate gate: emit ONLY on positive
+                            # foreground evidence; DEFER when ambiguous (a reworded ACK
+                            # no longer fires a premature subagent_done).
+                            _decision = _should_defer_subagent_done(
+                                session_id, tool_use_id, task_info, output
+                            )
+                            if _decision == "emit":
                                 yield {
                                     "type": "subagent_done",
                                     "tool_id": tool_use_id,
@@ -3103,6 +3189,15 @@ async def _stream_to_websocket_impl(
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
+                            elif _decision == "defer":
+                                # Park it; keep the node RUNNING and task_tool_uses
+                                # intact. The durable tool_result row already flowed
+                                # to tool_messages above.
+                                deferred_subagent_done[tool_use_id] = {
+                                    "output": output,
+                                    "is_error": getattr(block, 'is_error', False),
+                                    "agent_type": task_info.get("agent_type", "unknown"),
+                                }
                         # Check if this tool result is from a subagent.
                         elif is_subagent_lane:
                             # Merge result into the matching child entry under the parent subagent
@@ -3383,7 +3478,12 @@ async def _stream_to_websocket_impl(
                             # parks, via the drain pump) and it completes on the terminal
                             # TaskNotificationMessage. Do NOT emit subagent_done / delete
                             # tracking, or the node renders "completed / no activity".
-                            if not (task_info.get("run_in_background") or _looks_like_subagent_launch_ack(output)):
+                            # #660 defer-don't-terminate gate (UserMessage lane): emit
+                            # ONLY on positive foreground evidence; DEFER when ambiguous.
+                            _decision = _should_defer_subagent_done(
+                                session_id, tool_use_id, task_info, output
+                            )
+                            if _decision == "emit":
                                 yield {
                                     "type": "subagent_done",
                                     "tool_id": tool_use_id,
@@ -3394,6 +3494,15 @@ async def _stream_to_websocket_impl(
                                 }
                                 # Clean up tracking
                                 del task_tool_uses[tool_use_id]
+                            elif _decision == "defer":
+                                # Park it; keep the node RUNNING and task_tool_uses
+                                # intact. The durable tool_result row already flowed
+                                # to tool_messages above.
+                                deferred_subagent_done[tool_use_id] = {
+                                    "output": output,
+                                    "is_error": block.is_error,
+                                    "agent_type": task_info.get("agent_type", "unknown"),
+                                }
                         # Check if this tool result is from a subagent.
                         elif is_subagent_lane:
                             # Merge result into the matching child entry under the parent subagent
@@ -3491,6 +3600,41 @@ async def _stream_to_websocket_impl(
         if state.interrupt_requested:
             interrupted = True
             logger.debug(f"[WS] Streaming loop ended after interrupt for session {session_id}")
+
+        # #660 end-of-turn drain flush (RULING R1 — abort-safe). Runs ONLY on a
+        # clean, NON-interrupted loop exit: it lives inside the streaming `try`,
+        # so any exception/CancelledError jumps past it, and the `not interrupted`
+        # guard drops a soft-interrupt (loop ended naturally after
+        # client.interrupt()). On any aborted path the parked entries are dropped
+        # WITHOUT emitting — a stuck-running node is recoverable (FE re-open belt
+        # #659, registry drain chip); a false terminal is not.
+        #
+        # A surviving parked entry is flushed as subagent_done ONLY when it is a
+        # genuine SYNCHRONOUS FOREGROUND launch: its tool_use_id never saw an
+        # in-stream TaskStarted (task_started_tool_use_ids) AND it is not in any
+        # background set. An entry that DID see TaskStarted (dropped already at the
+        # branch above) or that a late frame revealed as background settles on its
+        # terminal TaskNotificationMessage instead — never here.
+        if not interrupted and deferred_subagent_done:
+            for _tuid, _parked in list(deferred_subagent_done.items()):
+                if _tuid in task_started_tool_use_ids:
+                    continue
+                if session_id and (
+                    task_registry.was_background_launch(session_id, _tuid)
+                    or task_registry.was_subagent_background_launch(session_id, _tuid)
+                    or task_registry.running_background_task_for_tool_use(session_id, _tuid)
+                ):
+                    continue
+                yield {
+                    "type": "subagent_done",
+                    "tool_id": _tuid,
+                    "agent_id": _tuid,
+                    "agent_type": _parked.get("agent_type", "unknown"),
+                    "result": _parked.get("output"),
+                    "is_error": _parked.get("is_error", False),
+                }
+                task_tool_uses.pop(_tuid, None)
+        deferred_subagent_done.clear()
 
         # Finalize any trailing thinking block
         if _current_thinking:

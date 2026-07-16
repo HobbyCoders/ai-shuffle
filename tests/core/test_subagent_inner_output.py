@@ -800,3 +800,164 @@ class TestRecordSubagentLaneLaunchesMonitor:
         _qe._record_subagent_lane_launches("sess-rec-mon", msg)
         assert task_registry.was_subagent_background_launch("sess-rec-mon", "tu-mon-top") is False
         assert task_registry.was_background_launch("sess-rec-mon", "tu-mon-top") is False
+
+
+# ---------------------------------------------------------------------------
+# #660: defer-don't-terminate gate — end-to-end over stream_to_websocket.
+#
+# The pre-#660 guard fired subagent_done at the launch ToolResult UNLESS the
+# result matched the 5-substring ACK sniffer or a run_in_background flag was set.
+# If a future CLI REWORDS the launch ACK, the sniffer misses it and a premature
+# subagent_done was persisted at launch (card checkmarks while the agent runs).
+#
+# The gate defers an ambiguous launch result instead of terminating it:
+#  - a genuine async launch emits a later in-stream TaskStarted → the parked
+#    entry is DROPPED (it settles on its terminal TaskNotificationMessage), so a
+#    REWORDED ACK no longer fires a false subagent_done;
+#  - a genuine SYNCHRONOUS foreground agent (no TaskStarted, no background
+#    evidence) is flushed as subagent_done at a clean end-of-turn drain;
+#  - registry background evidence SUPPRESSES with no phrase match at all;
+#  - an ABORTED turn (RULING R1) drops the parked entry WITHOUT emitting.
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio  # noqa: E402
+
+
+async def _collect(agen):
+    out = []
+    async for ev in agen:
+        out.append(ev)
+    return out
+
+
+def _raising_state(messages, exc) -> _SessionState:
+    """A SessionState whose receive_response yields ``messages`` then RAISES —
+    models a mid-stream interrupt/crash after the launch result was parked."""
+    adapter = _MagicMock()
+    adapter.is_alive = _MagicMock(return_value=True)
+    adapter.sdk_client = _MagicMock()
+    adapter.sdk_client.query = _AsyncMock()
+
+    async def _response():
+        for m in messages:
+            yield m
+        raise exc
+
+    adapter.sdk_client.receive_response = _MagicMock(side_effect=lambda: _response())
+    return _SessionState(adapter=adapter, is_connected=True)
+
+
+# A launch ACK the 5-substring sniffer does NOT match — the exact regression the
+# gate defends against (a future CLI reword of the async-launch placeholder).
+_REWORDED_ACK = "Spawned the explorer agent; it will report back once finished."
+_REAL_SYNC_RESULT = "All three commands ran successfully: STEP-1 then STEP-2 then STEP-3."
+
+
+class TestDeferDontTerminateStream:
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_reworded_ack_then_taskstarted_emits_no_subagent_done(self):
+        """The #660 win: a launch result the sniffer MISSES is DEFERRED, then a
+        later in-stream TaskStarted drops the parked entry — so NO premature
+        subagent_done is ever emitted (the node stays running, settling on its
+        terminal notification instead)."""
+        session_id = "sess-defer-a"
+        messages = [
+            _agent_launch_msg("toolu_bg"),
+            _tool_result_user_msg("toolu_bg", _REWORDED_ACK),
+            _started("task-bg", task_type="local_agent", tool_use_id="toolu_bg"),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            events = await _collect(
+                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+        assert [e for e in events if e.get("type") == "subagent_done"] == []
+        # The TaskStarted frame still flows to the FE (settles via #617 join).
+        assert any(e.get("type") == "task_started" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_synchronous_foreground_flushes_at_turn_end(self):
+        """A genuine synchronous sub-agent (real result, NO TaskStarted, no
+        background evidence) is flushed as subagent_done at the clean end-of-turn
+        drain — AND (RULING R3) lands deterministically AFTER later same-turn
+        events, not at the launch ToolResult position."""
+        session_id = "sess-defer-b"
+        messages = [
+            _agent_launch_msg("toolu_sync"),
+            _tool_result_user_msg("toolu_sync", _REAL_SYNC_RESULT),
+            # A later same-turn top-level tool: proves the flushed subagent_done
+            # deterministically trails it (the accepted R3 cosmetic reorder).
+            AssistantMessage(
+                content=[ToolUseBlock(id="t_read", name="Read", input={"file_path": "/x"})],
+                model="claude",
+            ),
+            _tool_result_user_msg("t_read", "file contents"),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            events = await _collect(
+                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+        dones = [e for e in events if e.get("type") == "subagent_done"]
+        assert len(dones) == 1
+        assert dones[0]["tool_id"] == "toolu_sync"
+        assert dones[0]["result"] == _REAL_SYNC_RESULT
+        assert dones[0]["is_error"] is False
+        # Deterministic ordering: the flushed done trails the later Read result.
+        done_idx = events.index(dones[0])
+        read_result_idx = next(
+            i for i, e in enumerate(events)
+            if e.get("type") == "tool_result" and e.get("tool_use_id") == "t_read"
+        )
+        assert done_idx > read_result_idx
+
+    @pytest.mark.asyncio
+    async def test_registry_background_evidence_suppresses_without_phrase_match(self):
+        """A launch pre-armed in the registry (was_background_launch) SUPPRESSES
+        at the ToolResult with NO ACK phrase match — the gate no longer depends
+        on the sniffer when positive background evidence exists."""
+        session_id = "sess-defer-c"
+        task_registry.mark_background_launch(session_id, "toolu_bg")
+        messages = [
+            _agent_launch_msg("toolu_bg"),
+            _tool_result_user_msg("toolu_bg", _REWORDED_ACK),
+        ]
+        state = _ack_state(messages)
+        pool = _AckStubPool(state)
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            events = await _collect(
+                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+        assert [e for e in events if e.get("type") == "subagent_done"] == []
+
+    @pytest.mark.asyncio
+    async def test_aborted_turn_drops_parked_entry_without_emitting(self):
+        """RULING R1 (abort-safe): a parked launch result whose turn ends via an
+        abnormal teardown (CancelledError) is DROPPED — the end-of-turn flush
+        lives inside the streaming try and is skipped, so NO false terminal is
+        emitted. A stuck-running node is recoverable (#659 re-open belt); a false
+        terminal is not."""
+        session_id = "sess-defer-d"
+        messages = [
+            _agent_launch_msg("toolu_sync"),
+            _tool_result_user_msg("toolu_sync", _REAL_SYNC_RESULT),
+        ]
+        state = _raising_state(messages, _asyncio.CancelledError())
+        pool = _AckStubPool(state)
+        with _ExitStack() as stack:
+            _ack_chat_patches(stack, pool)
+            events = await _collect(
+                _qe.stream_to_websocket("prompt", session_id, "claude-code")
+            )
+        assert [e for e in events if e.get("type") == "subagent_done"] == []

@@ -228,3 +228,67 @@ class TestCliTurnEventsFromMessage:
 
     def test_non_chat_messages_yield_nothing(self):
         assert _cli_turn_events_from_message("sess-1", SimpleNamespace(), {}) == []
+
+
+# =============================================================================
+# _should_defer_subagent_done — the #660 defer classifier
+# =============================================================================
+
+from app.core.query_engine import _should_defer_subagent_done  # noqa: E402
+
+
+class TestShouldDeferSubagentDone:
+    """The defer-don't-terminate classifier: suppress on positive background
+    evidence, DEFER when ambiguous. Registry membership must suppress WITHOUT any
+    ACK phrase match (the reverse-lookup case #660 adds); a plain foreground
+    result with no evidence defers."""
+
+    def setup_method(self):
+        task_registry.reset_all()
+
+    def teardown_method(self):
+        task_registry.reset_all()
+
+    def test_run_in_background_flag_suppresses(self):
+        info = {"agent_type": "Explore", "run_in_background": True}
+        assert _should_defer_subagent_done("s1", "tu-1", info, "anything") == "suppress"
+
+    def test_registry_reverse_lookup_suppresses_without_phrase_match(self):
+        # A running background task (SDK marker) registered for this launch id,
+        # but was_background_launch("tu-1") was NEVER recorded — so ONLY the new
+        # reverse lookup can see it. A REAL result (no ACK phrase) must still
+        # suppress, and the classifier arms the turn-local + durable gate.
+        task_registry.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        task_registry.mark_sdk_background_task("s1", "task-1")
+        assert task_registry.was_background_launch("s1", "tu-1") is False
+        info = {"agent_type": "Explore", "run_in_background": False}
+        decision = _should_defer_subagent_done(
+            "s1", "tu-1", info, "the real synchronous result, no launch-ack wording"
+        )
+        assert decision == "suppress"
+        # Armed for turn consistency (case b side-effect).
+        assert info["run_in_background"] is True
+        assert task_registry.was_background_launch("s1", "tu-1") is True
+
+    def test_recorded_background_launch_suppresses(self):
+        task_registry.mark_background_launch("s1", "tu-1")
+        info = {"agent_type": "Explore", "run_in_background": False}
+        assert _should_defer_subagent_done("s1", "tu-1", info, "real result") == "suppress"
+
+    def test_ack_phrase_suppresses(self):
+        info = {"agent_type": "Explore", "run_in_background": False}
+        ack = "Async agent launched successfully. It is working in the background."
+        assert _should_defer_subagent_done("s1", "tu-1", info, ack) == "suppress"
+        # Sniffer fallback alone does not arm the durable gate (the in-stream ACK
+        # arms do that upstream); the classifier's case c is suppress-only.
+        assert task_registry.was_background_launch("s1", "tu-1") is False
+
+    def test_ambiguous_real_result_defers(self):
+        # No flag, no registry evidence, no ACK phrase -> DEFER (park).
+        info = {"agent_type": "Explore", "run_in_background": False}
+        decision = _should_defer_subagent_done(
+            "s1", "tu-1", info, "All three commands ran successfully: STEP-1, STEP-2."
+        )
+        assert decision == "defer"
+        assert info["run_in_background"] is False
+        assert task_registry.was_background_launch("s1", "tu-1") is False

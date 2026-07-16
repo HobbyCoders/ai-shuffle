@@ -881,6 +881,42 @@ class TaskRegistry:
             return None
         return None
 
+    def running_background_task_for_tool_use(
+        self, session_id: str, tool_use_id: str
+    ) -> bool:
+        """True iff a RUNNING background task was launched by ``tool_use_id``.
+
+        The reverse of ``get_task_tool_use_id`` (which maps task_id → launch
+        tool_use_id): given the parent's launch ``tool_use_id`` — the subagent
+        card's join key — is there a live registry task that (a) was launched by
+        that exact tool_use, (b) is still ``running``, and (c) is background per
+        the existing predicates (``is_own_background_task`` OR
+        ``is_subagent_background_task``)? Consumed by the query_engine defer
+        classifier so a launch-ACK ToolResult whose task is ALREADY a registered
+        running background task suppresses ``subagent_done`` regardless of the ACK
+        wording. Note the launch-ACK ToolResult is usually processed BEFORE the
+        task's TaskStartedMessage registers it, so this mainly catches a
+        CROSS-TURN launch still in flight (registered in a prior turn).
+
+        Read-only and exception-free (mirrors ``get_task_tool_use_id``): no
+        locks, and any stray shape returns ``False``.
+        """
+        if not session_id or not tool_use_id:
+            return False
+        try:
+            for task_id, record in self._tasks.get(session_id, {}).items():
+                if record.get("tool_use_id") != tool_use_id:
+                    continue
+                if record.get("status") != "running":
+                    continue
+                if self.is_own_background_task(
+                    session_id, task_id
+                ) or self.is_subagent_background_task(session_id, task_id):
+                    return True
+        except Exception:  # noqa: BLE001 — a stray shape must never raise.
+            return False
+        return False
+
     def clear_session(self, session_id: str) -> None:
         """Drop all tasks for a session (called when the live session is removed).
 

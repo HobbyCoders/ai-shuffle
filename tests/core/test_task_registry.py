@@ -653,6 +653,61 @@ class TestBackgroundLaunch:
         assert reg.was_background_launch("s1", "tool-1") is False
 
 
+class TestRunningBackgroundTaskForToolUse:
+    """Reverse lookup (launch tool_use_id -> is there a RUNNING background task?),
+    the registry evidence powering the #660 defer classifier. True ONLY for a
+    task that is (a) running, (b) launched by the matching tool_use_id, and (c)
+    background per is_own_background_task / is_subagent_background_task."""
+
+    def test_hit_via_sdk_background_marker(self, reg):
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        reg.mark_sdk_background_task("s1", "task-1")
+        # is_own_background_task is True via the SDK marker, even though
+        # was_background_launch("tu-1") was NEVER recorded — isolates the reverse
+        # lookup as the sole signal.
+        assert reg.was_background_launch("s1", "tu-1") is False
+        assert reg.running_background_task_for_tool_use("s1", "tu-1") is True
+
+    def test_hit_via_recorded_background_launch(self, reg):
+        reg.mark_background_launch("s1", "tu-1")
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.running_background_task_for_tool_use("s1", "tu-1") is True
+
+    def test_hit_via_subagent_lane_marker(self, reg):
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        reg.mark_subagent_background_task("s1", "task-1")
+        assert reg.running_background_task_for_tool_use("s1", "tu-1") is True
+
+    def test_miss_unknown_tool_use(self, reg):
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        reg.mark_sdk_background_task("s1", "task-1")
+        assert reg.running_background_task_for_tool_use("s1", "tu-other") is False
+
+    def test_foreground_running_task_not_counted(self, reg):
+        # Running and the tool_use_id matches, but the task is NOT background
+        # (no marker, no recorded launch) -> a synchronous foreground sub-agent.
+        reg.start_task("s1", "task-1", "agent", "fg", tool_use_id="tu-1")
+        assert reg.is_own_background_task("s1", "task-1") is False
+        assert reg.running_background_task_for_tool_use("s1", "tu-1") is False
+
+    def test_terminal_status_record_not_counted(self, reg):
+        # Background and matching, but COMPLETED (not running) -> not counted; the
+        # record is kept by complete_task, so this exercises the status filter.
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        reg.mark_sdk_background_task("s1", "task-1")
+        reg.complete_task("s1", "task-1", "completed")
+        assert reg.running_background_task_for_tool_use("s1", "tu-1") is False
+
+    def test_blank_ids_false(self, reg):
+        assert reg.running_background_task_for_tool_use("", "tu-1") is False
+        assert reg.running_background_task_for_tool_use("s1", "") is False
+
+    def test_independent_per_session(self, reg):
+        reg.start_task("s1", "task-1", "agent", "bg", tool_use_id="tu-1")
+        reg.mark_sdk_background_task("s1", "task-1")
+        assert reg.running_background_task_for_tool_use("s2", "tu-1") is False
+
+
 class TestClearAndNoOps:
     def test_clear_session(self, reg):
         reg.start_task("s1", "t1", "agent", "x")
