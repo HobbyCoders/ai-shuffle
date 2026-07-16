@@ -6,6 +6,7 @@ is exercised.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -149,3 +150,47 @@ def test_successful_connect_resets_failure_streak(monkeypatch, gw):
         monkeypatch, gw, ["fail", "fail", "success"], max_sleeps=3
     )
     assert record.call_count == 0
+
+
+# ── Deterministic shutdown (issue #622) ──────────────────────────────────────
+
+
+def test_stop_joins_running_listener_thread_promptly(monkeypatch):
+    """stop() must halt and join a REAL listener thread quickly, even while it
+    is in the reconnect-backoff sleep.
+
+    Regression for #622: the daemon listener must not outlive teardown. The
+    interruptible backoff sleep (``_stop_event``) means stop() returns without
+    waiting out a multi-second backoff hop."""
+    import app.core.event_gateway as eg
+
+    g = EventGateway()
+    monkeypatch.setattr(
+        eg.settings, "database_url", "postgresql://REDACTED@localhost:5432/test"
+    )
+
+    # Every connect fails immediately, so the loop parks in the (interruptible)
+    # backoff sleep between attempts.
+    def fake_connect(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
+    monkeypatch.setattr("app.db.error_logs.record_error", lambda *a, **k: None)
+
+    g._ensure_listener()
+    thread = g._thread
+    assert thread is not None and thread.is_alive()
+
+    t0 = time.monotonic()
+    g.stop(join_timeout=5.0)
+    elapsed = time.monotonic() - t0
+
+    assert not thread.is_alive(), "listener thread did not stop"
+    assert elapsed < 2.0, f"stop() took {elapsed:.2f}s — backoff sleep not interruptible"
+
+
+def test_stop_is_idempotent_and_safe_when_never_started():
+    """stop() on a gateway whose thread never started is a clean no-op."""
+    g = EventGateway()
+    g.stop()  # thread is None — must not raise
+    g.stop()  # idempotent

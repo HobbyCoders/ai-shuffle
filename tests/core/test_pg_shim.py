@@ -17,10 +17,17 @@ failure through.
 """
 
 import sqlite3
+import threading
+import time
 
 import pytest
 
-from tests.pg_shim import ShimConnection, new_sqlite_connection
+from tests.pg_shim import (
+    ShimConnection,
+    ShimConnectionClosedError,
+    close_connection,
+    new_sqlite_connection,
+)
 
 
 class _FakeRaw:
@@ -96,3 +103,89 @@ def test_commit_still_persists_a_real_write():
     check.execute("SELECT v FROM _t")
     assert check.fetchone() == {"v": "hello"}
     raw.close()
+
+
+# =============================================================================
+# issue #622: race-proof close against cross-thread statements
+# =============================================================================
+#
+# The event_gateway LISTEN daemon can call record_error -> ShimCursor.execute
+# against the shared test connection WHILE the main thread's _raw_sqlite fixture
+# teardown closes it. Cross-thread use of a mid-close sqlite3 connection frees
+# the C-level handle under the running statement and SEGFAULTS the interpreter
+# (exit 139). close_connection serializes the close against in-flight statements
+# under _TXN_LOCK and marks the connection closed so late statements raise
+# cleanly instead of touching a freed handle.
+
+
+def test_execute_after_close_raises_clean_not_segfault():
+    """A statement issued after close_connection raises a recognizable error
+    (never touches the freed sqlite handle)."""
+    raw = new_sqlite_connection()
+    cur = ShimConnection(raw).cursor()
+    close_connection(raw)
+    with pytest.raises(ShimConnectionClosedError):
+        cur.execute("SELECT 1")
+
+
+def test_close_is_idempotent_and_survives_never_opened():
+    """close_connection tolerates a double close without raising or deadlocking."""
+    raw = new_sqlite_connection()
+    close_connection(raw)
+    close_connection(raw)  # second close is a clean no-op
+
+
+def test_commit_rollback_after_close_are_noops():
+    """commit/rollback on a closed shim connection no-op instead of touching the
+    freed handle (matches psycopg2's tolerance of a gone connection)."""
+    raw = new_sqlite_connection()
+    conn = ShimConnection(raw)
+    close_connection(raw)
+    assert conn.commit() is None
+    assert conn.rollback() is None
+
+
+def test_concurrent_execute_vs_close_no_crash_no_deadlock():
+    """Reproduce the #622 race shape deterministically: one thread loops shim
+    statements while the main thread closes the connection. The worker must see
+    a clean exception (no interpreter crash), and neither thread may deadlock.
+
+    Reaching the assertions at all proves there was no segfault — a crash would
+    take the whole process down."""
+    raw = new_sqlite_connection()
+    started = threading.Event()
+    observed_clean_close = threading.Event()
+    worker_error: list = []
+
+    def hammer():
+        started.set()
+        while True:
+            cur = ShimConnection(raw).cursor()
+            try:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            except ShimConnectionClosedError:
+                observed_clean_close.set()
+                return
+            except sqlite3.ProgrammingError:
+                # e.g. "Cannot operate on a closed database" — also clean.
+                observed_clean_close.set()
+                return
+            except Exception as exc:  # pragma: no cover - unexpected
+                worker_error.append(exc)
+                return
+
+    t = threading.Thread(target=hammer, name="shim-hammer", daemon=True)
+    t.start()
+    assert started.wait(timeout=1.0)
+    # Let the worker spin a few iterations, then close under it.
+    time.sleep(0.02)
+
+    deadline = time.monotonic() + 2.0
+    close_connection(raw)  # serialized against the in-flight statement
+    t.join(timeout=2.0)
+
+    assert not t.is_alive(), "worker deadlocked (lock not released on close)"
+    assert time.monotonic() < deadline, "close/join exceeded 2s budget"
+    assert not worker_error, f"unexpected worker error: {worker_error}"
+    assert observed_clean_close.is_set(), "worker never observed a clean close"

@@ -106,11 +106,26 @@ def _raw_sqlite() -> Generator[sqlite3.Connection, None, None]:
     dialect-translating :class:`~tests.pg_shim.ShimCursor`), so the test
     database always matches production and never drifts. See ``tests/pg_shim.py``.
     """
-    from tests.pg_shim import new_sqlite_connection
+    from tests.pg_shim import new_sqlite_connection, close_connection
 
     conn = new_sqlite_connection()
     yield conn
-    conn.close()
+
+    # issue #622: the event_gateway LISTEN daemon can call record_error ->
+    # pg_shim.execute against this shared connection from its own thread. Stop
+    # and join that thread BEFORE closing the connection so no cross-thread
+    # statement races the close (which would segfault the interpreter, exit 139).
+    try:
+        from app.core.event_gateway import get_gateway
+
+        get_gateway().stop()
+    except Exception:
+        pass
+
+    # Close through the shim's race-proof path: it marks the connection closed
+    # under the same lock every serialized statement holds, so any late
+    # cross-thread statement raises cleanly instead of touching a freed handle.
+    close_connection(conn)
 
 
 @pytest.fixture(scope="function")

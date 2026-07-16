@@ -110,6 +110,88 @@ def _txn_release_all() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Race-proof connection close (issue #622)
+# ---------------------------------------------------------------------------
+#
+# The test harness shares ONE ``check_same_thread=False`` SQLite connection
+# across threads (see above). A background daemon — the event_gateway LISTEN
+# thread — can call ``record_error`` → ``ShimCursor.execute`` against that shared
+# connection WHILE the main thread's ``_raw_sqlite`` fixture teardown is closing
+# it. Cross-thread use of a sqlite3 connection that is mid-close frees the C-level
+# db handle under the running statement and SEGFAULTS the interpreter (exit 139).
+#
+# Fix: funnel the fixture teardown's close through ``close_connection`` below,
+# which takes the SAME ``_TXN_LOCK`` every serialized statement holds while it
+# touches the raw connection, and marks the connection closed UNDER that lock
+# before closing it. A statement that was already mid-flight has the lock, so
+# close blocks until it finishes; a statement that arrives after acquires the
+# lock, observes the closed marker, and raises :class:`ShimConnectionClosedError`
+# cleanly instead of touching a freed handle. The lock — not the flag alone — is
+# what serializes close against in-flight statements (a bare flag check is a
+# TOCTOU race).
+#
+# The marker lives on the connection object itself. ``sqlite3.Connection`` is
+# neither weak-referenceable nor attribute-settable, so the shim's connections
+# are created as a tiny subclass (:class:`_ShimSQLiteConnection`) that carries a
+# ``_shim_closed`` flag — per-connection state that cannot leak across tests and
+# has no id-recycling hazard. A plain ``sqlite3.Connection`` (never created by
+# this shim) simply reads back "not closed".
+
+
+class _ShimSQLiteConnection(sqlite3.Connection):
+    """sqlite3 connection subclass that can hold the ``_shim_closed`` marker.
+
+    (The base ``sqlite3.Connection`` supports neither weakrefs nor instance
+    attributes.) Used for every connection the shim shares across threads."""
+
+    _shim_closed = False
+
+
+class ShimConnectionClosedError(sqlite3.ProgrammingError):
+    """Raised when a statement runs against a shim connection whose underlying
+    sqlite3 connection has been (or is being) closed via ``close_connection``.
+
+    Subclasses ``sqlite3.ProgrammingError`` so callers that already tolerate
+    sqlite programming errors keep working; recognizable so the event_gateway
+    listener can swallow it silently during teardown."""
+
+
+def _is_closed(raw_conn) -> bool:
+    """Whether ``raw_conn`` has been closed via :func:`close_connection`.
+
+    Must be called with ``_TXN_LOCK`` held so the answer cannot change between
+    the check and the ensuing statement."""
+    return bool(getattr(raw_conn, "_shim_closed", False))
+
+
+def close_connection(raw_conn) -> None:
+    """Close a shared test sqlite3 connection, serialized against in-flight
+    shim statements (issue #622).
+
+    Acquires the same ``_TXN_LOCK`` that :meth:`ShimCursor.execute` holds while
+    touching the raw connection, marks the connection closed UNDER that lock,
+    then closes it. Any concurrent statement either already holds the lock (so
+    the close waits for it) or acquires it afterward and observes the closed
+    marker, raising :class:`ShimConnectionClosedError` instead of touching a
+    freed sqlite3 handle. This is the fixture-teardown close path — call it in
+    place of a bare ``raw_conn.close()``."""
+    _txn_acquire()
+    try:
+        try:
+            raw_conn._shim_closed = True
+        except AttributeError:
+            # A plain (non-shim) sqlite3.Connection — nothing to mark; just
+            # close it. It is not shared cross-thread with the listener.
+            pass
+        try:
+            raw_conn.close()
+        except Exception:  # noqa: BLE001 — already closed / never opened is fine
+            pass
+    finally:
+        _txn_release_all()
+
+
+# ---------------------------------------------------------------------------
 # SQL translation
 # ---------------------------------------------------------------------------
 
@@ -251,6 +333,10 @@ class ShimCursor:
             return self
         _txn_acquire()
         try:
+            if _is_closed(self._cur.connection):
+                raise ShimConnectionClosedError(
+                    "pg_shim: connection closed (teardown in progress)"
+                )
             self._cur.execute(tsql, params if params is not None else ())
         finally:
             self._release_if_idle()
@@ -265,6 +351,10 @@ class ShimCursor:
             return self
         _txn_acquire()
         try:
+            if _is_closed(self._cur.connection):
+                raise ShimConnectionClosedError(
+                    "pg_shim: connection closed (teardown in progress)"
+                )
             self._cur.executemany(tsql, seq_of_params)
         finally:
             self._release_if_idle()
@@ -280,7 +370,13 @@ class ShimCursor:
         race-free because only lock holders can execute statements; a
         concurrent ``commit()`` from another thread ending our transaction only
         means releasing now is MORE correct, not less."""
-        if not self._cur.connection.in_transaction:
+        try:
+            open_txn = self._cur.connection.in_transaction
+        except sqlite3.ProgrammingError:
+            # Connection was closed under us (fixture teardown, issue #622):
+            # there is no open transaction to keep the claim for. Repay it.
+            open_txn = False
+        if not open_txn:
             _txn_release_all()
 
     @staticmethod
@@ -352,6 +448,11 @@ class ShimConnection:
         # RLock re-acquire is free; _txn_release_all repays the whole claim.
         _txn_acquire()
         try:
+            if _is_closed(self._conn):
+                # Teardown closed the shared connection under us (issue #622);
+                # a real commit would touch a freed handle. psycopg2 treats a
+                # commit on a gone connection as a no-op-ish, so mirror that.
+                return None
             return self._commit_or_rollback(self._conn.commit)
         finally:
             _txn_release_all()
@@ -359,6 +460,8 @@ class ShimConnection:
     def rollback(self):
         _txn_acquire()
         try:
+            if _is_closed(self._conn):
+                return None
             return self._commit_or_rollback(self._conn.rollback)
         finally:
             _txn_release_all()
@@ -388,12 +491,12 @@ class ShimConnection:
             raise
 
     def close(self):
-        try:
-            return self._conn.close()
-        finally:
-            # Defensive: never strand this thread's claim if a transaction
-            # was left open when the connection went away.
-            _txn_release_all()
+        # Route through the race-proof close (issue #622): mark the raw
+        # connection closed under _TXN_LOCK before closing it, so a concurrent
+        # cross-thread statement raises cleanly instead of segfaulting.
+        # close_connection repays the calling thread's whole lock claim, so no
+        # transaction is ever stranded when the connection goes away.
+        close_connection(self._conn)
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, "_conn"), name)
@@ -454,7 +557,9 @@ def new_sqlite_connection() -> sqlite3.Connection:
     ``create_postgres_schema`` through :class:`ShimCursor`, so it stays in
     lockstep with the production schema definition.
     """
-    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    raw = sqlite3.connect(
+        ":memory:", check_same_thread=False, factory=_ShimSQLiteConnection
+    )
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA foreign_keys = ON")
 

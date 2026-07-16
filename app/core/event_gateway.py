@@ -40,6 +40,9 @@ class EventGateway:
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
         self._stop = False
+        # Set by ``stop()`` to interrupt the reconnect backoff sleep at once, so
+        # shutdown/teardown never has to wait out a multi-second backoff hop.
+        self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -111,6 +114,7 @@ class EventGateway:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop = False
+            self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._listen_loop,
                 name="event-gateway-listener",
@@ -202,17 +206,24 @@ class EventGateway:
         self._dispatch(session_id, max_seq)
 
     def _sleep(self, seconds: float) -> None:
-        # Wrapped for testability; interruptible-ish via the stop flag between hops.
-        import time
+        # Interruptible backoff sleep: ``stop()`` sets ``_stop_event`` to wake
+        # this immediately, so shutdown never waits out a full backoff hop.
+        # Returns early (does not raise) when stopped.
+        self._stop_event.wait(seconds)
 
-        time.sleep(seconds)
+    def stop(self, join_timeout: float = 5.0) -> None:
+        """Stop the listener thread and join it (tests/shutdown only).
 
-    def stop(self) -> None:
-        """Stop the listener thread (tests/shutdown only)."""
+        Idempotent and safe to call when the thread never started. Wakes the
+        reconnect-backoff sleep immediately via ``_stop_event`` so the join
+        returns promptly. A fresh ``subscribe``/``add_global_listener`` after a
+        stop lazily restarts the listener (``_ensure_listener`` clears the flag
+        and event)."""
         self._stop = True
+        self._stop_event.set()
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=10.0)
+            thread.join(timeout=join_timeout)
 
 
 _gateway: EventGateway | None = None
