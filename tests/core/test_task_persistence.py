@@ -7,6 +7,8 @@ fire-and-forget enqueue -> coalescing queue -> single async consumer -> v55
 with raw SQL precisely because no application read path exists yet.
 """
 
+import asyncio
+import contextlib
 import logging
 
 import pytest
@@ -18,10 +20,21 @@ from app.db import database
 
 
 @pytest.fixture(autouse=True)
-def _fresh_writer():
+async def _fresh_writer():
+    # Async (not sync) fixture on purpose: the consumer task started during a
+    # test is bound to the test's event loop, and reset() cancels it via
+    # loop.call_soon. A sync fixture's teardown can run AFTER pytest-asyncio has
+    # closed that loop, so the cancel raises "RuntimeError: Event loop is closed"
+    # (issue #619). An async fixture's teardown runs INSIDE the still-open loop,
+    # so the cancel lands cleanly; awaiting the cancelled task also drains it so
+    # nothing is left "pending" at collection end.
     tp.reset()
     yield
+    consumer = tp._consumer
     tp.reset()
+    if consumer is not None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
 
 
 def _rows(mock_db, sid):

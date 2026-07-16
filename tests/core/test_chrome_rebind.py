@@ -8,7 +8,7 @@ docstring; these tests pin the automatable surface.
 """
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,7 +69,13 @@ class TestRestartSupervisedChrome:
         (d / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv) + b"\x00")
 
     def _run(self, tmp_path, monkeypatch, profile: str):
-        monkeypatch.setattr(cr, "_PROFILE_DIR", Path(profile))
+        # The product only ever runs this on the Linux container, where
+        # ``_PROFILE_DIR`` is a POSIX path and ``str(_PROFILE_DIR)`` (used to
+        # build the ``--user-data-dir=<profile>`` match) keeps forward slashes.
+        # Use PurePosixPath so the match string matches the POSIX cmdline we
+        # write into the fake /proc tree even when the test runs on Windows,
+        # where a plain Path would stringify with backslashes and never match.
+        monkeypatch.setattr(cr, "_PROFILE_DIR", PurePosixPath(profile))
         pids = [p.name for p in tmp_path.iterdir()]  # snapshot before patching listdir
         monkeypatch.setattr(cr.os, "listdir", lambda p: pids)
         real_open = open

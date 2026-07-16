@@ -8,12 +8,38 @@ plugin so it appears in the Available tab, installs, and its skills surface as
 """
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from app.core.plugin_service import PluginService
 from app.core.plugin_updates import check_for_updates
+
+
+def _symlinks_supported() -> bool:
+    """Probe whether this process can create symlinks.
+
+    On Windows, os.symlink raises OSError (WinError 1314) unless Developer Mode
+    is on or the process is elevated. Detect the capability by actually trying to
+    create one in a throwaway temp dir so the symlink-dependent tests skip with a
+    clear reason on unprivileged runners instead of failing (issue #620).
+    """
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            link = os.path.join(d, "probe_link")
+            os.symlink(os.path.join(d, "probe_target"), link)
+            os.remove(link)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+_SYMLINKS_SUPPORTED = _symlinks_supported()
+_requires_symlinks = pytest.mark.skipif(
+    not _SYMLINKS_SUPPORTED,
+    reason="symlink creation requires Developer Mode or admin privileges on this platform",
+)
 
 
 @pytest.fixture
@@ -92,6 +118,7 @@ def test_empty_repo_contributes_no_plugin(svc):
     assert all(p.id != "emptyrepo@emptyrepo" for p in available)
 
 
+@_requires_symlinks
 def test_install_materializes_symlinked_skills_as_real_files(svc):
     """remotion layout: real skill under .agents/skills symlinked from .claude/skills."""
     clone = _register_marketplace(svc, "remotion")
@@ -179,6 +206,7 @@ def test_check_for_updates_skips_implicit_plugin(svc):
     assert all(u.plugin_id != "remotion@remotion" for u in updates)
 
 
+@_requires_symlinks
 def test_install_ignores_dangling_symlink_skill(svc):
     clone = _register_marketplace(svc, "remotion")
     skills = clone / ".claude" / "skills"
