@@ -20,11 +20,10 @@ Covers the coordinator-mandated seven cases:
 5. Interrupt observed: a FOREIGN durable running->interrupting flip is picked
    up by the observe pass, which drives the live runtime's interrupt exactly
    once — a second pass is a guarded no-op.
-6. Flag OFF: ``handle_query`` takes the legacy cloud-relay path byte-for-byte
-   (relay_message called, nothing enqueued locally) and ``claim_once`` is
-   inert. Flag ON: a remote-placed query enqueues durably with NO local kick,
-   strips the install-local 'claude-code' sentinel, fires the NOTIFY wake, and
-   acks ``query_queued``.
+6. Flag OFF: ``claim_once`` is inert (the claim loop never runs). Flag ON: a
+   remote-placed query enqueues durably with NO local kick, strips the
+   install-local 'claude-code' sentinel, fires the NOTIFY wake, and acks
+   ``query_queued``.
 7. O4 amendment: the interrupt idempotency guard is PER-TURN — interrupting
    turn 1, completing it, then interrupting turn 2 drives the runtime interrupt
    again (a sticky guard would swallow it).

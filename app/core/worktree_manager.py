@@ -187,8 +187,6 @@ class WorktreeManager:
     over time. Sessions track their worktree via the sessions.worktree_id field.
 
     Key operations:
-    - create_worktree(): Creates a standalone worktree (no session)
-    - create_worktree_session(): Creates worktree + session together (legacy support)
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
@@ -586,56 +584,6 @@ class WorktreeManager:
             result.append(wt)
 
         return result
-
-    def _attach_new_session_to_worktree(
-        self,
-        worktree: Dict,
-        project_id: str,
-        project: Dict,
-        profile_id: Optional[str],
-        branch_name: str,
-        base_branch: Optional[str],
-    ) -> Tuple[Dict, Dict]:
-        """
-        Create a new chat session attached to an already-existing worktree.
-
-        Used by the idempotent retry path in create_worktree_session when a
-        previous request already created the git worktree + DB row but the
-        frontend lost the response. Instead of erroring with
-        "branch already exists", we simply create a fresh session on top of
-        the existing worktree — the user observes the same end state.
-        """
-        # Resolve profile id the same way create_worktree_session does
-        if not profile_id:
-            project_settings = project.get("settings", {})
-            profile_id = project_settings.get("default_profile_id")
-            if not profile_id:
-                profiles = database.get_all_profiles()
-                if profiles:
-                    profile_id = profiles[0]["id"]
-                else:
-                    raise WorktreeError("No profiles available. Please create a profile first.")
-
-        session_id = f"ses-{uuid.uuid4().hex[:12]}"
-        try:
-            session = database.create_session(
-                session_id=session_id,
-                profile_id=profile_id,
-                project_id=project_id,
-                title=None,
-                worktree_id=worktree["id"],
-                worktree_branch=branch_name,
-                worktree_path=worktree["worktree_path"],
-            )
-        except Exception as e:
-            logger.error(f"Failed to create session on reused worktree {worktree['id']}: {e}")
-            raise WorktreeError(f"Failed to create chat session: {str(e)}")
-
-        logger.debug(
-            f"Attached new session {session_id} to existing worktree {worktree['id']} "
-            f"for branch {branch_name}"
-        )
-        return worktree, session
 
     def get_worktree_by_session(self, session_id: str) -> Optional[Dict]:
         """Get worktree associated with a session"""
