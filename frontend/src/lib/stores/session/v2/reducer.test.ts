@@ -491,6 +491,58 @@ describe('subagent cards', () => {
 		const s = fold([ev('subagent.progress', { task_id: 'nope', kind: 'chunk', note: 'x' })]);
 		expect(s.messages).toHaveLength(0);
 	});
+
+	it('subagent.started drops the orphan launch placeholder opened by input_delta', () => {
+		// The launch tool_use block emits input_delta (a spinning placeholder)
+		// but never tool.use/tool.result. When the card arrives for the SAME id
+		// (launch tool_use_id == task_id), the placeholder must be removed.
+		const s = fold([
+			ev('tool.input_delta', { tool_use_id: 'toolu-1', partial_json: '{"desc":' }),
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		expect(cards[0].id).toBe('subagent-toolu-1');
+		const orphan = s.messages.find((m) => m.type === 'tool_use' && m.toolId === 'toolu-1');
+		expect(orphan).toBeUndefined();
+	});
+
+	it('input_delta after the subagent card exists does not recreate a placeholder', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('tool.input_delta', { tool_use_id: 'toolu-1', partial_json: '{"desc":' }),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		const placeholder = s.messages.find((m) => m.type === 'tool_use' && m.toolId === 'toolu-1');
+		expect(placeholder).toBeUndefined();
+	});
+
+	it('subagent.progress re-opens a card that a premature terminal chip settled', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			// A premature terminal chip settles the card to 'completed'.
+			ev('task.updated', { task_id: 'reg-1', state: 'completed', tool_use_id: 'toolu-1' }),
+			// Progress only flows while the agent works, so it must re-open.
+			ev('subagent.progress', { task_id: 'toolu-1', kind: 'chunk', note: 'still going' }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('running');
+		// A fresh terminal chip settles the re-opened card again.
+		const s2 = reduce(s, ev('task.updated', { task_id: 'reg-1', state: 'completed', tool_use_id: 'toolu-1' }));
+		const card2 = s2.messages.find((m) => m.type === 'subagent');
+		expect(card2?.agentStatus).toBe('completed');
+	});
+
+	it('subagent.progress never re-opens a card settled to error', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('subagent.completed', { task_id: 'toolu-1', status: 'failed', result_preview: 'boom' }),
+			ev('subagent.progress', { task_id: 'toolu-1', kind: 'chunk', note: 'late' }),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('error');
+	});
 });
 
 // ─── Task summaries ─────────────────────────────────────────────────────────

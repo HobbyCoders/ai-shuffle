@@ -672,6 +672,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					}),
 				};
 			}
+			// A background subagent launch emits input_delta for the launch
+			// tool_use block but never tool.use/tool.result. Once the subagent
+			// card exists for that id (launch tool_use_id == task_id), the card
+			// is the rendering surface — do not recreate the orphan placeholder.
+			if (findSubagentByTask(state.messages, toolUseId)) return state;
 			// input_delta before the tool.use envelope: open a placeholder card.
 			const next = closeOpen(state);
 			const msg: ChatMessage = {
@@ -717,6 +722,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!taskId) return state;
 			let next = closeOpen(state);
 			if (findSubagentByTask(next.messages, taskId)) return next; // idempotent
+			// The launch tool_use block emitted only tool.input_delta (never
+			// tool.use/tool.result), opening a `tooluse-${taskId}` placeholder
+			// that would spin forever. The subagent card is the designed surface
+			// for the launch — drop the orphan placeholder now the card exists.
+			next = {
+				...next,
+				messages: next.messages.filter((m) => !(m.type === 'tool_use' && m.toolId === taskId)),
+			};
 			const msg: ChatMessage = {
 				id: `subagent-${taskId}`,
 				role: 'assistant',
@@ -788,7 +801,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					children.push({ id: event.id, type: 'text', content: text, streaming: true });
 				}
 			}
-			return { ...state, messages: replaceById(state.messages, card.id, { agentChildren: children }) };
+			// Re-open belt: progress only ever flows while the agent genuinely
+			// works, so any progress after a premature settle (from a terminal
+			// chip that landed early) must re-open the card. Only 'completed'
+			// re-opens — never 'error'/'killed' (those are authoritative).
+			const reopen = card.agentStatus === 'completed' ? { agentStatus: 'running' as const } : {};
+			return {
+				...state,
+				messages: replaceById(state.messages, card.id, { agentChildren: children, ...reopen }),
+			};
 		}
 
 		case 'subagent.completed': {

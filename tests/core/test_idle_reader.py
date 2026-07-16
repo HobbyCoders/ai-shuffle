@@ -163,6 +163,32 @@ async def test_terminal_notification_handoff(mock_db):
     handoff.assert_awaited_once_with("s2", frame)
 
 
+async def test_terminal_notification_record_includes_task_id(mock_db):
+    """The drain-pump task_notification chip record must carry ``task_id`` so
+    turn_recorder can populate the contract task.updated event (else the reducer
+    bails on empty task_id and the agent's summary never reaches its card)."""
+    turns_db.enqueue_turn("s2", "user", prompt="hi")
+    idle_reader.register_on_task_terminal(AsyncMock())
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "task-9", "tool_use_id": "tu-9",
+             "summary": "done", "usage": None}
+    pool, _ = _make_pool([notif])
+
+    rec = AsyncMock()
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=rec))
+        await idle_reader.run_idle_reader("s2")
+
+    rec.assert_awaited_once()
+    _, recorded = rec.call_args.args
+    assert recorded["type"] == "task_notification"
+    assert recorded["task_id"] == "task-9"
+    assert recorded["tool_use_id"] == "tu-9"
+
+
 async def test_non_terminal_notification_no_handoff(mock_db):
     handoff = AsyncMock()
     idle_reader.register_on_task_terminal(handoff)

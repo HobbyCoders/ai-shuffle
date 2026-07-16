@@ -253,6 +253,33 @@ async def test_terminal_surface_carries_tool_use_id_join_key():
     assert rows[0]["metadata"]["system_data"]["tool_use_id"] == "tu-join"
 
 
+async def test_terminal_surface_carries_task_id():
+    """The chip ``data`` dict must carry ``task_id`` (alongside ``tool_use_id``)
+    so turn_recorder's task.updated translation populates it — the reducer bails
+    on an empty task_id and the agent's summary would never reach its card."""
+    _make_db_session()
+    cwh.register_terminal_notification_callback()
+    _own_task("t-tid", "tu-tid")
+
+    drained = AsyncMock()
+    with patch("app.core.turn_recorder.record_drained_event", drained):
+        task_registry.complete_task(SESSION, "t-tid", "killed")
+        await _drain_terminal_surface()
+
+    # (1) LIVE chip carries both task_id and the tool_use_id join key.
+    drained.assert_awaited()
+    live_data = drained.call_args.args[1]["data"]
+    assert live_data["task_id"] == "t-tid"
+    assert live_data["tool_use_id"] == "tu-tid"
+
+    # (2) DURABLE row carries them too.
+    rows = await _terminal_rows("t-tid")
+    assert len(rows) == 1, f"expected exactly ONE durable terminal row, got {len(rows)}"
+    sys_data = rows[0]["metadata"]["system_data"]
+    assert sys_data["task_id"] == "t-tid"
+    assert sys_data["tool_use_id"] == "tu-tid"
+
+
 async def test_callback_records_only_no_unpark_handoff_even_with_live_client():
     """V2 A7 (B5): the terminal surface NO LONGER hands off an unpark, even when
     a live pooled client exists — the scheduler is the sole unpark producer. The

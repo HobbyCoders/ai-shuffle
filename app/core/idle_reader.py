@@ -355,6 +355,7 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 try:
                     await record_drained_event(session_id, {
                         "type": "task_notification",
+                        "task_id": frame.get("task_id"),
                         "tool_use_id": tool_use_id,
                         "status": status,
                         "usage": frame.get("usage"),

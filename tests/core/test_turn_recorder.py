@@ -226,6 +226,30 @@ async def test_task_events_map_to_task_updated(mock_db, pump_type, default_state
     await rec.close()
 
 
+async def test_task_notification_record_populates_task_id_and_tool_use_id(mock_db):
+    # Mirror the EXACT drain-pump record shape idle_reader now emits (with the
+    # newly threaded task_id). The contract task.updated event must carry BOTH
+    # task_id and tool_use_id — an empty task_id makes the reducer bail and the
+    # agent's summary never reaches its card.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "task_notification",
+        "task_id": "task-9",
+        "tool_use_id": "tu-9",
+        "status": "completed",
+        "usage": None,
+        "summary": "all done",
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["task_id"] == "task-9"
+    assert row["payload"]["tool_use_id"] == "tu-9"
+    assert row["payload"]["state"] == "completed"
+    assert row["payload"]["summary"] == "all done"
+    await rec.close()
+
+
 async def test_task_event_explicit_status_wins(mock_db):
     _mk_session()
     rec = await _recorder()
