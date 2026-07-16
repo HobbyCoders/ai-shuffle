@@ -287,6 +287,59 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
     state.adapter.sdk_client.query.assert_awaited_once()
 
 
+# ─── launched_model stamp (issue #577) ──────────────────────────────────────
+
+
+async def test_background_init_stamps_launched_model(mock_db):
+    """Regression (#577): the background REST spawn path (POST
+    /conversation/start -> _run_background_query) must persist the effective
+    launched model to sessions.launched_model at init, like the other three
+    spawn paths (execute_query / stream_query / stream_to_websocket) already do
+    via #552. Before the fix this path never stamped launched_model, so every
+    background session read back NULL and the Unraid host-op guard could not
+    resolve its model authoritatively.
+    """
+    sid = "bg-launched-model"
+    sessions_db.create_session(sid, "default")
+    state = _fake_state(messages=[
+        SystemMessage(subtype="init", data={"session_id": "sdk-1"}),
+        AssistantMessage(content=[TextBlock("hi")], model="fable"),
+        _result_message(),
+    ])
+    pool = _StubPool(state)
+    run_sync_calls = []
+
+    with ExitStack() as stack:
+        _bg_patches(stack, pool, run_sync_calls=run_sync_calls)
+        # The pinned-model profile resolves to an explicit options.model (the
+        # worker's compounding-engineer profile pins `fable`). Override the
+        # MagicMock options built by _bg_patches so getattr(options, "model")
+        # is a real string, not an auto-created attribute.
+        opts = MagicMock()
+        opts.cwd = None
+        opts.model = "fable"
+        stack.enter_context(patch(
+            "app.core.sdk_options.build_options_from_profile",
+            return_value=(opts, {}),
+        ))
+        await _run(sid)
+
+    from app.db import database
+
+    launched_model_writes = [
+        (a, k)
+        for fn, a, k in run_sync_calls
+        if fn is database.update_session and "launched_model" in k
+    ]
+    assert launched_model_writes, (
+        "background spawn path never stamped launched_model — the session "
+        "reads back NULL and the host-op guard cannot resolve its model (#577)"
+    )
+    assert all(k["launched_model"] == "fable" for _, k in launched_model_writes), (
+        f"launched_model stamped with wrong value: {launched_model_writes}"
+    )
+
+
 # ─── persist_turn_end_state (turn_finalize) ─────────────────────────────────
 
 

@@ -312,6 +312,28 @@ async def _run_background_query_impl(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"[Background] Captured SDK session ID: {sdk_session_id}")
+                    # Stamp the effective launched model on EVERY spawn/init so
+                    # the Unraid host-op guard can resolve THIS session's model
+                    # authoritatively from sessions.launched_model without waiting
+                    # for turn-end session_messages.metadata['model'] (issue #577).
+                    # The other three spawn paths (execute_query / stream_query /
+                    # stream_to_websocket) already do this via #552; the background
+                    # REST path (POST /conversation/start) was the one that never
+                    # did, persisting launched_model=NULL for its sessions. A None
+                    # model is a no-op in update_session (never clobbers). The
+                    # sdk_session_id link stays owned by end-of-turn
+                    # _persist_turn_results on this path (unchanged).
+                    try:
+                        await run_sync(
+                            database.update_session,
+                            session_id,
+                            launched_model=getattr(options, "model", None),
+                        )
+                    except Exception as link_err:
+                        logger.warning(
+                            f"[Background] launched_model persist failed for "
+                            f"{session_id}: {link_err}"
+                        )
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
