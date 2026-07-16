@@ -432,3 +432,63 @@ def test_no_legacy_row_branch_checked_out_elsewhere_returns_none(
     assert checkout_manager.ensure_checkout(
         project, branch=branch, runner_id=RUNNER
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_clone_url: recover a cloneable remote from legacy projects ->
+# git_repositories.remote_url, validated by auto_link_group_id == origin.
+# Inert PR-1 plumbing (#607) — no callers yet; wired in PR-2.
+# ---------------------------------------------------------------------------
+
+def _seed_git_repository_with_remote(repo_id, project_id, remote_url):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO git_repositories (id, project_id, remote_url) "
+            "VALUES (%s, %s, %s)",
+            (repo_id, project_id, remote_url),
+        )
+
+
+def test_resolve_clone_url_matching_legacy_repo_returns_remote(mock_db):
+    from app.core.project_links import auto_link_group_id
+
+    remote_url = "https://github.com/o/r.git"
+    origin = auto_link_group_id(remote_url)  # the git:… token the collapse assigns
+    _seed_legacy_project("lp1", "R", "/some/legacy/path", link_group_id=origin)
+    _seed_git_repository_with_remote("gr1", "lp1", remote_url)
+
+    assert checkout_manager._resolve_clone_url(origin) == remote_url
+
+
+def test_resolve_clone_url_no_legacy_row_returns_none(mock_db):
+    from app.core.project_links import auto_link_group_id
+
+    # A well-formed git:… origin with no matching legacy git_repositories row.
+    origin = auto_link_group_id("https://github.com/o/absent.git")
+    assert checkout_manager._resolve_clone_url(origin) is None
+
+
+def test_resolve_clone_url_non_matching_remote_returns_none(mock_db):
+    from app.core.project_links import auto_link_group_id
+
+    # A legacy repo exists, but its remote hashes to a DIFFERENT origin than asked.
+    other_remote = "https://github.com/o/other.git"
+    _seed_legacy_project("lp1", "Other", "/some/legacy/path",
+                         link_group_id=auto_link_group_id(other_remote))
+    _seed_git_repository_with_remote("gr1", "lp1", other_remote)
+
+    asked_origin = auto_link_group_id("https://github.com/o/wanted.git")
+    assert asked_origin != auto_link_group_id(other_remote)
+    assert checkout_manager._resolve_clone_url(asked_origin) is None
+
+
+@pytest.mark.parametrize("origin", ["local:lp1", "manual:group-7", "", None])
+def test_resolve_clone_url_excluded_origins_return_none_without_db(origin, monkeypatch):
+    # local:/manual:/empty origins hard-fail up front with NO DB lookup — prove it
+    # by making any get_db access explode, then asserting we still get None.
+    def _boom(*_a, **_k):  # pragma: no cover - must never be reached
+        raise AssertionError("no DB lookup expected for excluded origin")
+
+    monkeypatch.setattr(checkout_manager, "get_db", _boom)
+    assert checkout_manager._resolve_clone_url(origin) is None

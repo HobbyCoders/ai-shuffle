@@ -66,3 +66,31 @@ class TestCloneRepoUrlGuard:
             success, _ = git.clone_repo("/tmp/work", "git@github.com:org/repo.git")
         assert success is True
         mock_run.assert_called_once()
+
+
+class TestCloneRepoTerminalPrompt:
+    """clone must disable git's interactive credential prompt so a
+    credential-requiring remote fails fast instead of blocking until timeout."""
+
+    def test_clone_sets_git_terminal_prompt_zero(self, git):
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        with patch.object(git, "_run_git", return_value=fake_result) as mock_run:
+            git.clone_repo("/tmp/work", "https://github.com/o/r.git")
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env is not None
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_clone_env_preserves_inherited_vars(self, git):
+        """The prompt-disable is merged onto os.environ, not a bare replacement —
+        inherited vars (PATH, git config env, etc.) must survive."""
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        with patch.dict("os.environ", {"AI_SHUFFLE_CLONE_ENV_PROBE": "keep-me"}, clear=False):
+            with patch.object(git, "_run_git", return_value=fake_result) as mock_run:
+                git.clone_repo("/tmp/work", "https://github.com/o/r.git")
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env["AI_SHUFFLE_CLONE_ENV_PROBE"] == "keep-me"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"

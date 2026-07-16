@@ -61,7 +61,8 @@ class GitService(
         working_dir: str,
         args: List[str],
         timeout: int = 30,
-        check: bool = False
+        check: bool = False,
+        env: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
         """
         Run a git command and return the result.
@@ -71,6 +72,9 @@ class GitService(
             args: Git command arguments (without 'git' prefix)
             timeout: Command timeout in seconds
             check: If True, raise CalledProcessError on non-zero exit
+            env: Optional environment mapping for the subprocess. ``None`` (the
+                default) inherits the parent process environment exactly as before,
+                so existing callers are unaffected.
 
         Returns:
             CompletedProcess with returncode, stdout, stderr
@@ -84,7 +88,8 @@ class GitService(
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
-                check=check
+                check=check,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"Git command timed out: git {' '.join(args)}")
@@ -181,13 +186,20 @@ class GitService(
             logger.warning("Refusing unsafe clone URL scheme: %s", clone_url[:50])
             return False, "Refusing unsafe clone URL scheme (ext:: / file::)"
 
+        # Force-disable git's interactive credential prompt so a clone of a
+        # private/credential-requiring remote fails fast instead of blocking on a
+        # username/password prompt until the timeout. Merged onto (never replacing)
+        # the inherited environment so existing git config/PATH survive.
+        clone_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
         try:
             # `--` terminates option parsing so the url is always treated as a
             # positional argument even if a future value slips past the guard.
             result = self._run_git(
                 working_dir,
                 ["clone", "--", clone_url, "."],
-                timeout=timeout
+                timeout=timeout,
+                env=clone_env,
             )
             if result.returncode == 0:
                 logger.debug(f"Cloned repository from {clone_url} into {working_dir}")

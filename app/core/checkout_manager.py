@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.core.git_service import git_service
+from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
     resolve_rebound_branch_plan,
@@ -134,6 +135,54 @@ def _branch_plan(
             "checkout_manager: branch-plan resolution failed for %s: %s", base_dir, e
         )
         return None
+
+
+def _resolve_clone_url(origin: str) -> Optional[str]:
+    """Recover a cloneable remote URL for a project_v2 ``origin`` from legacy data.
+
+    Consumed by the PR-2 self-seed slice (#607) to clone a base checkout on demand
+    when a pinned runner has no local materialization. Has NO callers yet — this is
+    the inert PR-1 plumbing; PR-2 wires it into ``_ensure_base_checkout``.
+
+    A v2 ``origin`` is the collapse key ``project_resolver.origin_for_legacy_project``
+    seeds: the legacy ``link_group_id`` (a ``git:…`` / ``manual:…`` token) or a synth
+    ``'local:' + id`` for remote-less rows. Only a ``git:…`` origin can ever name a
+    remote, so ``local:`` / ``manual:`` origins are hard-fail excluded up front
+    (ruling 5) with no DB lookup. For the rest we scan legacy ``projects`` ->
+    ``git_repositories.remote_url`` and return the first URL whose
+    ``auto_link_group_id(remote_url)`` reproduces this exact ``origin`` — the same
+    deterministic, install-independent hash the v60 collapse used to assign origins,
+    so a match is a true identity, not a heuristic.
+
+    Every no-match path returns ``None`` explicitly (never an ``or``-fallback chain —
+    a standing repo rule from a past production bug). Best-effort: a DB error logs
+    and returns ``None`` so a caller degrades to today's "not on this device" error.
+    """
+    if not origin:
+        return None
+    if origin.startswith("local:") or origin.startswith("manual:"):
+        return None
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT gr.remote_url AS remote_url "
+                "FROM git_repositories gr "
+                "JOIN projects p ON p.id = gr.project_id "
+                "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''",
+            )
+            candidates = cursor.fetchall()
+    except Exception as e:  # pragma: no cover - defensive; resolution is best-effort
+        logger.warning(
+            "checkout_manager: clone-url lookup failed for origin %r: %s", origin, e
+        )
+        return None
+
+    for cand in candidates:
+        remote_url = cand["remote_url"]
+        if auto_link_group_id(remote_url) == origin:
+            return remote_url
+    return None
 
 
 def _ensure_base_checkout(project_id: str, runner_id: str) -> Optional[str]:
