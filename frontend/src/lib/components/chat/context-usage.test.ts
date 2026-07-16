@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 import {
-	breakdownStatusLabel,
 	computeContextBreakdown,
 	decideBreakdownRefresh,
 	formatTokenCount,
@@ -203,27 +202,6 @@ describe('resolveCategoryColor', () => {
 		expect(resolveCategoryColor(undefined, CONTEXT_CATEGORY_PALETTE.length)).toBe(
 			CONTEXT_CATEGORY_PALETTE[0]
 		);
-	});
-});
-
-describe('breakdownStatusLabel', () => {
-	it('reads "final breakdown" for a persisted snapshot', () => {
-		expect(breakdownStatusLabel('persisted', false)).toBe('final breakdown');
-		// Persistence wins even if the flag says streaming (a persisted session isn't).
-		expect(breakdownStatusLabel('persisted', true)).toBe('final breakdown');
-	});
-
-	it('reads "live breakdown" for a connected session at rest', () => {
-		expect(breakdownStatusLabel('live', false)).toBe('live breakdown');
-	});
-
-	it('notes the turn-end refresh cadence while a live turn streams', () => {
-		expect(breakdownStatusLabel('live', true)).toBe('breakdown · refreshes at turn end');
-	});
-
-	it('returns empty (no footer caption) when there is no rich breakdown', () => {
-		expect(breakdownStatusLabel(null, false)).toBe('');
-		expect(breakdownStatusLabel(null, true)).toBe('');
 	});
 });
 

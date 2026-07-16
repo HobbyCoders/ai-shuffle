@@ -387,25 +387,3 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		autocompactTokens,
 	};
 }
-
-/**
- * Provenance of the breakdown currently on screen:
- * - `'live'`      — fetched from a connected session's SDK just now.
- * - `'persisted'` — the final snapshot the backend saved at the session's last
- *                   turn end (the session is no longer connected).
- * - `null`        — no rich breakdown; the popover is showing the poller estimate.
- */
-export type BreakdownSource = 'live' | 'persisted' | null;
-
-/**
- * The footer status label for the context section, derived from where the
- * breakdown came from and whether a turn is streaming. Kept pure so the wording
- * is unit-testable and matches the backend's live/persisted distinction. Returns
- * an empty string when there is no rich breakdown to caption (the poller
- * estimate), so the footer can hide itself entirely in that case.
- */
-export function breakdownStatusLabel(source: BreakdownSource, isStreaming: boolean): string {
-	if (source === 'persisted') return 'final breakdown';
-	if (source === 'live') return isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown';
-	return '';
-}

@@ -10,22 +10,21 @@
 	 *
 	 * The popover is a wide, compact panel. It stacks, top → bottom:
 	 *   1. Context window — a collapsible header (persisted in localStorage under
-	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar
-	 *      (a contiguous segment per category + a dim autocompact-buffer segment;
-	 *      the bare track tail is the free space) and, when expanded, per-category
-	 *      rows (swatch + label + tokens + percent) followed by a trailing, muted
-	 *      Model row (no swatch, no percent — just the effective model label). The
-	 *      breakdown is fetched from the SDK (`/context-usage`) on session load and
-	 *      refreshed at turn end (never polled mid-stream) so the pill ring can
-	 *      prefer it; `source: "persisted"` (final snapshot from the session's last
-	 *      turn end) is treated as a valid rich breakdown. The poller estimate is
-	 *      the fallback before the first fetch lands — a fresh session shows
-	 *      em-dash rows.
+	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar.
+	 *      Expanded: a contiguous segment per category + a dim autocompact-buffer
+	 *      segment (the bare track tail is the free space), plus per-category rows
+	 *      (swatch + label + tokens + percent) followed by a trailing, muted Model
+	 *      row (no swatch, no percent — just the effective model label). Collapsed:
+	 *      a single severity-coloured fill sized to the total percent — no
+	 *      per-category colour breakdown. The breakdown is fetched from the SDK
+	 *      (`/context-usage`) on session load and refreshed at turn end (never
+	 *      polled mid-stream) so the pill ring can prefer it; `source: "persisted"`
+	 *      (final snapshot from the session's last turn end) is treated as a valid
+	 *      rich breakdown. The poller estimate is the fallback before the first
+	 *      fetch lands — a fresh session shows em-dash rows.
 	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
 	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
 	 *      and reset text inline. "No usage data yet" when the bucket is empty.
-	 *   3. Footer — breakdown status, shown only when a rich breakdown is loaded
-	 *      (hidden while the poller estimate is on screen).
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
 	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
@@ -47,12 +46,10 @@
 		computeContextBreakdown,
 		mapSdkContextUsage,
 		decideBreakdownRefresh,
-		breakdownStatusLabel,
 		formatTokenCount,
 		usageSeverity,
 		type ContextBreakdown,
 		type BreakdownRefreshState,
-		type BreakdownSource,
 		type UsageSeverity,
 	} from './context-usage';
 	import {
@@ -103,9 +100,6 @@
 
 	// ── SDK/persisted breakdown = the single display source for the context section ─
 	let richBreakdown = $state<ContextBreakdown | null>(null);
-	// Where the current rich breakdown came from — drives the footer status. Both
-	// "live" and "persisted" render an identical breakdown; only the label differs.
-	let richSource = $state<BreakdownSource>(null);
 	const sessionId = $derived($activeSession.sessionId);
 	const isStreaming = $derived($activeSession.isStreaming);
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
@@ -114,10 +108,6 @@
 	// the buffer in the same way the popover header does — so they can't disagree),
 	// falling back to the poller estimate before the first fetch lands.
 	const contextPercent = $derived(displayBreakdown.totalPercent);
-
-	// Footer status label — derived once, empty string hides the footer entirely
-	// (no rich breakdown loaded yet, i.e. the poller estimate is on screen).
-	const statusLabel = $derived(breakdownStatusLabel(richSource, isStreaming));
 
 	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
 	const RING_RADIUS = 6;
@@ -169,7 +159,6 @@
 			if (controller.signal.aborted) return;
 			if (res.available) {
 				richBreakdown = mapSdkContextUsage(res.usage);
-				richSource = res.source;
 				loadedSessionId = sid;
 			}
 		} catch {
@@ -192,13 +181,11 @@
 			case 'clear':
 				cancelFetch();
 				richBreakdown = null;
-				richSource = null;
 				loadedSessionId = null;
 				break;
 			case 'session-fetch':
 				cancelFetch();
 				richBreakdown = null;
-				richSource = null;
 				loadedSessionId = null;
 				fetchBreakdown(next.sessionId!);
 				break;
@@ -377,15 +364,23 @@
 					</svg>
 				</button>
 
-				<!-- Single segmented bar (always shown): one segment per category + a
-				     dim buffer segment; the bare track tail is the free space. -->
+				<!-- Segmented bar (always shown). Expanded: one segment per category + a
+				     dim buffer segment; the bare track tail is the free space. Collapsed:
+				     a single severity-coloured fill, same total width as the header %. -->
 				<div class="ctx-segbar" aria-hidden="true">
-					{#each barSegments as seg (seg.key)}
+					{#if breakdownOpen}
+						{#each barSegments as seg (seg.key)}
+							<span
+								class="ctx-seg {seg.dim ? 'dim' : ''}"
+								style="width: {seg.widthPct}%; background: {seg.color}"
+							></span>
+						{/each}
+					{:else}
 						<span
-							class="ctx-seg {seg.dim ? 'dim' : ''}"
-							style="width: {seg.widthPct}%; background: {seg.color}"
+							class="ctx-seg solid {displayBreakdown.severity}"
+							style="width: {displayBreakdown.totalPercent}%"
 						></span>
-					{/each}
+					{/if}
 				</div>
 
 				{#if breakdownOpen}
@@ -422,7 +417,6 @@
 			<div class="popover-divider"></div>
 
 			<!-- ═══ Plan usage limits ═══ -->
-			<div class="popover-title">Plan usage limits</div>
 			{#if showSectionHeader}
 				<div class="popover-section">
 					<div class="section-head">
@@ -467,13 +461,6 @@
 				{/each}
 			{:else}
 				<div class="row-reset no-data">No usage data yet</div>
-			{/if}
-
-			<!-- ═══ Footer ═══ -->
-			{#if statusLabel}
-				<div class="popover-footer">
-					<span class="footer-status">{statusLabel}</span>
-				</div>
 			{/if}
 		</div>
 	{/if}
@@ -552,14 +539,6 @@
 		border: 1px solid var(--glass-border, var(--border));
 		border-radius: calc(var(--radius, 0.75rem) * 0.66);
 		box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
-	}
-
-	.popover-title {
-		font-size: 11px;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: var(--muted-foreground);
 	}
 
 	/* ===== Context section ===== */
@@ -642,6 +621,16 @@
 		flex-shrink: 0;
 		min-width: 0;
 		transition: width 0.3s ease;
+	}
+	/* Collapsed state: one plain severity-coloured fill (same vars as the ring/pct). */
+	.ctx-seg.solid {
+		background: var(--primary);
+	}
+	.ctx-seg.solid.warning {
+		background: var(--warning);
+	}
+	.ctx-seg.solid.danger {
+		background: var(--destructive);
 	}
 
 	/* Per-category breakdown rows — one line: swatch + label (left) + value (right). */
@@ -799,21 +788,5 @@
 	.section-stale {
 		font-size: 10px;
 		color: var(--warning);
-	}
-
-	/* Footer — breakdown status. Only rendered when there's a rich breakdown to
-	   caption (empty statusLabel hides the whole footer). */
-	.popover-footer {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 8px;
-		font-size: 10px;
-		letter-spacing: 0.02em;
-		color: var(--muted-foreground);
-		opacity: 0.75;
-	}
-	.footer-status {
-		font-style: italic;
 	}
 </style>

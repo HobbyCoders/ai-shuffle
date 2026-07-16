@@ -141,17 +141,22 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelectorAll('.breakdown-row').length).toBeGreaterThan(0);
 	});
 
-	it('collapses on toggle: hides rows but keeps the segmented bar + limits, persists to localStorage', async () => {
+	it('collapses on toggle: hides rows, collapses the bar to a single fill, keeps limits, persists to localStorage', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		const header = container.querySelector('.ctx-header') as HTMLButtonElement;
 
 		await fireEvent.click(header);
 
-		// Rows hidden; the segmented bar and the plan-limits section stay visible.
+		// Rows hidden; the segmented bar collapses to a single severity-coloured
+		// fill; the plan-limits section (data rows / "No usage data yet") stays
+		// visible even though the "Plan usage limits" title is gone.
 		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
-		expect(container.querySelector('.ctx-segbar')).not.toBeNull();
-		expect(container.textContent).toContain('Plan usage limits');
+		const segs = container.querySelectorAll('.ctx-seg');
+		expect(segs.length).toBe(1);
+		expect(segs[0].classList.contains('solid')).toBe(true);
+		expect(container.textContent).not.toContain('Plan usage limits');
+		expect(container.textContent).toContain('No usage data yet');
 		expect(header.getAttribute('aria-expanded')).toBe('false');
 		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('0');
 	});
@@ -162,8 +167,43 @@ describe('ContextUsageBar — context breakdown', () => {
 		await openPopover(container);
 		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('false');
 		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
-		// The segmented bar is not part of the collapse.
-		expect(container.querySelector('.ctx-segbar')).not.toBeNull();
+		// Collapsed: a single severity-coloured fill, not the per-category segments.
+		const segs = container.querySelectorAll('.ctx-seg');
+		expect(segs.length).toBe(1);
+		expect(segs[0].classList.contains('solid')).toBe(true);
+	});
+
+	it('collapsed bar renders a single severity-coloured fill sized to the total percent', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 190_000, color: '#333' },
+					{ name: 'Free space', tokens: 10_000, color: '#444' },
+				],
+				totalTokens: 190_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 95,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.querySelector('.ctx-pct')?.textContent).toContain('95%'));
+
+		const header = container.querySelector('.ctx-header') as HTMLButtonElement;
+		await fireEvent.click(header); // collapse
+
+		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
+		expect(segs.length).toBe(1);
+		expect(segs[0].classList.contains('solid')).toBe(true);
+		// 95% → danger severity (usageSeverity: >90 is danger).
+		expect(segs[0].classList.contains('danger')).toBe(true);
+		expect(parseFloat((segs[0] as HTMLElement).style.width)).toBeCloseTo(95, 5);
 	});
 
 	it('shows em-dash rows for a fresh session with no per-row mini bars', async () => {
@@ -183,15 +223,16 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelector('.breakdown-row .row-bar')).toBeNull();
 	});
 
-	it('renders only the dim buffer segment on a fresh session', async () => {
+	it('renders only the dim buffer segment on a fresh session (breakdown expanded)', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
+		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true');
 		const segs = container.querySelectorAll('.ctx-seg');
 		expect(segs.length).toBe(1);
 		expect(segs[0].classList.contains('dim')).toBe(true);
 	});
 
-	it('renders one segment per in-bar category plus a dim buffer segment, excluding Free space AND Output tokens', async () => {
+	it('renders one segment per in-bar category plus a dim buffer segment, excluding Free space AND Output tokens (breakdown expanded)', async () => {
 		mocks.activeSession.set({
 			...mocks.DEFAULT,
 			sessionId: 's1',
@@ -203,6 +244,7 @@ describe('ContextUsageBar — context breakdown', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
+		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true');
 
 		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
 		// Input + cacheRead + cacheCreation segments + 1 dim buffer segment. Output
@@ -224,7 +266,7 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(segTokens).toBe(20_000 + 50_000 + 30_000); // input + cacheRead + cacheCreation
 	});
 
-	it('renders a deferred category row with tokens + em-dash (no percent) and no bar segment', async () => {
+	it('renders a deferred category row with tokens + em-dash (no percent) and no bar segment (breakdown expanded)', async () => {
 		mocks.getContextUsage.mockResolvedValue({
 			available: true,
 			source: 'live',
@@ -246,6 +288,7 @@ describe('ContextUsageBar — context breakdown', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		await waitFor(() => expect(container.textContent).toContain('MCP tools (deferred)'));
+		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true');
 
 		const rows = Array.from(container.querySelectorAll('.breakdown-row'));
 		const deferredRow = rows.find((r) => r.textContent?.includes('MCP tools (deferred)'))!;
@@ -384,15 +427,11 @@ describe('ContextUsageBar — context breakdown', () => {
 });
 
 describe('ContextUsageBar — footer', () => {
-	it('does not render the footer when no rich breakdown is loaded (poller estimate only)', async () => {
+	it('never renders a footer — neither on the poller estimate nor once a rich breakdown loads', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-
 		expect(container.querySelector('.popover-footer')).toBeNull();
-		expect(container.textContent).not.toContain('estimated from last turn');
-	});
 
-	it('renders the footer with "live breakdown" once a rich breakdown loads', async () => {
 		mocks.getContextUsage.mockResolvedValue({
 			available: true,
 			source: 'live',
@@ -410,63 +449,8 @@ describe('ContextUsageBar — footer', () => {
 			},
 		});
 		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-
-		await waitFor(() => expect(container.querySelector('.popover-footer')).not.toBeNull());
-		expect(container.querySelector('.footer-status')?.textContent).toBe('live breakdown');
-	});
-
-	it('renders the footer with "final breakdown" for a persisted snapshot', async () => {
-		mocks.getContextUsage.mockResolvedValue({
-			available: true,
-			source: 'persisted',
-			usage: {
-				categories: [
-					{ name: 'Messages', tokens: 10_000, color: '#333' },
-					{ name: 'Free space', tokens: 190_000, color: '#444' },
-				],
-				totalTokens: 10_000,
-				maxTokens: 200_000,
-				rawMaxTokens: 200_000,
-				percentage: 5,
-				model: 'claude-x',
-				isAutoCompactEnabled: true,
-			},
-		});
-		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-
-		await waitFor(() =>
-			expect(container.querySelector('.footer-status')?.textContent).toBe('final breakdown')
-		);
-	});
-
-	it('never shows the model label in the footer', async () => {
-		mocks.getContextUsage.mockResolvedValue({
-			available: true,
-			source: 'live',
-			usage: {
-				categories: [
-					{ name: 'Messages', tokens: 10_000, color: '#333' },
-					{ name: 'Free space', tokens: 190_000, color: '#444' },
-				],
-				totalTokens: 10_000,
-				maxTokens: 200_000,
-				rawMaxTokens: 200_000,
-				percentage: 5,
-				model: 'claude-x',
-				isAutoCompactEnabled: true,
-			},
-		});
-		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
-		const { container } = render(ContextUsageBar);
-		await openPopover(container);
-
-		await waitFor(() => expect(container.querySelector('.popover-footer')).not.toBeNull());
-		expect(container.querySelector('.footer-model')).toBeNull();
-		expect(container.querySelector('.popover-footer')?.textContent).not.toContain('Sonnet');
+		await waitFor(() => expect(container.textContent).toContain('Messages'));
+		expect(container.querySelector('.popover-footer')).toBeNull();
 	});
 });
 
@@ -477,6 +461,23 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
 		expect(container.textContent).toContain('No usage data yet');
 		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+	});
+
+	it('never shows the "Plan usage limits" title, whether the section is empty or has rows', async () => {
+		const { container: empty } = render(ContextUsageBar);
+		await openPopover(empty);
+		expect(empty.textContent).not.toContain('Plan usage limits');
+		expect(empty.textContent).toContain('No usage data yet');
+		cleanup();
+
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
+		});
+		const { container: withRows } = render(ContextUsageBar);
+		await openPopover(withRows);
+		expect(withRows.textContent).not.toContain('Plan usage limits');
+		expect(withRows.querySelectorAll('.popover-row').length).toBe(1);
 	});
 
 	it('lists the resolved window percentage (snapshot is 0–100)', async () => {
