@@ -55,8 +55,13 @@ const STATIC_DEFAULT = 'sonnet';
 
 const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
 	'claude-haiku-4-5': 'haiku',
+	'claude-haiku-4-5-20251001': 'haiku',
 	'claude-sonnet-4-6': 'sonnet',
 	'claude-sonnet-4-6[1m]': 'sonnet[1m]',
+	'claude-sonnet-5': 'sonnet',
+	'claude-sonnet-5[1m]': 'sonnet[1m]',
+	'claude-fable-5': 'fable',
+	'claude-fable-5[1m]': 'fable[1m]',
 	'claude-opus-4-6': 'opus',
 	'claude-opus-4-6[1m]': 'opus[1m]',
 	'claude-opus-4-7': 'opus',
@@ -176,6 +181,24 @@ export function getModelLabel(value: string | null | undefined): string {
 export function getModelFamily(value: string | null | undefined): ModelFamily | null {
 	const base = getBaseModel(value);
 	return _registry.models.find((m) => m.value === base)?.family ?? null;
+}
+
+/**
+ * Robust family inference: try the registry lookup first, then fall back to
+ * substring inference on the base model id. The SDK can echo a dated
+ * snapshot id (e.g. a future `claude-sonnet-X-YYYYMMDD`) that isn't in
+ * `LEGACY_MODEL_MAP` yet — `getModelFamily` would return `null` for that,
+ * making a genuine same-family id look like an unclassifiable reroute. This
+ * still classifies those ids by checking which family name appears in the
+ * lowercased base model string. Returns `null` for truly custom/unknown
+ * models (no family substring present).
+ */
+export function inferModelFamily(value: string | null | undefined): ModelFamily | null {
+	const registryFamily = getModelFamily(value);
+	if (registryFamily) return registryFamily;
+	const base = getBaseModel(value).toLowerCase();
+	const families: ModelFamily[] = ['haiku', 'sonnet', 'opus', 'fable'];
+	return families.find((family) => base.includes(family)) ?? null;
 }
 
 /**

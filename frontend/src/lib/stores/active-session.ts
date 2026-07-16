@@ -94,6 +94,16 @@ export interface ActiveSessionState {
 	 *  targets that turn — a stop delivered after its turn settled then no-ops
 	 *  server-side instead of interrupting the successor turn (GitHub #585). */
 	liveTurnId: string | null;
+	/** Model the SDK's MAIN lane is ACTUALLY running for the live/last turn,
+	 *  surfaced by the v2 feed's `system.note`/`model_info` events (null when no
+	 *  note has arrived). Compared against the effective model selection to flag
+	 *  a mid-turn reroute in the composer. Transient — reset on every session
+	 *  switch / new chat and re-derived from the feed replay. */
+	liveModel: string | null;
+	/** The model that was REQUESTED for the turn `liveModel` reports on (from
+	 *  the same `model_info` note). Transient — reset on every session switch /
+	 *  new chat and re-derived from the feed replay, same as `liveModel`. */
+	liveRequestedModel: string | null;
 	wsConnected: boolean;
 	error: string | null;
 	profile: string;
@@ -211,6 +221,8 @@ function defaultState(): ActiveSessionState {
 		messages: [],
 		isStreaming: false,
 		liveTurnId: null,
+		liveModel: null,
+		liveRequestedModel: null,
 		wsConnected: false,
 		error: null,
 		profile: getPersistedProfile(),

@@ -380,6 +380,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// #585: the leaving session's live turn id must not bleed into the
 			// target — the target feed re-derives it from its own turn.* events.
 			liveTurnId: null,
+			// Same for the live model: the leaving session's rerouted-model note
+			// must not flag a phantom reroute on the target before its feed replays.
+			liveModel: null,
+			liveRequestedModel: null,
 			pendingInterruptPrompt: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
@@ -568,6 +572,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			isStreaming: false,
 			// #585: reset the live turn id on newChat (mirrors defaultState).
 			liveTurnId: null,
+			// Reset the live model too so no stale reroute flag survives into the
+			// fresh compose screen (mirrors defaultState).
+			liveModel: null,
+			liveRequestedModel: null,
 			pendingInterruptPrompt: null,
 			error: null,
 			title: 'New Chat',

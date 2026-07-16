@@ -27,9 +27,34 @@
 		 *  exclusive — opening one closes the others. */
 		isOpen: boolean;
 		onOpenChange: (open: boolean) => void;
+		/** Desktop (>=640px) label rendered beside the icon as a full pill
+		 *  (icon + label + chevron). When omitted the control stays icon-only at
+		 *  every width. */
+		buttonLabel?: string;
+		/** Elevates the control to a warning state (amber border/text + warning
+		 *  indicator dot). Used to flag a model reroute (actual != requested). */
+		warn?: boolean;
+		/** Tooltip shown in place of the default one while `warn` is set. */
+		warnTitle?: string;
+		/** One-line notice rendered at the top of the open dropdown (e.g. the
+		 *  reroute explanation). */
+		notice?: string;
 	}
 
-	let { modes, currentValue, onSelect, icon, title, isOverridden, isOpen, onOpenChange }: Props = $props();
+	let {
+		modes,
+		currentValue,
+		onSelect,
+		icon,
+		title,
+		isOverridden,
+		isOpen,
+		onOpenChange,
+		buttonLabel,
+		warn = false,
+		warnTitle,
+		notice
+	}: Props = $props();
 
 	const isActive = $derived(isOverridden ?? currentValue !== null);
 
@@ -71,21 +96,32 @@
 	<button
 		type="button"
 		class="override-btn"
-		class:active={isActive}
+		class:active={isActive && !warn}
+		class:has-label={buttonLabel != null}
+		class:warn
 		onclick={handleClick}
-		title="{title} (session only)"
+		title={warn && warnTitle ? warnTitle : `${title} (session only)`}
 		aria-haspopup="menu"
 		aria-expanded={isOpen}
 	>
 		{@render icon()}
-		{#if isActive}
-			<span class="override-indicator"></span>
+		{#if buttonLabel != null}
+			<span class="override-label">{buttonLabel}</span>
+			<svg class="override-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 9l6 6 6-6" />
+			</svg>
+		{/if}
+		{#if isActive || warn}
+			<span class="override-indicator" class:warn></span>
 		{/if}
 	</button>
 
 	{#if isOpen}
 		<div class="override-dropdown" role="menu" aria-label={title}>
 			<div class="override-dropdown-header">{title}</div>
+			{#if notice}
+				<div class="override-dropdown-notice">{notice}</div>
+			{/if}
 			{#each modes as mode (mode.value)}
 				<button
 					type="button"
@@ -141,6 +177,35 @@
 		background: var(--selection-bg-emphasis);
 	}
 
+	/* Reroute warning — the actual model differs from what was requested. The
+	   component never sets both `.active` and `.warn` at once (see the
+	   `class:active={isActive && !warn}` guard above), so these rules are
+	   order-independent. Icon-only mode tints the glyph amber; the pill variant
+	   below repaints the whole chip. */
+	.override-btn.warn,
+	.override-btn.warn:hover {
+		color: var(--warning);
+	}
+
+	/* Label + chevron (desktop pill only — hidden until the 640px breakpoint) */
+	.override-label {
+		display: none;
+		max-width: 92px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		line-height: 1;
+		letter-spacing: 0.01em;
+	}
+
+	.override-chevron {
+		display: none;
+		width: 11px;
+		height: 11px;
+		flex-shrink: 0;
+		opacity: 0.6;
+	}
+
 	/* Active indicator dot */
 	.override-indicator {
 		position: absolute;
@@ -151,6 +216,23 @@
 		background: var(--primary);
 		border-radius: 50%;
 		border: 1px solid var(--background);
+	}
+
+	.override-indicator.warn {
+		background: var(--warning);
+	}
+
+	/* One-line reroute notice at the head of the open dropdown. */
+	.override-dropdown-notice {
+		margin: 0 2px 4px;
+		padding: 6px 8px;
+		font-size: 11px;
+		line-height: 1.3;
+		font-weight: 500;
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 40%, transparent);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
 
 	/* Override dropdown */
@@ -223,7 +305,7 @@
 		margin-left: auto;
 	}
 
-	/* Mobile: slightly more compact */
+	/* Mobile: slightly more compact, icon-only (labels stay hidden). */
 	@media (max-width: 639px) {
 		.override-btn {
 			width: 26px;
@@ -237,6 +319,63 @@
 
 		.override-dropdown {
 			min-width: 120px;
+		}
+	}
+
+	/* Desktop: labeled controls expand into full pills that match the composer's
+	   top context pills (`.context-selector-btn` metrics: 28px tall, 0 10px pad,
+	   same surface/border/radius/typography). Icon-only controls (no buttonLabel)
+	   are untouched and stay compact. */
+	@media (min-width: 640px) {
+		.override-btn.has-label {
+			width: auto;
+			height: 28px;
+			gap: 5px;
+			padding: 0 10px;
+			background: color-mix(in oklch, var(--foreground) 6%, var(--background));
+			border: 1px solid var(--border);
+			border-radius: var(--radius, 0.75rem);
+			color: var(--muted-foreground);
+			font-size: 0.75rem;
+			font-weight: 500;
+			white-space: nowrap;
+		}
+
+		.override-btn.has-label .override-label,
+		.override-btn.has-label .override-chevron {
+			display: block;
+		}
+
+		.override-btn.has-label:hover {
+			background: color-mix(in oklch, var(--foreground) 6%, var(--background));
+			border-color: var(--primary);
+			color: var(--foreground);
+		}
+
+		/* Override set: primary-tinted chip instead of a corner dot. */
+		.override-btn.has-label.active {
+			background: color-mix(in oklch, var(--primary) 10%, var(--background));
+			border-color: var(--primary);
+			color: var(--foreground);
+		}
+
+		.override-btn.has-label.active:hover {
+			background: color-mix(in oklch, var(--primary) 14%, var(--background));
+		}
+
+		/* Reroute: amber chip. The component never sets both `.active` and
+		   `.warn` at once, so this rule doesn't depend on declaration order
+		   relative to `.active`. */
+		.override-btn.has-label.warn,
+		.override-btn.has-label.warn:hover {
+			background: color-mix(in oklch, var(--warning) 10%, var(--background));
+			border-color: var(--warning);
+			color: var(--warning);
+		}
+
+		/* The corner dot is redundant once the pill carries a label + fill. */
+		.override-btn.has-label .override-indicator {
+			display: none;
 		}
 	}
 </style>

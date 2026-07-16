@@ -92,6 +92,8 @@ function mockState(): ActiveSessionState {
 		messages: [],
 		isStreaming: false,
 		liveTurnId: null,
+		liveModel: null,
+		liveRequestedModel: null,
 		wsConnected: true,
 		error: null,
 		profile: 'default',

@@ -53,6 +53,8 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		messages: [{ id: 'm1', role: 'user', content: 'hi' }],
 		isStreaming: false,
 		liveTurnId: null,
+		liveModel: null,
+		liveRequestedModel: null,
 		wsConnected: true,
 		error: null,
 		profile: 'profile-global',

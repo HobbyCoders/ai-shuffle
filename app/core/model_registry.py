@@ -79,8 +79,13 @@ INHERIT_VALUE = ""
 # are required because normalize_model does an exact-string lookup.
 LEGACY_MODEL_MAP: Dict[str, str] = {
     "claude-haiku-4-5": "haiku",
+    "claude-haiku-4-5-20251001": "haiku",
     "claude-sonnet-4-6": "sonnet",
     "claude-sonnet-4-6[1m]": "sonnet[1m]",
+    "claude-sonnet-5": "sonnet",
+    "claude-sonnet-5[1m]": "sonnet[1m]",
+    "claude-fable-5": "fable",
+    "claude-fable-5[1m]": "fable[1m]",
     "claude-opus-4-6": "opus",
     "claude-opus-4-6[1m]": "opus[1m]",
     "claude-opus-4-7": "opus",

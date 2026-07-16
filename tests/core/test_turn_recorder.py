@@ -348,6 +348,42 @@ async def test_system_maps_to_system_note(mock_db):
     await rec.close()
 
 
+async def test_system_model_info_folds_top_level_keys_into_data(mock_db):
+    # The pump yields model/requested_model nested under "data"; the recorder's
+    # generic system-note fallback passes it through so the frontend sees
+    # actual-vs-requested on the wire (model-rerouting detection).
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "model_info",
+        "data": {"model": "claude-actual", "requested_model": "claude-requested"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.note"
+    assert row["payload"]["subtype"] == "model_info"
+    assert row["payload"]["data"] == {
+        "model": "claude-actual",
+        "requested_model": "claude-requested",
+    }
+    await rec.close()
+
+
+async def test_system_model_info_null_requested_model(mock_db):
+    # requested_model passthrough is optional (options.model may be None).
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "model_info",
+        "data": {"model": "claude-actual", "requested_model": None},
+    })
+    row = _rows()[-1]
+    assert row["payload"]["subtype"] == "model_info"
+    assert row["payload"]["data"] == {
+        "model": "claude-actual", "requested_model": None,
+    }
+    await rec.close()
+
+
 async def test_system_compaction_boundary_passthrough(mock_db):
     _mk_session()
     rec = await _recorder()

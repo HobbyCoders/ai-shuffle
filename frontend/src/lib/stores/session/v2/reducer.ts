@@ -60,6 +60,15 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
+	/** Model the SDK's MAIN lane is ACTUALLY running this turn, as reported by
+	 *  the backend `system.note`/`model_info` event (null before the first note).
+	 *  Drives the composer's reroute indicator (actual-vs-requested). Purely
+	 *  event-derived, so a from_seq=0 replay self-restores it on reload. */
+	liveModel: string | null;
+	/** The model that was REQUESTED for the turn `liveModel` reports on (from
+	 *  the same `model_info` note). Comparing actual-vs-requested per turn
+	 *  avoids flagging a mere selection change as a reroute. */
+	liveRequestedModel: string | null;
 	/** `transcript.rewound` bookkeeping: message id → seq of the event that
 	 *  CREATED it. A message absent from this map is optimistic (seeded outside
 	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
@@ -81,6 +90,8 @@ export function initialState(): V2SessionState {
 		openTextId: null,
 		openThinkingId: null,
 		liveTurnId: null,
+		liveModel: null,
+		liveRequestedModel: null,
 		messageOriginSeq: {},
 		taskOriginSeq: {},
 	};
@@ -378,11 +389,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		// ── Turn lifecycle ──────────────────────────────────────────────
 		case 'turn.started':
 			// Track the live turn id (#585) so a Stop can target THIS turn.
+			// Also reset liveModel/liveRequestedModel: the new turn's model is
+			// unknown until its own model_info note arrives; without this, a
+			// previous turn's reroute banner lingers even after the user aligns
+			// their selection. Replay order preserves correctness: a backfill
+			// replays turn.started then that turn's model_info.
 			return {
 				...state,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
+				liveModel: null,
+				liveRequestedModel: null,
 			};
 
 		case 'turn.parked':
@@ -940,6 +958,18 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// mapping point -- so no message is ever created. activeTasks
 			// state is untouched (this event never feeds it).
 			if (str(event.subtype) === 'background_tasks_changed') return state;
+			// `model_info` reports the model the SDK's MAIN lane is actually
+			// running (vs. what was requested) at turn start and whenever it
+			// changes mid-turn (rerouting). It drives the composer's reroute
+			// indicator only — never a transcript card — so fold it into
+			// `liveModel` and return without appending, exactly like
+			// `background_tasks_changed` above. A from_seq=0 replay re-applies
+			// these notes, so `liveModel` self-restores on reload.
+			if (str(event.subtype) === 'model_info') {
+				const model = str(obj(event.data)?.model);
+				const requested = str(obj(event.data)?.requested_model);
+				return { ...state, liveModel: model || null, liveRequestedModel: requested || null };
+			}
 			const data = obj(event.data);
 			const msg: ChatMessage = {
 				id: event.id,

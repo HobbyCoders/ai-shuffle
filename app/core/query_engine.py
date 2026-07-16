@@ -2395,6 +2395,20 @@ async def _stream_to_websocket_impl(
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
         metadata = {}
         interrupted = False
+        # Last `model` value emitted via a `model_info` system note THIS turn.
+        # Seeded from the SDK init frame so init + first AssistantMessage with
+        # the same model produce ONE event (not two); a mid-turn model CHANGE
+        # (rerouting) re-emits. Main-lane only (subagent models are their own).
+        last_model_info: Optional[str] = None
+        requested_model = getattr(options, "model", None)
+
+        def _model_info_frame(model: str) -> dict:
+            return {
+                "type": "system",
+                "subtype": "model_info",
+                "data": {"model": model, "requested_model": requested_model},
+            }
+
         include_partial = options.include_partial_messages  # Track if streaming events are enabled
         has_visible_content = False  # Track if any content was yielded to the frontend
         is_slash_command = prompt.strip().startswith("/")
@@ -2533,6 +2547,15 @@ async def _stream_to_websocket_impl(
                                 f"[WS] early sdk_session_id link failed for "
                                 f"{session_id}: {link_err}"
                             )
+
+                    # Live model_info note: surface the model the SDK actually
+                    # LAUNCHED (vs. what we requested) so the frontend can flag
+                    # rerouting during the turn. Seed last_model_info so an
+                    # identical first AssistantMessage does not re-emit.
+                    init_model = message.data.get("model")
+                    if init_model:
+                        last_model_info = init_model
+                        yield _model_info_frame(init_model)
 
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
@@ -3170,6 +3193,19 @@ async def _stream_to_websocket_impl(
                         }
 
                 metadata["model"] = message.model
+
+                # Live model_info note: re-emit when the MAIN-lane model the SDK
+                # is actually running changes mid-turn (rerouting). Seeded from
+                # the init frame above, so init + an identical first assistant
+                # model collapse to one event; a subagent's own model (its
+                # AssistantMessages carry parent_tool_use_id) never counts.
+                if (
+                    not is_subagent_lane
+                    and message.model
+                    and message.model != last_model_info
+                ):
+                    last_model_info = message.model
+                    yield _model_info_frame(message.model)
 
                 # Per-turn usage from AssistantMessage (SDK 0.1.49+)
                 if message.usage:

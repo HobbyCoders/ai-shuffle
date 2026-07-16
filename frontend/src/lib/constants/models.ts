@@ -18,6 +18,7 @@ export {
 	modelSupports1M,
 	getModelLabel,
 	getModelFamily,
+	inferModelFamily,
 	getModelBadgeClass,
 	hydrateModelRegistry
 } from './models.svelte';

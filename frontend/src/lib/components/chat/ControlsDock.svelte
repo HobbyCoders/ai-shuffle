@@ -10,6 +10,13 @@
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
 	import { Monitor } from 'lucide-svelte';
+	import {
+		getModels,
+		getModelLabel,
+		getDefaultModel,
+		inferModelFamily,
+		type ModelFamily
+	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import { getUsageLimits } from '$lib/api/client';
 	import { rateLimit, resolveBucketKey, isBucketStale } from '$lib/stores/rate-limit';
@@ -38,8 +45,8 @@
 		}
 	}
 
-	// Only one override dropdown may be open at a time — opening one closes the other.
-	let openDropdown = $state<'effort' | 'permission' | null>(null);
+	// Only one override dropdown may be open at a time — opening one closes the others.
+	let openDropdown = $state<'model' | 'effort' | 'permission' | null>(null);
 
 	// The effort/permission dropdowns reflect the *effective* value: the per-session
 	// override if one is set, otherwise the active profile's setting. They list only
@@ -51,6 +58,64 @@
 	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
 	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
+
+	// ── Model override ──────────────────────────────────────────────
+	// Terse, family-level blurbs — the dropdown surfaces one line of "why pick
+	// this" without turning into a spec sheet.
+	const MODEL_FAMILY_BLURB: Record<ModelFamily, string> = {
+		haiku: 'Fastest, lightest',
+		sonnet: 'Balanced speed and depth',
+		opus: 'Deep reasoning',
+		fable: 'Most capable'
+	};
+	const modelOptions = $derived(
+		getModels().map((m) => ({
+			value: m.value,
+			label: m.label,
+			description: MODEL_FAMILY_BLURB[m.family] ?? ''
+		}))
+	);
+	// Effective selection: the per-session override if set, else the profile's
+	// model, else the registry default. Selecting the profile's own model clears
+	// the override (mirrors the effort/permission pattern).
+	const profileModel = $derived(activeProfile?.config?.model ?? getDefaultModel());
+	const modelValue = $derived($activeSession.modelOverride ?? profileModel);
+
+	// Live reroute detection: the backend `model_info` note tells us which model
+	// the SDK's MAIN lane is ACTUALLY running. Compare at FAMILY level — exact-ID
+	// comparison false-flags when the SDK echoes a dated snapshot ID missing from
+	// the legacy map (inferModelFamily still classifies those via substring
+	// inference). Unknown/custom models never flag (deliberate: no reroute alarm
+	// we can't substantiate); same-family version reroutes are intentionally not
+	// flagged.
+	const liveModel = $derived($activeSession.liveModel);
+	const liveRequestedModel = $derived($activeSession.liveRequestedModel);
+	// Compare actual vs what was REQUESTED for that same turn (both from the
+	// model_info note) — never the live selection, which the user may have
+	// changed since.
+	const actualFamily = $derived(inferModelFamily(liveModel));
+	const requestedFamily = $derived(inferModelFamily(liveRequestedModel));
+	const rerouted = $derived(
+		liveModel != null &&
+			liveRequestedModel != null &&
+			actualFamily != null &&
+			requestedFamily != null &&
+			actualFamily !== requestedFamily
+	);
+	const selectedModelLabel = $derived(getModelLabel(modelValue));
+	const actualModelLabel = $derived(getModelLabel(liveModel));
+	const requestedModelLabel = $derived(getModelLabel(liveRequestedModel));
+	// When rerouted the pill shows the ACTUAL model (what's really running);
+	// otherwise it shows the selection.
+	const modelButtonLabel = $derived(rerouted ? actualModelLabel : selectedModelLabel);
+	const modelWarnTitle = $derived(
+		rerouted
+			? `Model rerouted: running ${actualModelLabel} (requested ${requestedModelLabel})`
+			: undefined
+	);
+	const modelNotice = $derived(
+		rerouted ? `Running ${actualModelLabel} instead of ${requestedModelLabel}` : undefined
+	);
 
 	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
 	// concurrent triggers (e.g. mount + a rapid target change) into ONE GET.
@@ -119,6 +184,15 @@
 		{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
 		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
 	];
+
+	// Desktop pill labels — the effective value's human label, with a neutral
+	// fallback when nothing is set yet (no profile value + no override).
+	const effortButtonLabel = $derived(
+		effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort'
+	);
+	const permissionButtonLabel = $derived(
+		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Access'
+	);
 </script>
 
 <div class="controls-dock">
@@ -129,6 +203,29 @@
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->
 	<div class="controls-right">
+		<!-- Model Override -->
+		<OverrideDropdown
+			modes={modelOptions}
+			currentValue={modelValue}
+			isOverridden={$activeSession.modelOverride !== null}
+			isOpen={openDropdown === 'model'}
+			onOpenChange={(open) => (openDropdown = open ? 'model' : null)}
+			onSelect={(v) => activeSession.setModelOverride(v === profileModel ? null : v)}
+			title="Model"
+			buttonLabel={modelButtonLabel}
+			warn={rerouted}
+			warnTitle={modelWarnTitle}
+			notice={modelNotice}
+		>
+			{#snippet icon()}
+				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<rect x="4" y="4" width="16" height="16" rx="2" stroke-width="1.75" />
+					<rect x="9" y="9" width="6" height="6" stroke-width="1.75" />
+					<path stroke-linecap="round" stroke-width="1.75" d="M9 1.5v2.5M15 1.5v2.5M9 20v2.5M15 20v2.5M20 9h2.5M20 14h2.5M1.5 9H4M1.5 14H4" />
+				</svg>
+			{/snippet}
+		</OverrideDropdown>
+
 		<!-- Effort Level Override -->
 		<OverrideDropdown
 			modes={effortLevels}
@@ -138,6 +235,7 @@
 			onOpenChange={(open) => (openDropdown = open ? 'effort' : null)}
 			onSelect={(v) => activeSession.setEffortLevelOverride(v === profileEffort ? null : v)}
 			title="Effort Level"
+			buttonLabel={effortButtonLabel}
 		>
 			{#snippet icon()}
 				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -155,6 +253,7 @@
 			onOpenChange={(open) => (openDropdown = open ? 'permission' : null)}
 			onSelect={(v) => activeSession.setPermissionModeOverride(v === profilePermissionMode ? null : v)}
 			title="Permission Mode"
+			buttonLabel={permissionButtonLabel}
 		>
 			{#snippet icon()}
 				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
