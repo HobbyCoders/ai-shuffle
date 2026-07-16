@@ -286,6 +286,34 @@ function mapTaskStatus(state: string): Task['status'] {
 	return TASK_STATE_MAP[state] ?? 'running';
 }
 
+// ─── Tool-result rejection classification (#612) ──────────────────────────────
+
+/**
+ * Map a raw model-API image-rejection error (surfaced verbatim on an
+ * `is_error` `tool.result`, e.g. from a Read that attached an image) to a
+ * short, friendly card message. CONSERVATIVE: returns a friendly string only
+ * on a confident substring match, else `null` so the caller keeps today's raw
+ * passthrough. A miss must degrade to the raw text, never a wrong substitution.
+ */
+function classifyToolRejection(raw: string): string | null {
+	const s = raw.toLowerCase();
+	// Image too large (byte size or pixel dimensions).
+	if (s.includes('image exceeds') || s.includes('exceeds 5 mb') || s.includes('dimensions exceed')) {
+		return 'Image too large for the model to read (limit ~5 MB / 8000 px). Try a smaller or downscaled version.';
+	}
+	// Unsupported / invalid image format. `invalid_request_error` only counts
+	// when the message is clearly about an image (avoids catching unrelated
+	// request errors).
+	if (
+		s.includes('unsupported image') ||
+		s.includes('invalid image') ||
+		(s.includes('invalid_request_error') && s.includes('image'))
+	) {
+		return "The model couldn't read this image (unsupported or invalid format).";
+	}
+	return null;
+}
+
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
 export function reduce(state: V2SessionState, event: WireEvent): V2SessionState {
@@ -548,10 +576,17 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!toolUseId) return state;
 			const existing = findByToolId(state.messages, toolUseId);
 			if (!existing) return state; // standalone tool_result is not rendered
+			const rawResult = str(event.content_preview);
+			// On an API rejection (#612), swap the raw provider error text for a
+			// friendly message when we confidently recognize it; otherwise keep the
+			// raw preview (conservative — a miss degrades to today's passthrough).
+			const toolResult = event.is_error
+				? classifyToolRejection(rawResult) ?? rawResult
+				: rawResult;
 			return {
 				...state,
 				messages: replaceById(state.messages, existing.id, {
-					toolResult: str(event.content_preview),
+					toolResult,
 					toolStatus: event.is_error ? 'error' : 'complete',
 					streaming: false,
 				}),

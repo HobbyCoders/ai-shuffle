@@ -250,6 +250,46 @@ describe('tool cards', () => {
 		const s = fold([ev('tool.result', { tool_use_id: 'ghost', content_preview: 'x' })]);
 		expect(s.messages).toHaveLength(0);
 	});
+
+	// ── Image-rejection classification (#612) ──
+	it('is_error image-too-large rejection swaps to the friendly message', () => {
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't1', name: 'Read', input: { file_path: 'big.png' } }),
+			ev('tool.result', {
+				tool_use_id: 't1',
+				is_error: true,
+				content_preview:
+					'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum: 7340032 bytes > 5242880 bytes"}}',
+			}),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't1')!;
+		expect(card.toolStatus).toBe('error');
+		expect(card.toolResult).toBe(
+			'Image too large for the model to read (limit ~5 MB / 8000 px). Try a smaller or downscaled version.'
+		);
+	});
+
+	it('is_error unrecognized rejection passes the raw preview through unchanged', () => {
+		const raw = 'API Error: 500 something totally unexpected happened on the server';
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't2', name: 'Read', input: { file_path: 'x' } }),
+			ev('tool.result', { tool_use_id: 't2', is_error: true, content_preview: raw }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't2')!;
+		expect(card.toolStatus).toBe('error');
+		expect(card.toolResult).toBe(raw); // no substitution on a miss
+	});
+
+	it('is_error:false result is never classified even if it mentions an image', () => {
+		const preview = 'Read image exceeds expectations — looks great';
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't3', name: 'Read', input: { file_path: 'ok.png' } }),
+			ev('tool.result', { tool_use_id: 't3', is_error: false, content_preview: preview }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't3')!;
+		expect(card.toolStatus).toBe('complete');
+		expect(card.toolResult).toBe(preview); // untouched passthrough
+	});
 });
 
 // ─── Subagents (correlated by task_id) ──────────────────────────────────────
