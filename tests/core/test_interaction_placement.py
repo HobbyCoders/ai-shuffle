@@ -30,11 +30,12 @@ from unittest.mock import AsyncMock
 
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
-from app.core import interaction_sweeper, interaction_wait
+from app.core import interaction_events, interaction_sweeper, interaction_wait
 from app.core.config import settings
 from app.core.permission_handler import PermissionHandler, _DeferSentinel
 from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions
+from app.db import session_events as session_events_db
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,14 @@ def _reset_interaction_wait_state():
     interaction_wait._listener_registered = False
 
 
+@pytest.fixture(autouse=True)
+def _reset_backfill_memo():
+    """Drop the per-process empty-session memo so each test backfills fresh."""
+    from app.core import history_backfill
+
+    history_backfill._reset_memo()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -93,6 +102,13 @@ def _answered_row(session_id, request_id, kind="permission"):
         if (r.get("payload") or {}).get("request_id") == request_id:
             return r
     return None
+
+
+def _events_of_type(session_id, event_type):
+    return [
+        e for e in session_events_db.get_events(session_id)
+        if e.get("event_type") == event_type
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +581,72 @@ async def test_sweeper_start_stop(mock_db):
     await interaction_sweeper.stop()
     assert interaction_sweeper._loop_task is None
     assert task.done()
+
+
+# ---------------------------------------------------------------------------
+# Sweeper (PR-B) — durable interaction.expired (reason=ttl) emission.
+# ---------------------------------------------------------------------------
+
+async def test_sweep_once_emits_expired_ttl_with_request_id(mock_db):
+    """A swept overdue row emits exactly one interaction.expired (reason=ttl)
+    carrying the row's request_id (nested in payload)."""
+    interactions.create_interaction(
+        "s1", "permission", {"request_id": "req-x"}, -1,   # overdue
+    )
+
+    count = await interaction_sweeper.sweep_once()
+    assert count == 1
+
+    rows = _events_of_type("s1", "interaction.expired")
+    assert len(rows) == 1
+    assert rows[0]["payload"]["reason"] == "ttl"
+    assert rows[0]["payload"]["request_id"] == "req-x"
+    # Unfenced append: the sweeper holds no run lease.
+    assert rows[0]["run_id"] is None
+
+
+async def test_sweep_once_answered_row_emits_nothing(mock_db):
+    """A row that lost the guarded UPDATE race (already answered, not pending)
+    is never swept, so the sweeper emits no interaction.expired for it —
+    preserving the exactly-once-terminal-event invariant."""
+    answered = interactions.create_interaction(
+        "s1", "permission", {"request_id": "req-answered"}, 60,
+    )
+    assert interactions.answer_interaction(answered["id"], {"decision": "allow"}) is True
+
+    overdue = interactions.create_interaction(
+        "s1", "permission", {"request_id": "req-overdue"}, -1,
+    )
+
+    count = await interaction_sweeper.sweep_once()
+    assert count == 1  # only the overdue-pending row is swept
+
+    rows = _events_of_type("s1", "interaction.expired")
+    assert len(rows) == 1
+    assert {r["payload"]["request_id"] for r in rows} == {"req-overdue"}
+    # The already-answered row produced no expired event.
+    assert overdue["id"] != answered["id"]
+
+
+async def test_sweep_once_emission_failure_does_not_break_sweep(mock_db, monkeypatch):
+    """An append failure inside emission is swallowed and never wedges the
+    sweep: the rows are still flipped to expired and the count is returned."""
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(session_events_db, "append_events", _boom)
+
+    overdue = interactions.create_interaction(
+        "s1", "permission", {"request_id": "req-x"}, -1,
+    )
+
+    # Must not raise despite the failing append.
+    count = await interaction_sweeper.sweep_once()
+    assert count == 1
+    # The row was still expired (the DB sweep is independent of emission).
+    assert interactions.get_interaction(overdue["id"])["state"] == "expired"
+    # And nothing was recorded.
+    assert _events_of_type("s1", "interaction.expired") == []
 
 
 # ---------------------------------------------------------------------------

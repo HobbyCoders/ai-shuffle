@@ -66,6 +66,19 @@ async def sweep_once() -> int:
                 session_id,
                 exc_info=True,
             )
+
+    # Append a durable ``interaction.expired`` (reason=ttl) per swept row AFTER
+    # the notify above (isolation invariant: emission is last and its helper
+    # swallows every failure, so it can never wedge the sweep). Each swept row
+    # won the guarded UPDATE's RETURNING, so this is exactly-once per row.
+    from app.core import interaction_events
+
+    for row in rows:
+        request_id = (row.get("payload") or {}).get("request_id")
+        await interaction_events.emit_interaction_expired(
+            row["session_id"], row["id"], request_id, "ttl"
+        )
+
     logger.debug("interaction_sweeper: expired %d interaction(s)", len(rows))
     return len(rows)
 

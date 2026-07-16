@@ -113,15 +113,19 @@ def expire_due_interactions() -> int:
 
 def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
     """Expire every pending interaction past its TTL, returning the swept rows
-    (id, session_id, kind) so the sweeper can NOTIFY each affected session."""
+    (id, session_id, kind, parsed payload) so the sweeper can NOTIFY each
+    affected session and emit a durable ``interaction.expired`` (reason=ttl)
+    carrying the row's ``request_id`` (nested in ``payload``)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE pending_interactions SET state='expired' "
             "WHERE state='pending' AND expires_at < NOW() "
-            "RETURNING id, session_id, kind"
+            "RETURNING id, session_id, kind, payload"
         )
         rows = rows_to_list(cursor.fetchall())
+    for row in rows:
+        row["payload"] = _parse_json(row.get("payload"))
     return rows
 
 

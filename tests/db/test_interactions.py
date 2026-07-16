@@ -72,8 +72,8 @@ def test_get_interaction_missing_returns_none(mock_db):
 
 def test_expire_due_detailed_returns_swept_rows(mock_db):
     live = ix.create_interaction("s1", "permission", {}, 60)
-    overdue_a = ix.create_interaction("s1", "permission", {}, -1)
-    overdue_b = ix.create_interaction("s2", "question", {}, -1)
+    overdue_a = ix.create_interaction("s1", "permission", {"request_id": "req-a"}, -1)
+    overdue_b = ix.create_interaction("s2", "question", {"request_id": "req-b"}, -1)
     rows = ix.expire_due_interactions_detailed()
     swept = {r["id"]: r for r in rows}
     assert overdue_a["id"] in swept
@@ -82,6 +82,10 @@ def test_expire_due_detailed_returns_swept_rows(mock_db):
     # Each row carries session_id + kind so the sweeper can NOTIFY per session.
     assert swept[overdue_a["id"]]["session_id"] == "s1"
     assert swept[overdue_b["id"]]["kind"] == "question"
+    # Each row also carries its parsed payload so the sweeper can emit a durable
+    # interaction.expired carrying the row's request_id (PR-B).
+    assert swept[overdue_a["id"]]["payload"] == {"request_id": "req-a"}
+    assert swept[overdue_b["id"]]["payload"] == {"request_id": "req-b"}
     assert ix.get_interaction(live["id"])["state"] == "pending"
 
 
