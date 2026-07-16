@@ -40,7 +40,7 @@ from app.core.rewind_db_sync import (
     apply_rewind_delete,
     delete_all_session_rows,
 )
-from app.core.jsonl_parser import invalidate_parse_cache
+from app.core.jsonl_parser import invalidate_parse_cache, _is_task_notification
 from app.core.sync_engine import sync_engine
 from app.core.session_pool import get_session_pool
 from app.core.models import (
@@ -577,11 +577,22 @@ def _is_prompt_event(row: dict) -> bool:
     Command prompts (kind='command') are excluded because the JSONL checkpoint
     list (`get_checkpoints`) skips command/meta entries, and ordinals must be
     computed against the SAME population on both sides.
+
+    Task-notification wake prompts (synthetic user rows containing a
+    ``<task-notification>`` block) are likewise excluded: since #658 the UI
+    renders them as system Task cards, not user bubbles, so they must never
+    resolve as rewind checkpoints. Reuses ``jsonl_parser._is_task_notification``
+    — the shared ``<task-notification>`` substring convention used across
+    history_backfill and the sessions.py orphan-turn guards.
     """
-    return (
-        row["event_type"] == "message.user"
-        and (row.get("payload") or {}).get("kind") != "command"
-    )
+    if row["event_type"] != "message.user":
+        return False
+    payload = row.get("payload") or {}
+    if payload.get("kind") == "command":
+        return False
+    if _is_task_notification(payload.get("content") or ""):
+        return False
+    return True
 
 
 def _resolve_checkpoint_uuid_from_content(

@@ -18,6 +18,7 @@ import pytest
 import app.api.commands as cmd
 from app.api.commands import (
     RewindRequestV2,
+    _is_prompt_event,
     _load_message_events,
     _resolve_checkpoint_uuid_from_content,
     _resolve_rewind_from_seq,
@@ -59,6 +60,28 @@ def _patch_checkpoints(monkeypatch, checkpoints):
         cmd.jsonl_rewind_service, "get_checkpoints",
         lambda sdk_session_id, working_dir: list(checkpoints),
     )
+
+
+# ---------------------------------------------------------------------------
+# _is_prompt_event — checkpoint candidacy
+# ---------------------------------------------------------------------------
+
+def test_is_prompt_event_normal_user_message():
+    row = {"event_type": "message.user", "payload": {"content": "hello there"}}
+    assert _is_prompt_event(row) is True
+
+
+def test_is_prompt_event_excludes_task_notification():
+    row = {
+        "event_type": "message.user",
+        "payload": {
+            "content": (
+                "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+                "<task-notification>\n<detail>done</detail>\n</task-notification>"
+            ),
+        },
+    }
+    assert _is_prompt_event(row) is False
 
 
 # ---------------------------------------------------------------------------
