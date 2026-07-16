@@ -178,6 +178,7 @@ function fold(): void {
 					...s,
 					messages: reducerState.messages,
 					isStreaming: reducerState.isStreaming,
+					liveTurnId: reducerState.liveTurnId,
 					activeTasks,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					...usagePatch,

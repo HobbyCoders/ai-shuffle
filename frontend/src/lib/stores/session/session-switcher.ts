@@ -377,6 +377,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deferredPermissions: [],
 			pendingQuestions: [],
 			isStreaming: false,
+			// #585: the leaving session's live turn id must not bleed into the
+			// target — the target feed re-derives it from its own turn.* events.
+			liveTurnId: null,
 			pendingInterruptPrompt: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
@@ -563,6 +566,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			project: getPersistedProject() || s.project,
 			messages: [],
 			isStreaming: false,
+			// #585: reset the live turn id on newChat (mirrors defaultState).
+			liveTurnId: null,
 			pendingInterruptPrompt: null,
 			error: null,
 			title: 'New Chat',

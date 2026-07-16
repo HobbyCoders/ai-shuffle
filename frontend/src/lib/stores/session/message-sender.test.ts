@@ -332,6 +332,32 @@ describe('message-sender stopGeneration deferral', () => {
 		expect(deps.internal.stopRequestedBeforeSession).toBe(false);
 	});
 
+	it('carries the live turn id when one is known (#585)', () => {
+		const { deps, wsConn } = makeDeps(
+			baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: 'turn-9' })
+		);
+		const sender = createMessageSender(deps);
+
+		sender.stopGeneration();
+
+		const sends = stopSends(wsConn);
+		expect(sends).toHaveLength(1);
+		expect((sends[0][0] as any).turn_id).toBe('turn-9');
+	});
+
+	it('omits turn_id when no live turn id is known (legacy session-scoped, #585)', () => {
+		const { deps, wsConn } = makeDeps(
+			baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: null })
+		);
+		const sender = createMessageSender(deps);
+
+		sender.stopGeneration();
+
+		const sends = stopSends(wsConn);
+		expect(sends).toHaveLength(1);
+		expect('turn_id' in (sends[0][0] as any)).toBe(false);
+	});
+
 	it('defers the stop when no sessionId yet but a new session is awaited', () => {
 		const { deps, wsConn } = makeDeps(baseState({ sessionId: null, isStreaming: true }));
 		deps.internal.awaitingNewSession = true;

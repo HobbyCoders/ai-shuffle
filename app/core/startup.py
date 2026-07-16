@@ -9,7 +9,7 @@ import asyncio
 import logging
 import sys
 import time
-from typing import List
+from typing import List, Optional
 
 from app.core.config import settings, ensure_directories, load_workspace_from_database
 from app.db import database
@@ -508,10 +508,21 @@ def install_v2_turns_wiring() -> None:
 
     turn_scheduler.install()
 
-    async def _route_interrupt(session_id: str, mode: str) -> None:
+    async def _route_interrupt(
+        session_id: str, mode: str, turn_id: Optional[str] = None
+    ) -> None:
         runtime = session_runtime.get_live_runtime(session_id)
-        if runtime is not None:
-            await runtime.interrupt(mode)
+        if runtime is None:
+            return
+        # #585: a turn-scoped stop only signals the live runtime when it is
+        # actually executing the targeted turn. Belt-and-suspenders behind the
+        # DB guard (the durable flip already required id=turn_id, so a mismatch
+        # would not have fired the executor); guards the rare window where this
+        # process's runtime has already advanced past turn_id. turn_id=None
+        # (legacy session-scoped callers) keeps today's unconditional signal.
+        if turn_id is not None and runtime.turn_id != turn_id:
+            return
+        await runtime.interrupt(mode)
 
     turn_manager.register_interrupt_executor(_route_interrupt)
     logger.info("V2 turns wiring installed (scheduler + interrupt executor)")

@@ -825,8 +825,17 @@ class ChatWebSocketHandler:
             # so queued turns REMAIN untouched (F4) — no _stopped_sessions latch.
             # The ``stop_background`` opt-in still tears down surviving background
             # tasks transport-side (the runtime interrupt does not carry it).
+            # #585: bind the stop to the turn the FE believed was live (optional
+            # — older clients omit it). turn_manager threads it to the DB flip
+            # (id=turn_id guard) and the runtime signal so a stop that arrives
+            # after its target settled cannot interrupt the successor turn.
+            # Absent turn_id keeps the legacy session-scoped stop.
+            target_turn_id = data.get("turn_id") or None
             flipped = turn_manager.interrupt(
-                session_id, "stop", stop_background=stop_background
+                session_id,
+                "stop",
+                stop_background=stop_background,
+                turn_id=target_turn_id,
             )
             if flipped is not None:
                 # Cross-runner wake: if the executing runtime lives on another

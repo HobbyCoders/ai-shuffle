@@ -54,6 +54,12 @@ export interface V2SessionState {
 	 *  from the event order, so replay is idempotent. */
 	openTextId: string | null;
 	openThinkingId: string | null;
+	/** Id of the turn the FE currently believes is live (set on `turn.started`,
+	 *  cleared on `turn.completed`/`turn.aborted`). Read at Stop-press time so
+	 *  the stop can target that specific turn — a stop delivered after its turn
+	 *  settled then no-ops server-side instead of interrupting the successor
+	 *  (GitHub #585). */
+	liveTurnId: string | null;
 	/** `transcript.rewound` bookkeeping: message id → seq of the event that
 	 *  CREATED it. A message absent from this map is optimistic (seeded outside
 	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
@@ -74,6 +80,7 @@ export function initialState(): V2SessionState {
 		lastSeq: 0,
 		openTextId: null,
 		openThinkingId: null,
+		liveTurnId: null,
 		messageOriginSeq: {},
 		taskOriginSeq: {},
 	};
@@ -326,7 +333,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 	switch (event.type) {
 		// ── Turn lifecycle ──────────────────────────────────────────────
 		case 'turn.started':
-			return { ...state, isStreaming: true, parked: false };
+			// Track the live turn id (#585) so a Stop can target THIS turn.
+			return {
+				...state,
+				isStreaming: true,
+				parked: false,
+				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
+			};
 
 		case 'turn.parked':
 			// A turn parked on background work: not "streaming" but still live.
@@ -341,6 +354,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					...state,
 					isStreaming: false,
 					parked: false,
+					liveTurnId: null,
 					usage: obj(event.usage) ?? state.usage,
 				})
 			);
@@ -385,7 +399,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					next = { ...next, messages: marked };
 				}
 			}
-			return { ...next, isStreaming: false, parked: false };
+			return { ...next, isStreaming: false, parked: false, liveTurnId: null };
 		}
 
 		case 'turn.usage':

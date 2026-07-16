@@ -38,6 +38,20 @@ describe('turn lifecycle', () => {
 		expect(s.parked).toBe(false);
 	});
 
+	it('tracks liveTurnId across turn.started -> completed/aborted (#585)', () => {
+		// Set on turn.started, cleared on the terminal event.
+		const started = reduce(initialState(), ev('turn.started', { turn_id: 'turn-1' }));
+		expect(started.liveTurnId).toBe('turn-1');
+		const completed = reduce(started, ev('turn.completed', {}));
+		expect(completed.liveTurnId).toBeNull();
+
+		const aborted = reduce(
+			reduce(initialState(), ev('turn.started', { turn_id: 'turn-2' })),
+			ev('turn.aborted', { reason: 'interrupt' })
+		);
+		expect(aborted.liveTurnId).toBeNull();
+	});
+
 	it('turn.parked closes open text and marks parked (not streaming)', () => {
 		const s = fold([
 			ev('turn.started'),

@@ -219,23 +219,41 @@ def start_turn(
 
 
 def interrupt_turn(
-    session_id: str, mode: str, stop_background: bool = False
+    session_id: str,
+    mode: str,
+    stop_background: bool = False,
+    turn_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Transition a session's ``running`` turn to ``interrupting``.
 
     ``mode`` is ``'stop'`` or ``'send_now'``; ``stop_background`` records
     whether background children should be torn down. Returns the interrupting
     turn row, or ``None`` if there is no running turn to interrupt.
+
+    When ``turn_id`` is provided the UPDATE also requires ``id=turn_id`` so a
+    stop whose target turn is no longer the running one (it settled and a
+    successor took the live slot) matches zero rows and returns ``None`` — a
+    no-op, never touching the successor (GitHub #585). When ``turn_id`` is
+    absent the behavior is byte-identical to the legacy session-scoped stop.
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE turns SET state='interrupting', interrupt_mode=%s, "
-            "stop_background=%s "
-            "WHERE session_id=%s AND state='running' "
-            "RETURNING *",
-            (mode, bool(stop_background), session_id),
-        )
+        if turn_id is not None:
+            cursor.execute(
+                "UPDATE turns SET state='interrupting', interrupt_mode=%s, "
+                "stop_background=%s "
+                "WHERE session_id=%s AND state='running' AND id=%s "
+                "RETURNING *",
+                (mode, bool(stop_background), session_id, turn_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE turns SET state='interrupting', interrupt_mode=%s, "
+                "stop_background=%s "
+                "WHERE session_id=%s AND state='running' "
+                "RETURNING *",
+                (mode, bool(stop_background), session_id),
+            )
         row = cursor.fetchone()
     return _row(row)
 

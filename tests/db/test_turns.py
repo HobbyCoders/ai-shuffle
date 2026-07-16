@@ -137,6 +137,42 @@ def test_interrupt_with_no_running_turn_returns_none(mock_db):
     assert turns.interrupt_turn("s1", "stop") is None
 
 
+def test_interrupt_turn_id_scoped_matches_current_running_turn(mock_db):
+    # A turn-scoped stop whose turn_id IS the running turn interrupts it.
+    t = turns.enqueue_turn("s1", "user")
+    turns.start_turn(t["id"])
+    inter = turns.interrupt_turn("s1", "stop", turn_id=t["id"])
+    assert inter is not None and inter["state"] == "interrupting"
+
+
+def test_interrupt_turn_id_scoped_stale_stop_no_ops_and_spares_successor(mock_db):
+    # GitHub #585: turn N settles completed, successor N+1 takes the live slot,
+    # then a stop targeting N's turn_id arrives late. The id=turn_id guard
+    # matches zero rows -> None -> N+1 is NOT interrupted.
+    n = turns.enqueue_turn("s1", "user")
+    turns.start_turn(n["id"])
+    assert turns.settle_turn(n["id"], "completed") is not None
+    n1 = turns.enqueue_turn("s1", "queue")
+    turns.start_turn(n1["id"])
+    assert turns.get_live_turn("s1")["id"] == n1["id"]
+
+    # Stale stop for the already-settled N.
+    assert turns.interrupt_turn("s1", "stop", turn_id=n["id"]) is None
+    # Successor untouched, still running; N stays terminally completed.
+    assert turns.get_turn(n1["id"])["state"] == "running"
+    assert turns.get_turn(n["id"])["state"] == "completed"
+
+
+def test_interrupt_without_turn_id_stays_session_scoped(mock_db):
+    # No turn_id -> legacy session-scoped stop: whatever running turn the session
+    # has is interrupted, byte-identical to before #585.
+    t = turns.enqueue_turn("s1", "user")
+    turns.start_turn(t["id"])
+    inter = turns.interrupt_turn("s1", "stop")
+    assert inter is not None and inter["state"] == "interrupting"
+    assert inter["id"] == t["id"]
+
+
 def test_escalate_only_from_interrupting(mock_db):
     t = turns.enqueue_turn("s1", "user")
     turns.start_turn(t["id"])

@@ -351,6 +351,46 @@ async def test_handle_stop_background_gate_tears_down_when_active(mock_db, monke
     stop_bg.assert_awaited_once_with("sess-1")
 
 
+async def test_handle_stop_with_current_turn_id_interrupts(mock_db):
+    """A stop carrying the CURRENT running turn's id interrupts it (turn-scoped
+    stop, #585)."""
+    _make_session("sess-1")
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
+    turns_db.start_turn(live, run_id="run-1")
+
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_stop(
+            {"session_id": "sess-1", "turn_id": live}
+        )
+
+    assert turns_db.get_turn(live)["state"] == "interrupting"
+
+
+async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
+    """GitHub #585 regression: turn N settles completed, successor N+1 becomes
+    running, then a stop carrying N's (now stale) turn_id is delivered. The
+    id=turn_id guard matches zero rows, so N+1 stays running — it is NOT
+    interrupted by the stop that was meant for N."""
+    _make_session("sess-1")
+    n = turns_db.enqueue_turn("sess-1", "user", prompt="first")["id"]
+    turns_db.start_turn(n, run_id="run-1")
+    turns_db.settle_turn(n, "completed")
+    n1 = turns_db.enqueue_turn("sess-1", "queue", prompt="second")["id"]
+    turns_db.start_turn(n1, run_id="run-2")
+    assert turns_db.get_live_turn("sess-1")["id"] == n1
+
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_stop(
+            {"session_id": "sess-1", "turn_id": n}
+        )
+
+    # Successor untouched (still running); the stale target stays completed.
+    assert turns_db.get_turn(n1)["state"] == "running"
+    assert turns_db.get_turn(n)["state"] == "completed"
+
+
 # ═══ handle_interrupt_for_query — interrupt(send_now) + confirm ══════════════
 
 

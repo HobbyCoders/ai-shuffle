@@ -490,7 +490,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// backend can interrupt and discard the no-output orphan turn.
 					if (internal.stopRequestedBeforeSession) {
 						internal.stopRequestedBeforeSession = false;
-						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
+						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
 						internal.stopBackgroundRequested = false;
 					}
 					// Adopt a freshly-minted session by starting the SSE feed
@@ -532,7 +532,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// double-send.
 					if (internal.stopRequestedBeforeSession) {
 						internal.stopRequestedBeforeSession = false;
-						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested });
+						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
 						internal.stopBackgroundRequested = false;
 					}
 					// The SSE feed owns the transcript and streaming state. Adopt the

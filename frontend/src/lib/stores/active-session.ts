@@ -89,6 +89,11 @@ export interface ActiveSessionState {
 	title: string;
 	messages: ChatMessage[];
 	isStreaming: boolean;
+	/** Id of the turn currently believed live (from the v2 feed's `turn.*`
+	 *  events; null when no turn is live). Read at Stop-press time so the stop
+	 *  targets that turn — a stop delivered after its turn settled then no-ops
+	 *  server-side instead of interrupting the successor turn (GitHub #585). */
+	liveTurnId: string | null;
 	wsConnected: boolean;
 	error: string | null;
 	profile: string;
@@ -205,6 +210,7 @@ function defaultState(): ActiveSessionState {
 		title: 'New Chat',
 		messages: [],
 		isStreaming: false,
+		liveTurnId: null,
 		wsConnected: false,
 		error: null,
 		profile: getPersistedProfile(),

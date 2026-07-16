@@ -431,7 +431,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// false stops only the foreground turn (Claude Code's Esc). The backend
 				// ignores this field entirely when the preserve-background flag is off,
 				// so a default-false send is exactly today's full stop there.
-				wsConn.send({ type: 'stop', session_id: _state.sessionId, stop_background: stopBackground });
+				// #585: carry the live turn id so the backend binds the stop to that
+				// turn — a stop that lands after its turn settled then no-ops instead
+				// of interrupting the successor. Omitted when the FE knows no live turn
+				// (legacy session-scoped stop server-side).
+				wsConn.send({
+					type: 'stop',
+					session_id: _state.sessionId,
+					stop_background: stopBackground,
+					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
+				});
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created

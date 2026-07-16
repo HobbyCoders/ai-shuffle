@@ -141,9 +141,10 @@ def test_interrupt_flips_row_before_firing_executor(mock_db):
     # FIRST, then the executor fires).
     seen = {}
 
-    def executor(sid, mode):
+    def executor(sid, mode, turn_id=None):
         seen["row"] = turns.get_live_turn(sid)
         seen["mode"] = mode
+        seen["turn_id"] = turn_id
 
     turn_manager.register_interrupt_executor(executor)
     tid = turn_manager.submit("s1", "user", prompt="p")
@@ -156,7 +157,7 @@ def test_interrupt_flips_row_before_firing_executor(mock_db):
 
 
 def test_interrupt_executor_failure_does_not_raise(mock_db):
-    def boom(_sid, _mode):
+    def boom(_sid, _mode, _turn_id=None):
         raise RuntimeError("executor exploded")
 
     turn_manager.register_interrupt_executor(boom)
@@ -170,7 +171,7 @@ def test_interrupt_executor_failure_does_not_raise(mock_db):
 async def test_async_interrupt_executor_is_scheduled(mock_db):
     ran = asyncio.Event()
 
-    async def aexec(_sid, _mode):
+    async def aexec(_sid, _mode, _turn_id=None):
         ran.set()
 
     turn_manager.register_interrupt_executor(aexec)
@@ -184,7 +185,9 @@ def test_interrupt_with_no_running_turn_does_not_fire_executor(mock_db):
     # No live turn: interrupt returns None AND must NOT fire the executor
     # (there is nothing to interrupt — firing would be a spurious no-op call).
     fired = []
-    turn_manager.register_interrupt_executor(lambda sid, mode: fired.append((sid, mode)))
+    turn_manager.register_interrupt_executor(
+        lambda sid, mode, turn_id=None: fired.append((sid, mode))
+    )
 
     turn_manager.submit("s1", "user", prompt="p")  # queued, never started
     assert turn_manager.interrupt("s1", "stop") is None

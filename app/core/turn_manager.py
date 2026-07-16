@@ -55,18 +55,24 @@ def register_kick(hook: Optional[Callable[[str], Any]]) -> None:
 # live runtime) the durable ``interrupting`` row stands and ``reap_expired`` is
 # the backstop. ``turn_manager`` never imports ``session_runtime``; the wiring
 # lives at boot (``startup``).
-_interrupt_executor: Optional[Callable[[str, str], Any]] = None
+_interrupt_executor: Optional[Callable[..., Any]] = None
 
 
-def register_interrupt_executor(hook: Optional[Callable[[str, str], Any]]) -> None:
+def register_interrupt_executor(hook: Optional[Callable[..., Any]]) -> None:
     """Register (or clear, with ``None``) the interrupt executor the boot wiring
     uses to drive the live runtime's SDK interrupt/escalation. Tests inject a
-    spy."""
+    spy.
+
+    The hook is called ``hook(session_id, mode, turn_id)`` where ``turn_id`` is
+    the optional turn identity a user stop targets (``None`` for the legacy
+    session-scoped internal callers)."""
     global _interrupt_executor
     _interrupt_executor = hook
 
 
-def _fire_interrupt_executor(session_id: str, mode: str) -> None:
+def _fire_interrupt_executor(
+    session_id: str, mode: str, turn_id: Optional[str] = None
+) -> None:
     """Fire the registered interrupt executor, if any. Swallows errors — a
     failed executor must never break the interrupt: the durable ``interrupting``
     row already stands and the reap sweep is the backstop."""
@@ -74,7 +80,7 @@ def _fire_interrupt_executor(session_id: str, mode: str) -> None:
     if hook is None:
         return
     try:
-        result = hook(session_id, mode)
+        result = hook(session_id, mode, turn_id)
         # Tolerate an async executor (the runtime's ``interrupt`` is a
         # coroutine): schedule it on the running loop rather than dropping it.
         if asyncio.iscoroutine(result):
@@ -175,7 +181,10 @@ def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
 
 
 def interrupt(
-    session_id: str, mode: str, stop_background: bool = False
+    session_id: str,
+    mode: str,
+    stop_background: bool = False,
+    turn_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Interrupt a session's live turn — the ONE interrupt implementation.
 
@@ -185,10 +194,19 @@ def interrupt(
     fires the interrupt executor so the live runtime reacts (SDK interrupt +
     escalation). Returns the now-interrupting turn row, or ``None`` when there
     is no running turn to interrupt.
+
+    ``turn_id`` (optional) binds the interrupt to a specific turn identity: it
+    is threaded to BOTH the DB transition (so a stale stop whose target turn
+    already settled matches zero rows → ``None`` → no executor fire) and the
+    runtime signal (so the live runtime is only signalled when it is executing
+    that turn). ``None`` preserves the legacy session-scoped behavior used by
+    the internal auto/resource/send-now callers (GitHub #585).
     """
-    row = turns.interrupt_turn(session_id, mode, stop_background=stop_background)
+    row = turns.interrupt_turn(
+        session_id, mode, stop_background=stop_background, turn_id=turn_id
+    )
     if row is not None:
-        _fire_interrupt_executor(session_id, mode)
+        _fire_interrupt_executor(session_id, mode, turn_id)
     return row
 
 
