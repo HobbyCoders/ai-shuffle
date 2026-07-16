@@ -15,8 +15,10 @@ import json
 
 import pytest
 
+from starlette.requests import ClientDisconnect
+
 import app.api.events as events_mod
-from app.api.events import event_stream, stream_session_events
+from app.api.events import event_stream, stream_session_events, _is_client_disconnect
 from app.core.event_gateway import EventGateway
 from app.db import session_events as se
 
@@ -144,6 +146,103 @@ async def test_close_unsubscribes(mock_db, gw):
     assert "sess-e" in gw._subscribers
     await agen.aclose()
     assert gw._subscribers == {}
+
+
+# ---------------------------------------------------------------------------
+# Client-disconnect handling (issue #627)
+#
+# On disconnect Starlette cancels the streaming task, throwing the exception
+# into this generator at its current ``await``. If it escapes, the app's
+# BaseHTTPMiddleware stack (CSRF/access-log/rate-limit) collapses it into an
+# anyio ExceptionGroup that surfaces as an unhandled 500 + error_log row instead
+# of a clean connection close. ``athrow`` injects the exact exception shapes at
+# the live suspension point without a buffering ASGI test client.
+# ---------------------------------------------------------------------------
+
+
+async def test_client_disconnect_cancellederror_ends_cleanly(mock_db, gw):
+    """A plain CancelledError (client disconnect) ends the stream, not raises."""
+    se.append_events("sess-cd", [{"type": "turn.started"}])
+    agen = event_stream("sess-cd", 0)
+    await _collect(agen, 1)  # drain backfill -> generator parked mid-stream
+    assert "sess-cd" in gw._subscribers
+
+    # Generator swallows the cancellation and returns -> athrow raises StopAsyncIteration.
+    with pytest.raises(StopAsyncIteration):
+        await agen.athrow(asyncio.CancelledError())
+
+    assert gw._subscribers == {}  # finally still unsubscribed; nothing escaped
+
+
+async def test_client_disconnect_exceptiongroup_ends_cleanly(mock_db, gw):
+    """The anyio ExceptionGroup-wrapped cancellation is handled the same way."""
+    se.append_events("sess-eg", [{"type": "turn.started"}])
+    agen = event_stream("sess-eg", 0)
+    await _collect(agen, 1)
+    assert "sess-eg" in gw._subscribers
+
+    grp = BaseExceptionGroup("disconnect", [asyncio.CancelledError()])
+    with pytest.raises(StopAsyncIteration):
+        await agen.athrow(grp)
+
+    assert gw._subscribers == {}
+
+
+async def test_client_disconnect_clientdisconnect_ends_cleanly(mock_db, gw):
+    """A starlette ClientDisconnect thrown into the stream also ends cleanly."""
+    se.append_events("sess-cld", [{"type": "turn.started"}])
+    agen = event_stream("sess-cld", 0)
+    await _collect(agen, 1)
+
+    with pytest.raises(StopAsyncIteration):
+        await agen.athrow(ClientDisconnect())
+
+    assert gw._subscribers == {}
+
+
+async def test_real_error_still_propagates(mock_db, gw):
+    """A genuine mid-stream error is NOT swallowed — it must still surface."""
+    se.append_events("sess-err", [{"type": "turn.started"}])
+    agen = event_stream("sess-err", 0)
+    await _collect(agen, 1)
+    assert "sess-err" in gw._subscribers
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await agen.athrow(RuntimeError("boom"))
+
+    assert gw._subscribers == {}  # unsubscribed even on the error path
+
+
+async def test_exceptiongroup_with_real_error_propagates(mock_db, gw):
+    """An ExceptionGroup carrying a real error is re-raised, not swallowed."""
+    se.append_events("sess-egr", [{"type": "turn.started"}])
+    agen = event_stream("sess-egr", 0)
+    await _collect(agen, 1)
+
+    grp = BaseExceptionGroup("mixed", [asyncio.CancelledError(), RuntimeError("boom")])
+    with pytest.raises(BaseExceptionGroup):
+        await agen.athrow(grp)
+
+    assert gw._subscribers == {}
+
+
+def test_is_client_disconnect_classifier():
+    """Classifier recognizes disconnect/cancellation shapes and rejects errors."""
+    assert _is_client_disconnect(asyncio.CancelledError())
+    assert _is_client_disconnect(ClientDisconnect())
+    assert _is_client_disconnect(BaseExceptionGroup("g", [asyncio.CancelledError()]))
+    assert _is_client_disconnect(
+        BaseExceptionGroup("g", [asyncio.CancelledError(), ClientDisconnect()])
+    )
+    # Nested groups (anyio can wrap more than one level deep).
+    assert _is_client_disconnect(
+        BaseExceptionGroup("outer", [BaseExceptionGroup("inner", [asyncio.CancelledError()])])
+    )
+    # Any real error present -> not a pure disconnect.
+    assert not _is_client_disconnect(RuntimeError("boom"))
+    assert not _is_client_disconnect(
+        BaseExceptionGroup("g", [asyncio.CancelledError(), ValueError()])
+    )
 
 
 async def test_endpoint_returns_sse_response(mock_db, gw):
