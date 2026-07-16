@@ -140,6 +140,72 @@ describe('turn lifecycle', () => {
 		const text = s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!;
 		expect(text.content).toBe('partial');
 	});
+
+	// #606 item 2: turn.aborted(reason='error') carries `message` (turn_recorder
+	// extra_payload) — surface it as an error-styled system card so a viewer on a
+	// non-runner device sees WHY streaming stopped.
+	it('turn.aborted(error) appends exactly one error system message with the wire message', () => {
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('turn.aborted', {
+				reason: 'error',
+				message: "Worktree for session s1 (branch 'feat/x') is unavailable",
+			}),
+		]);
+		const errors = s.messages.filter((m) => m.systemSubtype === 'error');
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toMatchObject({
+			role: 'system',
+			type: 'system',
+			content: "Worktree for session s1 (branch 'feat/x') is unavailable",
+			systemSubtype: 'error',
+		});
+		expect(s.isStreaming).toBe(false);
+		expect(s.liveTurnId).toBeNull();
+	});
+
+	it('turn.aborted(error) repeated with an identical message is idempotent (no duplicate card)', () => {
+		const abort = ev('turn.aborted', { reason: 'error', message: 'boom' });
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			abort,
+			{ ...abort, id: 'evt-dup', seq: abort.seq + 1 } as WireEvent,
+		]);
+		expect(s.messages.filter((m) => m.systemSubtype === 'error')).toHaveLength(1);
+	});
+
+	it('turn.aborted(error) without a message appends nothing', () => {
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('turn.aborted', { reason: 'error' }),
+		]);
+		expect(s.messages.filter((m) => m.role === 'system')).toHaveLength(0);
+		expect(s.isStreaming).toBe(false);
+	});
+
+	it('turn.aborted(interrupt) never appends an error card even when a message rides along', () => {
+		const s = fold([
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('assistant.text_delta', { text: 'partial' }),
+			ev('turn.aborted', { reason: 'interrupt', message: 'Query was interrupted' }),
+		]);
+		expect(s.messages.filter((m) => m.systemSubtype === 'error')).toHaveLength(0);
+		const text = s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!;
+		expect(text.content).toBe('partial\n\n[Stopped]');
+	});
+
+	it('turn.aborted(error) card participates in replay determinism (reduceAll twice)', () => {
+		const log = [
+			ev('message.user', { content: 'go' }),
+			ev('turn.started'),
+			ev('turn.aborted', { reason: 'error', message: 'spawn failed' }),
+		];
+		expect(reduceAll(log)).toEqual(reduceAll(log));
+	});
 });
 
 // ─── User messages + optimistic reconcile ───────────────────────────────────

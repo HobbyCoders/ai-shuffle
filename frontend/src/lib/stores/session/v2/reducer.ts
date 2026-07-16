@@ -442,6 +442,37 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					};
 					next = { ...next, messages: marked };
 				}
+			} else if (reason === 'error') {
+				// Surface the abort's error message in the transcript (#606 item 2).
+				// Spawn-time refusals (e.g. WorktreeUnavailableError) reach the log as
+				// turn.aborted(reason='error', message=...) via turn_recorder's
+				// extra_payload — without this, a viewer on a NON-runner device sees
+				// streaming stop with no explanation. Rendered as the standard
+				// error-styled system card (SystemMessage.svelte case 'error').
+				//
+				// Double-display note: on the RUNNER's own device the legacy WS
+				// 'error' handler surfaces this same message as a transient BANNER
+				// (activeSession.error), never a transcript message — so appending
+				// here cannot duplicate a transcript entry. The guard below only
+				// defends against the same/repeated event folding twice (replay).
+				const message = str(event.message);
+				if (message) {
+					const last = next.messages[next.messages.length - 1];
+					const duplicate =
+						last?.role === 'system' &&
+						last.systemSubtype === 'error' &&
+						last.content === message;
+					if (!duplicate) {
+						next = appendMessage(next, {
+							id: event.id,
+							role: 'system',
+							type: 'system',
+							content: message,
+							systemSubtype: 'error',
+							timestamp: createdAt || undefined,
+						}, seq);
+					}
+				}
 			}
 			return { ...next, isStreaming: false, parked: false, liveTurnId: null };
 		}
