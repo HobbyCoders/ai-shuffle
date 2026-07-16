@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import require_auth
+from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
 from app.db.session_events import get_events, get_max_seq
@@ -35,28 +36,6 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 KEEPALIVE_SECONDS = 15.0
 
 _PAGE = 500
-
-
-def _is_client_disconnect(exc: BaseException) -> bool:
-    """True when ``exc`` represents a normal SSE client disconnect.
-
-    On client disconnect (tab close, navigation, network blip) Starlette
-    cancels the streaming task, throwing ``CancelledError`` into this generator
-    at its current ``await``. Because the app wraps every request in a stack of
-    ``BaseHTTPMiddleware`` (CSRF, access-log, rate-limit, ...), a cancellation
-    that escapes the generator collapses into an anyio ``ExceptionGroup`` that
-    surfaces as an unhandled 500 instead of a clean connection close (issue
-    #627). This recognizes both the plain form and that group-wrapped form so
-    the caller can swallow it — while any group carrying a *real* error is left
-    to propagate.
-    """
-    if isinstance(exc, (asyncio.CancelledError, ClientDisconnect)):
-        return True
-    if isinstance(exc, BaseExceptionGroup):
-        return bool(exc.exceptions) and all(
-            _is_client_disconnect(sub) for sub in exc.exceptions
-        )
-    return False
 
 
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,7 +128,7 @@ async def event_stream(session_id: str, from_seq: int = 0):
         # ExceptionGroup and surfaces as an unhandled 500 through the
         # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
         # disconnect/cancellation is re-raised unchanged.
-        if not _is_client_disconnect(exc):
+        if not is_client_disconnect(exc):
             raise
         logger.debug(
             "SSE event stream closed (client disconnect) for session %s", session_id

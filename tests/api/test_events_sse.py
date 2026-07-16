@@ -18,7 +18,8 @@ import pytest
 from starlette.requests import ClientDisconnect
 
 import app.api.events as events_mod
-from app.api.events import event_stream, stream_session_events, _is_client_disconnect
+from app.api.events import event_stream, stream_session_events
+from app.api.sse_utils import is_client_disconnect as _is_client_disconnect
 from app.core.event_gateway import EventGateway
 from app.db import session_events as se
 

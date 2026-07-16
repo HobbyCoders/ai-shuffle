@@ -11,7 +11,9 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, Response, status
 from fastapi.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 
+from app.api.sse_utils import is_client_disconnect
 from app.services.mobile_push_hub import mobile_push_hub
 from app.core.models import (
     MobileDevice,
@@ -343,6 +345,15 @@ async def notifications_stream(request: Request):
                     yield ": keepalive\n\n"
                     continue
                 yield f"event: notification\ndata: {json.dumps(event)}\n\n"
+        except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
+            # A normal SSE client disconnect must end the stream cleanly, NOT
+            # bubble a cancellation out of the generator where it collapses into
+            # an anyio ExceptionGroup and surfaces as an unhandled 500 through the
+            # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
+            # disconnect/cancellation is re-raised unchanged.
+            if not is_client_disconnect(exc):
+                raise
+            logger.debug("SSE notification stream closed (client disconnect)")
         finally:
             mobile_push_hub.unsubscribe(queue)
 

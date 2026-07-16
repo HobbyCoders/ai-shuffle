@@ -2,11 +2,13 @@
 Query API routes - main AI interface
 """
 
+import asyncio
 import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 
 from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
@@ -14,6 +16,7 @@ from app.core.models import (
 from app.core.query_engine import stream_query, interrupt_session, start_background_query
 from app.core.auth import auth_service
 from app.api.auth import require_api_key, require_auth
+from app.api.sse_utils import is_client_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +222,16 @@ async def stream_one_shot_query(
                 data = json.dumps(event)
                 yield f"event: {event_type}\ndata: {data}\n\n"
 
+        except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
+            # A normal SSE client disconnect must end the stream cleanly, NOT
+            # bubble a cancellation out of the generator where it collapses into
+            # an anyio ExceptionGroup and surfaces as an unhandled 500 through the
+            # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
+            # disconnect/cancellation is re-raised unchanged.
+            if not is_client_disconnect(exc):
+                raise
+            logger.debug("SSE query stream closed (client disconnect)")
+            return
         except Exception as e:
             logger.error(f"Stream error: {e}")
             error_detail = str(e) if str(e) else type(e).__name__
@@ -331,6 +344,16 @@ async def stream_conversation(
                 data = json.dumps(event)
                 yield f"event: {event_type}\ndata: {data}\n\n"
 
+        except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
+            # A normal SSE client disconnect must end the stream cleanly, NOT
+            # bubble a cancellation out of the generator where it collapses into
+            # an anyio ExceptionGroup and surfaces as an unhandled 500 through the
+            # BaseHTTPMiddleware stack (issue #627). Anything that is not a pure
+            # disconnect/cancellation is re-raised unchanged.
+            if not is_client_disconnect(exc):
+                raise
+            logger.debug("SSE conversation stream closed (client disconnect)")
+            return
         except Exception as e:
             logger.error(f"Stream error: {e}")
             error_detail = str(e) if str(e) else type(e).__name__
