@@ -202,6 +202,93 @@ describe('message.user reconcile', () => {
 	});
 });
 
+// ─── Task-notification wake prompts ───────────────────────────────────────────
+
+// Mirrors app/core/turn_scheduler.py::_build_task_notification_prompt output.
+function taskNotificationBlock(o: {
+	taskId?: string;
+	toolUseId?: string;
+	outputFile?: string;
+	status?: string;
+	summary?: string;
+	result?: string;
+	subagentTokens?: string;
+	toolUses?: string;
+	durationMs?: string;
+}): string {
+	return (
+		'<task-notification>\n' +
+		`  <task-id>${o.taskId ?? 'task-1'}</task-id>\n` +
+		`  <tool-use-id>${o.toolUseId ?? 'toolu_1'}</tool-use-id>\n` +
+		`  <output-file>${o.outputFile ?? '/tmp/out.txt'}</output-file>\n` +
+		`  <status>${o.status ?? 'completed'}</status>\n` +
+		`  <summary>${o.summary ?? 'Did the thing'}</summary>\n` +
+		'  <note>Background work has come to rest.</note>\n' +
+		`  <result>${o.result ?? 'All done.'}</result>\n` +
+		'  <usage>\n' +
+		`    <subagent_tokens>${o.subagentTokens ?? '88851'}</subagent_tokens>\n` +
+		`    <tool_uses>${o.toolUses ?? '57'}</tool_uses>\n` +
+		`    <duration_ms>${o.durationMs ?? '312000'}</duration_ms>\n` +
+		'  </usage>\n' +
+		'</task-notification>'
+	);
+}
+
+describe('task-notification wake prompts', () => {
+	it('renders a single <task-notification> block as one system card (no user bubble)', () => {
+		const content = taskNotificationBlock({
+			// The backend does NOT XML-escape field values (turn_scheduler.py::_esc
+			// is a plain str() passthrough), so literal markdown containing
+			// entity-like text must survive verbatim, unescaped.
+			result: 'Fixed the bug. To emphasize, use &lt;strong&gt; here instead of *bold*.',
+		});
+		const s = fold([ev('message.user', { id: 'srv-tn', content })]);
+		expect(s.messages).toHaveLength(1);
+		const m = s.messages[0];
+		expect(m.role).toBe('system');
+		expect(m.type).toBe('system');
+		expect(m.systemSubtype).toBe('task_notification');
+		expect(m.id).toBe('srv-tn');
+		expect(s.messages.some((x) => x.role === 'user')).toBe(false);
+		const data = m.systemData as Record<string, unknown>;
+		expect(data.status).toBe('completed');
+		expect(data.summary).toBe('Did the thing');
+		expect(data.result).toBe('Fixed the bug. To emphasize, use &lt;strong&gt; here instead of *bold*.');
+		expect(data.task_id).toBe('task-1');
+		expect(data.output_file).toBe('/tmp/out.txt');
+		expect(data.usage).toEqual({ subagent_tokens: 88851, tool_uses: 57, duration_ms: 312000 });
+	});
+
+	it('renders TWO concatenated blocks as two system cards with distinct stable ids', () => {
+		const content =
+			taskNotificationBlock({ taskId: 'task-a', summary: 'first' }) +
+			'\n' +
+			taskNotificationBlock({ taskId: 'task-b', summary: 'second' });
+		const s = fold([ev('message.user', { id: 'srv-multi', content })]);
+		expect(s.messages).toHaveLength(2);
+		expect(s.messages.every((m) => m.systemSubtype === 'task_notification')).toBe(true);
+		expect(s.messages[0].id).toBe('srv-multi-tn-0');
+		expect(s.messages[1].id).toBe('srv-multi-tn-1');
+		expect(s.messages[0].id).not.toBe(s.messages[1].id);
+		expect((s.messages[0].systemData as Record<string, unknown>).summary).toBe('first');
+		expect((s.messages[1].systemData as Record<string, unknown>).summary).toBe('second');
+	});
+
+	it('falls through to a normal user message when the block is truncated/unclosed', () => {
+		const content = taskNotificationBlock({}).replace('</task-notification>', '');
+		const s = fold([ev('message.user', { id: 'srv-trunc', content })]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].role).toBe('user');
+		expect(s.messages[0].content).toBe(content);
+	});
+
+	it('leaves a normal user message (no marker) unchanged', () => {
+		const s = fold([ev('message.user', { id: 'srv-plain', content: 'hello world' })]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0]).toMatchObject({ role: 'user', type: 'text', content: 'hello world' });
+	});
+});
+
 // ─── Assistant deltas ───────────────────────────────────────────────────────
 
 describe('assistant deltas', () => {

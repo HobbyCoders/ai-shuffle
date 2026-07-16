@@ -108,6 +108,41 @@
 		return localMarked.parse(content, { breaks: true }) as string;
 	}
 
+	// Format a task-notification duration into a compact human string (m/s).
+	function formatDurationMs(v: unknown): string {
+		const ms = Number(v);
+		if (!Number.isFinite(ms) || ms <= 0) return '';
+		const totalSec = Math.round(ms / 1000);
+		const m = Math.floor(totalSec / 60);
+		const s = totalSec % 60;
+		return m > 0 ? `${m}m ${s}s` : `${s}s`;
+	}
+
+	// Build the compact trailing usage line for a task-notification card, e.g.
+	// "— 88,851 tokens · 57 tool uses · 5m 12s". Returns '' when no usage present.
+	function formatTaskUsage(usage: Record<string, unknown> | undefined): string {
+		if (!usage) return '';
+		const parts: string[] = [];
+		const numOrRaw = (v: unknown): string => {
+			const n = Number(v);
+			return Number.isFinite(n) ? n.toLocaleString('en-US') : String(v);
+		};
+		const tokens = usage.subagent_tokens;
+		if (tokens !== undefined && tokens !== null && tokens !== '') {
+			parts.push(`${numOrRaw(tokens)} tokens`);
+		}
+		const toolUses = usage.tool_uses;
+		if (toolUses !== undefined && toolUses !== null && toolUses !== '') {
+			parts.push(`${numOrRaw(toolUses)} tool uses`);
+		}
+		const durationMs = usage.duration_ms;
+		if (durationMs !== undefined && durationMs !== null && durationMs !== '') {
+			const human = formatDurationMs(durationMs);
+			if (human) parts.push(human);
+		}
+		return parts.length ? `— ${parts.join(' · ')}` : '';
+	}
+
 	// Get formatted content based on subtype
 	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string; rawInput?: string; taskStatus?: string } {
 		const subtype = message.systemSubtype || 'system';
@@ -496,10 +531,20 @@
 					: 'gray';
 
 				let rawOutput: string | undefined;
-				try {
-					rawOutput = JSON.stringify(data, null, 2);
-				} catch {
-					rawOutput = undefined;
+				const resultText =
+					typeof data.result === 'string' && data.result.trim() ? data.result : '';
+				if (resultText) {
+					// task_notification card: show the sub-agent's result markdown as
+					// the expanded pane, with a compact usage line appended.
+					rawOutput = resultText;
+					const usageLine = formatTaskUsage(data.usage as Record<string, unknown> | undefined);
+					if (usageLine) rawOutput += `\n\n${usageLine}`;
+				} else {
+					try {
+						rawOutput = JSON.stringify(data, null, 2);
+					} catch {
+						rawOutput = undefined;
+					}
 				}
 
 				return {

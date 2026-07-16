@@ -273,6 +273,50 @@ function obj(v: unknown): Record<string, unknown> | undefined {
 	return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
+// ─── Task-notification parsing ────────────────────────────────────────────────
+// Background-task wake turns persist their synthesized prompt as a
+// `message.user` event whose body is one or more `<task-notification>` XML
+// blocks (app/core/turn_scheduler.py::_build_task_notification_prompt). The
+// helpers below turn each block into a collapsible system card instead of a raw
+// user bubble.
+
+/** First `<tag>…</tag>` inner text (lazy), or '' when absent. The backend
+ *  does not XML-escape field values (app/core/turn_scheduler.py::_esc is a
+ *  plain str() passthrough), so the raw inner text is returned as-is. */
+function extractTag(block: string, tag: string): string {
+	const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+	return m ? m[1] : '';
+}
+
+/** A usage number is kept as Number when it round-trips cleanly, otherwise the
+ *  raw trimmed string; empty → undefined (so the field is omitted). */
+function parseUsageNum(raw: string): number | string | undefined {
+	const t = raw.trim();
+	if (!t) return undefined;
+	const n = Number(t);
+	return Number.isFinite(n) && String(n) === t ? n : t;
+}
+
+/** Parse one `<task-notification>` block into `systemData` for a system card. */
+function parseTaskNotification(block: string): Record<string, unknown> {
+	const usage: Record<string, number | string> = {};
+	const subagentTokens = parseUsageNum(extractTag(block, 'subagent_tokens'));
+	const toolUses = parseUsageNum(extractTag(block, 'tool_uses'));
+	const durationMs = parseUsageNum(extractTag(block, 'duration_ms'));
+	if (subagentTokens !== undefined) usage.subagent_tokens = subagentTokens;
+	if (toolUses !== undefined) usage.tool_uses = toolUses;
+	if (durationMs !== undefined) usage.duration_ms = durationMs;
+	return {
+		task_id: extractTag(block, 'task-id'),
+		tool_use_id: extractTag(block, 'tool-use-id'),
+		status: extractTag(block, 'status'),
+		summary: extractTag(block, 'summary'),
+		result: extractTag(block, 'result'),
+		output_file: extractTag(block, 'output-file'),
+		usage,
+	};
+}
+
 // ─── Task state mapping ───────────────────────────────────────────────────────
 
 const TASK_STATE_MAP: Record<string, Task['status']> = {
@@ -408,6 +452,35 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {
 			const content = str(event.content);
+
+			// Background-task wake turns persist their synthesized prompt as a
+			// message.user event whose body is one or more <task-notification>
+			// XML blocks (turn_scheduler::_build_task_notification_prompt).
+			// Render each as a collapsible "task notification" system card rather
+			// than a raw user chat bubble. If the marker substring is present but
+			// NOTHING parses, fall through to the normal user-bubble path below.
+			if (content.includes('<task-notification>')) {
+				const blocks = content.match(/<task-notification>[\s\S]*?<\/task-notification>/g) || [];
+				if (blocks.length > 0) {
+					const notifStamp = stampTs(event, createdAt);
+					let next = state;
+					blocks.forEach((block, i) => {
+						const msg: ChatMessage = {
+							id: blocks.length === 1 ? event.id : `${event.id}-tn-${i}`,
+							role: 'system',
+							type: 'system',
+							content: '',
+							systemSubtype: 'task_notification',
+							systemData: parseTaskNotification(block),
+							timestamp: notifStamp || undefined,
+						};
+						next = appendMessage(next, msg, seq);
+					});
+					return next;
+				}
+				// substring present but no complete block parsed → safe fallback.
+			}
+
 			const commandId = typeof event.command_id === 'string' ? event.command_id : null;
 			// 1. Reconcile against an optimistic message with a matching command_id.
 			let idx = -1;
