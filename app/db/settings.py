@@ -45,7 +45,9 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[User
                     try:
                         result["value"] = json.loads(raw)
                     except (json.JSONDecodeError, ValueError):
-                        logger.warning("Invalid JSON in preference %s for %s/%s: %r", key, user_type, user_id, raw)
+                        # Legacy bare-string value stored before preference values
+                        # were JSON-encoded (e.g. timezone "America/New_York").
+                        # Tolerate on read: use the raw string as the value.
                         result["value"] = raw
             return result
         return None
@@ -104,7 +106,8 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[UserPreferenc
                     try:
                         row["value"] = json.loads(raw)
                     except (json.JSONDecodeError, ValueError):
-                        logger.warning("Invalid JSON in preference %s: %r", row.get("key"), raw)
+                        # Legacy bare-string value stored before preference values
+                        # were JSON-encoded. Tolerate on read: use the raw string.
                         row["value"] = raw
         return rows
 

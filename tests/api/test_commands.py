@@ -2175,3 +2175,81 @@ class TestCommandsSessionOwnership:
         response = await get_rewind_checkpoints("session-1", req)
         # No 403 raised; handler proceeds (returns the no-sdk-session response).
         assert response.session_id == "session-1"
+
+
+# =============================================================================
+# Legacy rewind -> V2 restore_option plumbing (regression for issue #584)
+# =============================================================================
+
+class TestExecuteRewindLegacyRestoreCode:
+    """execute_rewind_legacy must map restore_option onto RewindRequestV2.
+
+    Regression for #584: the legacy path constructed RewindRequestV2 with a
+    non-existent ``restore_code=`` kwarg (Pydantic silently dropped it), so
+    ``restore_files`` stayed False and code-restore was never requested.
+    """
+
+    def _session(self):
+        return {"id": "session-1", "project_id": "proj-A", "sdk_session_id": "sdk-1"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "restore_option, expect_chat, expect_files",
+        [
+            (1, True, True),    # code + conversation
+            (2, True, False),   # conversation only
+            (3, False, True),   # code only
+        ],
+    )
+    async def test_restore_option_maps_to_v2_flags(
+        self, restore_option, expect_chat, expect_files,
+        mock_database, mock_jsonl_rewind_service, mock_settings,
+    ):
+        from app.api.commands import execute_rewind_legacy
+        from app.core.models import RewindRequest
+
+        mock_database.get_session.return_value = self._session()
+        mock_jsonl_rewind_service.get_checkpoints.return_value = [
+            MockCheckpoint(uuid="uuid-0", index=0, message_preview="hi", full_message="hi"),
+        ]
+
+        captured = {}
+
+        async def _fake_execute_rewind(session_id, request, http_request=None):
+            captured["request"] = request
+            return MagicMock(success=True, message="ok", error=None)
+
+        with patch("app.api.commands.execute_rewind", side_effect=_fake_execute_rewind):
+            await execute_rewind_legacy(
+                "session-1",
+                RewindRequest(checkpoint_index=0, restore_option=restore_option),
+                http_request=None,
+            )
+
+        v2_request = captured["request"]
+        assert v2_request.target_uuid == "uuid-0"
+        assert v2_request.restore_chat is expect_chat
+        # The crux of #584: restore_files must reflect the code-restore intent.
+        assert v2_request.restore_files is expect_files
+
+    @pytest.mark.asyncio
+    async def test_cancel_option_does_not_execute(
+        self, mock_database, mock_jsonl_rewind_service, mock_settings,
+    ):
+        from app.api.commands import execute_rewind_legacy
+        from app.core.models import RewindRequest
+
+        mock_database.get_session.return_value = self._session()
+        mock_jsonl_rewind_service.get_checkpoints.return_value = [
+            MockCheckpoint(uuid="uuid-0", index=0, message_preview="hi", full_message="hi"),
+        ]
+
+        with patch("app.api.commands.execute_rewind") as mock_exec:
+            result = await execute_rewind_legacy(
+                "session-1",
+                RewindRequest(checkpoint_index=0, restore_option=4),
+                http_request=None,
+            )
+
+        mock_exec.assert_not_called()
+        assert result.restore_option == 4

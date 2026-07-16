@@ -29,6 +29,7 @@ Tests cover:
 - Sync log operations
 """
 
+import logging
 import pytest
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -1447,6 +1448,62 @@ class TestUserPreferences:
         result = db.get_all_user_preferences("admin", "user-1")
 
         assert len(result) == 2
+
+    def test_set_user_preference_stores_valid_json(self, mock_db):
+        """set_user_preference should store a JSON-encoded value, not a bare string."""
+        db.set_user_preference("admin", "Admin", "timezone", "America/New_York")
+
+        cursor = mock_db.execute(
+            "SELECT value FROM user_preferences "
+            "WHERE user_type = ? AND user_id = ? AND key = ?",
+            ("admin", "Admin", "timezone"),
+        )
+        raw = cursor.fetchone()[0]
+        # Stored form must be valid JSON (a quoted string), so the read path
+        # round-trips cleanly without hitting the legacy fallback.
+        assert raw == '"America/New_York"'
+        import json as _json
+        assert _json.loads(raw) == "America/New_York"
+
+    def _insert_legacy_bare_string_pref(self, mock_db, user_type, user_id, key, value):
+        """Insert a legacy bare-string preference (pre-JSON-encoding) directly."""
+        now = datetime.now(timezone.utc).isoformat()
+        mock_db.execute(
+            """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_type, user_id, key, value, now),
+        )
+        mock_db.commit()
+
+    def test_get_user_preference_legacy_bare_string(self, mock_db, caplog):
+        """A legacy bare-string value should be returned as-is with no warning."""
+        self._insert_legacy_bare_string_pref(
+            mock_db, "admin", "Admin", "timezone", "America/New_York"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = db.get_user_preference("admin", "Admin", "timezone")
+
+        assert result is not None
+        assert result["value"] == "America/New_York"
+        assert not any(
+            "Invalid JSON in preference" in rec.getMessage() for rec in caplog.records
+        )
+
+    def test_get_all_user_preferences_legacy_bare_string(self, mock_db, caplog):
+        """get_all should tolerate a legacy bare-string value with no warning."""
+        self._insert_legacy_bare_string_pref(
+            mock_db, "admin", "Admin", "timezone", "America/New_York"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = db.get_all_user_preferences("admin", "Admin")
+
+        assert len(result) == 1
+        assert result[0]["value"] == "America/New_York"
+        assert not any(
+            "Invalid JSON in preference" in rec.getMessage() for rec in caplog.records
+        )
 
 
 # =============================================================================

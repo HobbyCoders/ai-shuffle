@@ -1224,7 +1224,7 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
     v2_request = RewindRequestV2(
         target_uuid=target_uuid,
         restore_chat=restore_chat,
-        restore_code=restore_code,
+        restore_files=restore_code,
         include_response=True
     )
 
