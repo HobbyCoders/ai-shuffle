@@ -99,12 +99,22 @@ class TestRekeyModuleImports:
 
     def test_server_probe_returns_none_when_nothing_listening(self, monkeypatch):
         """With no server, the probe reports clear (None)."""
+        import socket
+
         from scripts import rekey
 
-        # Point at a very unlikely port so the connection is refused fast.
+        # Discover a genuinely free port at runtime: bind to port 0, let the OS
+        # assign a free one, read it back, then release it. The tiny
+        # close-to-use race is acceptable for this test — hardcoding a port
+        # (e.g. 59999) breaks on machines where something happens to listen.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+        probe.close()
+
         class _S:
             host = "127.0.0.1"
-            port = 59999
+            port = free_port
         monkeypatch.setattr("app.core.config.settings", _S(), raising=False)
         assert rekey._server_appears_up() is None
 
