@@ -112,6 +112,8 @@
 		// Monitor / background tasks
 		Monitor: 'eye', TaskOutput: 'eye', TaskStop: 'stop',
 		// Notifications
+		NotifyDevices: 'bell',
+		// Legacy alias kept so historical transcript cards keep their icon
 		PushNotification: 'bell',
 	};
 

@@ -352,10 +352,10 @@ def create_builtin_tools_server(
     all_tools.append(schedule_wakeup)
 
     # ------------------------------------------------------------------
-    # PushNotification
+    # NotifyDevices (formerly PushNotification; renamed for issue #610)
     # ------------------------------------------------------------------
     @tool(
-        "PushNotification",
+        "NotifyDevices",
         "Send a push notification to all registered mobile devices. "
         "Use for alerting the user to long-running task completion or important events.",
         {
@@ -381,7 +381,7 @@ def create_builtin_tools_server(
             successful = sum(1 for r in results if getattr(r, "success", False))
             return _ok({"sent": len(results), "successful": successful})
         except Exception as e:
-            logger.exception("PushNotification failed")
+            logger.exception("NotifyDevices failed")
             return _err(f"send failed: {e}")
 
     all_tools.append(push_notification)
@@ -971,7 +971,7 @@ def get_builtin_tool_names() -> List[str]:
     """Return MCP tool names so they can be added to ``allowed_tools``."""
     return [
         "mcp__builtins__ScheduleWakeup",
-        "mcp__builtins__PushNotification",
+        "mcp__builtins__NotifyDevices",
         "mcp__builtins__EnterWorktree",
         "mcp__builtins__ExitWorktree",
         "mcp__builtins__CronCreate",

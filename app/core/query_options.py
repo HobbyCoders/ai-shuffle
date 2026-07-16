@@ -51,6 +51,27 @@ from app.core.environment import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+# Back-compat aliases for tool names that were renamed. Applied at config-read
+# time only (never migrated in the DB) so saved profiles keep working. The
+# builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
+# resolve a collision with a bare stub of the same name (issue #610).
+_LEGACY_TOOL_ALIASES = {
+    "PushNotification": "mcp__builtins__NotifyDevices",
+    "mcp__builtins__PushNotification": "mcp__builtins__NotifyDevices",
+}
+
+
+def _apply_legacy_tool_aliases(tool_names: list) -> list:
+    """Translate legacy tool names to their current equivalents, in order,
+    without introducing duplicates."""
+    out: list = []
+    for name in tool_names:
+        mapped = _LEGACY_TOOL_ALIASES.get(name, name)
+        if mapped not in out:
+            out.append(mapped)
+    return out
+
+
 class WorktreeUnavailableError(Exception):
     """Raised when a worktree-flagged session's working directory no longer exists
     on disk and we refuse to silently fall back to the main checkout.
@@ -534,8 +555,8 @@ def build_options_from_profile(
     # Priority: tools > tools_preset > allowed_tools (legacy)
     tools_config = config.get("tools")  # Explicit list of tools
     tools_preset = config.get("tools_preset")  # "claude_code" preset
-    allowed_tools = config.get("allowed_tools") or []
-    disallowed_tools = config.get("disallowed_tools") or []
+    allowed_tools = _apply_legacy_tool_aliases(config.get("allowed_tools") or [])
+    disallowed_tools = _apply_legacy_tool_aliases(config.get("disallowed_tools") or [])
 
     # Determine tools parameter for SDK
     # New SDK way: use 'tools' param with list or preset dict
@@ -564,7 +585,7 @@ def build_options_from_profile(
         logger.debug("App-config MCP tools added to allowed_tools")
 
     # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
-    # EnterWorktree, CronCreate, PushNotification, ToolSearch, etc). These are
+    # EnterWorktree, CronCreate, NotifyDevices, ToolSearch, etc). These are
     # harness-level tools that the CLI ships natively; under the SDK we provide
     # our own implementations bridged to AI Shuffle infrastructure.
     from app.mcp.builtin_tools import get_builtin_tool_names

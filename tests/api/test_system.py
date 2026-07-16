@@ -994,3 +994,36 @@ class TestSystemIntegration:
         discovered_builtin = [t for t in all_tools_result.all_tools if not t.name.startswith("mcp__")]
         assert len(discovered_builtin) == len(builtin_result)
         assert len(discovered_builtin) == len(BUILTIN_TOOLS)
+
+
+# =============================================================================
+# Issue #610: PushNotification -> NotifyDevices rename
+# =============================================================================
+
+class TestPushNotificationRename:
+    """The bare ``PushNotification`` catalog stub collided with the builtin MCP
+    tool of the same name; the builtin was renamed to ``NotifyDevices`` and the
+    bare stub removed (issue #610)."""
+
+    def test_catalog_has_no_bare_push_notification(self):
+        """BUILTIN_TOOLS must not advertise a bare ``PushNotification`` entry."""
+        from app.api.system import BUILTIN_TOOLS
+
+        names = {t["name"] for t in BUILTIN_TOOLS}
+        assert "PushNotification" not in names
+
+    def test_descriptions_and_rules_drop_bare_name(self):
+        """The bare name must be gone from descriptions and category rules too."""
+        from app.api.system import TOOL_DESCRIPTIONS, TOOL_CATEGORY_RULES
+
+        assert "PushNotification" not in TOOL_DESCRIPTIONS
+        for names in TOOL_CATEGORY_RULES.values():
+            assert "PushNotification" not in names
+
+    def test_builtin_exposed_under_new_name(self):
+        """The builtin leaf tool is now ``mcp__builtins__NotifyDevices``."""
+        from app.mcp.builtin_tools import get_builtin_tool_names
+
+        names = get_builtin_tool_names()
+        assert "mcp__builtins__NotifyDevices" in names
+        assert "mcp__builtins__PushNotification" not in names

@@ -109,9 +109,6 @@ BUILTIN_TOOLS = [
     {"name": "EnterWorktree", "category": "worktree", "description": "Enter an isolated git worktree"},
     {"name": "ExitWorktree", "category": "worktree", "description": "Exit the current worktree"},
 
-    # Notification tools
-    {"name": "PushNotification", "category": "notification", "description": "Send a push notification"},
-
     # Other tools
     {"name": "Skill", "category": "other", "description": "Execute skills"},
     {"name": "DesignSync", "category": "other", "description": "Sync design assets"},
@@ -152,7 +149,6 @@ TOOL_DESCRIPTIONS = {
     "RemoteTrigger": "Trigger a remote automation",
     "EnterWorktree": "Enter an isolated git worktree",
     "ExitWorktree": "Exit the current worktree",
-    "PushNotification": "Send a push notification",
     "SendUserFile": "Send a file to the user",
     "DesignSync": "Sync design assets",
     "Skill": "Execute skills",
@@ -172,7 +168,7 @@ TOOL_CATEGORY_RULES = {
     "task_management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"],
     "scheduling": ["ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "RemoteTrigger"],
     "worktree": ["EnterWorktree", "ExitWorktree"],
-    "notification": ["PushNotification", "SendUserFile"],
+    "notification": ["SendUserFile"],
 }
 
 # Cache for dynamically discovered tools
