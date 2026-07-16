@@ -238,7 +238,15 @@ async def trigger_automation(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook validation failed")
         return result
     else:
-        # Manual trigger
+        # Manual trigger. _execute's is_enabled gate silently no-ops a
+        # disabled automation, so a fake "triggered" here would mislead the
+        # caller into thinking a run started. Reject explicitly — the user
+        # must enable the automation first.
+        if not automation.get("is_enabled"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Automation is disabled — enable it before triggering",
+            )
         result = await automation_manager.trigger_manual(automation_id)
         if not result:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to trigger automation")

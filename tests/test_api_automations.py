@@ -329,6 +329,9 @@ class TestTrigger:
         )
         aid = create_resp.json()["id"]
 
+        # A signature routes this through the webhook branch (patched below);
+        # without one it would fall to the manual branch, which now rejects a
+        # disabled automation with 409.
         with patch(
             "app.core.automation_manager.automation_manager.trigger_webhook",
             new_callable=AsyncMock,
@@ -337,10 +340,71 @@ class TestTrigger:
             response = authenticated_client.post(
                 f"/api/v1/automations/{aid}/trigger",
                 json={"test": "data"},
+                headers={"X-Webhook-Signature": "sha256=test"},
             )
 
         assert response.status_code == 200
         assert response.json()["status"] == "triggered"
+
+    def test_trigger_disabled_returns_409_and_starts_no_run(
+        self, authenticated_client, mock_encryption
+    ):
+        """A disabled automation must reject the manual trigger, not fake success."""
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Disabled Trigger",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+            },
+        )
+        aid = create_resp.json()["id"]
+        # Created disabled by default (AutomationCreate.enabled defaults False).
+        assert create_resp.json()["is_enabled"] is False
+
+        with patch(
+            "app.core.automation_manager.automation_manager.trigger_manual",
+            new_callable=AsyncMock,
+        ) as trigger_manual:
+            response = authenticated_client.post(f"/api/v1/automations/{aid}/trigger")
+
+        assert response.status_code == 409
+        assert "disabled" in response.json()["detail"].lower()
+        # No run was started: the manager was never invoked.
+        trigger_manual.assert_not_awaited()
+        from app.db import database
+        assert database.get_automation_runs(aid) == []
+
+    def test_trigger_enabled_still_works(self, authenticated_client, mock_encryption):
+        """Triggering an enabled automation still reports 'triggered'."""
+        profile_id = _create_profile(authenticated_client)
+        create_resp = authenticated_client.post(
+            "/api/v1/automations",
+            json={
+                "name": "Enabled Trigger",
+                "trigger_type": "webhook",
+                "trigger_config": {},
+                "prompt": "test",
+                "profile_id": profile_id,
+                "enabled": True,
+            },
+        )
+        aid = create_resp.json()["id"]
+        assert create_resp.json()["is_enabled"] is True
+
+        with patch(
+            "app.core.automation_manager.automation_manager.trigger_manual",
+            new_callable=AsyncMock,
+            return_value={"automation_id": aid, "status": "triggered"},
+        ) as trigger_manual:
+            response = authenticated_client.post(f"/api/v1/automations/{aid}/trigger")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "triggered"
+        trigger_manual.assert_awaited_once_with(aid)
 
 
 # =============================================================================
