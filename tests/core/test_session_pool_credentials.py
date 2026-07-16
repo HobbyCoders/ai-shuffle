@@ -91,6 +91,17 @@ def test_credentials_not_rotated_when_mtime_matches(monkeypatch):
     assert credentials_rotated(state) is False
 
 
+def test_permission_mode_only_change_does_not_require_reconnect():
+    """A mid-session permission_mode switch must reuse the pooled client — it is
+    applied in place via client.set_permission_mode() (issue #608), so it is NOT
+    a respawn reason. This is the reuse precondition the in-place apply relies on.
+    """
+    opts = ClaudeAgentOptions(system_prompt="p", cwd="/w", permission_mode="default")
+    state = _make_state(options=opts)
+    new_opts = ClaudeAgentOptions(system_prompt="p", cwd="/w", permission_mode="plan")
+    assert requires_reconnect(state, new_opts) is False
+
+
 # ─── refresh_subprocess_credentials ──────────────────────────────────────────
 
 

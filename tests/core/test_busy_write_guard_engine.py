@@ -281,7 +281,7 @@ def _rest_patches(stack: ExitStack, pool: _StubPool):
     stack.enter_context(patch.object(qe, "credentials_rotated", return_value=False))
     sync = _fake_sync_engine()
     stack.enter_context(patch.object(qe, "sync_engine", new=sync))
-    return sync
+    return options
 
 
 async def test_rest_gate_refuses_busy_client_and_never_writes_stdin():
@@ -451,3 +451,139 @@ async def test_background_claim_window_exception_clears_flag():
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
     state.adapter.sdk_client.query.assert_not_awaited()
+
+
+# ─── Mid-session permission_mode switch is applied in place on pooled reuse ───
+# ─── (issue #608). requires_reconnect() keeps permission_mode off the respawn ─
+# ─── list, so the change must be pushed into the live subprocess via           ─
+# ─── client.set_permission_mode() — the callback_refs update alone only gates  ─
+# ─── the app-level can_use_tool callback, not the CLI's internal auto-approval. ─
+
+
+def _reuse_state_with_opts(perm_mode="default", model="m") -> SessionState:
+    """A reusable pooled state whose spawn snapshot has the given perm_mode/model,
+    with the SDK-client runtime setters stubbed as AsyncMocks."""
+    state = _fake_state()
+    state.connect_options = MagicMock(permission_mode=perm_mode, model=model)
+    state.adapter.sdk_client.set_permission_mode = AsyncMock()
+    state.adapter.sdk_client.set_model = AsyncMock()
+    return state
+
+
+async def test_chat_applies_permission_mode_on_reuse_without_respawn():
+    """WS path: a reused client whose spawn permission_mode differs from this
+    turn's gets set_permission_mode(new) awaited, and the pool entry is NOT
+    torn down (no respawn — that would kill in-flight background tasks)."""
+    state = _reuse_state_with_opts(perm_mode="default", model="m")
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        options = _chat_patches(stack, pool)
+        options.permission_mode = "plan"
+        options.model = "m"  # unchanged → set_model must NOT fire
+        events = await _collect(qe.stream_to_websocket("hi", "sess-perm", "claude-code"))
+
+    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.sdk_client.set_model.assert_not_awaited()
+    assert pool.state is state, "reuse must not evict/replace the pooled client"
+    assert not any(e.get("type") == "error" for e in events), events
+    assert state.is_streaming is False  # empty turn completed, claim released
+
+
+async def test_chat_permission_mode_unchanged_does_not_call_setter():
+    """No spurious setter call when permission_mode is identical to spawn."""
+    state = _reuse_state_with_opts(perm_mode="plan", model="m")
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        options = _chat_patches(stack, pool)
+        options.permission_mode = "plan"
+        options.model = "m"
+        await _collect(qe.stream_to_websocket("hi", "sess-noop", "claude-code"))
+
+    state.adapter.sdk_client.set_permission_mode.assert_not_awaited()
+
+
+async def test_chat_permission_mode_setter_failure_does_not_propagate():
+    """A raising set_permission_mode must be swallowed (logged, never raised): an
+    exception between the is_streaming claim and the main try/finally would
+    strand the flag and brick the pooled client. The turn proceeds normally."""
+    state = _reuse_state_with_opts(perm_mode="default", model="m")
+    state.adapter.sdk_client.set_permission_mode = AsyncMock(side_effect=RuntimeError("setter boom"))
+    pool = _StubPool(state)
+
+    with ExitStack() as stack:
+        options = _chat_patches(stack, pool)
+        options.permission_mode = "plan"
+        options.model = "m"
+        events = await _collect(qe.stream_to_websocket("hi", "sess-perm-boom", "claude-code"))
+
+    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
+    assert not any(e.get("type") == "error" for e in events), events
+    assert state.is_streaming is False  # turn still completed cleanly
+    assert pool.state is state
+
+
+async def test_rest_applies_permission_mode_on_reuse_without_respawn():
+    """REST path (stream_query): same in-place apply. Short-circuit the turn body
+    right after the reuse block (the stream_start sync-log write is the first main
+    await) to assert the apply ran before it, without harnessing a full turn."""
+    state = _reuse_state_with_opts(perm_mode="default", model="m")
+    pool = _StubPool(state)
+
+    async def _run_sync_boom(fn, *a, **k):
+        if k.get("event_type") == "stream_start":
+            raise RuntimeError("sync-log boom")
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        options = _rest_patches(stack, pool)
+        options.permission_mode = "plan"
+        options.model = "m"
+        stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_run_sync_boom)))
+        with pytest.raises(RuntimeError, match="sync-log boom"):
+            await _collect(qe.stream_query("hi", "claude-code", session_id="sess-perm-rest"))
+
+    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.sdk_client.set_model.assert_not_awaited()
+    assert pool.state is state, "reuse must not evict/replace the pooled client"
+
+
+async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_db):
+    """Background path: same in-place apply. Short-circuit right after the reuse
+    block via _store_background_task (first statement after the 'Mark as
+    streaming' claim, before the query) to assert the apply ran, without a turn."""
+    state = _reuse_state_with_opts(perm_mode="default", model="m")
+    pool = _StubPool(state)
+    sessions_db.create_session("sess-perm-bg", "default")
+
+    async def _fake_run_sync(fn, *a, **k):
+        return {"id": "row-1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+        stack.enter_context(patch.object(qb, "sync_engine", new=_fake_sync_engine()))
+        oauth = MagicMock()
+        oauth.ensure_fresh_credentials = AsyncMock()
+        stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
+        options = MagicMock()
+        options.permission_mode = "plan"
+        options.model = "m"
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})))
+        stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
+        stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
+        stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
+        stack.enter_context(patch.object(qb, "credentials_rotated", return_value=False))
+        stack.enter_context(patch.object(
+            qb, "_store_background_task", side_effect=RuntimeError("stop-after-apply")
+        ))
+
+        with pytest.raises(RuntimeError, match="stop-after-apply"):
+            await qb._run_background_query(
+                "sess-perm-bg", "hello", {"id": "claude-code"}, None, None, None, None, None,
+            )
+
+    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.sdk_client.set_model.assert_not_awaited()
+    assert pool.state is state, "reuse must not evict/replace the pooled client"
+    assert state.is_streaming is False  # claim-guard released it on the raise

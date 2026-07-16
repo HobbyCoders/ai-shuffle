@@ -1261,6 +1261,40 @@ async def stream_query(
             try:
                 if credentials_rotated(state):
                     await refresh_subprocess_credentials(state, session_id)
+
+                # Runtime-changeable options (model, permission_mode) are baked
+                # into the CLI subprocess at spawn. requires_reconnect() lets them
+                # change without a respawn, so a mid-session switch must be pushed
+                # into the live subprocess here (this path has no can_use_tool
+                # compensation at all). Never raise: an exception between the
+                # is_streaming claim and the main try/finally would strand the
+                # flag and brick the pooled client.
+                old_opts = state.connect_options
+                if old_opts:
+                    new_model = getattr(options, 'model', None)
+                    old_model = getattr(old_opts, 'model', None)
+                    if new_model and new_model != old_model:
+                        try:
+                            await state.client.set_model(new_model)
+                            logger.debug(f"Updated model to {new_model} for reused session {session_id}")
+                            # Persist the switched model so launched_model never
+                            # goes stale — the host-op guard reads this column.
+                            try:
+                                await run_sync(database.update_session, session_id, launched_model=new_model)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.warning(f"Failed to set model on reused session {session_id}: {e}")
+
+                    new_perm_mode = getattr(options, 'permission_mode', None)
+                    old_perm_mode = getattr(old_opts, 'permission_mode', None)
+                    if new_perm_mode and new_perm_mode != old_perm_mode:
+                        try:
+                            await state.client.set_permission_mode(new_perm_mode)
+                            logger.debug(f"Updated permission_mode to {new_perm_mode} for reused session {session_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to set permission_mode on reused session {session_id}: {e}")
+
                 logger.info(f"Reusing pooled client for session {session_id}")
             except BaseException:
                 state.is_streaming = False
@@ -1913,6 +1947,23 @@ async def _stream_to_websocket_impl(
                                 pass
                         except Exception as e:
                             logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
+
+                    # permission_mode is baked into the CLI subprocess at spawn.
+                    # requires_reconnect() deliberately lets it change without a
+                    # respawn, so a mid-session switch (e.g. into/out of plan
+                    # mode) must be pushed into the live subprocess here — the
+                    # callback_refs update above only gates the app-level
+                    # can_use_tool callback, not the CLI's own auto-approval.
+                    # Never raise: an exception between the is_streaming claim and
+                    # the main try/finally would strand the flag and brick the client.
+                    new_perm_mode = getattr(options, 'permission_mode', None)
+                    old_perm_mode = getattr(old_opts, 'permission_mode', None)
+                    if new_perm_mode and new_perm_mode != old_perm_mode:
+                        try:
+                            await state.client.set_permission_mode(new_perm_mode)
+                            logger.debug(f"[WS] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
+                        except Exception as e:
+                            logger.warning(f"[WS] Failed to set permission_mode on reused session {session_id}: {e}")
 
                 logger.info(f"[WS] Reusing pooled client for session {session_id}")
             except BaseException:

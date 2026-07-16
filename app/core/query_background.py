@@ -215,6 +215,39 @@ async def _run_background_query_impl(
             try:
                 if credentials_rotated(state):
                     await refresh_subprocess_credentials(state, session_id)
+
+                # Runtime-changeable options (model, permission_mode) are baked
+                # into the CLI subprocess at spawn. requires_reconnect() lets them
+                # change without a respawn, so a mid-session switch must be pushed
+                # into the live subprocess here. Never raise: an exception between
+                # the is_streaming claim and the main try/finally would strand the
+                # flag and brick the pooled client.
+                old_opts = state.connect_options
+                if old_opts:
+                    new_model = getattr(options, 'model', None)
+                    old_model = getattr(old_opts, 'model', None)
+                    if new_model and new_model != old_model:
+                        try:
+                            await state.client.set_model(new_model)
+                            logger.debug(f"[Background] Updated model to {new_model} for reused session {session_id}")
+                            # Persist the switched model so launched_model never
+                            # goes stale — the host-op guard reads this column.
+                            try:
+                                await run_sync(database.update_session, session_id, launched_model=new_model)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to set model on reused session {session_id}: {e}")
+
+                    new_perm_mode = getattr(options, 'permission_mode', None)
+                    old_perm_mode = getattr(old_opts, 'permission_mode', None)
+                    if new_perm_mode and new_perm_mode != old_perm_mode:
+                        try:
+                            await state.client.set_permission_mode(new_perm_mode)
+                            logger.debug(f"[Background] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to set permission_mode on reused session {session_id}: {e}")
+
                 logger.info(f"[Background] Reusing pooled client for session {session_id}")
             except BaseException:
                 state.is_streaming = False
