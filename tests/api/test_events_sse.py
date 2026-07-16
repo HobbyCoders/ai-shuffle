@@ -45,7 +45,28 @@ def _parse(frame: str) -> dict:
 
 
 async def _collect(agen, n, timeout=5.0):
-    """Read ``n`` event frames (skipping keepalive comments) from the stream."""
+    """Read ``n`` event frames (skipping keepalive comments and the ``caught_up``
+    history/live boundary sentinel) from the stream."""
+    frames = []
+
+    async def _pump():
+        async for chunk in agen:
+            if chunk.startswith(":"):
+                continue
+            parsed = _parse(chunk)
+            if parsed.get("event") == "caught_up":
+                continue
+            frames.append(parsed)
+            if len(frames) >= n:
+                return
+
+    await asyncio.wait_for(_pump(), timeout=timeout)
+    return frames
+
+
+async def _collect_raw(agen, n, timeout=5.0):
+    """Like ``_collect`` but keeps the ``caught_up`` sentinel (still skips
+    keepalive comments) so sentinel placement can be asserted."""
     frames = []
 
     async def _pump():
@@ -136,6 +157,70 @@ async def test_notify_wakes_stream_before_poll(mock_db, gw, monkeypatch):
         await agen.aclose()
 
     assert more[0]["id"] == 2
+
+
+async def test_caught_up_sentinel_after_backfill(mock_db, gw, monkeypatch):
+    """The catch-up sentinel is emitted once, right after the last backfill frame,
+    carries the backfill cursor as ``seq``, and has no ``id:`` line (so it does not
+    advance the reconnect cursor)."""
+    # Keep the live poll far away so the sentinel is the 3rd frame, not a live one.
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
+    se.append_events("sess-cu", [
+        {"type": "turn.started"},
+        {"type": "turn.completed"},
+    ])
+
+    agen = event_stream("sess-cu", 0)
+    try:
+        raw = await _collect_raw(agen, 3)
+    finally:
+        await agen.aclose()
+
+    assert [f.get("event") for f in raw] == [
+        "turn.started", "turn.completed", "caught_up",
+    ]
+    # Sentinel carries the backfill cursor and no id line.
+    assert raw[2]["data"] == {"seq": 2}
+    assert "id" not in raw[2]
+
+
+async def test_caught_up_precedes_live_frames(mock_db, gw, monkeypatch):
+    """The sentinel is emitted BEFORE any live-tail frame, so the client can fold
+    the whole history in one batch before switching to incremental live paint."""
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
+    se.append_events("sess-cu2", [{"type": "turn.started"}])
+
+    agen = event_stream("sess-cu2", 0)
+    try:
+        # Backfill frame + sentinel.
+        head = await _collect_raw(agen, 2, timeout=3.0)
+        # A new live event lands after catch-up.
+        se.append_events("sess-cu2", [{"type": "turn.completed"}])
+        live = await _collect_raw(agen, 1, timeout=3.0)
+    finally:
+        await agen.aclose()
+
+    assert head[0]["event"] == "turn.started"
+    assert head[1]["event"] == "caught_up"
+    assert live[0]["event"] == "turn.completed"
+    assert live[0]["id"] == 2
+
+
+async def test_caught_up_emitted_on_empty_backfill(mock_db, gw, monkeypatch):
+    """Even when ``from_seq`` is past the log tail (empty backfill — e.g. a
+    reconnect), the sentinel is still emitted so the client's batch flag re-arms
+    and folds once."""
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
+    se.append_events("sess-cu3", [{"type": "turn.started"}])
+
+    agen = event_stream("sess-cu3", 1)  # from_seq at the tail → no backfill rows
+    try:
+        raw = await _collect_raw(agen, 1)
+    finally:
+        await agen.aclose()
+
+    assert raw[0]["event"] == "caught_up"
+    assert raw[0]["data"] == {"seq": 1}
 
 
 async def test_close_unsubscribes(mock_db, gw):

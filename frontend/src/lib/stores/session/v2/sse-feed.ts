@@ -21,6 +21,11 @@
 export interface SseFeedOptions {
 	/** Called once per parsed data frame with the decoded JSON payload. */
 	onEvent: (event: Record<string, unknown>) => void;
+	/** Optional: called each time a connection successfully opens (first connect
+	 *  AND every reconnect), before any frame from that connection is delivered.
+	 *  Lets the consumer re-arm per-connect state (e.g. the history-catch-up flag)
+	 *  so a reconnect's fresh backfill batches before the next `caught_up`. */
+	onOpen?: () => void;
 	/** Optional: called on transient errors (before a reconnect is scheduled). */
 	onError?: (err: unknown) => void;
 	/** Seed cursor. The first request uses `from_seq`; reconnects use lastSeq (server filter is exclusive). */
@@ -212,6 +217,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 
 			// A successful connect resets the backoff clock.
 			backoff = BACKOFF_MIN_MS;
+			// Signal the fresh connection so the consumer can re-arm per-connect
+			// state before any frame lands (the backfill for this connection is
+			// about to stream, terminated by a `caught_up` sentinel).
+			options.onOpen?.();
 
 			const reader = res.body.getReader();
 			const decoder = new TextDecoder();
@@ -236,6 +245,15 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 					if (frame.data) {
 						try {
 							const payload = JSON.parse(frame.data) as Record<string, unknown>;
+							// Surface the named SSE `event:` type to the consumer. Normal
+							// event frames already carry `type` in their payload (the wire
+							// envelope), so this is a no-op for them; control frames whose
+							// data omits `type` (e.g. the `caught_up` sentinel, data
+							// `{"seq":N}`) get it stamped here so the controller can act on
+							// them without a separate channel.
+							if (payload.type === undefined && frame.event) {
+								payload.type = frame.event;
+							}
 							options.onEvent(payload);
 						} catch (e) {
 							options.onError?.(e);

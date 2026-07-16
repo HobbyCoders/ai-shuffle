@@ -110,6 +110,13 @@ async def event_stream(session_id: str, from_seq: int = 0):
             if len(page) < _PAGE:
                 break
 
+        # 1b. Catch-up sentinel: mark the history/live boundary so the client can
+        #     paint the whole backfilled transcript in ONE batch instead of
+        #     repainting per backfilled frame. Carries no ``id:`` line, so it does
+        #     not advance the reconnect cursor (``lastSeq``); it re-arms per connect
+        #     (a near-empty reconnect backfill just folds once).
+        yield f"event: caught_up\ndata: {json.dumps({'seq': cursor})}\n\n"
+
         # 2. Live tail. Wake on a notify OR the keepalive timer; either way
         #    reconcile against get_max_seq so we also serve as the poll
         #    fallback when notifies are absent.

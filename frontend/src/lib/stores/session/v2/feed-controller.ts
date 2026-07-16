@@ -58,6 +58,37 @@ let timerHandle: ReturnType<typeof setTimeout> | null = null;
  */
 const deliveredTurnIds = new Set<string>();
 
+// History/live boundary. While `false`, backfilled events are reduced WITHOUT
+// scheduling a fold, so the whole persisted transcript paints in ONE batch on
+// the `caught_up` sentinel instead of repainting per backfilled frame (which
+// made the list grow one message at a time on open). Re-armed per SSE connect.
+let caughtUp = false;
+// Safety net for an old backend that never emits `caught_up`: if the sentinel
+// hasn't arrived within this window, fold whatever has accumulated so the view
+// can never be stuck blank. Re-armed per connect; cleared on `caught_up`.
+let catchupFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+const CATCHUP_FALLBACK_MS = 1_000;
+
+function clearCatchupFallback(): void {
+	if (catchupFallbackTimer !== null) {
+		clearTimeout(catchupFallbackTimer);
+		catchupFallbackTimer = null;
+	}
+}
+
+function armCatchupFallback(): void {
+	clearCatchupFallback();
+	catchupFallbackTimer = setTimeout(() => {
+		catchupFallbackTimer = null;
+		if (!caughtUp) {
+			// No sentinel arrived (old backend). Give up batching and fold what we
+			// have; subsequent events flush per the normal live cadence.
+			caughtUp = true;
+			fold();
+		}
+	}, CATCHUP_FALLBACK_MS);
+}
+
 // ─── Optimistic-message seeding ───────────────────────────────────────────────
 
 /**
@@ -220,24 +251,54 @@ export const feedController: FeedController = {
 		currentSessionId = sessionId;
 		reducerState = initialState();
 		deliveredTurnIds.clear();
+		caughtUp = false;
 		feed = createSseFeed(sessionId, {
+			onOpen: () => {
+				// Re-arm the batch flag for THIS connection: the backend replays a
+				// fresh backfill (near-empty on a reconnect) terminated by another
+				// `caught_up`, so batch it and fold once when the sentinel lands.
+				caughtUp = false;
+				armCatchupFallback();
+			},
 			onEvent: (e) => {
 				// Only apply events for the session we're feeding.
 				if (currentSessionId !== sessionId) return;
+				// History/live boundary sentinel: fold the whole backfill in one
+				// batch, then switch to the per-frame live cadence below.
+				if ((e as { type?: string }).type === 'caught_up') {
+					caughtUp = true;
+					clearCatchupFallback();
+					fold();
+					return;
+				}
 				const ev = e as WireEvent;
 				// #588: a delivered queued turn arrives as its own user message; note
-				// its turn_id so fold() can clear the matching stale queue chip.
+				// its turn_id so fold() can clear the matching stale queue chip. Runs
+				// for real wire events in BOTH the backfill and live phases.
 				if (ev.type === 'message.user' && typeof ev.turn_id === 'string' && ev.turn_id) {
 					deliveredTurnIds.add(ev.turn_id);
 				}
 				seedOptimistic();
 				reducerState = reduce(reducerState, ev);
-				scheduleFlush();
+				// During backfill (!caughtUp) accumulate silently — the single fold
+				// happens on `caught_up`. After catch-up, keep the existing
+				// incremental per-frame paint so live streaming is unchanged.
+				if (caughtUp) scheduleFlush();
 			},
 			onError: (err) => {
 				console.debug('[feedController] feed error', err);
 			},
 		});
+		// Arm the no-sentinel safety net even before the first connect resolves.
+		armCatchupFallback();
+		// FIX B: seed optimistic messages BEFORE the immediate fold. A freshly
+		// committed worktree session commits an optimistic user message +
+		// isStreaming=true just before start(); folding an empty reducerState here
+		// would clobber both to [] / false (surface reads it as 'cleared' → hero
+		// flash → SSE replay rebuilds = the double-load). Seeding first carries the
+		// optimistic message + streaming flag through this fold; the replayed
+		// `message.user` later reconciles it in place by commandId (no duplicate).
+		seedOptimistic();
 		// Immediate fold so the switch-in clears any transient loading state even
 		// before the first frame lands.
 		fold();
@@ -249,6 +310,8 @@ export const feedController: FeedController = {
 			feed = null;
 		}
 		clearScheduledFlush();
+		clearCatchupFallback();
+		caughtUp = false;
 		currentSessionId = null;
 		reducerState = initialState();
 		deliveredTurnIds.clear();

@@ -46,14 +46,18 @@ def _parse(frame: str) -> dict:
 
 
 async def _collect(agen, n, timeout=5.0):
-    """Read ``n`` event frames (skipping keepalive comments) from the stream."""
+    """Read ``n`` event frames (skipping keepalive comments and the ``caught_up``
+    history/live boundary sentinel) from the stream."""
     frames = []
 
     async def _pump():
         async for chunk in agen:
             if chunk.startswith(":"):
                 continue
-            frames.append(_parse(chunk))
+            parsed = _parse(chunk)
+            if parsed.get("event") == "caught_up":
+                continue
+            frames.append(parsed)
             if len(frames) >= n:
                 return
 
@@ -84,6 +88,34 @@ async def test_stream_backfills_legacy_history_first(mock_db, gw, monkeypatch):
     assert frames[0]["data"]["turn_id"] == "backfill"
     assert frames[0]["data"]["run_id"] is None
     assert frames[1]["data"]["content"] == "old reply"
+
+
+async def test_caught_up_sentinel_follows_legacy_backfill(mock_db, gw, monkeypatch):
+    """The catch-up sentinel is emitted after the legacy-history backfill frames,
+    so a session hydrated purely from legacy history still paints in one batch."""
+    monkeypatch.setattr(hb, "_load_legacy_history", lambda sid: list(LEGACY))
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
+
+    agen = event_stream("sess-bf-cu", 0)
+    raw = []
+
+    async def _pump():
+        async for chunk in agen:
+            if chunk.startswith(":"):
+                continue
+            raw.append(_parse(chunk))
+            if len(raw) >= 3:
+                return
+
+    try:
+        await asyncio.wait_for(_pump(), timeout=5.0)
+    finally:
+        await agen.aclose()
+
+    assert [f.get("event") for f in raw] == [
+        "message.user", "message.assistant", "caught_up",
+    ]
+    assert raw[2]["data"] == {"seq": 2}
 
 
 async def test_backfilled_then_live_events_share_one_seq_space(mock_db, gw, monkeypatch):

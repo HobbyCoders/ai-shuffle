@@ -1,28 +1,43 @@
 /**
- * Feed-controller flush-scheduling tests (docs/V2_PHASE1_DESIGN.md §6).
+ * Feed-controller tests (docs/V2_PHASE1_DESIGN.md §6).
  *
- * The controller coalesces reducer folds onto requestAnimationFrame. Browsers
- * pause rAF in hidden / fully-occluded tabs, which would strand the coalescing
- * latch forever and freeze the live view until refocus. `scheduleFlush()`
- * therefore races the rAF against a 250ms setTimeout fallback so a fold always
- * lands. These tests pin: (1) the fold still happens via the timer when rAF
- * never fires (hidden tab), and (2) the normal path still folds via rAF exactly
- * once (no double-run when both handles are live).
+ * Two behaviours are pinned here:
+ *
+ * 1. History-batch hydration. The controller reduces backfilled events WITHOUT
+ *    folding until a `caught_up` sentinel arrives, so the whole persisted
+ *    transcript paints in ONE batch instead of repainting per backfilled frame
+ *    (the "history paints one message at a time on open" bug). After catch-up,
+ *    live events keep the incremental per-frame paint. The flag re-arms per SSE
+ *    connect (`onOpen`) and has a no-sentinel fallback so the view can never be
+ *    stuck blank against an old backend.
+ *
+ * 2. Flush scheduling. The post-catch-up fold coalesces onto requestAnimationFrame
+ *    with a 250ms setTimeout fallback (browsers pause rAF in hidden tabs). These
+ *    tests pin the timer-fallback fold and the exactly-once rAF fold.
+ *
+ * 3. Optimistic seeding through the immediate fold (worktree double-load fix):
+ *    start() seeds optimistic messages BEFORE the immediate fold so a freshly
+ *    committed worktree session's optimistic user message + isStreaming survive.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Capture the SSE feed's onEvent so we can drive events directly, without a real
-// fetch/stream. `vi.hoisted` keeps the shared state accessible from the hoisted
-// `vi.mock` factory.
+// Capture the SSE feed's onEvent/onOpen so we can drive events directly, without a
+// real fetch/stream. `vi.hoisted` keeps the shared state accessible from the
+// hoisted `vi.mock` factory.
 const hoisted = vi.hoisted(() => ({
 	onEvent: null as ((e: Record<string, unknown>) => void) | null,
+	onOpen: null as (() => void) | null,
 	stops: 0,
 }));
 
 vi.mock('./sse-feed', () => ({
-	createSseFeed: (_sessionId: string, opts: { onEvent: (e: Record<string, unknown>) => void }) => {
+	createSseFeed: (
+		_sessionId: string,
+		opts: { onEvent: (e: Record<string, unknown>) => void; onOpen?: () => void },
+	) => {
 		hoisted.onEvent = opts.onEvent;
+		hoisted.onOpen = opts.onOpen ?? null;
 		return {
 			get running() {
 				return true;
@@ -50,13 +65,14 @@ function flushRaf(): void {
 	for (const r of q) r.cb(0);
 }
 
-function makeDeps() {
+function makeDeps(initial?: Partial<ActiveSessionState>) {
 	let state = {
 		sessionId: 's1',
 		messages: [],
 		isStreaming: false,
 		activeTasks: [],
 		queuedMessages: [],
+		...initial,
 	} as unknown as ActiveSessionState;
 	const update = vi.fn((fn: (s: ActiveSessionState) => ActiveSessionState) => {
 		state = fn(state);
@@ -99,8 +115,14 @@ function userMessage(id: string, turnId: string, content = 'queued text'): Recor
 	};
 }
 
+// The history/live boundary sentinel emitted by the backend after backfill.
+function caughtUp(seq = 0): Record<string, unknown> {
+	return { type: 'caught_up', seq };
+}
+
 beforeEach(() => {
 	hoisted.onEvent = null;
+	hoisted.onOpen = null;
 	hoisted.stops = 0;
 	rafQueue = [];
 	rafId = 0;
@@ -125,12 +147,83 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-describe('feedController flush scheduling', () => {
-	it('folds via the 250ms timer when rAF never fires (hidden/occluded tab)', () => {
+describe('feedController history-batch hydration', () => {
+	it('(a) batches backfill: no intermediate folds, one fold on caught_up with full list', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
 		expect(hoisted.onEvent).toBeTypeOf('function');
+
+		// The immediate fold on start() is the only update so far.
+		const callsAfterStart = deps.update.mock.calls.length;
+		expect(callsAfterStart).toBe(1);
+
+		// Backfill events arrive before the sentinel. None must fold.
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		hoisted.onEvent!(textDelta('e2', 'bar'));
+		// Even if rAF/timers fire, nothing was scheduled during backfill.
+		flushRaf();
+		vi.advanceTimersByTime(500); // < CATCHUP_FALLBACK_MS (1000)
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+		expect((deps.state.messages as unknown[]).length).toBe(0);
+
+		// The sentinel folds exactly once, with the full backfilled list.
+		hoisted.onEvent!(caughtUp(2));
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs).toHaveLength(1);
+		expect(msgs[0].content).toBe('foobar');
+	});
+
+	it('(a-fallback) folds once when caught_up never arrives (old backend safety net)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		const callsAfterStart = deps.update.mock.calls.length;
+
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		hoisted.onEvent!(textDelta('e2', 'bar'));
+		// No sentinel. The 1s no-sentinel fallback must fold what we have.
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart);
+		vi.advanceTimersByTime(1000);
+		expect(deps.update.mock.calls.length).toBe(callsAfterStart + 1);
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs).toHaveLength(1);
+		expect(msgs[0].content).toBe('foobar');
+	});
+
+	it('(c) re-arms the batch flag on reconnect (onOpen) so re-backfill batches', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		expect(hoisted.onOpen).toBeTypeOf('function');
+
+		// Complete initial catch-up.
+		hoisted.onEvent!(caughtUp(0));
+
+		// Reconnect: onOpen re-arms the flag, so the fresh backfill batches again.
+		hoisted.onOpen!();
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		flushRaf();
+		vi.advanceTimersByTime(500);
+		// Batched — not yet folded into activeSession.
+		expect((deps.state.messages as unknown[]).length).toBe(0);
+
+		// The reconnect's sentinel folds it once.
+		hoisted.onEvent!(caughtUp(1));
+		const msgs = deps.state.messages as Array<{ content: string }>;
+		expect(msgs).toHaveLength(1);
+		expect(msgs[0].content).toBe('foo');
+	});
+});
+
+describe('feedController flush scheduling (post-catch-up live cadence)', () => {
+	it('(b) folds via the 250ms timer when rAF never fires (hidden/occluded tab)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		// Enter live mode so events flush per the incremental cadence.
+		hoisted.onEvent!(caughtUp(0));
 
 		// Two events arrive while the tab is backgrounded. rAF is captured but
 		// NEVER flushed (simulating a paused rAF clock).
@@ -148,10 +241,11 @@ describe('feedController flush scheduling', () => {
 		expect(msgs[0].content).toBe('foobar'); // both events folded via the timer
 	});
 
-	it('folds via rAF on the normal path and runs exactly once (no double-run)', () => {
+	it('(b) folds via rAF on the normal path and runs exactly once (no double-run)', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
 
 		hoisted.onEvent!(textDelta('e1', 'foo'));
 		hoisted.onEvent!(textDelta('e2', 'bar'));
@@ -178,6 +272,8 @@ describe('feedController queue reconciliation (#588)', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
+		// Enter live mode so per-event folds run (post-catch-up incremental cadence).
+		hoisted.onEvent!(caughtUp(0));
 
 		// A queued chip is present (as the WS queue_updated broadcast would seed it),
 		// keyed by the turn id.
@@ -202,6 +298,8 @@ describe('feedController queue reconciliation (#588)', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
+		// Enter live mode so per-event folds run (post-catch-up incremental cadence).
+		hoisted.onEvent!(caughtUp(0));
 
 		deps.update((s) => ({
 			...s,
@@ -214,5 +312,32 @@ describe('feedController queue reconciliation (#588)', () => {
 
 		const queued = deps.state.queuedMessages as Array<{ id: string }>;
 		expect(queued.map((q) => q.id)).toEqual(['turn-9']);
+	});
+});
+
+describe('feedController optimistic seeding (worktree double-load fix)', () => {
+	it('(d) preserves the optimistic user message + isStreaming through the immediate fold', () => {
+		// A freshly committed worktree session: an optimistic user message and
+		// isStreaming=true are already on activeSession when start() runs.
+		const deps = makeDeps({
+			messages: [
+				{
+					id: 'opt-1',
+					role: 'user',
+					content: 'do the thing',
+					commandId: 'req-abc',
+					timestamp: '2026-07-15T00:00:00.000Z',
+				},
+			],
+			isStreaming: true,
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// The immediate fold must NOT have clobbered messages to [] / isStreaming
+		// to false — seedOptimistic ran first, carrying both through the fold.
+		const msgs = deps.state.messages as Array<{ id: string; role: string }>;
+		expect(msgs.some((m) => m.id === 'opt-1')).toBe(true);
+		expect(deps.state.isStreaming).toBe(true);
 	});
 });
