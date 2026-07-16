@@ -596,6 +596,18 @@ export const activeSession = {
 		persistSession();
 	},
 
+	/**
+	 * Sync the chat header title for a session renamed elsewhere (e.g. the
+	 * sessions board's inline rename). No-op unless the renamed session is the one
+	 * currently open, mirroring the `session_updated` title-sync guard in
+	 * ws-message-handlers — the header must only ever reflect the open session.
+	 */
+	setTitle(sessionId: string, title: string) {
+		if (_state.sessionId !== sessionId) return;
+		_update(s => ({ ...s, title }));
+		persistSession();
+	},
+
 	// ── Session Overrides ───────────────────────────────────────────
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },

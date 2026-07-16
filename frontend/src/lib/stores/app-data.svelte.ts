@@ -9,7 +9,7 @@
  */
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
-import { api, searchSessionsPaginated } from '$lib/api/client';
+import { api, searchSessionsPaginated, renameSession as apiRenameSession } from '$lib/api/client';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
@@ -411,6 +411,25 @@ export const appData = {
 			// Rollback optimistic removal on error, then resync from server.
 			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
 			await appData.loadSessions();
+			throw err;
+		}
+	},
+
+	async renameSession(sessionId: string, title: string) {
+		// Optimistic rename — patch the row's title in local state immediately for
+		// instant feedback (mirrors deleteSession's optimistic splice). Snapshot the
+		// previous list so we can roll back if the PATCH fails.
+		const prevSessions = _state.sessions;
+		_update(s => ({
+			...s,
+			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, title } : x)),
+		}));
+
+		try {
+			await apiRenameSession(sessionId, title);
+		} catch (err) {
+			// Roll the optimistic title change back and let the caller surface the error.
+			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}
 	},

@@ -195,6 +195,16 @@ export async function toggleSessionFavorite(sessionId: string): Promise<Session>
 }
 
 /**
+ * Rename a session. The backend `PATCH /sessions/{id}` endpoint takes the new
+ * title as a query parameter (not a JSON body) and returns the updated Session;
+ * this mirrors `toggleSessionFavorite`'s use of `api.patch` with no request body.
+ */
+export async function renameSession(sessionId: string, title: string): Promise<Session> {
+	const params = new URLSearchParams({ title });
+	return api.patch<Session>(`/sessions/${sessionId}?${params.toString()}`);
+}
+
+/**
  * Export a session in the specified format and trigger download
  */
 export async function exportSession(

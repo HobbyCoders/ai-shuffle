@@ -60,9 +60,11 @@ const mocks = vi.hoisted(() => {
 		loadSessions: vi.fn(),
 		loadProjects: vi.fn(),
 		deleteSession: vi.fn(),
+		renameSession: vi.fn(),
 		clearSession: vi.fn(),
 		clearMessages: vi.fn(),
 		newChat: vi.fn(),
+		setTitle: vi.fn(),
 		toastPush: vi.fn(),
 		apiPost: vi.fn(),
 		apiDelete: vi.fn()
@@ -74,6 +76,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 		loadSessions: mocks.loadSessions,
 		loadProjects: mocks.loadProjects,
 		deleteSession: mocks.deleteSession,
+		renameSession: mocks.renameSession,
 		clearSession: mocks.clearSession
 	},
 	sessions: mocks.sessions,
@@ -87,7 +90,8 @@ vi.mock('$lib/stores/active-session', () => ({
 	// used on the delete path.
 	activeSession: Object.assign(mocks.activeSession, {
 		clearMessages: mocks.clearMessages,
-		newChat: mocks.newChat
+		newChat: mocks.newChat,
+		setTitle: mocks.setTitle
 	}),
 	streamingSessions: mocks.streamingSessions,
 	backgroundPermissions: mocks.backgroundPermissions
@@ -165,6 +169,7 @@ beforeEach(() => {
 	mocks.loadSessions.mockResolvedValue(undefined);
 	mocks.clearSession.mockResolvedValue(undefined);
 	mocks.deleteSession.mockResolvedValue(undefined);
+	mocks.renameSession.mockResolvedValue(undefined);
 	mocks.activeSession.set({ sessionId: null, isStreaming: false });
 	mocks.sessions.set([localSession, remoteSession]);
 });
@@ -740,3 +745,131 @@ describe('SessionsBoard degraded (V2 Q7) chip', () => {
 		expect(screen.queryByText('Waiting — device offline')).toBeNull();
 	});
 });
+
+/**
+ * Inline rename (issue #589): the Sessions list rows gain a "Rename" action in
+ * their RowActionMenu. Choosing it swaps the row's title text for an input
+ * pre-filled with the current title; Enter commits, Escape cancels, blur commits.
+ * A commit updates the row title through the sessions store (appData.renameSession)
+ * AND the chat header through the active-session store (activeSession.setTitle).
+ * Empty/whitespace-only or unchanged titles cancel with no API call, and the row's
+ * click-through-to-open is suppressed while editing.
+ */
+describe('SessionsBoard inline rename', () => {
+	function renameInput(row: HTMLElement): HTMLInputElement | null {
+		return row.querySelector('.row-title-input');
+	}
+	async function startRename(title: string): Promise<HTMLElement> {
+		const row = rowFor(title);
+		await fireEvent.click(row.querySelector('[title="Rename session"]') as HTMLElement);
+		return row;
+	}
+
+	it('renders a Rename action on every row', () => {
+		renderBoard();
+		expect(screen.getAllByTitle('Rename session')).toHaveLength(2);
+	});
+
+	it('swaps the title for an input pre-filled with the current title', async () => {
+		renderBoard();
+		const row = await startRename('Local one');
+		// Title text is gone; an input carrying the current title is in its place.
+		expect(row.querySelector('.row-title')).toBeNull();
+		const input = renameInput(row);
+		expect(input).toBeTruthy();
+		expect(input!.value).toBe('Local one');
+	});
+
+	it('commits on Enter: renames through both stores and closes the editor', async () => {
+		renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: 'Renamed local' } });
+		await fireEvent.keyDown(input, { key: 'Enter' });
+
+		expect(mocks.renameSession).toHaveBeenCalledWith('a', 'Renamed local');
+		expect(mocks.setTitle).toHaveBeenCalledWith('a', 'Renamed local');
+		// Editor closed (input removed).
+		expect(renameInput(row)).toBeNull();
+	});
+
+	it('commits on blur', async () => {
+		renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: 'Blur renamed' } });
+		await fireEvent.blur(input);
+
+		expect(mocks.renameSession).toHaveBeenCalledWith('a', 'Blur renamed');
+		expect(mocks.setTitle).toHaveBeenCalledWith('a', 'Blur renamed');
+	});
+
+	it('cancels on Escape without calling the API and without opening the session', async () => {
+		const { onOpenSession } = renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: 'Should not save' } });
+		await fireEvent.keyDown(input, { key: 'Escape' });
+
+		expect(mocks.renameSession).not.toHaveBeenCalled();
+		expect(mocks.setTitle).not.toHaveBeenCalled();
+		// The plain title is restored (editor closed).
+		expect(renameInput(row)).toBeNull();
+		expect(row.querySelector('.row-title')?.textContent?.trim()).toBe('Local one');
+		expect(onOpenSession).not.toHaveBeenCalled();
+	});
+
+	it('does not call the API for an empty/whitespace-only title', async () => {
+		renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: '   ' } });
+		await fireEvent.keyDown(input, { key: 'Enter' });
+
+		expect(mocks.renameSession).not.toHaveBeenCalled();
+		expect(renameInput(row)).toBeNull();
+	});
+
+	it('does not call the API when the title is unchanged', async () => {
+		renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		// Leave the value as the current title (only surrounding whitespace differs).
+		await fireEvent.input(input, { target: { value: '  Local one  ' } });
+		await fireEvent.keyDown(input, { key: 'Enter' });
+
+		expect(mocks.renameSession).not.toHaveBeenCalled();
+	});
+
+	it('suppresses row click-through to open while the row is being renamed', async () => {
+		const { onOpenSession } = renderBoard();
+		const row = await startRename('Local one');
+		// A click that reaches the row must not open the session while editing.
+		await fireEvent.click(row);
+		expect(onOpenSession).not.toHaveBeenCalled();
+	});
+
+	it('surfaces a toast when the rename request fails', async () => {
+		mocks.renameSession.mockRejectedValueOnce({ status: 500, detail: 'boom' });
+		renderBoard();
+		const row = await startRename('Local one');
+		const input = renameInput(row) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: 'Renamed local' } });
+		await fireEvent.keyDown(input, { key: 'Enter' });
+
+		await vi.waitFor(() =>
+			expect(mocks.toastPush).toHaveBeenCalledWith('Failed to rename session', { tone: 'error' })
+		);
+	});
+
+	it('closes the mobile ⋮ tray when Rename is chosen', async () => {
+		renderBoard();
+		const row = rowFor('Local one');
+		const toggle = row.querySelector('[title="Session actions"]') as HTMLElement;
+		await fireEvent.click(toggle);
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+		await fireEvent.click(row.querySelector('[title="Rename session"]') as HTMLElement);
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+	});
+});

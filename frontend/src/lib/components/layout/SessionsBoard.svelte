@@ -12,7 +12,7 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2 } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
@@ -84,6 +84,10 @@
 	// Mobile only: which row has its action rail expanded out of the ⋮ menu.
 	// Single value = one open at a time; desktop keeps the always-inline rail.
 	let actionsOpenId = $state<string | null>(null);
+	// Inline rename UI state: the row whose title is currently swapped for an
+	// edit input (null = none), plus the live editor value. One row at a time.
+	let renamingSessionId = $state<string | null>(null);
+	let renameValue = $state('');
 
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
@@ -518,15 +522,73 @@
 		actionsOpenId = null;
 		disarmDeleteConfirm();
 	}
+	// --- Inline rename -----------------------------------------------------
+	// Focus (and select-all) the rename input the moment it mounts, so the user
+	// can immediately overtype the current title. A Svelte action fires on the
+	// freshly-created node, so no manual tick/setTimeout is needed.
+	function focusSelect(node: HTMLInputElement) {
+		node.focus();
+		node.select();
+	}
+	// Enter Rename mode for a row: swap its title for an input pre-filled with the
+	// current title. stopPropagation so the row's own click never also opens the
+	// session; clear any transient action state first.
+	function startRename(e: MouseEvent | KeyboardEvent, s: Session) {
+		e.stopPropagation();
+		actionsOpenId = null;
+		disarmDeleteConfirm();
+		renamingSessionId = s.id;
+		renameValue = s.title || '';
+	}
+	function cancelRename() {
+		renamingSessionId = null;
+		renameValue = '';
+	}
+	// Commit the edited title. Empty/whitespace-only OR unchanged titles cancel
+	// with no API call (backend enforces any further length rules). On success the
+	// row title updates through the sessions store and, if this session is the one
+	// open in the chat tab, its header title updates through the active-session
+	// store. Guarded against double-fire: Enter/Escape both null renamingSessionId
+	// which unmounts the input and fires a trailing blur — the guard drops it.
+	async function commitRename(s: Session) {
+		if (renamingSessionId !== s.id) return;
+		const next = renameValue.trim();
+		const current = (s.title || '').trim();
+		renamingSessionId = null;
+		renameValue = '';
+		if (!next || next === current) return;
+		try {
+			await appData.renameSession(s.id, next);
+			activeSession.setTitle(s.id, next);
+		} catch {
+			toast.push('Failed to rename session', { tone: 'error' });
+		}
+	}
+	// Keydown on the rename input: Enter commits, Escape cancels. Every key stops
+	// propagation so the row's own keydown (Enter/Space → open session) never fires
+	// and typing spaces doesn't trigger it either.
+	function onRenameKeydown(e: KeyboardEvent, s: Session) {
+		e.stopPropagation();
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			commitRename(s);
+		} else if (e.key === 'Escape') {
+			e.preventDefault();
+			cancelRename();
+		}
+	}
+
 	// Open a session from its row — but never while that row is showing its
 	// delete confirmation (deletingSessionId) OR its delete request is in flight
-	// (deleteInFlightId). The confirm button is natively `disabled` during the
+	// (deleteInFlightId), NOR while its title is being renamed inline
+	// (renamingSessionId). The confirm button is natively `disabled` during the
 	// request, and the browser routes a click on a disabled button to its parent
 	// (the row), which would otherwise open the just-deleted session as an empty
-	// chat. Two variables because the armed-confirm state can be nulled at any
-	// moment (Escape / Cancel / re-arm) while the request is still running.
+	// chat. Two delete variables because the armed-confirm state can be nulled at
+	// any moment (Escape / Cancel / re-arm) while the request is still running.
 	function openSession(id: string) {
 		if (deletingSessionId === id || deleteInFlightId === id) return;
+		if (renamingSessionId === id) return;
 		onOpenSession(id);
 	}
 
@@ -801,7 +863,20 @@
 		</span>
 		<div class="row-main">
 			<div class="row-line1">
-				<span class="row-title">{session.title || 'Untitled'}</span>
+				{#if renamingSessionId === session.id}
+					<input
+						class="row-title-input"
+						type="text"
+						bind:value={renameValue}
+						use:focusSelect
+						onclick={(e) => e.stopPropagation()}
+						onkeydown={(e) => onRenameKeydown(e, session)}
+						onblur={() => commitRename(session)}
+						aria-label="Rename session"
+					/>
+				{:else}
+					<span class="row-title">{session.title || 'Untitled'}</span>
+				{/if}
 			</div>
 			<div class="row-line2">
 				{#if session.automation_id}
@@ -887,6 +962,14 @@
 					<Play size={13} strokeWidth={1.6} />
 				</button>
 			{/if}
+			<button
+				class="row-action"
+				title="Rename session"
+				disabled={isArmed}
+				onclick={(e) => startRename(e, session)}
+			>
+				<Pencil size={13} strokeWidth={1.6} />
+			</button>
 			<button
 				class="row-action"
 				title="Fork session"
@@ -1312,6 +1395,25 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+	/* Inline rename input — sits in the title's slot and matches its type so the
+	   row doesn't reflow on entering edit mode. Primary-ringed to read as active. */
+	.row-title-input {
+		flex: 1;
+		min-width: 0;
+		font-family: inherit;
+		font-size: 0.85rem;
+		font-weight: 500;
+		color: var(--foreground);
+		background: var(--background);
+		border: 1px solid var(--primary);
+		border-radius: 6px;
+		padding: 2px 6px;
+		margin: -3px 0;
+		outline: none;
+	}
+	.row-title-input:focus-visible {
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 30%, transparent);
+	}
 	.row-time { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.75; }
 
 	.row-line2 {
@@ -1501,6 +1603,7 @@
 		.proj-grid { grid-template-columns: 1fr; }
 		.row { min-height: 64px; padding: 11px 14px; gap: 11px; }
 		.row-title { font-size: 0.9rem; }
+		.row-title-input { font-size: 0.9rem; }
 		.row-line2 { font-size: 0.72rem; gap: 7px; }
 		.row-action { width: 38px; height: 38px; }
 	}
