@@ -9,10 +9,59 @@
  * The `rateLimit` store is a singleton; each test resets it via
  * `__resetForTests` and clears localStorage between tests.
  */
-import { render, cleanup, fireEvent } from '@testing-library/svelte';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
+
+// The breakdown now fetches on session load and the pill prefers the rich data, so
+// the tests need to drive both the active session state and the /context-usage
+// fetch. A tiny controllable store replaces `activeSession` (usage-target reads its
+// `.current` + `.subscribe`); `getContextUsage` is a stub. Everything else in the
+// active-session / sessions modules is preserved via importOriginal.
+const mocks = vi.hoisted(() => {
+	const DEFAULT = {
+		sessionId: null as string | null,
+		isStreaming: false,
+		executionMode: null,
+		modelOverride: null,
+		profile: null,
+		contextUsed: null as number | null,
+		totalTokensIn: 0,
+		totalTokensOut: 0,
+		totalCacheCreationTokens: 0,
+		totalCacheReadTokens: 0,
+	};
+	type State = typeof DEFAULT;
+	function store(initial: State) {
+		let val = initial;
+		const subs = new Set<(v: State) => void>();
+		return {
+			get current() {
+				return val;
+			},
+			subscribe(fn: (v: State) => void) {
+				fn(val);
+				subs.add(fn);
+				return () => subs.delete(fn);
+			},
+			set(v: State) {
+				val = v;
+				subs.forEach((f) => f(val));
+			},
+		};
+	}
+	return { DEFAULT, activeSession: store({ ...DEFAULT }), getContextUsage: vi.fn() };
+});
+
+vi.mock('$lib/stores/active-session', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, activeSession: mocks.activeSession };
+});
+vi.mock('$lib/api/sessions', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, getContextUsage: mocks.getContextUsage };
+});
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
 const past = () => new Date(Date.now() - 1_000).toISOString();
@@ -26,6 +75,9 @@ beforeEach(() => {
 	localStorage.clear();
 	// Full reset: clears every bucket AND the per-install generation guard.
 	rateLimit.__resetForTests();
+	mocks.activeSession.set({ ...mocks.DEFAULT });
+	mocks.getContextUsage.mockReset();
+	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });
 });
 afterEach(() => cleanup());
 
@@ -50,30 +102,227 @@ describe('ContextUsageBar — pill', () => {
 });
 
 describe('ContextUsageBar — context breakdown', () => {
-	it('always renders the category breakdown rows on open (no chevron toggle)', async () => {
+	it('renders the collapse chevron with category rows expanded by default', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// Breakdown is always shown — the estimate rows render without any toggle.
+		const header = container.querySelector('.ctx-header');
+		expect(header).not.toBeNull();
+		expect(container.querySelector('.ctx-chevron')).not.toBeNull();
+		expect(header?.getAttribute('aria-expanded')).toBe('true');
+		// Expanded by default → the per-category rows are shown.
 		expect(container.querySelectorAll('.breakdown-row').length).toBeGreaterThan(0);
-		// The collapse chevron is gone entirely.
-		expect(container.querySelector('.ctx-chevron')).toBeNull();
 	});
 
-	it('shows em-dash values for a fresh session, keeping the System overhead reserve', async () => {
+	it('collapses on toggle: hides rows but keeps the segmented bar + limits, persists to localStorage', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const header = container.querySelector('.ctx-header') as HTMLButtonElement;
+
+		await fireEvent.click(header);
+
+		// Rows hidden; the segmented bar and the plan-limits section stay visible.
+		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
+		expect(container.querySelector('.ctx-segbar')).not.toBeNull();
+		expect(container.textContent).toContain('Plan usage limits');
+		expect(header.getAttribute('aria-expanded')).toBe('false');
+		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('0');
+	});
+
+	it('starts collapsed when localStorage says so (default is expanded)', async () => {
+		localStorage.setItem('aihub.contextBreakdownOpen', '0');
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('false');
+		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
+		// The segmented bar is not part of the collapse.
+		expect(container.querySelector('.ctx-segbar')).not.toBeNull();
+	});
+
+	it('shows em-dash rows for a fresh session with no per-row mini bars', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
 		const rows = Array.from(container.querySelectorAll('.breakdown-row'));
-		const overhead = rows.find((r) => r.textContent?.includes('System overhead'))!;
-		// The fixed reserve keeps its real value even on an empty session.
-		expect(overhead.querySelector('.breakdown-value')?.textContent?.trim()).not.toBe('—');
-		// Every other category has no usage yet → em-dash.
-		const others = rows.filter((r) => !r.textContent?.includes('System overhead'));
-		expect(others.length).toBeGreaterThan(0);
-		for (const r of others) {
+		// input / cacheRead / cacheCreation / output — no System overhead, no Free space.
+		expect(rows.length).toBe(4);
+		for (const r of rows) {
 			expect(r.querySelector('.breakdown-value')?.textContent?.trim()).toBe('—');
 		}
+		// The former per-row mini bars are gone from the context section.
+		expect(container.querySelector('.row-bar.mini')).toBeNull();
+		expect(container.querySelector('.breakdown-row .row-bar')).toBeNull();
+	});
+
+	it('renders only the dim buffer segment on a fresh session', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const segs = container.querySelectorAll('.ctx-seg');
+		expect(segs.length).toBe(1);
+		expect(segs[0].classList.contains('dim')).toBe(true);
+	});
+
+	it('renders one segment per in-bar category plus a dim buffer segment, excluding Free space AND Output tokens', async () => {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's1',
+			contextUsed: 100_000,
+			totalTokensIn: 20_000,
+			totalTokensOut: 5_000,
+			totalCacheCreationTokens: 30_000,
+			totalCacheReadTokens: 50_000,
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
+		// Input + cacheRead + cacheCreation segments + 1 dim buffer segment. Output
+		// tokens are session-cumulative and NOT part of totalUsed, so — unlike
+		// Free space, which is the bare track — it renders no segment at all.
+		expect(segs.length).toBe(4);
+		expect(segs.filter((s) => s.classList.contains('dim')).length).toBe(1);
+		// The rows still include both Output tokens and Free space (5 rows total),
+		// but neither is a segment.
+		expect(container.querySelectorAll('.breakdown-row').length).toBe(5);
+		// Segment widths (as fractions of contextMax) plus the buffer sum to the
+		// same total the header reports — the invariant this fix restores.
+		const contextMax = 200_000; // default model's context window in tests
+		const segTokens = Math.round(
+			segs
+				.filter((s) => !s.classList.contains('dim'))
+				.reduce((sum, s) => sum + (parseFloat((s as HTMLElement).style.width) / 100) * contextMax, 0)
+		);
+		expect(segTokens).toBe(20_000 + 50_000 + 30_000); // input + cacheRead + cacheCreation
+	});
+
+	it('renders a deferred category row with tokens + em-dash (no percent) and no bar segment', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+					{ name: 'MCP tools (deferred)', tokens: 40_500, color: '#222', isDeferred: true },
+					{ name: 'Free space', tokens: 83_500, color: '#444' },
+				],
+				totalTokens: 76_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 38,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.textContent).toContain('MCP tools (deferred)'));
+
+		const rows = Array.from(container.querySelectorAll('.breakdown-row'));
+		const deferredRow = rows.find((r) => r.textContent?.includes('MCP tools (deferred)'))!;
+		expect(deferredRow).toBeDefined();
+		expect(deferredRow.classList.contains('muted')).toBe(true);
+		const value = deferredRow.querySelector('.breakdown-value')?.textContent ?? '';
+		// Tokens are shown ("40.5k") alongside an em-dash instead of a percent.
+		expect(value).toContain('40.5k');
+		expect(value).toContain('—');
+		expect(value).not.toMatch(/\d+(\.\d+)?%/);
+
+		// No segmented-bar segment for the deferred category: Messages (in-bar) is
+		// the only non-dim segment; no dim buffer here since there's no autocompact
+		// category in this fixture.
+		const segs = Array.from(container.querySelectorAll('.ctx-seg'));
+		expect(segs.length).toBe(1);
+		expect(segs[0].classList.contains('dim')).toBe(false);
+	});
+
+	it('never leaves a stale breakdown on screen when the session switches mid-fetch (abort race)', async () => {
+		const deferred: { resolve: ((v: unknown) => void) | null } = { resolve: null };
+		mocks.getContextUsage.mockImplementation((sid: string) => {
+			if (sid === 's1') {
+				return new Promise<unknown>((resolve) => {
+					deferred.resolve = resolve;
+				});
+			}
+			return Promise.resolve({
+				available: true,
+				source: 'live',
+				usage: {
+					categories: [
+						{ name: 'Messages', tokens: 10_000, color: '#333' },
+						{ name: 'Free space', tokens: 190_000, color: '#444' },
+					],
+					totalTokens: 10_000,
+					maxTokens: 200_000,
+					rawMaxTokens: 200_000,
+					percentage: 5,
+					model: 'claude-x',
+					isAutoCompactEnabled: true,
+				},
+			});
+		});
+
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Switch sessions before the s1 fetch resolves — the effect aborts s1's
+		// in-flight controller and kicks off a fetch for s2.
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's2' });
+		await waitFor(() => expect(container.textContent).toContain('Messages'));
+
+		// Now let the stale s1 promise resolve — its continuation must be a no-op
+		// (aborted-signal guard) and must NOT overwrite s2's breakdown.
+		deferred.resolve?.({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Old session data', tokens: 199_000, color: '#111' },
+					{ name: 'Free space', tokens: 1_000, color: '#444' },
+				],
+				totalTokens: 199_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 99,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(container.textContent).not.toContain('Old session data');
+		expect(container.textContent).toContain('Messages');
+	});
+
+	it('drives the pill ring from the rich breakdown percent once loaded (pill and header agree)', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 180_000, color: '#333' },
+					{ name: 'Free space', tokens: 20_000, color: '#444' },
+				],
+				totalTokens: 180_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 90,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
+
+		// Rich totalPercent = 180k / 200k = 90% — not the ~17% poller estimate.
+		await waitFor(() => expect(pill.getAttribute('aria-label')).toMatch(/90%/));
+		expect(pill.getAttribute('aria-label')).not.toMatch(/17%/);
+
+		await openPopover(container);
+		expect(container.querySelector('.ctx-pct')?.textContent).toContain('90%');
 	});
 });
 

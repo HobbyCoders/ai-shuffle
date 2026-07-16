@@ -6,7 +6,9 @@ import {
 	decideBreakdownRefresh,
 	formatTokenCount,
 	mapSdkContextUsage,
+	resolveCategoryColor,
 	usageSeverity,
+	CONTEXT_CATEGORY_PALETTE,
 	type BreakdownRefreshState,
 	type ContextUsageInput,
 } from './context-usage';
@@ -58,23 +60,66 @@ describe('computeContextBreakdown', () => {
 		expect(b.severity).toBe('neutral');
 	});
 
-	it('emits one row per token type with bars relative to contextMax', () => {
+	it('emits one row per token type plus a trailing Free space row (no overhead row)', () => {
 		const b = computeContextBreakdown(base);
 		expect(b.rows.map((r) => r.key)).toEqual([
 			'input',
 			'cacheRead',
 			'cacheCreation',
 			'output',
-			'overhead',
+			'freeSpace',
 		]);
+		// The System overhead row is gone; its tokens live on autocompactTokens.
+		expect(b.rows.find((r) => r.key === 'overhead')).toBeUndefined();
+		expect(b.autocompactTokens).toBe(AUTO_COMPACTION_BASE);
 		const input = b.rows.find((r) => r.key === 'input')!;
 		expect(input.tokens).toBe(20_000);
 		expect(input.barPercent).toBeCloseTo(10, 5); // 20k / 200k
-		const overhead = b.rows.find((r) => r.key === 'overhead')!;
-		expect(overhead.tokens).toBe(AUTO_COMPACTION_BASE);
-		expect(overhead.subline).toBe('estimated');
 		const output = b.rows.find((r) => r.key === 'output')!;
 		expect(output.subline).toBe('session total · not in context');
+		// Free space = contextMax - totalUsed (which includes the buffer), grayed + last.
+		const free = b.rows.find((r) => r.key === 'freeSpace')!;
+		expect(free.muted).toBe(true);
+		expect(free.tokens).toBe(200_000 - (AUTO_COMPACTION_BASE + 100_000));
+		expect(b.rows[b.rows.length - 1].key).toBe('freeSpace');
+	});
+
+	it('flags inBar only on rows whose tokens are part of totalUsed (input/cacheRead/cacheCreation, not output or Free space)', () => {
+		const b = computeContextBreakdown(base);
+		expect(b.rows.find((r) => r.key === 'input')!.inBar).toBe(true);
+		expect(b.rows.find((r) => r.key === 'cacheRead')!.inBar).toBe(true);
+		expect(b.rows.find((r) => r.key === 'cacheCreation')!.inBar).toBe(true);
+		// Output tokens are session-cumulative, NOT part of context used — never a segment.
+		expect(b.rows.find((r) => r.key === 'output')!.inBar).toBe(false);
+		expect(b.rows.find((r) => r.key === 'freeSpace')!.inBar).toBe(false);
+	});
+
+	it('invariant: sum of inBar row tokens plus autocompactTokens equals totalUsed (estimate path)', () => {
+		const b = computeContextBreakdown({
+			rawContextUsed: 987_654,
+			inputTokens: 111_111,
+			outputTokens: 222_222,
+			cacheCreationTokens: 333_333,
+			cacheReadTokens: 543_210,
+			contextMax: 1_000_000,
+		});
+		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
+		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+	});
+
+	it('keeps showPercent true for every row on the estimate path (no deferred concept there)', () => {
+		const b = computeContextBreakdown(base);
+		expect(b.rows.every((r) => r.showPercent === true)).toBe(true);
+	});
+
+	it('gives category rows fallback-palette colours and Free space a muted swatch', () => {
+		const b = computeContextBreakdown(base);
+		expect(b.rows.find((r) => r.key === 'input')!.color).toBe(CONTEXT_CATEGORY_PALETTE[0]);
+		expect(b.rows.find((r) => r.key === 'cacheRead')!.color).toBe(CONTEXT_CATEGORY_PALETTE[1]);
+		expect(b.rows.find((r) => r.key === 'cacheCreation')!.color).toBe(CONTEXT_CATEGORY_PALETTE[2]);
+		expect(b.rows.find((r) => r.key === 'output')!.color).toBe(CONTEXT_CATEGORY_PALETTE[3]);
+		// Free space is not a palette hue — it's the neutral muted swatch.
+		expect(b.rows.find((r) => r.key === 'freeSpace')!.color).not.toBe(CONTEXT_CATEGORY_PALETTE[0]);
 	});
 
 	it('clamps the total and bars at 100% when over the window', () => {
@@ -101,7 +146,7 @@ describe('computeContextBreakdown', () => {
 		expect(b.rows.every((r) => r.barPercent >= 0)).toBe(true);
 	});
 
-	it('marks every category empty on a fresh session EXCEPT the System overhead reserve', () => {
+	it('marks every category empty and suppresses the Free space row on a fresh session', () => {
 		const b = computeContextBreakdown({
 			rawContextUsed: 0,
 			inputTokens: 0,
@@ -110,18 +155,21 @@ describe('computeContextBreakdown', () => {
 			cacheReadTokens: 0,
 			contextMax: 200_000,
 		});
-		const empties = b.rows.filter((r) => r.empty).map((r) => r.key);
-		expect(empties).toEqual(['input', 'cacheRead', 'cacheCreation', 'output']);
-		const overhead = b.rows.find((r) => r.key === 'overhead')!;
-		expect(overhead.empty).toBe(false);
-		expect(overhead.tokens).toBe(AUTO_COMPACTION_BASE);
-		// The header total is still the reserve, so the pill/header stay non-zero.
+		// No Free space row while the estimate has no real data — just em-dash rows.
+		expect(b.rows.map((r) => r.key)).toEqual(['input', 'cacheRead', 'cacheCreation', 'output']);
+		expect(b.rows.every((r) => r.empty)).toBe(true);
+		// Em-dash placeholder rows never contribute a bar segment either.
+		expect(b.rows.every((r) => r.inBar === false)).toBe(true);
+		expect(b.rows.find((r) => r.key === 'freeSpace')).toBeUndefined();
+		// The buffer is still folded in, so the pill/header stay non-zero.
 		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE);
+		expect(b.autocompactTokens).toBe(AUTO_COMPACTION_BASE);
 	});
 
-	it('marks no row empty once any usage has landed', () => {
+	it('marks no category row empty and adds Free space once any usage has landed', () => {
 		const b = computeContextBreakdown({ ...base });
-		expect(b.rows.every((r) => r.empty === false)).toBe(true);
+		expect(b.rows.filter((r) => !r.muted).every((r) => r.empty === false)).toBe(true);
+		expect(b.rows.find((r) => r.key === 'freeSpace')).toBeDefined();
 
 		// A single cache-read token is enough to leave the empty state.
 		const b2 = computeContextBreakdown({
@@ -133,6 +181,28 @@ describe('computeContextBreakdown', () => {
 			contextMax: 200_000,
 		});
 		expect(b2.rows.every((r) => r.empty === false)).toBe(true);
+		expect(b2.rows.find((r) => r.key === 'freeSpace')).toBeDefined();
+	});
+});
+
+describe('resolveCategoryColor', () => {
+	it('passes through valid hex / rgb() / hsl() colours verbatim', () => {
+		expect(resolveCategoryColor('#abc', 0)).toBe('#abc');
+		expect(resolveCategoryColor('#1a2b3c', 0)).toBe('#1a2b3c');
+		expect(resolveCategoryColor('#1a2b3c80', 0)).toBe('#1a2b3c80');
+		expect(resolveCategoryColor('rgb(1, 2, 3)', 1)).toBe('rgb(1, 2, 3)');
+		expect(resolveCategoryColor('hsl(210, 50%, 50%)', 2)).toBe('hsl(210, 50%, 50%)');
+	});
+
+	it('falls back to the palette (by wrapping index) for missing / unparseable colours', () => {
+		expect(resolveCategoryColor(undefined, 0)).toBe(CONTEXT_CATEGORY_PALETTE[0]);
+		expect(resolveCategoryColor(null, 1)).toBe(CONTEXT_CATEGORY_PALETTE[1]);
+		expect(resolveCategoryColor('', 2)).toBe(CONTEXT_CATEGORY_PALETTE[2]);
+		expect(resolveCategoryColor('CanvasText', 3)).toBe(CONTEXT_CATEGORY_PALETTE[3]);
+		// Index wraps around the palette length.
+		expect(resolveCategoryColor(undefined, CONTEXT_CATEGORY_PALETTE.length)).toBe(
+			CONTEXT_CATEGORY_PALETTE[0]
+		);
 	});
 });
 
@@ -174,20 +244,73 @@ describe('mapSdkContextUsage', () => {
 		...over,
 	});
 
-	it('maps a normal payload to the total + one row per category', () => {
+	it('maps a normal payload with non-free categories in descending token order, Free space last', () => {
 		const b = mapSdkContextUsage(sdk());
 		expect(b.totalUsed).toBe(100_000);
 		expect(b.contextMax).toBe(200_000);
 		expect(b.totalPercent).toBe(50);
 		expect(b.severity).toBe('neutral');
+		expect(b.autocompactTokens).toBe(0);
+		// Descending by tokens (Messages 76k > MCP 20k > System 4k), Free space last.
 		expect(b.rows.map((r) => r.label)).toEqual([
-			'System prompt',
-			'MCP tools',
 			'Messages',
+			'MCP tools',
+			'System prompt',
 			'Free space',
 		]);
+		expect(b.rows[b.rows.length - 1].label).toBe('Free space');
 		// bar relative to maxTokens: 20k / 200k = 10%
 		expect(b.rows.find((r) => r.label === 'MCP tools')!.barPercent).toBeCloseTo(10, 5);
+	});
+
+	it('uses each SDK category colour verbatim and marks Free space grayed', () => {
+		const b = mapSdkContextUsage(sdk());
+		// '#333' is Messages' colour, passed through unchanged.
+		expect(b.rows.find((r) => r.label === 'Messages')!.color).toBe('#333');
+		const free = b.rows.find((r) => r.label === 'Free space')!;
+		expect(free.muted).toBe(true);
+		expect(b.rows.filter((r) => !r.muted).every((r) => r.muted === false)).toBe(true);
+	});
+
+	it('flags inBar on every non-free-space row, false on Free space', () => {
+		const b = mapSdkContextUsage(sdk());
+		expect(b.rows.filter((r) => r.label !== 'Free space').every((r) => r.inBar === true)).toBe(
+			true
+		);
+		expect(b.rows.find((r) => r.label === 'Free space')!.inBar).toBe(false);
+	});
+
+	it('invariant: sum of inBar row tokens plus autocompactTokens equals totalUsed (rich/SDK path)', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'System prompt', tokens: 4_567, color: '#111' },
+					{ name: 'MCP tools', tokens: 20_123, color: '#222' },
+					{ name: 'Messages', tokens: 76_543, color: '#333' },
+					{ name: 'Autocompact buffer', tokens: 33_000, color: '#555', isDeferred: true },
+					{ name: 'Free space', tokens: 65_767, color: '#444' },
+				],
+				totalTokens: 101_233,
+				maxTokens: 200_000,
+				percentage: 50,
+			})
+		);
+		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
+		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+	});
+
+	it('falls back to the palette when a category colour is unparseable', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'Messages', tokens: 76_000, color: 'CanvasText' },
+					{ name: 'MCP tools', tokens: 20_000, color: 'var(--foo)' },
+				],
+			})
+		);
+		// Ordered Messages (idx 0), MCP tools (idx 1) — both unparseable → palette.
+		expect(b.rows[0].color).toBe(CONTEXT_CATEGORY_PALETTE[0]);
+		expect(b.rows[1].color).toBe(CONTEXT_CATEGORY_PALETTE[1]);
 	});
 
 	it('drops zero-token categories but keeps Free space', () => {
@@ -204,17 +327,35 @@ describe('mapSdkContextUsage', () => {
 		expect(b.rows.map((r) => r.label)).toEqual(['System prompt', 'Free space']);
 	});
 
-	it('marks deferred categories with a "deferred" subline', () => {
+	it('marks non-autocompact deferred categories with a "deferred" subline', () => {
 		const b = mapSdkContextUsage(
 			sdk({
 				categories: [
-					{ name: 'Autocompact buffer', tokens: 8_000, color: '#111', isDeferred: true },
+					{ name: 'Output reserve', tokens: 8_000, color: '#111', isDeferred: true },
 					{ name: 'Messages', tokens: 10_000, color: '#222' },
 				],
 			})
 		);
-		expect(b.rows.find((r) => r.label === 'Autocompact buffer')!.subline).toBe('deferred');
+		expect(b.rows.find((r) => r.label === 'Output reserve')!.subline).toBe('deferred');
 		expect(b.rows.find((r) => r.label === 'Messages')!.subline).toBeNull();
+	});
+
+	it('excludes the Autocompact buffer from rows but reports its tokens', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+					{ name: 'Autocompact buffer', tokens: 33_000, color: '#555', isDeferred: true },
+					{ name: 'Free space', tokens: 91_000, color: '#444' },
+				],
+				totalTokens: 76_000,
+			})
+		);
+		expect(b.rows.map((r) => r.label)).toEqual(['Messages', 'Free space']);
+		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeUndefined();
+		expect(b.autocompactTokens).toBe(33_000);
+		// Buffer still folded into the total.
+		expect(b.totalUsed).toBe(76_000 + 33_000);
 	});
 
 	it('clamps percentage and bars to 0–100', () => {
@@ -260,7 +401,62 @@ describe('mapSdkContextUsage', () => {
 		expect(b.totalUsed).toBe(160_600);
 		expect(b.totalPercent).toBeCloseTo(80.3, 5);
 		expect(b.severity).toBe('warning');
-		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeDefined();
+		expect(b.autocompactTokens).toBe(33_000);
+		// The buffer is folded into the total but never rendered as its own row.
+		expect(b.rows.find((r) => r.label === 'Autocompact buffer')).toBeUndefined();
+	});
+
+	it('renders non-autocompact deferred categories grayed, em-dash, ordered after Free space, and excluded from the inBar invariant sum', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'System prompt', tokens: 4_000, color: '#111' },
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+					{ name: 'MCP tools (deferred)', tokens: 40_500, color: '#222', isDeferred: true },
+					{ name: 'Free space', tokens: 79_500, color: '#444' },
+				],
+				totalTokens: 80_000,
+				maxTokens: 200_000,
+				percentage: 40,
+			})
+		);
+		// Order: non-deferred non-free (desc) -> Free space -> deferred (desc).
+		expect(b.rows.map((r) => r.label)).toEqual([
+			'Messages',
+			'System prompt',
+			'Free space',
+			'MCP tools (deferred)',
+		]);
+		const deferredRow = b.rows.find((r) => r.label === 'MCP tools (deferred)')!;
+		expect(deferredRow.inBar).toBe(false);
+		expect(deferredRow.muted).toBe(true);
+		expect(deferredRow.showPercent).toBe(false);
+		expect(deferredRow.color).not.toBe('#222');
+		expect(deferredRow.subline).toBe('deferred');
+		expect(deferredRow.tokens).toBe(40_500);
+		// Every non-deferred row keeps showPercent true.
+		expect(b.rows.filter((r) => r.label !== 'MCP tools (deferred)').every((r) => r.showPercent)).toBe(
+			true
+		);
+		// Invariant: sum(inBar tokens) + autocompactTokens === totalUsed, EXCLUDING
+		// the deferred category's tokens (they sit outside the window accounting).
+		const inBarTokens = b.rows.filter((r) => r.inBar).reduce((sum, r) => sum + r.tokens, 0);
+		expect(inBarTokens + b.autocompactTokens).toBe(b.totalUsed);
+		expect(inBarTokens).toBe(4_000 + 76_000);
+	});
+
+	it('drops a zero-token deferred category (same drop rule as other non-free rows)', () => {
+		const b = mapSdkContextUsage(
+			sdk({
+				categories: [
+					{ name: 'Messages', tokens: 76_000, color: '#333' },
+					{ name: 'MCP tools (deferred)', tokens: 0, color: '#222', isDeferred: true },
+					{ name: 'Free space', tokens: 124_000, color: '#444' },
+				],
+				totalTokens: 76_000,
+			})
+		);
+		expect(b.rows.map((r) => r.label)).toEqual(['Messages', 'Free space']);
 	});
 
 	it('falls back to the raw total/percentage when no autocompact category is present', () => {
@@ -296,27 +492,47 @@ describe('decideBreakdownRefresh', () => {
 		...over,
 	});
 
-	it('fetches on open (single source is fetched when the popover opens)', () => {
+	it('fetches on open for the same session (only when nothing is loaded yet)', () => {
 		const prev = S({ open: false });
 		const next = S({ open: true });
 		expect(decideBreakdownRefresh(prev, next)).toBe('open-fetch');
 	});
 
-	it('refreshes when a turn ends (fetched outside streaming, not only during it)', () => {
-		const prev = S({ isStreaming: true });
-		const next = S({ isStreaming: false });
-		expect(decideBreakdownRefresh(prev, next)).toBe('refresh');
+	it('refreshes when a turn ends — even while the popover is closed', () => {
+		expect(decideBreakdownRefresh(S({ isStreaming: true }), S({ isStreaming: false }))).toBe(
+			'refresh'
+		);
+		// Turn-end refresh fires with the popover closed too (keeps the pill accurate).
+		expect(
+			decideBreakdownRefresh(
+				S({ open: false, isStreaming: true }),
+				S({ open: false, isStreaming: false })
+			)
+		).toBe('refresh');
 	});
 
-	it('clears when the popover closes or there is no session', () => {
-		expect(decideBreakdownRefresh(S(), S({ open: false }))).toBe('clear');
+	it('clears only when there is no session (closing the popover does not clear)', () => {
 		expect(decideBreakdownRefresh(S(), S({ sessionId: null }))).toBe('clear');
+		// Popover merely closing over the same session is idle — the breakdown stays.
+		expect(decideBreakdownRefresh(S(), S({ open: false }))).toBe('idle');
 	});
 
-	it('re-fetches when the session changes under an open popover', () => {
-		const prev = S({ sessionId: 'sess-1' });
-		const next = S({ sessionId: 'sess-2' });
-		expect(decideBreakdownRefresh(prev, next)).toBe('open-fetch');
+	it('fetches on a session change whether the popover is open or closed', () => {
+		expect(decideBreakdownRefresh(S({ sessionId: 'sess-1' }), S({ sessionId: 'sess-2' }))).toBe(
+			'session-fetch'
+		);
+		expect(
+			decideBreakdownRefresh(
+				S({ open: false, sessionId: 'sess-1' }),
+				S({ open: false, sessionId: 'sess-2' })
+			)
+		).toBe('session-fetch');
+	});
+
+	it('fetches on initial mount when a session first appears (closed popover)', () => {
+		const prev: BreakdownRefreshState = { open: false, sessionId: null, isStreaming: false };
+		const next = S({ open: false, sessionId: 'sess-1' });
+		expect(decideBreakdownRefresh(prev, next)).toBe('session-fetch');
 	});
 
 	it('stays idle while a turn streams — the display source never flips', () => {
@@ -324,7 +540,6 @@ describe('decideBreakdownRefresh', () => {
 		// updates token counts leaves them unchanged, so the decision is `idle`
 		// (no reset, no refetch) for every tick of the turn.
 		const streaming = S({ isStreaming: true });
-		// Simulate many poll ticks over the same open, streaming session.
 		const actions = Array.from({ length: 5 }, () =>
 			decideBreakdownRefresh(streaming, streaming)
 		);
@@ -332,32 +547,31 @@ describe('decideBreakdownRefresh', () => {
 	});
 
 	it('does not re-fetch or reset just because the popover stays open at idle', () => {
-		const prev = S();
-		const next = S();
-		expect(decideBreakdownRefresh(prev, next)).toBe('idle');
+		expect(decideBreakdownRefresh(S(), S())).toBe('idle');
 	});
 
-	it('models a full open→stream→turn-end sequence: one fetch on open, one on turn-end, none mid-stream', () => {
-		// Drive the exact transition sequence the component walks through and record
-		// which steps actually trigger a network fetch. The breakdown must be the
-		// stable single source: fetched at open and turn-end, never flip-flopped.
+	it('models mount→open→stream→turn-end: fetch on mount + turn-end, none mid-stream', () => {
 		const steps: BreakdownRefreshState[] = [
-			S({ open: false, isStreaming: false }), // initial (closed)
-			S({ open: true, isStreaming: false }), //  user opens popover        -> open-fetch
-			S({ open: true, isStreaming: true }), //   turn starts streaming      -> idle
-			S({ open: true, isStreaming: true }), //   poll tick (tokens change)  -> idle
-			S({ open: true, isStreaming: true }), //   poll tick                  -> idle
-			S({ open: true, isStreaming: false }), //  turn ends                  -> refresh
-			S({ open: true, isStreaming: false }), //  post-turn idle             -> idle
+			{ open: false, sessionId: null, isStreaming: false }, // initial (no session)
+			S({ open: false, isStreaming: false }), // session loads (closed) -> session-fetch
+			S({ open: true, isStreaming: false }), //  user opens popover     -> open-fetch
+			S({ open: true, isStreaming: true }), //   turn starts streaming  -> idle
+			S({ open: true, isStreaming: true }), //   poll tick              -> idle
+			S({ open: true, isStreaming: false }), //  turn ends              -> refresh
+			S({ open: true, isStreaming: false }), //  post-turn idle         -> idle
 		];
 		const actions: string[] = [];
 		for (let i = 1; i < steps.length; i++) {
 			actions.push(decideBreakdownRefresh(steps[i - 1], steps[i]));
 		}
-		expect(actions).toEqual(['open-fetch', 'idle', 'idle', 'idle', 'refresh', 'idle']);
-		// Exactly two fetches (open + turn-end), and zero mid-stream flip-flops.
-		const fetches = actions.filter((a) => a === 'open-fetch' || a === 'refresh');
-		expect(fetches).toHaveLength(2);
+		expect(actions).toEqual([
+			'session-fetch',
+			'open-fetch',
+			'idle',
+			'idle',
+			'refresh',
+			'idle',
+		]);
 		expect(actions.filter((a) => a === 'clear')).toHaveLength(0);
 	});
 });

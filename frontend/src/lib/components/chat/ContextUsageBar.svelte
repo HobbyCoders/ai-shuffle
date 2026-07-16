@@ -8,14 +8,17 @@
 	 * coloured by the severity of MAX(context %, resolved five-hour %). No inline
 	 * text — the percentage rides on the button's aria-label. It is ALWAYS visible.
 	 *
-	 * The popover is a wide, compact panel; every data row is one line (label left,
-	 * value right) with a thin full-width bar beneath. It stacks, top → bottom:
-	 *   1. Context window — header total plus an always-shown per-category
-	 *      breakdown. The breakdown is fetched from the SDK (`/context-usage`) when
-	 *      the POPOVER opens and refreshed at turn end (never polled mid-stream);
-	 *      `source: "persisted"` (final snapshot from the session's last turn end)
-	 *      is treated as a valid rich breakdown. The poller estimate is the fallback
-	 *      before the first fetch lands — a fresh session shows em-dash rows.
+	 * The popover is a wide, compact panel. It stacks, top → bottom:
+	 *   1. Context window — a collapsible header (persisted in localStorage under
+	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar
+	 *      (a contiguous segment per category + a dim autocompact-buffer segment;
+	 *      the bare track tail is the free space) and, when expanded, per-category
+	 *      rows (swatch + label + tokens + percent). The breakdown is fetched from
+	 *      the SDK (`/context-usage`) on session load and refreshed at turn end
+	 *      (never polled mid-stream) so the pill ring can prefer it; `source:
+	 *      "persisted"` (final snapshot from the session's last turn end) is treated
+	 *      as a valid rich breakdown. The poller estimate is the fallback before the
+	 *      first fetch lands — a fresh session shows em-dash rows.
 	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
 	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
 	 *      and reset text inline. "No usage data yet" when the bucket is empty.
@@ -87,16 +90,6 @@
 		})
 	);
 
-	// The pill's ring is driven by the poller estimate — never the live fetch.
-	const contextPercent = $derived(breakdown.totalPercent);
-
-	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
-	const RING_RADIUS = 6;
-	const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
-	const ringDashoffset = $derived(
-		RING_CIRCUMFERENCE - (Math.min(Math.max(contextPercent, 0), 100) / 100) * RING_CIRCUMFERENCE
-	);
-
 	// ── Popover open/close (click + tap-away) ─────────────────────────────
 	let open = $state(false);
 	let wrapperRef = $state<HTMLDivElement | null>(null);
@@ -114,6 +107,47 @@
 	const isStreaming = $derived($activeSession.isStreaming);
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
 
+	// The pill ring prefers the rich breakdown when loaded (its totalPercent folds
+	// the buffer in the same way the popover header does — so they can't disagree),
+	// falling back to the poller estimate before the first fetch lands.
+	const contextPercent = $derived(displayBreakdown.totalPercent);
+
+	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
+	const RING_RADIUS = 6;
+	const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+	const ringDashoffset = $derived(
+		RING_CIRCUMFERENCE - (Math.min(Math.max(contextPercent, 0), 100) / 100) * RING_CIRCUMFERENCE
+	);
+
+	// Segmented progress bar: one contiguous segment per row whose tokens are
+	// actually part of totalUsed (row.inBar — excludes the grayed Free space row,
+	// em-dash placeholders, and, on the estimate path, Output tokens, which is
+	// session-cumulative and NOT part of context used), then one dim segment for
+	// the folded autocompact buffer. Remaining track = free space (no segment).
+	interface BarSegment {
+		key: string;
+		widthPct: number;
+		color: string;
+		dim: boolean;
+	}
+	const barSegments = $derived.by<BarSegment[]>(() => {
+		const max = displayBreakdown.contextMax;
+		const segs: BarSegment[] = displayBreakdown.rows
+			.filter((r) => r.inBar && r.tokens > 0)
+			.map((r) => ({ key: r.key, widthPct: r.barPercent, color: r.color, dim: false }));
+		const bufferPct = max > 0 ? Math.min((displayBreakdown.autocompactTokens / max) * 100, 100) : 0;
+		if (bufferPct > 0) {
+			segs.push({
+				key: '__autocompact',
+				widthPct: bufferPct,
+				color: 'color-mix(in oklch, var(--foreground) 28%, var(--background))',
+				dim: true,
+			});
+		}
+		return segs;
+	});
+
+	let loadedSessionId: string | null = null;
 	let currentController: AbortController | null = null;
 	function cancelFetch() {
 		currentController?.abort();
@@ -129,14 +163,18 @@
 			if (res.available) {
 				richBreakdown = mapSdkContextUsage(res.usage);
 				richSource = res.source;
+				loadedSessionId = sid;
 			}
 		} catch {
 			// Aborted or network error → keep whatever is on screen.
+		} finally {
+			if (currentController === controller) currentController = null;
 		}
 	}
 
-	// Refresh cadence: fetch on open, refresh on turn-end, clear on close. The
-	// breakdown fetch is tied to the POPOVER opening — NOT to the chevron below.
+	// Refresh cadence: fetch on session load (even while closed, so the ring is
+	// accurate), on popover open (if not already loaded), and at turn end; reset
+	// synchronously on session change so no stale cross-session breakdown flashes.
 	let prevRefresh: BreakdownRefreshState = { open: false, sessionId: null, isStreaming: false };
 	$effect(() => {
 		const next: BreakdownRefreshState = { open, sessionId, isStreaming };
@@ -148,11 +186,20 @@
 				cancelFetch();
 				richBreakdown = null;
 				richSource = null;
+				loadedSessionId = null;
 				break;
-			case 'open-fetch':
+			case 'session-fetch':
+				cancelFetch();
 				richBreakdown = null;
 				richSource = null;
+				loadedSessionId = null;
 				fetchBreakdown(next.sessionId!);
+				break;
+			case 'open-fetch':
+				// Only fetch if nothing is loaded/in-flight for this session already.
+				if (loadedSessionId !== next.sessionId && !currentController) {
+					fetchBreakdown(next.sessionId!);
+				}
 				break;
 			case 'refresh':
 				fetchBreakdown(next.sessionId!);
@@ -161,6 +208,26 @@
 				break;
 		}
 	});
+
+	// ── Category breakdown collapse state (persisted, default expanded) ────
+	const BREAKDOWN_OPEN_KEY = 'aihub.contextBreakdownOpen';
+	function loadBreakdownOpen(): boolean {
+		try {
+			// Absent → expanded; only an explicit '0' collapses.
+			return localStorage.getItem(BREAKDOWN_OPEN_KEY) !== '0';
+		} catch {
+			return true;
+		}
+	}
+	let breakdownOpen = $state(loadBreakdownOpen());
+	function toggleBreakdown() {
+		breakdownOpen = !breakdownOpen;
+		try {
+			localStorage.setItem(BREAKDOWN_OPEN_KEY, breakdownOpen ? '1' : '0');
+		} catch {
+			// best-effort persistence
+		}
+	}
 
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
@@ -248,7 +315,9 @@
 	<button
 		type="button"
 		class="usage-indicator"
-		title="{formatTokenCount(breakdown.totalUsed)} / {formatTokenCount(contextMax)} tokens — click for details"
+		title="{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
+			contextMax
+		)} tokens — click for details"
 		aria-label="Context and usage — {Math.round(contextPercent)}% of context window used"
 		aria-haspopup="dialog"
 		aria-expanded={open}
@@ -274,7 +343,13 @@
 		<div class="usage-popover" role="dialog" aria-label="Context and usage">
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
-				<div class="row-line">
+				<button
+					type="button"
+					class="ctx-header"
+					aria-expanded={breakdownOpen}
+					aria-label="Context window breakdown — {breakdownOpen ? 'collapse' : 'expand'}"
+					onclick={toggleBreakdown}
+				>
 					<span class="row-label">Context window</span>
 					<span class="ctx-value">
 						{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
@@ -284,27 +359,53 @@
 							>({Math.round(displayBreakdown.totalPercent)}%)</span
 						>
 					</span>
-				</div>
-				<div class="row-bar">
-					<div
-						class="row-fill {displayBreakdown.severity}"
-						style="width: {displayBreakdown.totalPercent}%"
-					></div>
+					<svg
+						class="ctx-chevron {breakdownOpen ? '' : 'collapsed'}"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						aria-hidden="true"
+					>
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</button>
+
+				<!-- Single segmented bar (always shown): one segment per category + a
+				     dim buffer segment; the bare track tail is the free space. -->
+				<div class="ctx-segbar" aria-hidden="true">
+					{#each barSegments as seg (seg.key)}
+						<span
+							class="ctx-seg {seg.dim ? 'dim' : ''}"
+							style="width: {seg.widthPct}%; background: {seg.color}"
+						></span>
+					{/each}
 				</div>
 
-				{#each displayBreakdown.rows as row (row.key)}
-					<div class="breakdown-row">
-						<div class="row-line">
+				{#if breakdownOpen}
+					{#each displayBreakdown.rows as row (row.key)}
+						<div class="breakdown-row {row.muted ? 'muted' : ''}">
+							<span
+								class="cat-swatch {row.empty ? 'neutral' : ''}"
+								style="background: {row.color}"
+							></span>
 							<span class="breakdown-label">
 								{row.label}{#if row.subline}<span class="row-sub"> · {row.subline}</span>{/if}
 							</span>
-							<span class="breakdown-value">{row.empty ? '—' : formatTokenCount(row.tokens)}</span>
+							<span class="breakdown-value">
+								{#if row.empty}
+									—
+								{:else}
+									{formatTokenCount(row.tokens)}
+									{#if row.showPercent}
+										<span class="cat-pct">{row.barPercent.toFixed(1)}%</span>
+									{:else}
+										<span class="cat-pct">—</span>
+									{/if}
+								{/if}
+							</span>
 						</div>
-						<div class="row-bar mini">
-							<div class="row-fill" style="width: {row.empty ? 0 : row.barPercent}%"></div>
-						</div>
-					</div>
-				{/each}
+					{/each}
+				{/if}
 			</div>
 
 			<div class="popover-divider"></div>
@@ -453,10 +554,42 @@
 	.ctx-section {
 		display: flex;
 		flex-direction: column;
-		gap: 5px;
+		gap: 7px;
 	}
 
-	/* One-line row: label left, value right — shared by every data row. */
+	/* Collapsible header — full-width button: label left, value + chevron right. */
+	.ctx-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 10px;
+		width: 100%;
+		padding: 0;
+		background: none;
+		border: none;
+		font: inherit;
+		text-align: left;
+		color: inherit;
+		cursor: pointer;
+	}
+	.ctx-header:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
+		border-radius: 3px;
+	}
+	.ctx-chevron {
+		width: 13px;
+		height: 13px;
+		flex-shrink: 0;
+		align-self: center;
+		color: var(--muted-foreground);
+		transition: transform 200ms ease;
+	}
+	.ctx-chevron.collapsed {
+		transform: rotate(-90deg);
+	}
+
+	/* One-line row: label left, value right — shared by the plan-usage data rows. */
 	.row-line {
 		display: flex;
 		align-items: baseline;
@@ -482,28 +615,70 @@
 		color: var(--destructive);
 	}
 
-	/* Per-category breakdown rows — indented + smaller, always shown. */
+	/* Single segmented progress bar — contiguous category segments + dim buffer,
+	   the remaining track is the free space. Same track colour as the pill ring. */
+	.ctx-segbar {
+		display: flex;
+		width: 100%;
+		height: 6px;
+		border-radius: 999px;
+		overflow: hidden;
+		background: color-mix(in oklch, var(--foreground) 12%, var(--background));
+	}
+	.ctx-seg {
+		height: 100%;
+		flex-shrink: 0;
+		min-width: 0;
+		transition: width 0.3s ease;
+	}
+
+	/* Per-category breakdown rows — one line: swatch + label (left) + value (right). */
 	.breakdown-row {
 		display: flex;
-		flex-direction: column;
-		gap: 3px;
-		padding-left: 12px;
+		align-items: center;
+		gap: 8px;
+	}
+	.cat-swatch {
+		width: 8px;
+		height: 8px;
+		flex-shrink: 0;
+		border-radius: 2px;
+	}
+	.cat-swatch.neutral {
+		border: 1px solid color-mix(in oklch, var(--foreground) 20%, var(--background));
 	}
 	.breakdown-label {
+		flex: 1 1 auto;
+		min-width: 0;
 		font-size: 11px;
 		color: var(--muted-foreground);
 		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.row-sub {
 		font-size: 10px;
 		opacity: 0.65;
 	}
 	.breakdown-value {
+		flex-shrink: 0;
 		font-family: var(--font-mono);
 		font-size: 10.5px;
 		color: var(--muted-foreground);
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
+	}
+	.cat-pct {
+		color: var(--foreground);
+		font-weight: 600;
+	}
+	/* Grayed "Free space" row — de-emphasised label, value, and percent. */
+	.breakdown-row.muted .breakdown-label,
+	.breakdown-row.muted .breakdown-value,
+	.breakdown-row.muted .cat-pct {
+		color: var(--muted-foreground);
+		font-weight: 400;
+		opacity: 0.75;
 	}
 
 	.popover-divider {
@@ -559,10 +734,6 @@
 		border-radius: 999px;
 		overflow: hidden;
 	}
-	.row-bar.mini {
-		height: 2px;
-	}
-
 	.row-fill {
 		height: 100%;
 		background: var(--primary);

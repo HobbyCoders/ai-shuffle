@@ -29,27 +29,92 @@ export interface ContextBreakdownRow {
 	key: string;
 	label: string;
 	tokens: number;
-	/** Bar width relative to contextMax, clamped 0–100 so rows are comparable. */
+	/** Segment/percent width relative to contextMax, clamped 0–100 so rows are comparable. */
 	barPercent: number;
-	/** Muted caption under the row, or null for none. */
+	/** Muted caption after the row label, or null for none. */
 	subline: string | null;
 	/**
 	 * True when this row has no real value to show yet (a fresh session with zero
-	 * usage): the popover renders an em-dash and an empty bar instead of "0". The
-	 * System overhead / Autocompact buffer row is never empty — it always shows the
-	 * fixed reserve — so the header still reads a non-zero total.
+	 * usage): the popover renders an em-dash and a neutral swatch instead of "0".
 	 */
 	empty: boolean;
+	/**
+	 * Resolved swatch/segment colour — the SDK category colour when valid, else a
+	 * fallback-palette hue by row index (grayed rows and em-dash placeholders use a
+	 * neutral muted colour). Shared by the swatch and the segmented bar.
+	 */
+	color: string;
+	/**
+	 * Grayed/muted row (the trailing "Free space" row): rendered in muted styling
+	 * and EXCLUDED from the segmented progress bar (it is the bare track).
+	 */
+	muted: boolean;
+	/**
+	 * True when this row's tokens are part of `totalUsed` and should render a
+	 * segment in the segmented progress bar. False for rows that are muted,
+	 * empty (em-dash placeholder), or — on the estimate path — the Output
+	 * tokens row, which is session-cumulative and NOT part of context used
+	 * (`totalUsed = AUTO_COMPACTION_BASE + input + cacheCreation + cacheRead`).
+	 * The segmented bar must build its segments from this flag rather than a
+	 * `!muted && !empty` heuristic, or Output would inflate the bar past the
+	 * header percentage.
+	 */
+	inBar: boolean;
+	/**
+	 * False only for deferred SDK categories (e.g. "MCP tools (deferred)"):
+	 * those token pools sit outside the context-window accounting, so the
+	 * popover renders an em-dash in place of a percent — same treatment as
+	 * Claude Code's own panel. True (the default) for every other row.
+	 */
+	showPercent: boolean;
 }
 
 export interface ContextBreakdown {
-	/** System overhead reserve + conversation tokens — the pill's number. */
+	/** Autocompact buffer + conversation tokens — the pill's number. */
 	totalUsed: number;
 	contextMax: number;
 	/** Clamped 0–100. */
 	totalPercent: number;
 	severity: UsageSeverity;
 	rows: ContextBreakdownRow[];
+	/**
+	 * The auto-compaction buffer reserve folded into `totalUsed` but excluded from
+	 * `rows` — surfaced so the segmented bar can render its own dim buffer segment.
+	 * 0 when absent.
+	 */
+	autocompactTokens: number;
+}
+
+/**
+ * Fallback category swatch/segment palette — theme-agnostic mid-tone hues that
+ * stay legible on both light and dark backgrounds. Used verbatim for the estimate
+ * path and as the fallback when an SDK category has no parseable colour. Assigned
+ * by row index (wrapping).
+ */
+export const CONTEXT_CATEGORY_PALETTE = [
+	'#5b8def', // blue
+	'#3bb27a', // green
+	'#e0a13c', // amber
+	'#d76b6b', // red
+	'#9a7fd6', // violet
+	'#39b3c0', // teal
+	'#dd6fa0', // pink
+	'#8894a6', // slate
+];
+
+/** Neutral swatch for grayed "Free space" rows and fresh-chat em-dash placeholders. */
+const MUTED_SWATCH = 'color-mix(in oklch, var(--foreground) 12%, var(--background))';
+
+/**
+ * Resolve a category swatch colour: the SDK-provided string verbatim when it is a
+ * hex (`#rgb`…`#rrggbbaa`) or an `rgb(`/`hsl(` colour, otherwise a palette hue by
+ * row index (wrapping). Keeps the swatch and the segmented bar in sync.
+ */
+export function resolveCategoryColor(raw: string | undefined | null, index: number): string {
+	if (raw && (/^#[0-9a-fA-F]{3,8}$/.test(raw) || raw.startsWith('rgb(') || raw.startsWith('hsl('))) {
+		return raw;
+	}
+	return CONTEXT_CATEGORY_PALETTE[index % CONTEXT_CATEGORY_PALETTE.length];
 }
 
 /**
@@ -98,9 +163,8 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 	const totalPercent = barPercent(totalUsed, contextMax);
 
 	// Fresh session: no conversation tokens of any kind have landed yet. The
-	// per-category rows have nothing real to show, so they render as em-dashes
-	// with empty bars — EXCEPT the fixed System overhead reserve, which is always
-	// present (and keeps the header total non-zero).
+	// per-category rows have nothing real to show, so they render as em-dashes with
+	// neutral swatches, and no "Free space" row is derived (the whole window is free).
 	const noUsageYet =
 		Math.max(rawContextUsed, 0) === 0 &&
 		inputTokens === 0 &&
@@ -116,6 +180,10 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			barPercent: barPercent(inputTokens, contextMax),
 			subline: null,
 			empty: noUsageYet,
+			color: noUsageYet ? MUTED_SWATCH : resolveCategoryColor(null, 0),
+			muted: false,
+			inBar: !noUsageYet,
+			showPercent: true,
 		},
 		{
 			key: 'cacheRead',
@@ -124,6 +192,10 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			barPercent: barPercent(cacheReadTokens, contextMax),
 			subline: null,
 			empty: noUsageYet,
+			color: noUsageYet ? MUTED_SWATCH : resolveCategoryColor(null, 1),
+			muted: false,
+			inBar: !noUsageYet,
+			showPercent: true,
 		},
 		{
 			key: 'cacheCreation',
@@ -132,6 +204,10 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			barPercent: barPercent(cacheCreationTokens, contextMax),
 			subline: null,
 			empty: noUsageYet,
+			color: noUsageYet ? MUTED_SWATCH : resolveCategoryColor(null, 2),
+			muted: false,
+			inBar: !noUsageYet,
+			showPercent: true,
 		},
 		{
 			key: 'output',
@@ -140,16 +216,31 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			barPercent: barPercent(outputTokens, contextMax),
 			subline: 'session total · not in context',
 			empty: noUsageYet,
-		},
-		{
-			key: 'overhead',
-			label: 'System overhead',
-			tokens: AUTO_COMPACTION_BASE,
-			barPercent: barPercent(AUTO_COMPACTION_BASE, contextMax),
-			subline: 'estimated',
-			empty: false,
+			color: noUsageYet ? MUTED_SWATCH : resolveCategoryColor(null, 3),
+			muted: false,
+			// Session-cumulative, NOT part of totalUsed — never a bar segment.
+			inBar: false,
+			showPercent: true,
 		},
 	];
+
+	// Grayed "Free space" row (always last) — only once real usage has landed. The
+	// buffer is already folded into totalUsed, so free space never includes it.
+	if (!noUsageYet) {
+		const freeTokens = Math.max(contextMax - totalUsed, 0);
+		rows.push({
+			key: 'freeSpace',
+			label: 'Free space',
+			tokens: freeTokens,
+			barPercent: barPercent(freeTokens, contextMax),
+			subline: null,
+			empty: false,
+			color: MUTED_SWATCH,
+			muted: true,
+			inBar: false,
+			showPercent: true,
+		});
+	}
 
 	return {
 		totalUsed,
@@ -157,17 +248,18 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		totalPercent,
 		severity: usageSeverity(totalPercent),
 		rows,
+		autocompactTokens: AUTO_COMPACTION_BASE,
 	};
 }
 
 /**
- * Inputs the ContextUsageBar effect watches to decide when to (re)fetch the live
+ * Inputs the ContextUsageBar effect watches to decide when to (re)fetch the SDK
  * `/context-usage` breakdown. Deliberately tiny so a streaming token update — which
  * touches many other `$activeSession` fields but none of these — never triggers a
  * refetch. Keeping this out of the component makes the refresh cadence unit-testable.
  */
 export interface BreakdownRefreshState {
-	/** Popover open? Breakdown is only fetched while the user is looking at it. */
+	/** Popover open? Opening triggers a fetch if none is loaded/in-flight yet. */
 	open: boolean;
 	sessionId: string | null;
 	/** The active turn is streaming — the SDK breakdown can't refresh mid-turn. */
@@ -175,34 +267,40 @@ export interface BreakdownRefreshState {
 }
 
 /**
- * What the effect should do about the live breakdown given the previous and next
+ * What the effect should do about the rich breakdown given the previous and next
  * watched state:
- * - `clear`     — popover closed or no session: drop any breakdown, cancel fetches.
- * - `open-fetch`— popover just opened (or session changed under it): show the
- *                 estimate immediately, then fetch fresh breakdown.
- * - `refresh`   — a turn just ended while the popover is open: fetch fresh, but
- *                 keep the current breakdown on screen until the new one lands.
- * - `idle`      — nothing relevant changed (e.g. a streaming poll tick): do NOT
- *                 refetch and do NOT reset — this is what stops the mode flip-flop.
+ * - `clear`         — no session: drop any breakdown, cancel fetches.
+ * - `session-fetch` — the session changed (or first appeared, incl. on mount):
+ *                     synchronously drop the old breakdown (no cross-session flash),
+ *                     abort any in-flight fetch, and fetch the new session's — even
+ *                     while the popover is closed, so the pill ring is accurate.
+ * - `open-fetch`    — popover just opened for the same session: fetch only if none
+ *                     is already loaded/in-flight (the component guards that).
+ * - `refresh`       — a turn just ended: fetch fresh (even while closed), keeping the
+ *                     current breakdown on screen until the new one lands.
+ * - `idle`          — nothing relevant changed (e.g. a streaming poll tick, or the
+ *                     popover merely closing): do NOT refetch and do NOT reset.
  */
-export type BreakdownRefreshAction = 'clear' | 'open-fetch' | 'refresh' | 'idle';
+export type BreakdownRefreshAction = 'clear' | 'session-fetch' | 'open-fetch' | 'refresh' | 'idle';
 
 /**
  * Decide the breakdown refresh action from the watched state transition.
  *
- * Single source of truth for the popover: the live breakdown is fetched on open,
- * re-fetched when a turn ends, and otherwise left untouched. Crucially, streaming
- * poll updates (which change token fields but NOT open/sessionId/isStreaming) map
- * to `idle`, so the popover never oscillates between the live breakdown and the
- * estimate while a turn streams.
+ * The rich breakdown is now fetched on session load (not just popover open) so the
+ * pill ring can prefer it: a sessionId change fetches even while closed, a turn end
+ * refreshes even while closed, and opening fetches only when nothing is loaded yet.
+ * Streaming poll updates (which change token fields but NOT open/sessionId/isStreaming)
+ * map to `idle`, so nothing oscillates while a turn streams.
  */
 export function decideBreakdownRefresh(
 	prev: BreakdownRefreshState,
 	next: BreakdownRefreshState
 ): BreakdownRefreshAction {
-	if (!next.open || !next.sessionId) return 'clear';
-	// Fresh open, or the session changed while the popover stayed open.
-	if (!prev.open || prev.sessionId !== next.sessionId) return 'open-fetch';
+	if (!next.sessionId) return 'clear';
+	// The session changed (or first appeared / mounted): reset + fetch the new one.
+	if (prev.sessionId !== next.sessionId) return 'session-fetch';
+	// Popover just opened for the same session — fetch if nothing is loaded yet.
+	if (!prev.open && next.open) return 'open-fetch';
 	// A turn just finished — the breakdown is now stale, pull a fresh one.
 	if (prev.isStreaming && !next.isStreaming) return 'refresh';
 	return 'idle';
@@ -219,28 +317,66 @@ export function decideBreakdownRefresh(
  *   Percentage is recomputed client-side from the folded total rather than
  *   trusting usage.percentage, with the existing severity thresholds applied
  *   on top.
- * - rows: one per category (label = name, bar relative to maxTokens). Deferred
- *   categories get a "deferred" subline. Zero/negative-token categories are
- *   dropped EXCEPT "Free space", which is always kept when present. The
- *   "Autocompact buffer" row (if present) still renders as its own row.
+ * - rows: one per category (label = name). Deferred categories (`isDeferred`,
+ *   e.g. "MCP tools (deferred)") sit OUTSIDE the context-window accounting — like
+ *   Claude Code's own panel, they render grayed with an em-dash instead of a
+ *   percent (`showPercent: false`), never contribute a segmented-bar segment
+ *   (`inBar: false`), and are ordered LAST, after Free space. Zero/negative-token
+ *   categories are dropped EXCEPT "Free space", which is always kept, grayed, and
+ *   ordered right before the deferred categories. The "Autocompact buffer"
+ *   category is excluded from the rows entirely (its tokens are reported on
+ *   `autocompactTokens` for the segmented bar's own dim buffer segment). Non-free,
+ *   non-deferred categories are ordered by descending token count, then Free
+ *   space, then deferred categories (also descending token count).
  */
 export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	const max = usage.maxTokens;
-	const autocompact = usage.categories.find((c) => c.name.toLowerCase() === 'autocompact buffer');
-	const totalUsed = usage.totalTokens + Math.max(autocompact?.tokens ?? 0, 0);
+	const isAutocompact = (name: string) => name.toLowerCase() === 'autocompact buffer';
+	const isFreeSpace = (name: string) => name === 'Free space';
+
+	const autocompact = usage.categories.find((c) => isAutocompact(c.name));
+	const autocompactTokens = Math.max(autocompact?.tokens ?? 0, 0);
+	const totalUsed = usage.totalTokens + autocompactTokens;
 	const totalPercent =
 		max > 0 ? barPercent(totalUsed, max) : Math.min(Math.max(usage.percentage, 0), 100);
 
-	const rows: ContextBreakdownRow[] = usage.categories
-		.filter((c) => c.tokens > 0 || c.name === 'Free space')
-		.map((c) => ({
+	const kept = usage.categories
+		.filter((c) => !isAutocompact(c.name))
+		.filter((c) => c.tokens > 0 || isFreeSpace(c.name));
+	// Non-free, non-deferred categories descending by tokens, then Free space,
+	// then deferred categories (also descending by tokens) last.
+	const nonFree = kept
+		.filter((c) => !isFreeSpace(c.name) && !c.isDeferred)
+		.sort((a, b) => b.tokens - a.tokens);
+	const free = kept.filter((c) => isFreeSpace(c.name));
+	const deferred = kept
+		.filter((c) => !isFreeSpace(c.name) && c.isDeferred)
+		.sort((a, b) => b.tokens - a.tokens);
+	const ordered = [...nonFree, ...free, ...deferred];
+
+	const rows: ContextBreakdownRow[] = ordered.map((c, i) => {
+		const isFree = isFreeSpace(c.name);
+		const isDeferred = !!c.isDeferred;
+		const muted = isFree || isDeferred;
+		return {
 			key: c.name,
 			label: c.name,
 			tokens: c.tokens,
 			barPercent: barPercent(c.tokens, max),
-			subline: c.isDeferred ? 'deferred' : null,
+			subline: isDeferred ? 'deferred' : null,
 			empty: false,
-		}));
+			color: muted ? MUTED_SWATCH : resolveCategoryColor(c.color, i),
+			muted,
+			// Free space and deferred categories never contribute a segmented-bar
+			// segment — deferred token pools sit outside the context-window
+			// accounting entirely, so counting them would inflate the bar past
+			// the header percentage.
+			inBar: !isFree && !isDeferred,
+			// Deferred rows show an em-dash instead of a percent, matching
+			// Claude Code's own panel (their tokens aren't part of the window).
+			showPercent: !isDeferred,
+		};
+	});
 
 	return {
 		totalUsed,
@@ -248,6 +384,7 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		totalPercent,
 		severity: usageSeverity(totalPercent),
 		rows,
+		autocompactTokens,
 	};
 }
 
