@@ -259,6 +259,44 @@ async def test_system_task_updated_maps_to_task_updated(mock_db, data, state):
     await rec.close()
 
 
+async def test_system_task_updated_enriches_tool_use_id_from_registry(mock_db):
+    # The SDK's TaskUpdatedMessage never carries tool_use_id, so a chip built from
+    # its raw data has None. The recorder must enrich it from the registry launch
+    # id so the terminal chip can settle the subagent card on the frontend.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "t1", "agent", "bg", tool_use_id="toolu_reg")
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "task_updated",
+        "data": {"task_id": "t1", "patch": {"status": "killed"}},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "task.updated"
+    assert row["payload"]["task_id"] == "t1"
+    assert row["payload"]["tool_use_id"] == "toolu_reg"
+    await rec.close()
+    task_registry.reset_all()
+
+
+async def test_system_task_updated_data_tool_use_id_wins_over_registry(mock_db):
+    # A tool_use_id already on the data wins over the registry fallback.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "t1", "agent", "bg", tool_use_id="toolu_reg")
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "task_updated",
+        "data": {"task_id": "t1", "status": "killed", "tool_use_id": "toolu_data"},
+    })
+    row = _rows()[-1]
+    assert row["payload"]["tool_use_id"] == "toolu_data"
+    await rec.close()
+    task_registry.reset_all()
+
+
 async def test_system_task_updated_without_task_id_falls_back_to_note(mock_db):
     _mk_session()
     rec = await _recorder()

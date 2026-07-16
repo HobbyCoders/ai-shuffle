@@ -166,6 +166,34 @@ class TestToolUseId:
         reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_second")
         assert reg._tasks["s1"]["t1"]["tool_use_id"] == "toolu_first"
 
+    def test_get_task_tool_use_id_live_record(self, reg):
+        # A live (running) task resolves its launch tool_use_id.
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_live")
+        assert reg.get_task_tool_use_id("s1", "t1") == "toolu_live"
+
+    def test_get_task_tool_use_id_just_completed(self, reg):
+        # complete_task keeps the live record, so a JUST-completed task still
+        # resolves (chip enrichment runs AFTER complete_task).
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_done")
+        reg.complete_task("s1", "t1", "killed")
+        assert reg.get_task_tool_use_id("s1", "t1") == "toolu_done"
+
+    def test_get_task_tool_use_id_from_recent_terminal_after_clear(self, reg):
+        # After clear_session wipes the live map, the retention snapshot
+        # (_recent_terminal, which survives clear) still resolves the id.
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="toolu_reaped")
+        reg.complete_task("s1", "t1", "killed")
+        reg.clear_session("s1")
+        assert "s1" not in reg._tasks  # live map gone
+        assert reg.get_task_tool_use_id("s1", "t1") == "toolu_reaped"
+
+    def test_get_task_tool_use_id_unknown_returns_none(self, reg):
+        assert reg.get_task_tool_use_id("s1", "nope") is None
+        assert reg.get_task_tool_use_id("missing", "t1") is None
+        # A task with no launch id recorded resolves to None (not a raise).
+        reg.start_task("s1", "t1", "agent", "bg")
+        assert reg.get_task_tool_use_id("s1", "t1") is None
+
 
 # =============================================================================
 # Filtering & ordering

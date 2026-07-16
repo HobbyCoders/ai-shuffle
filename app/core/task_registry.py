@@ -856,6 +856,31 @@ class TaskRegistry:
         record = self._tasks.get(session_id, {}).get(task_id)
         return to_wire(record) if record is not None else None
 
+    def get_task_tool_use_id(self, session_id: str, task_id: str) -> Optional[str]:
+        """The launch ``tool_use_id`` for a task, or None if it can't be resolved.
+
+        The card join key: terminal ``task_updated`` chips settle a subagent card
+        only when they carry the launch ``tool_use_id`` (the card's ``toolId``).
+        The SDK's ``TaskUpdatedMessage`` never carries it, so the chip path enriches
+        from the registry — and it runs AFTER ``complete_task``, so this must still
+        resolve for a JUST-completed task. ``complete_task`` keeps the live record
+        (it only flips status + snapshots), so the live ``_tasks`` map resolves the
+        common case; the ``_recent_terminal`` retention snapshot (which SURVIVES
+        ``clear_session``) is the fallback for a force-reaped task whose live record
+        was already wiped. Read-only and exception-free: any miss returns None.
+        """
+        try:
+            record = self._tasks.get(session_id, {}).get(task_id)
+            tool_use_id = record.get("tool_use_id") if record is not None else None
+            if tool_use_id:
+                return tool_use_id
+            entry = self._recent_terminal.get(session_id, {}).get(task_id)
+            if entry is not None:
+                return (entry.get("task") or {}).get("toolUseId")
+        except Exception:  # noqa: BLE001 — a stray shape must never raise.
+            return None
+        return None
+
     def clear_session(self, session_id: str) -> None:
         """Drop all tasks for a session (called when the live session is removed).
 

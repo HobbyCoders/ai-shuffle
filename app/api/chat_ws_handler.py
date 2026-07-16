@@ -150,6 +150,13 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     }
     if task.get("reason"):
         data["reason"] = task.get("reason")
+    # The card join key (mirror of the #540 enrichment): the frontend settles a
+    # subagent card only when the terminal chip carries the launch tool_use_id
+    # (the card's toolId). This SAME data dict feeds both the live chip
+    # (record_drained_event) and the durable row, so both carry it.
+    tool_use_id = task.get("toolUseId")
+    if tool_use_id:
+        data["tool_use_id"] = tool_use_id
 
     # 1) LIVE chip (once per task lifetime — shared latch with pump chips).
     # V2: append the chip to the session event log so the SSE feed renders it.

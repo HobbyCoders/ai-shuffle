@@ -228,6 +228,31 @@ async def test_force_eviction_reap_surfaces_exactly_one_terminal_row():
     assert (r_meta := terminal_rows[0]["metadata"]).get("subtype") == "task_updated", r_meta
 
 
+async def test_terminal_surface_carries_tool_use_id_join_key():
+    """The subagent CARD settles only when the terminal ``task_updated`` chip
+    carries the launch ``tool_use_id`` (the card's ``toolId``). Both the LIVE chip
+    (``record_drained_event``) and the DURABLE row must carry it — they share the
+    same ``data`` dict (mirror of the #540 enrichment)."""
+    _make_db_session()
+    cwh.register_terminal_notification_callback()
+    _own_task("t-join", "tu-join")
+
+    drained = AsyncMock()
+    with patch("app.core.turn_recorder.record_drained_event", drained):
+        task_registry.complete_task(SESSION, "t-join", "killed")
+        await _drain_terminal_surface()
+
+    # (1) LIVE chip carries the join key.
+    drained.assert_awaited()
+    live_evt = drained.call_args.args[1]
+    assert live_evt["data"]["tool_use_id"] == "tu-join"
+
+    # (2) DURABLE row carries the join key too.
+    rows = await _terminal_rows("t-join")
+    assert len(rows) == 1, f"expected exactly ONE durable terminal row, got {len(rows)}"
+    assert rows[0]["metadata"]["system_data"]["tool_use_id"] == "tu-join"
+
+
 async def test_callback_records_only_no_unpark_handoff_even_with_live_client():
     """V2 A7 (B5): the terminal surface NO LONGER hands off an unpark, even when
     a live pooled client exists — the scheduler is the sole unpark producer. The

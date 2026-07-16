@@ -114,7 +114,6 @@ def _neutralize_helpers():
         stack.enter_context(patch("app.core.query_engine._record_task_message", new=MagicMock()))
         stack.enter_context(patch("app.core.query_engine._subagent_events_from_message", new=MagicMock(return_value=[])))
         stack.enter_context(patch("app.core.query_engine._task_status_events_from_message", new=MagicMock(return_value=[])))
-        stack.enter_context(patch("app.core.query_engine._task_status_event_from_notification", new=MagicMock(return_value=[])))
         stack.enter_context(patch("app.core.query_engine._cli_turn_events_from_message", new=MagicMock(return_value=[])))
         stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=AsyncMock()))
         stack.enter_context(patch("app.core.turn_finalize.persist_turn_end_state", new=AsyncMock()))
@@ -213,3 +212,62 @@ async def test_no_drainable_client_returns_quietly(mock_db):
 
     with patch("app.core.session_pool.get_session_pool", return_value=pool):
         await idle_reader.run_idle_reader("s5")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# 5. Killed TaskUpdated-alone terminal — single chip + tool_use_id handoff
+# ---------------------------------------------------------------------------
+
+async def test_killed_task_update_single_chip_and_tool_use_id_handoff(mock_db):
+    """A killed background task terminating via a ``TaskUpdatedMessage`` ALONE:
+
+    (a) records EXACTLY ONE task_updated chip (only the generic own-background
+        branch — the deleted killed-branch chip must not duplicate it), and
+    (b) hands off the LAUNCH tool_use_id (from the registry record) — not the
+        hardcoded None — so the terminal chip can settle the subagent card.
+    """
+    from app.core.query_engine import TaskUpdatedMessage
+    from app.core.task_registry import task_registry
+
+    task_registry.reset_all()
+    # An own background task (registry record carries the launch tool_use_id).
+    task_registry.start_task("s6", "task-k", "agent", "bg", tool_use_id="tu-k")
+    task_registry.mark_background_launch("s6", "tu-k")
+
+    handoff = AsyncMock()
+    idle_reader.register_on_task_terminal(handoff)
+
+    upd = _make_message(
+        TaskUpdatedMessage,
+        task_id="task-k",
+        subtype="task_updated",
+        data={"task_id": "task-k", "patch": {"status": "killed"}},
+    )
+    pool, _ = _make_pool([upd])
+
+    rec = AsyncMock()
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_update_terminal_status", return_value="killed"))
+        # The generic own-background chip branch fires (it is the ONLY chip source
+        # now the killed-branch chip is deleted).
+        stack.enter_context(patch(
+            "app.core.query_engine._task_status_events_from_message",
+            new=MagicMock(return_value=[{
+                "type": "system", "subtype": "task_updated",
+                "data": {"task_id": "task-k", "patch": {"status": "killed"}},
+            }]),
+        ))
+        stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=rec))
+        await idle_reader.run_idle_reader("s6")
+
+    # (a) exactly one chip (generic branch) — no duplicate from the deleted branch.
+    assert rec.await_count == 1
+    # (b) handoff carries the launch tool_use_id from the registry record.
+    handoff.assert_awaited_once()
+    _, frame = handoff.call_args.args
+    assert frame["task_id"] == "task-k"
+    assert frame["status"] == "killed"
+    assert frame["tool_use_id"] == "tu-k"
+
+    task_registry.reset_all()

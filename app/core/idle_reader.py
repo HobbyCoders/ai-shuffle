@@ -153,7 +153,6 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
         _record_task_message,
         _subagent_events_from_message,
         _task_notification_frame,
-        _task_status_event_from_notification,
         _task_status_events_from_message,
         _task_update_terminal_status,
     )
@@ -322,17 +321,19 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     continue
                 u_task_id = getattr(message, "task_id", None)
                 # Only real tracked tasks (a phantom top-level self-rest has no record).
-                if task_registry.get_task(session_id, u_task_id) is None:
+                u_record = task_registry.get_task(session_id, u_task_id)
+                if u_record is None:
                     continue
-                try:
-                    for chip_ev in _task_status_event_from_notification(message):
-                        await record_drained_event(session_id, chip_ev)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("idle_reader: killed-task chip failed: %s", exc)
+                # NOTE: the generic own-background chip branch above already
+                # recorded the task_updated chip for this message (turn_recorder
+                # enriches its tool_use_id from the registry) — do NOT record a
+                # second one here. Hand the task's LAUNCH tool_use_id from the
+                # registry record to the scheduler so the synthesized wake prompt's
+                # <tool-use-id> is populated, instead of the old hardcoded None.
                 await _fire_on_task_terminal(session_id, {
                     "task_id": u_task_id,
                     "status": u_status,
-                    "tool_use_id": None,
+                    "tool_use_id": u_record.get("toolUseId"),
                 })
                 continue
 

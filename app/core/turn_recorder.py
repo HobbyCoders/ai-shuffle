@@ -241,13 +241,23 @@ def _translate_shared(
                 patch = data.get("patch")
                 patch = patch if isinstance(patch, dict) else {}
                 state = patch.get("status") or data.get("status") or "updated"
+                # The SDK's TaskUpdatedMessage never carries tool_use_id; enrich
+                # from the registry so terminal chips can settle the subagent card
+                # (whose toolId is the launch tool_use_id). Function-local import
+                # keeps this off the hot path / import graph.
+                tool_use_id = data.get("tool_use_id")
+                if not tool_use_id:
+                    from app.core.task_registry import task_registry
+                    tool_use_id = task_registry.get_task_tool_use_id(
+                        session_id, str(task_id)
+                    )
                 return [_build_event(
                     contract.TaskUpdated, session_id,
                     task_id=str(task_id),
                     state=str(state),
                     description=data.get("description"),
                     summary=data.get("summary"),
-                    tool_use_id=data.get("tool_use_id"),
+                    tool_use_id=tool_use_id,
                     **kw,
                 )]
         if subtype in _COMPACTION_SUBTYPES:
