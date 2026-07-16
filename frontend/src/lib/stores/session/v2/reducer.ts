@@ -118,6 +118,51 @@ function closeOpen(state: V2SessionState): V2SessionState {
 	return closeOpenThinking(closeOpenText(state));
 }
 
+/**
+ * Settle stale background work on a terminal turn (#609).
+ *
+ * INVARIANT (app/core/session_runtime.py::_finalize park gate): `turn.completed`
+ * is emitted ONLY when NO active background work remains — a turn still holding
+ * live background agents/tasks PARKS (turn.parked) instead of completing. So any
+ * subagent card still 'running', or task summary still 'running', at the moment
+ * turn.completed lands has MISSED its terminal `subagent.completed` / terminal
+ * `task.updated` event (the #543 wake-turn delivery gap) and is stale.
+ *
+ * Reconcile it against that authoritative signal: finalize such cards/summaries
+ * to 'completed'. This heals both live and on reload/replay with no /live fetch
+ * (so it stays inside the pure reducer and replay determinism is preserved —
+ * folding the same log twice yields the same settled state). A card that
+ * subagent.completed already settled with its richer result is left untouched
+ * (only status === 'running' is rewritten).
+ */
+function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
+	let cardsTouched = false;
+	const messages = state.messages.map((m) => {
+		if (m.type === 'subagent' && m.agentStatus === 'running') {
+			cardsTouched = true;
+			const children = (m.agentChildren ?? []).map((c) =>
+				c.streaming ? { ...c, streaming: false } : c
+			);
+			return { ...m, agentStatus: 'completed' as const, agentChildren: children };
+		}
+		return m;
+	});
+	let summariesTouched = false;
+	const activeTaskSummaries = state.activeTaskSummaries.map((t) => {
+		if (t.status === 'running') {
+			summariesTouched = true;
+			return { ...t, status: 'completed' as const };
+		}
+		return t;
+	});
+	if (!cardsTouched && !summariesTouched) return state; // preserve identity (no-op)
+	return {
+		...state,
+		messages: cardsTouched ? messages : state.messages,
+		activeTaskSummaries: summariesTouched ? activeTaskSummaries : state.activeTaskSummaries,
+	};
+}
+
 function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
@@ -260,12 +305,17 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			return closeOpen({ ...state, isStreaming: false, parked: true });
 
 		case 'turn.completed':
-			return closeOpen({
-				...state,
-				isStreaming: false,
-				parked: false,
-				usage: obj(event.usage) ?? state.usage,
-			});
+			// turn.completed ⟹ no background work remains (park gate), so settle any
+			// still-'running' subagent card / task summary that missed its terminal
+			// event (#609). See settleStaleBackgroundWork.
+			return settleStaleBackgroundWork(
+				closeOpen({
+					...state,
+					isStreaming: false,
+					parked: false,
+					usage: obj(event.usage) ?? state.usage,
+				})
+			);
 
 		case 'turn.aborted': {
 			const reason = str(event.reason);

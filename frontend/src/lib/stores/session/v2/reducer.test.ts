@@ -352,6 +352,58 @@ describe('task.updated summaries', () => {
 	});
 });
 
+// ─── Stale background work self-heal on turn.completed (#609) ────────────────
+
+describe('turn.completed settles stale background work (#609)', () => {
+	it('settles a subagent card left running when its terminal event was missed', () => {
+		// The subagent.completed / terminal task.updated never arrives (the #543
+		// wake-turn delivery gap). turn.completed only fires when no background work
+		// remains (park gate), so the still-running card is stale → settle it.
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('turn.completed', {}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('completed');
+	});
+
+	it('finalizes streaming children of a stranded subagent card', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('subagent.progress', { task_id: 'toolu-1', kind: 'chunk', note: 'partial' }),
+			ev('turn.completed', {}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentChildren?.every((c) => !c.streaming)).toBe(true);
+	});
+
+	it('clears a running task summary so the activeTasks strip empties', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('does not resurrect or downgrade an already-settled card', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('subagent.completed', { task_id: 'toolu-1', status: 'failed', result_preview: 'boom' }),
+			ev('turn.completed', {}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('error'); // richer terminal result preserved
+		expect(card?.content).toBe('boom');
+	});
+
+	it('is a no-op (identity-preserving) when nothing is stale', () => {
+		const base = fold([ev('turn.started')]);
+		const after = reduce(base, ev('turn.completed', {}));
+		expect(after.messages).toBe(base.messages);
+		expect(after.activeTaskSummaries).toBe(base.activeTaskSummaries);
+	});
+});
+
 // ─── System + unknown ───────────────────────────────────────────────────────
 
 describe('system + unknown events', () => {

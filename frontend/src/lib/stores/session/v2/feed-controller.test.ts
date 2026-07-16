@@ -56,6 +56,7 @@ function makeDeps() {
 		messages: [],
 		isStreaming: false,
 		activeTasks: [],
+		queuedMessages: [],
 	} as unknown as ActiveSessionState;
 	const update = vi.fn((fn: (s: ActiveSessionState) => ActiveSessionState) => {
 		state = fn(state);
@@ -81,6 +82,20 @@ function textDelta(id: string, text: string): Record<string, unknown> {
 		session_id: 's1',
 		created_at: '2026-07-12T00:00:00.000Z',
 		text,
+	};
+}
+
+// A delivered user message carrying the turn_id that correlates to a queue chip
+// (queue entry id === turn id). Firing this proves the queued turn ran.
+function userMessage(id: string, turnId: string, content = 'queued text'): Record<string, unknown> {
+	return {
+		type: 'message.user',
+		id,
+		seq: 0,
+		session_id: 's1',
+		created_at: '2026-07-12T00:00:00.000Z',
+		turn_id: turnId,
+		content,
 	};
 }
 
@@ -155,5 +170,49 @@ describe('feedController flush scheduling', () => {
 		vi.advanceTimersByTime(500);
 		flushRaf();
 		expect(deps.update.mock.calls.length).toBe(callsAfterRaf);
+	});
+});
+
+describe('feedController queue reconciliation (#588)', () => {
+	it('drops a stale queue chip once its turn is delivered on the transcript', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		// A queued chip is present (as the WS queue_updated broadcast would seed it),
+		// keyed by the turn id.
+		deps.update((s) => ({
+			...s,
+			queuedMessages: [
+				{ id: 'turn-1', content: 'queued text', queuedAt: 1 },
+				{ id: 'turn-2', content: 'still waiting', queuedAt: 2 },
+			],
+		}));
+
+		// The server drains and runs turn-1: its user message lands on the SSE feed,
+		// carrying turn_id === the chip id. No clearing queue_updated is ever sent.
+		hoisted.onEvent!(userMessage('evt-u1', 'turn-1'));
+		flushRaf();
+
+		const queued = deps.state.queuedMessages as Array<{ id: string }>;
+		expect(queued.map((q) => q.id)).toEqual(['turn-2']); // turn-1 chip self-healed
+	});
+
+	it('leaves chips intact when no matching turn has been delivered', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		deps.update((s) => ({
+			...s,
+			queuedMessages: [{ id: 'turn-9', content: 'pending', queuedAt: 1 }],
+		}));
+
+		// A DIFFERENT (non-queued) turn's user message must not clear the chip.
+		hoisted.onEvent!(userMessage('evt-u2', 'turn-other'));
+		flushRaf();
+
+		const queued = deps.state.queuedMessages as Array<{ id: string }>;
+		expect(queued.map((q) => q.id)).toEqual(['turn-9']);
 	});
 });

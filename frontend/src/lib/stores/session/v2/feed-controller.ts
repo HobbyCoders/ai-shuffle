@@ -19,7 +19,7 @@
 import { reduce, initialState, type V2SessionState, type WireEvent } from './reducer';
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
-import type { Task } from '../../types';
+import type { QueuedMessage, Task } from '../../types';
 
 // ─── Injected writer deps ─────────────────────────────────────────────────────
 
@@ -37,6 +37,26 @@ let currentSessionId: string | null = null;
 let flushScheduled = false;
 let rafHandle: number | null = null;
 let timerHandle: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Turn ids of queued messages the server has since DELIVERED, harvested from the
+ * SSE transcript (#588). A queued turn's `message.user` event carries the same
+ * `turn_id` as the queue entry's id (app/api/chat_ws_handler.py::_v2_queue_view:
+ * queue id ← turn id; app/api/events.py::_wire stamps turn_id on every frame), so
+ * this set lets `fold()` drop a stale "Queued (N)" chip once its message actually
+ * ran.
+ *
+ * Why this is needed: the turn-scheduler drain path
+ * (app/core/turn_scheduler.py::_on_turn_settled_impl → pop_ready → kick) runs a
+ * queued turn WITHOUT broadcasting a clearing `queue_updated`, and watch_session
+ * suppresses the empty-queue frame, so the queue chip is otherwise never told the
+ * queue shrank. Reconciling against the delivered transcript self-heals it.
+ *
+ * Session-scoped: cleared on start()/stop(). Non-queued turns' ids also land here
+ * but never match a chip id (chips exist only for queued turns), so filtering is
+ * exact — a chip is removed only when ITS turn produced a user message.
+ */
+const deliveredTurnIds = new Set<string>();
 
 // ─── Optimistic-message seeding ───────────────────────────────────────────────
 
@@ -105,6 +125,16 @@ function deriveUsageFields(usage: Record<string, unknown> | null): Partial<Activ
 	return patch;
 }
 
+/**
+ * Drop queue chips whose turn has been delivered (#588). Preserves the array
+ * identity when nothing changed so the fold stays a no-op for the common case.
+ */
+function reconcileQueuedMessages(queued: QueuedMessage[]): QueuedMessage[] {
+	if (queued.length === 0 || deliveredTurnIds.size === 0) return queued;
+	const next = queued.filter((q) => !deliveredTurnIds.has(q.id));
+	return next.length === queued.length ? queued : next;
+}
+
 function fold(): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
@@ -118,6 +148,7 @@ function fold(): void {
 					messages: reducerState.messages,
 					isStreaming: reducerState.isStreaming,
 					activeTasks,
+					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					...usagePatch,
 				}
 			: s
@@ -188,12 +219,19 @@ export const feedController: FeedController = {
 		this.stop();
 		currentSessionId = sessionId;
 		reducerState = initialState();
+		deliveredTurnIds.clear();
 		feed = createSseFeed(sessionId, {
 			onEvent: (e) => {
 				// Only apply events for the session we're feeding.
 				if (currentSessionId !== sessionId) return;
+				const ev = e as WireEvent;
+				// #588: a delivered queued turn arrives as its own user message; note
+				// its turn_id so fold() can clear the matching stale queue chip.
+				if (ev.type === 'message.user' && typeof ev.turn_id === 'string' && ev.turn_id) {
+					deliveredTurnIds.add(ev.turn_id);
+				}
 				seedOptimistic();
-				reducerState = reduce(reducerState, e as WireEvent);
+				reducerState = reduce(reducerState, ev);
 				scheduleFlush();
 			},
 			onError: (err) => {
@@ -213,6 +251,7 @@ export const feedController: FeedController = {
 		clearScheduledFlush();
 		currentSessionId = null;
 		reducerState = initialState();
+		deliveredTurnIds.clear();
 	},
 
 	isFeeding(sessionId?: string) {
