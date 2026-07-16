@@ -221,9 +221,9 @@ describe('breakdownStatusLabel', () => {
 		expect(breakdownStatusLabel('live', true)).toBe('breakdown · refreshes at turn end');
 	});
 
-	it('falls back to the estimate wording when there is no rich breakdown', () => {
-		expect(breakdownStatusLabel(null, false)).toBe('estimated from last turn');
-		expect(breakdownStatusLabel(null, true)).toBe('estimated from last turn');
+	it('returns empty (no footer caption) when there is no rich breakdown', () => {
+		expect(breakdownStatusLabel(null, false)).toBe('');
+		expect(breakdownStatusLabel(null, true)).toBe('');
 	});
 });
 

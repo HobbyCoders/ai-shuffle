@@ -13,16 +13,19 @@
 	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar
 	 *      (a contiguous segment per category + a dim autocompact-buffer segment;
 	 *      the bare track tail is the free space) and, when expanded, per-category
-	 *      rows (swatch + label + tokens + percent). The breakdown is fetched from
-	 *      the SDK (`/context-usage`) on session load and refreshed at turn end
-	 *      (never polled mid-stream) so the pill ring can prefer it; `source:
-	 *      "persisted"` (final snapshot from the session's last turn end) is treated
-	 *      as a valid rich breakdown. The poller estimate is the fallback before the
-	 *      first fetch lands — a fresh session shows em-dash rows.
+	 *      rows (swatch + label + tokens + percent) followed by a trailing, muted
+	 *      Model row (no swatch, no percent — just the effective model label). The
+	 *      breakdown is fetched from the SDK (`/context-usage`) on session load and
+	 *      refreshed at turn end (never polled mid-stream) so the pill ring can
+	 *      prefer it; `source: "persisted"` (final snapshot from the session's last
+	 *      turn end) is treated as a valid rich breakdown. The poller estimate is
+	 *      the fallback before the first fetch lands — a fresh session shows
+	 *      em-dash rows.
 	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
 	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
 	 *      and reset text inline. "No usage data yet" when the bucket is empty.
-	 *   3. Footer — breakdown status (left) + effective model label (right).
+	 *   3. Footer — breakdown status, shown only when a rich breakdown is loaded
+	 *      (hidden while the poller estimate is on screen).
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
 	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
@@ -111,6 +114,10 @@
 	// the buffer in the same way the popover header does — so they can't disagree),
 	// falling back to the poller estimate before the first fetch lands.
 	const contextPercent = $derived(displayBreakdown.totalPercent);
+
+	// Footer status label — derived once, empty string hides the footer entirely
+	// (no rich breakdown loaded yet, i.e. the poller estimate is on screen).
+	const statusLabel = $derived(breakdownStatusLabel(richSource, isStreaming));
 
 	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
 	const RING_RADIUS = 6;
@@ -316,7 +323,7 @@
 		type="button"
 		class="usage-indicator"
 		title="{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
-			contextMax
+			displayBreakdown.contextMax
 		)} tokens — click for details"
 		aria-label="Context and usage — {Math.round(contextPercent)}% of context window used"
 		aria-haspopup="dialog"
@@ -405,6 +412,10 @@
 							</span>
 						</div>
 					{/each}
+					<div class="breakdown-row muted model-row">
+						<span class="breakdown-label">Model</span>
+						<span class="breakdown-value">{effectiveModelLabel}</span>
+					</div>
 				{/if}
 			</div>
 
@@ -459,10 +470,11 @@
 			{/if}
 
 			<!-- ═══ Footer ═══ -->
-			<div class="popover-footer">
-				<span class="footer-status">{breakdownStatusLabel(richSource, isStreaming)}</span>
-				<span class="footer-model">{effectiveModelLabel}</span>
-			</div>
+			{#if statusLabel}
+				<div class="popover-footer">
+					<span class="footer-status">{statusLabel}</span>
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -680,6 +692,13 @@
 		font-weight: 400;
 		opacity: 0.75;
 	}
+	/* Model row — trailing info line in the expanded breakdown, set off from the
+	   category/Free-space rows above it with a hairline separator. */
+	.model-row {
+		margin-top: 2px;
+		padding-top: 6px;
+		border-top: 1px dashed var(--glass-border, var(--border));
+	}
 
 	.popover-divider {
 		height: 1px;
@@ -782,7 +801,8 @@
 		color: var(--warning);
 	}
 
-	/* Footer — breakdown status (left) + effective model label (right). */
+	/* Footer — breakdown status. Only rendered when there's a rich breakdown to
+	   caption (empty statusLabel hides the whole footer). */
 	.popover-footer {
 		display: flex;
 		align-items: baseline;
@@ -795,9 +815,5 @@
 	}
 	.footer-status {
 		font-style: italic;
-	}
-	.footer-model {
-		font-family: var(--font-mono);
-		white-space: nowrap;
 	}
 </style>

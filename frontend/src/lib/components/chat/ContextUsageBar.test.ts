@@ -99,6 +99,33 @@ describe('ContextUsageBar — pill', () => {
 		const { container } = render(ContextUsageBar);
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 	});
+
+	it('sources the pill title denominator from the rich breakdown, not the local model context max', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 180_000, color: '#333' },
+					{ name: 'Free space', tokens: 820_000, color: '#444' },
+				],
+				totalTokens: 180_000,
+				maxTokens: 1_000_000,
+				rawMaxTokens: 1_000_000,
+				percentage: 18,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
+
+		// The local model ('sonnet', default) has a 200k window — if the title fell
+		// back to it, it would read "200k". It must read the breakdown's 1M instead.
+		await waitFor(() => expect(pill.getAttribute('title')).toContain('1M'));
+		expect(pill.getAttribute('title')).not.toContain('200k');
+	});
 });
 
 describe('ContextUsageBar — context breakdown', () => {
@@ -143,7 +170,9 @@ describe('ContextUsageBar — context breakdown', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		const rows = Array.from(container.querySelectorAll('.breakdown-row'));
+		// Exclude the trailing Model row (always present when expanded) — this
+		// assertion is only about the em-dash category placeholder rows.
+		const rows = Array.from(container.querySelectorAll('.breakdown-row:not(.model-row)'));
 		// input / cacheRead / cacheCreation / output — no System overhead, no Free space.
 		expect(rows.length).toBe(4);
 		for (const r of rows) {
@@ -181,9 +210,9 @@ describe('ContextUsageBar — context breakdown', () => {
 		// Free space, which is the bare track — it renders no segment at all.
 		expect(segs.length).toBe(4);
 		expect(segs.filter((s) => s.classList.contains('dim')).length).toBe(1);
-		// The rows still include both Output tokens and Free space (5 rows total),
-		// but neither is a segment.
-		expect(container.querySelectorAll('.breakdown-row').length).toBe(5);
+		// The rows still include both Output tokens and Free space (5 category rows
+		// total, plus the trailing Model row), but neither is a segment.
+		expect(container.querySelectorAll('.breakdown-row:not(.model-row)').length).toBe(5);
 		// Segment widths (as fractions of contextMax) plus the buffer sum to the
 		// same total the header reports — the invariant this fix restores.
 		const contextMax = 200_000; // default model's context window in tests
@@ -323,6 +352,121 @@ describe('ContextUsageBar — context breakdown', () => {
 
 		await openPopover(container);
 		expect(container.querySelector('.ctx-pct')?.textContent).toContain('90%');
+	});
+
+	it('shows the effective model as a trailing muted row inside the expanded breakdown', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const modelRow = container.querySelector('.model-row');
+		expect(modelRow).not.toBeNull();
+		expect(modelRow?.classList.contains('breakdown-row')).toBe(true);
+		expect(modelRow?.classList.contains('muted')).toBe(true);
+		expect(modelRow?.querySelector('.breakdown-label')?.textContent).toBe('Model');
+		// Default model ('sonnet') resolves to the "Sonnet" label.
+		expect(modelRow?.querySelector('.breakdown-value')?.textContent).toBe('Sonnet');
+		// No swatch and no percent on the model row.
+		expect(modelRow?.querySelector('.cat-swatch')).toBeNull();
+		expect(modelRow?.querySelector('.cat-pct')).toBeNull();
+	});
+
+	it('hides the model row when the breakdown is collapsed', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.model-row')).not.toBeNull();
+
+		const header = container.querySelector('.ctx-header') as HTMLButtonElement;
+		await fireEvent.click(header);
+
+		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
+		expect(container.querySelector('.model-row')).toBeNull();
+	});
+});
+
+describe('ContextUsageBar — footer', () => {
+	it('does not render the footer when no rich breakdown is loaded (poller estimate only)', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		expect(container.querySelector('.popover-footer')).toBeNull();
+		expect(container.textContent).not.toContain('estimated from last turn');
+	});
+
+	it('renders the footer with "live breakdown" once a rich breakdown loads', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 10_000, color: '#333' },
+					{ name: 'Free space', tokens: 190_000, color: '#444' },
+				],
+				totalTokens: 10_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 5,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		await waitFor(() => expect(container.querySelector('.popover-footer')).not.toBeNull());
+		expect(container.querySelector('.footer-status')?.textContent).toBe('live breakdown');
+	});
+
+	it('renders the footer with "final breakdown" for a persisted snapshot', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'persisted',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 10_000, color: '#333' },
+					{ name: 'Free space', tokens: 190_000, color: '#444' },
+				],
+				totalTokens: 10_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 5,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		await waitFor(() =>
+			expect(container.querySelector('.footer-status')?.textContent).toBe('final breakdown')
+		);
+	});
+
+	it('never shows the model label in the footer', async () => {
+		mocks.getContextUsage.mockResolvedValue({
+			available: true,
+			source: 'live',
+			usage: {
+				categories: [
+					{ name: 'Messages', tokens: 10_000, color: '#333' },
+					{ name: 'Free space', tokens: 190_000, color: '#444' },
+				],
+				totalTokens: 10_000,
+				maxTokens: 200_000,
+				rawMaxTokens: 200_000,
+				percentage: 5,
+				model: 'claude-x',
+				isAutoCompactEnabled: true,
+			},
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		await waitFor(() => expect(container.querySelector('.popover-footer')).not.toBeNull());
+		expect(container.querySelector('.footer-model')).toBeNull();
+		expect(container.querySelector('.popover-footer')?.textContent).not.toContain('Sonnet');
 	});
 });
 
