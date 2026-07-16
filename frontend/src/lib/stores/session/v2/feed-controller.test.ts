@@ -7,9 +7,10 @@
  *    folding until a `caught_up` sentinel arrives, so the whole persisted
  *    transcript paints in ONE batch instead of repainting per backfilled frame
  *    (the "history paints one message at a time on open" bug). After catch-up,
- *    live events keep the incremental per-frame paint. The flag re-arms per SSE
- *    connect (`onOpen`) and has a no-sentinel fallback so the view can never be
- *    stuck blank against an old backend.
+ *    live events keep the incremental per-frame paint. The flag re-arms only on
+ *    the FIRST connect (`onOpen` before any catch-up); reconnects after catch-up
+ *    keep folding live events immediately (#611). A no-sentinel fallback means
+ *    the view can never be stuck blank against an old backend.
  *
  * 2. Flush scheduling. The post-catch-up fold coalesces onto requestAnimationFrame
  *    with a 250ms setTimeout fallback (browsers pause rAF in hidden tabs). These
@@ -192,25 +193,28 @@ describe('feedController history-batch hydration', () => {
 		expect(msgs[0].content).toBe('foobar');
 	});
 
-	it('(c) re-arms the batch flag on reconnect (onOpen) so re-backfill batches', () => {
+	it('(c) #611: after catch-up, a reconnect (onOpen) folds live events immediately — no re-batch', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
 		expect(hoisted.onOpen).toBeTypeOf('function');
 
-		// Complete initial catch-up.
+		// Complete initial catch-up (the FIRST connection still batches history).
 		hoisted.onEvent!(caughtUp(0));
 
-		// Reconnect: onOpen re-arms the flag, so the fresh backfill batches again.
+		// A reconnect after catch-up: onOpen must NOT re-arm the batch flag
+		// (`everCaughtUp` guard). Re-batching here would strand live events behind
+		// the throttleable CATCHUP_FALLBACK_MS timer, which a hidden tab freezes →
+		// transcript stall (#611). The reconnect's near-empty backfill (cursor =
+		// lastSeq) IS the live tail, so it must fold on the normal live cadence.
 		hoisted.onOpen!();
+
+		// A live event arrives with NO new `caught_up` sentinel. It must fold via
+		// the normal rAF/250ms cadence — NOT wait for a sentinel or the 1s catch-up
+		// fallback (we never advance timers to 1000ms here).
 		hoisted.onEvent!(textDelta('e1', 'foo'));
 		flushRaf();
-		vi.advanceTimersByTime(500);
-		// Batched — not yet folded into activeSession.
-		expect((deps.state.messages as unknown[]).length).toBe(0);
 
-		// The reconnect's sentinel folds it once.
-		hoisted.onEvent!(caughtUp(1));
 		const msgs = deps.state.messages as Array<{ content: string }>;
 		expect(msgs).toHaveLength(1);
 		expect(msgs[0].content).toBe('foo');

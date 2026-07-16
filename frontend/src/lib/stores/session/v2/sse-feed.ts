@@ -10,8 +10,8 @@
  * `:`-prefixed keepalive comments ignored), tracks `lastSeq` from each frame's
  * `id:`, and on disconnect reconnects with exponential backoff (1s → 15s cap) at
  * `from_seq=lastSeq` (the server filter is exclusive: `seq > from_seq`, so this
- * is gap-free and duplicate-free). Resubscribes on `visibilitychange`/`online`, mirroring
- * ws-connection.ts's revive behavior. `stop()` aborts cleanly.
+ * is gap-free and duplicate-free). Resubscribes on `visibilitychange`/`online`/`pageshow`
+ * (BFCache restore), mirroring ws-connection.ts's revive behavior. `stop()` aborts cleanly.
  *
  * No new npm deps: uses `fetch` + `ReadableStream` + `TextDecoder`.
  */
@@ -137,6 +137,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	// ── Revive listeners (mirror ws-connection.ts) ──────────────────────
 	let visibilityHandler: (() => void) | null = null;
 	let onlineHandler: (() => void) | null = null;
+	let pageShowHandler: ((e: PageTransitionEvent) => void) | null = null;
 
 	function scheduleReconnect() {
 		if (!running) return;
@@ -179,6 +180,13 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		if (typeof window !== 'undefined') {
 			onlineHandler = () => reviveNow();
 			window.addEventListener('online', onlineHandler);
+			// pageshow with persisted=true fires on BFCache restore, where
+			// visibilitychange may not fire — the reader would otherwise stay
+			// half-open forever. Mirrors ws-connection.ts's pageshow revive.
+			pageShowHandler = (e: PageTransitionEvent) => {
+				if (e.persisted) reviveNow();
+			};
+			window.addEventListener('pageshow', pageShowHandler as EventListener);
 		}
 	}
 
@@ -190,6 +198,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		if (onlineHandler && typeof window !== 'undefined') {
 			window.removeEventListener('online', onlineHandler);
 			onlineHandler = null;
+		}
+		if (pageShowHandler && typeof window !== 'undefined') {
+			window.removeEventListener('pageshow', pageShowHandler as EventListener);
+			pageShowHandler = null;
 		}
 	}
 

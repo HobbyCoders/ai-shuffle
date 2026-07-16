@@ -63,6 +63,12 @@ const deliveredTurnIds = new Set<string>();
 // the `caught_up` sentinel instead of repainting per backfilled frame (which
 // made the list grow one message at a time on open). Re-armed per SSE connect.
 let caughtUp = false;
+// Whether catch-up has EVER completed for the current feed (across reconnects).
+// #611: `onOpen` only re-arms the batch flag on the FIRST connection. Once
+// catch-up has happened, reconnect backfills (cursor = lastSeq, near-empty) keep
+// `caughtUp === true` so live events fold immediately instead of waiting on the
+// throttleable `CATCHUP_FALLBACK_MS` timer in a hidden tab. Reset in start()/stop().
+let everCaughtUp = false;
 // Safety net for an old backend that never emits `caught_up`: if the sentinel
 // hasn't arrived within this window, fold whatever has accumulated so the view
 // can never be stuck blank. Re-armed per connect; cleared on `caught_up`.
@@ -84,6 +90,7 @@ function armCatchupFallback(): void {
 			// No sentinel arrived (old backend). Give up batching and fold what we
 			// have; subsequent events flush per the normal live cadence.
 			caughtUp = true;
+			everCaughtUp = true;
 			fold();
 		}
 	}, CATCHUP_FALLBACK_MS);
@@ -253,13 +260,24 @@ export const feedController: FeedController = {
 		reducerState = initialState();
 		deliveredTurnIds.clear();
 		caughtUp = false;
+		everCaughtUp = false;
 		feed = createSseFeed(sessionId, {
 			onOpen: () => {
-				// Re-arm the batch flag for THIS connection: the backend replays a
-				// fresh backfill (near-empty on a reconnect) terminated by another
-				// `caught_up`, so batch it and fold once when the sentinel lands.
-				caughtUp = false;
-				armCatchupFallback();
+				// #611: only re-arm the batch flag on the FIRST connection. The
+				// initial connect replays the full history backfill terminated by
+				// `caught_up`, which must batch into one fold (#636). But a reconnect
+				// AFTER catch-up (revive / dropped stream) resumes at cursor=lastSeq —
+				// a near-empty backfill that is just the live tail. Re-arming
+				// `caughtUp=false` there would re-batch live events behind the
+				// throttleable `CATCHUP_FALLBACK_MS` timer, which a hidden tab freezes
+				// → transcript stall. So once catch-up has happened, keep
+				// `caughtUp === true` so those events fold immediately; a duplicate
+				// `caught_up` sentinel from the reconnect backfill just calls fold()
+				// again (harmless).
+				if (!everCaughtUp) {
+					caughtUp = false;
+					armCatchupFallback();
+				}
 			},
 			onEvent: (e) => {
 				// Only apply events for the session we're feeding.
@@ -268,6 +286,7 @@ export const feedController: FeedController = {
 				// batch, then switch to the per-frame live cadence below.
 				if ((e as { type?: string }).type === 'caught_up') {
 					caughtUp = true;
+					everCaughtUp = true;
 					clearCatchupFallback();
 					fold();
 					return;
@@ -313,6 +332,7 @@ export const feedController: FeedController = {
 		clearScheduledFlush();
 		clearCatchupFallback();
 		caughtUp = false;
+		everCaughtUp = false;
 		currentSessionId = null;
 		reducerState = initialState();
 		deliveredTurnIds.clear();

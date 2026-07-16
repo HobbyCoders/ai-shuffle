@@ -163,3 +163,135 @@ describe('createSseFeed reconnect cursor', () => {
 		feed.stop();
 	});
 });
+
+// ─── Revive listeners (#611: visibilitychange / online / pageshow-BFCache) ───
+
+describe('createSseFeed revive listeners', () => {
+	// Emit the given chunks then park (never close) so the reader stays half-open —
+	// mirrors a live tail that a revive event must re-establish. reviveNow() aborts
+	// this parked reader and reconnects at from_seq=lastSeq.
+	function streamThenPending(chunks: string[]): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		let i = 0;
+		return new ReadableStream({
+			pull(controller) {
+				if (i < chunks.length) {
+					controller.enqueue(enc.encode(chunks[i++]));
+					return;
+				}
+				return new Promise<void>(() => {});
+			},
+		});
+	}
+
+	const tick = async (n = 30) => {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	};
+
+	// Build a `pageshow` event with a defined `persisted` flag. jsdom may lack
+	// PageTransitionEvent (or ignore its options), so force-define the property.
+	function pageshowEvent(persisted: boolean): Event {
+		let ev: Event;
+		try {
+			ev = new PageTransitionEvent('pageshow', { persisted });
+		} catch {
+			ev = new Event('pageshow');
+		}
+		if ((ev as unknown as { persisted?: boolean }).persisted !== persisted) {
+			Object.defineProperty(ev, 'persisted', { value: persisted, configurable: true });
+		}
+		return ev;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	// Set up a feed whose first connect delivers seq 1–2 then parks. Returns the
+	// captured request URLs and the feed handle.
+	async function setup() {
+		const urls: string[] = [];
+		const fetchMock = vi.fn(async (url: string) => {
+			urls.push(url);
+			return {
+				ok: true,
+				status: 200,
+				body:
+					urls.length === 1
+						? streamThenPending(['id: 1\ndata: {"seq":1}\n\n', 'id: 2\ndata: {"seq":2}\n\n'])
+						: streamThenPending([]),
+			};
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+		await tick();
+		return { urls, feed, events };
+	}
+
+	it('pageshow with persisted=true reconnects at from_seq=lastSeq', async () => {
+		const { urls, feed } = await setup();
+		expect(urls).toHaveLength(1);
+		expect(feed.lastSeq).toBe(2);
+
+		window.dispatchEvent(pageshowEvent(true));
+		await tick();
+
+		expect(urls).toHaveLength(2);
+		expect(urls[1]).toContain('from_seq=2');
+		feed.stop();
+	});
+
+	it('pageshow with persisted=false does NOT reconnect', async () => {
+		const { urls, feed } = await setup();
+		expect(urls).toHaveLength(1);
+
+		window.dispatchEvent(pageshowEvent(false));
+		await tick();
+
+		expect(urls).toHaveLength(1);
+		feed.stop();
+	});
+
+	it('visibilitychange → visible reconnects at from_seq=lastSeq', async () => {
+		const { urls, feed } = await setup();
+		expect(urls).toHaveLength(1);
+
+		// jsdom's document.hidden defaults to false (visible), so the handler fires.
+		document.dispatchEvent(new Event('visibilitychange'));
+		await tick();
+
+		expect(urls).toHaveLength(2);
+		expect(urls[1]).toContain('from_seq=2');
+		feed.stop();
+	});
+
+	it('online reconnects at from_seq=lastSeq', async () => {
+		const { urls, feed } = await setup();
+		expect(urls).toHaveLength(1);
+
+		window.dispatchEvent(new Event('online'));
+		await tick();
+
+		expect(urls).toHaveLength(2);
+		expect(urls[1]).toContain('from_seq=2');
+		feed.stop();
+	});
+
+	it('removes all revive listeners after stop() (no reconnect on later dispatch)', async () => {
+		const { urls, feed } = await setup();
+		expect(urls).toHaveLength(1);
+
+		feed.stop();
+		await tick();
+		const afterStop = urls.length;
+
+		window.dispatchEvent(pageshowEvent(true));
+		document.dispatchEvent(new Event('visibilitychange'));
+		window.dispatchEvent(new Event('online'));
+		await tick();
+
+		expect(urls).toHaveLength(afterStop);
+	});
+});
