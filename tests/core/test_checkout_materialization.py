@@ -492,3 +492,200 @@ def test_resolve_clone_url_excluded_origins_return_none_without_db(origin, monke
 
     monkeypatch.setattr(checkout_manager, "get_db", _boom)
     assert checkout_manager._resolve_clone_url(origin) is None
+
+
+# ---------------------------------------------------------------------------
+# _seed_base_checkout: lazy self-seed of a MISSING base checkout (#607 PR-2),
+# gated behind AI_SHUFFLE_SELF_SEED. git operations are MOCKED — no real clone.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def seedable(mock_db):
+    """A project_v2 whose origin resolves (via legacy data) to a cloneable URL,
+    so ``_seed_base_checkout`` has a real URL to hand to the (mocked) clone."""
+    from app.core.project_links import auto_link_group_id
+
+    remote_url = "https://github.com/o/seedme.git"
+    origin = auto_link_group_id(remote_url)
+    proj = projects_v2.upsert_project(origin, name="Seed Me")
+    _seed_legacy_project("lp-seed", "Seed Me", "/legacy/seedme", link_group_id=origin)
+    _seed_git_repository_with_remote("gr-seed", "lp-seed", remote_url)
+    return proj, remote_url
+
+
+def _mock_clone(monkeypatch):
+    """Patch ``git_service.clone_repo`` to a recording fake that fabricates a minimal
+    ``.git`` in the (already-created) temp target so the atomic rename succeeds."""
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def _fake(working_dir, clone_url, timeout=120):
+        calls.append({"working_dir": working_dir, "clone_url": clone_url, "timeout": timeout})
+        (Path(working_dir) / ".git").mkdir()
+        (Path(working_dir) / "README.md").write_text("seeded\n", encoding="utf-8")
+        return True, None
+
+    monkeypatch.setattr(git_service, "clone_repo", _fake)
+    return calls
+
+
+def test_seed_happy_path_clones_renames_and_upserts(seedable, workspace_root, monkeypatch):
+    proj, remote_url = seedable
+    calls = _mock_clone(monkeypatch)
+
+    path = checkout_manager.ensure_checkout(proj, runner_id=RUNNER)
+
+    # Cloned exactly once, with the RESOLVED remote URL.
+    assert len(calls) == 1
+    assert calls[0]["clone_url"] == remote_url
+
+    # Materialized at the reserved {slug}/__base__ path via atomic rename.
+    assert path is not None
+    p = Path(path)
+    assert p.name == checkout_manager._BASE_DIR_NAME
+    assert p.parent.name == checkout_manager._project_slug(proj)
+    assert (p / ".git").exists()
+
+    # The clone landed at the final base path, not a leftover temp sibling.
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    leftovers = [d for d in slug_dir.iterdir() if d.name != checkout_manager._BASE_DIR_NAME]
+    assert leftovers == []
+
+    # A base (branch-NULL) checkout row was recorded at that path.
+    rows = checkouts_db.list_checkouts(proj["id"])
+    base_rows = [r for r in rows if not r.get("branch")]
+    assert len(base_rows) == 1
+    assert base_rows[0]["path"] == path
+
+    # Idempotent: a second call reuses the seeded base (no second clone).
+    again = checkout_manager.ensure_checkout(proj, runner_id=RUNNER)
+    assert again == path
+    assert len(calls) == 1
+
+
+def test_seed_flag_off_no_clone(seedable, workspace_root, monkeypatch):
+    proj, _ = seedable
+    monkeypatch.setattr(checkout_manager.settings, "self_seed_checkouts", False)
+    calls = _mock_clone(monkeypatch)
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+    assert calls == []
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
+def test_seed_resolver_none_no_clone_and_warns(project, workspace_root, monkeypatch, caplog):
+    # The default ``project`` fixture's origin ("git:repo") has NO matching legacy
+    # git_repositories row → _resolve_clone_url returns None → no clone, a warning,
+    # and honest None (fall-through to existing missing-checkout behavior).
+    calls = _mock_clone(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        assert checkout_manager.ensure_checkout(project, runner_id=RUNNER) is None
+
+    assert calls == []
+    assert checkouts_db.list_checkouts(project["id"]) == []
+    assert any(
+        "no cloneable remote URL resolved" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_seed_local_origin_no_clone(mock_db, workspace_root, monkeypatch):
+    # A ``local:`` origin is hard-excluded by _resolve_clone_url (ruling 5) → None,
+    # so the seed never clones even though the flag is ON.
+    proj = projects_v2.upsert_project("local:lp-x", name="Local Only")
+    calls = _mock_clone(monkeypatch)
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+    assert calls == []
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
+def test_seed_clone_failure_cleans_temp_and_no_upsert(seedable, workspace_root, monkeypatch):
+    proj, _ = seedable
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def _fail(working_dir, clone_url, timeout=120):
+        calls.append(working_dir)
+        # Leave the temp dir on disk as clone_repo would on a partial/failed clone.
+        return False, "fatal: could not read Username (terminal prompts disabled)"
+
+    monkeypatch.setattr(git_service, "clone_repo", _fail)
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+
+    # Clone was attempted, but the temp dir was cleaned up — no partial checkout,
+    # and the base path never came into existence.
+    assert len(calls) == 1
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    if slug_dir.exists():
+        assert list(slug_dir.iterdir()) == []
+    base_path = slug_dir / checkout_manager._BASE_DIR_NAME
+    assert not base_path.exists()
+
+    # Nothing recorded.
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
+def test_seed_rename_failure_cleans_temp_and_no_upsert(seedable, workspace_root, monkeypatch):
+    proj, _ = seedable
+    calls = _mock_clone(monkeypatch)
+
+    # Force the atomic rename to fail after a "successful" clone.
+    def _boom_rename(src, dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(checkout_manager.os, "rename", _boom_rename)
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+    assert len(calls) == 1
+
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    if slug_dir.exists():
+        assert list(slug_dir.iterdir()) == []
+    assert not (slug_dir / checkout_manager._BASE_DIR_NAME).exists()
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
+def test_seed_adopts_existing_valid_base_dir_without_clone(seedable, workspace_root, monkeypatch):
+    # A valid checkout already sits at the reserved __base__ path but carries no
+    # checkouts row → adopt it (upsert), never clone over it.
+    proj, _ = seedable
+    calls = _mock_clone(monkeypatch)
+
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    base_path = slug_dir / checkout_manager._BASE_DIR_NAME
+    existing = _make_base_repo(slug_dir)  # a real repo dir
+    existing.rename(base_path)
+
+    path = checkout_manager.ensure_checkout(proj, runner_id=RUNNER)
+    assert path == str(base_path)
+    assert calls == []  # adopted, not cloned
+    rows = checkouts_db.list_checkouts(proj["id"])
+    assert [r["path"] for r in rows if not r.get("branch")] == [str(base_path)]
+
+
+def test_seed_refuses_non_worktree_at_base_path(seedable, workspace_root, monkeypatch):
+    # A plain (non-git) dir occupies __base__ → refuse to seed over it (never
+    # destructive), and record nothing.
+    proj, _ = seedable
+    calls = _mock_clone(monkeypatch)
+
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    base_path = slug_dir / checkout_manager._BASE_DIR_NAME
+    base_path.mkdir(parents=True)
+    (base_path / "sentinel.txt").write_text("keep me\n", encoding="utf-8")
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+    assert calls == []
+    assert (base_path / "sentinel.txt").exists()  # untouched
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
+def test_branch_checkout_path_collision_guard_for_reserved_name(project, workspace_root):
+    # A logical branch literally named "__base__" must NOT resolve onto the base dir.
+    p = checkout_manager._branch_checkout_path(project, checkout_manager._BASE_DIR_NAME)
+    assert p.name != checkout_manager._BASE_DIR_NAME
+    assert p.name == f"{checkout_manager._BASE_DIR_NAME}-branch"

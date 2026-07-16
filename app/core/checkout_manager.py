@@ -30,6 +30,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -49,6 +51,12 @@ logger = logging.getLogger(__name__)
 # The single literal for the per-install checkouts subdirectory under the
 # configured workspace root. Used everywhere a checkout path is derived.
 _CHECKOUTS_SUBDIR = "checkouts"
+
+# The reserved directory name for a project's base (branch-NULL) checkout under
+# its per-project slug dir (#607, ruling 4). A logical branch that sanitizes to
+# this literal is renamed by ``_branch_checkout_path``'s collision guard so it can
+# never land on — and clobber — the base dir.
+_BASE_DIR_NAME = "__base__"
 
 
 def _checkout_root() -> Path:
@@ -87,6 +95,11 @@ def _branch_checkout_path(project_v2_row: Dict[str, Any], branch: str) -> Path:
     Windows and POSIX alike.
     """
     sanitized = worktree_manager._sanitize_branch_name(branch)
+    if sanitized == _BASE_DIR_NAME:
+        # Collision guard (#607, ruling 4): the base checkout reserves
+        # ``__base__``. A logical branch whose name sanitizes to that exact literal
+        # is renamed so it can never resolve onto — and overwrite — the base dir.
+        sanitized = f"{sanitized}-branch"
     return _checkout_root() / _project_slug(project_v2_row) / sanitized
 
 
@@ -185,19 +198,137 @@ def _resolve_clone_url(origin: str) -> Optional[str]:
     return None
 
 
-def _ensure_base_checkout(project_id: str, runner_id: str) -> Optional[str]:
+def _seed_base_checkout(
+    project_v2_row: Optional[Dict[str, Any]],
+    project_id: str,
+    runner_id: str,
+) -> Optional[str]:
+    """Lazily self-seed a MISSING base checkout by cloning the project's remote (#607).
+
+    Called by ``_ensure_base_checkout`` only when no base checkout is materialized on
+    this runner (the pinned-runner-never-cloned case). Gated behind
+    ``AI_SHUFFLE_SELF_SEED`` (``settings.self_seed_checkouts``, default ON) — when the
+    flag is falsy, NOTHING is cloned and the caller falls through to today's honest
+    "not materialized here" (``None``).
+
+    The cloneable URL is recovered from legacy data via ``_resolve_clone_url``; when
+    that returns ``None`` (``local:``/``manual:`` origins, no matching legacy repo, or
+    a DB error) a clear warning is logged and NOTHING is cloned — again ``None`` and
+    the existing missing-checkout behavior. Never an ``or``-fallback chain: every path
+    handles ``None`` explicitly.
+
+    On a resolvable URL the seed does a FULL clone (``git_service.clone_repo``, which
+    disables git's interactive credential prompt) into a temp sibling dir under this
+    runner's own ``_checkout_root()``, then an atomic rename into
+    ``{project_slug}/__base__`` and an ``upsert_checkout`` of the base row. Any failure
+    removes the temp dir and leaves no partial checkout, returning ``None``.
+    """
+    if not settings.self_seed_checkouts:
+        return None
+    if not project_v2_row:
+        return None
+
+    origin = project_v2_row.get("origin")
+    clone_url = _resolve_clone_url(origin) if origin else None
+    if clone_url is None:
+        logger.warning(
+            "checkout_manager: cannot self-seed base checkout for project %s "
+            "(origin %r): no cloneable remote URL resolved; leaving unmaterialized",
+            project_id,
+            origin,
+        )
+        return None
+
+    slug_dir = _checkout_root() / _project_slug(project_v2_row)
+    base_path = slug_dir / _BASE_DIR_NAME
+    base_str = str(base_path)
+
+    # Idempotency / never-destroy: if something already occupies the base path,
+    # adopt it when it is a valid checkout, else refuse to touch it (standing #581
+    # / never-destructive rule) rather than clobbering it with a fresh clone.
+    if base_path.exists():
+        if _dir_is_worktree(base_str):
+            checkouts_db.upsert_checkout(project_id, runner_id, base_str, status="active")
+            return base_str
+        logger.warning(
+            "checkout_manager: %s exists but is not a git checkout; refusing to seed over it",
+            base_str,
+        )
+        return None
+
+    try:
+        slug_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # pragma: no cover - defensive
+        logger.warning("checkout_manager: cannot create slug dir %s: %s", slug_dir, e)
+        return None
+
+    try:
+        temp_dir = tempfile.mkdtemp(prefix=f"{_BASE_DIR_NAME}.seed-", dir=str(slug_dir))
+    except OSError as e:  # pragma: no cover - defensive
+        logger.warning(
+            "checkout_manager: cannot create temp seed dir under %s: %s", slug_dir, e
+        )
+        return None
+
+    success, err = git_service.clone_repo(temp_dir, clone_url)
+    if not success:
+        logger.warning(
+            "checkout_manager: self-seed clone failed for project %s from %s: %s",
+            project_id,
+            clone_url,
+            err,
+        )
+        _rmtree_quiet(temp_dir)
+        return None
+
+    try:
+        os.rename(temp_dir, base_str)
+    except OSError as e:
+        logger.warning(
+            "checkout_manager: atomic rename of seeded base %s -> %s failed: %s",
+            temp_dir,
+            base_str,
+            e,
+        )
+        _rmtree_quiet(temp_dir)
+        return None
+
+    checkouts_db.upsert_checkout(project_id, runner_id, base_str, status="active")
+    logger.info(
+        "checkout_manager: self-seeded base checkout for project %s at %s",
+        project_id,
+        base_str,
+    )
+    return base_str
+
+
+def _rmtree_quiet(path: str) -> None:
+    """Best-effort recursive delete of a seed temp dir; never raises."""
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:  # pragma: no cover - ignore_errors already swallows
+        logger.warning("checkout_manager: temp-dir cleanup failed for %s: %s", path, e)
+
+
+def _ensure_base_checkout(
+    project_id: str,
+    runner_id: str,
+    project_v2_row: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """Resolve the base (branch-NULL) checkout path for a project on this runner.
 
     Returns the path when a base checkout row exists AND its dir exists (refreshing
-    ``status`` to ``'active'`` if it had drifted). Returns ``None`` — honestly "not
-    materialized here" — when there is no row, or the row exists but its dir is gone.
-    Phase 3 NEVER recreates/clones a missing base.
+    ``status`` to ``'active'`` if it had drifted). When there is NO base checkout row
+    on this runner, attempts a lazy self-seed (``_seed_base_checkout``, behind
+    ``AI_SHUFFLE_SELF_SEED``); if the seed cannot run (flag off, or no cloneable URL
+    resolved) it falls through to ``None`` — honestly "not materialized here". When a
+    row exists but its dir is gone we NEVER recreate it in place — honest ``None``.
     """
     # branch=None → base checkout; legacy fallback resolves the runner_id=''
     # rows the v60 collapse seeded for pre-instance_id legacy projects.
     row = checkouts_db.get_checkout_with_legacy_fallback(project_id, runner_id)
     if not row:
-        return None
+        return _seed_base_checkout(project_v2_row, project_id, runner_id)
     path = row.get("path")
     if not path or not os.path.isdir(path):
         # Row survives but the dir was removed on this device — do NOT recreate.
@@ -294,7 +425,8 @@ def _ensure_branch_checkout(
     """Resolve (materializing if needed) the (project, runner, branch) checkout."""
     # A branch checkout requires a materialized base checkout to `git worktree add`
     # from. No base here → not materializable (return None; caller may 409/fallback).
-    base_path = _ensure_base_checkout(project_id, runner_id)
+    # Pass the row so a missing base can lazily self-seed (#607) before the worktree.
+    base_path = _ensure_base_checkout(project_id, runner_id, project_v2_row)
     if not base_path:
         return None
 
@@ -415,7 +547,7 @@ def ensure_checkout(
 
     branch = (branch or "").strip()
     if not branch:
-        return _ensure_base_checkout(project_id, runner_id)
+        return _ensure_base_checkout(project_id, runner_id, project_v2_row)
     return _ensure_branch_checkout(
         project_v2_row,
         project_id,

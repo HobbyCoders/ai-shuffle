@@ -340,6 +340,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Lazy self-seed of a MISSING base checkout (#607 PR-2). ON by default: when a
+    # session is pinned to a runner that has never materialized the project, the
+    # checkout_manager clones the project's remote on demand (recovered from legacy
+    # data) instead of failing "not on this device". Bounded by the clone-timeout,
+    # the interactive-prompt disable, and the local:/manual: hard exclusion. Kill
+    # switch: AI_SHUFFLE_SELF_SEED=false disables all on-demand cloning instantly.
+    self_seed_checkouts: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_SHUFFLE_SELF_SEED", "SELF_SEED_CHECKOUTS", "self_seed_checkouts"
+        ),
+    )
+
     # V2 projects cutover (Phase 3) is COMPLETE. Project/checkout resolution keys
     # unconditionally off the origin-keyed ``projects_v2`` + per-runner
     # ``checkouts`` tables (seeded by the v60 collapse migration) for any session
