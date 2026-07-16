@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db
@@ -64,7 +65,17 @@ def upsert_checkout(
     never clobbers a previously-recorded ``branch``/``head_sha``/``dirty``.
     ``status`` (which always has a value) and ``updated_at`` are always set.
     Returns the resulting row.
+
+    ``path`` MUST be absolute. The v60 collapse migration once seeded workspace-
+    RELATIVE paths verbatim from legacy ``projects.path`` (#654), which the V2
+    resolver — treating ``checkouts.path`` as absolute — could not resolve. Reject
+    a relative path here so no new relative row can ever be written.
     """
+    if not os.path.isabs(path):
+        raise ValueError(
+            f"upsert_checkout: refusing workspace-relative checkout path {path!r}; "
+            "checkouts.path must be absolute (see #654)"
+        )
     checkout_id = checkout_id_for(project_id, runner_id, path)
     with get_db() as conn:
         cursor = conn.cursor()

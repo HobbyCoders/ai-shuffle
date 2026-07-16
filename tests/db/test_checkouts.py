@@ -103,6 +103,19 @@ def test_get_missing_returns_none(project):
 
 
 # ---------------------------------------------------------------------------
+# Relative-path write guard (#654) — checkouts.path must be absolute.
+# ---------------------------------------------------------------------------
+
+def test_upsert_rejects_relative_path(project):
+    # The v60 collapse once seeded workspace-relative paths verbatim; the V2
+    # resolver treats checkouts.path as absolute, so reject relative writes.
+    with pytest.raises(ValueError):
+        checkouts.upsert_checkout(project["id"], "runnerA", "relative/repo")
+    # Nothing was written.
+    assert checkouts.list_checkouts(project["id"]) == []
+
+
+# ---------------------------------------------------------------------------
 # get_checkout_with_legacy_fallback — runner_id='' fallback (M-2)
 # ---------------------------------------------------------------------------
 

@@ -689,3 +689,47 @@ def test_branch_checkout_path_collision_guard_for_reserved_name(project, workspa
     p = checkout_manager._branch_checkout_path(project, checkout_manager._BASE_DIR_NAME)
     assert p.name != checkout_manager._BASE_DIR_NAME
     assert p.name == f"{checkout_manager._BASE_DIR_NAME}-branch"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_checkout_path: workspace-relative legacy paths (#654) are resolved
+# against the runner's workspace_dir at READ time; absolute paths pass through.
+# ---------------------------------------------------------------------------
+
+def _insert_relative_checkout_row(project_id, runner_id, rel_path, branch=None):
+    """Insert a checkouts row with a RELATIVE path directly (bypassing the
+    upsert_checkout guard) to reproduce a #654 legacy row."""
+    from app.db.base import get_db
+    cid = checkouts_db.checkout_id_for(project_id, runner_id, rel_path)
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, branch, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (cid, project_id, runner_id, rel_path, branch, "active"),
+        )
+
+
+def test_resolve_checkout_path_absolute_unchanged():
+    # Absolute paths are returned verbatim — POSIX and Windows styles alike, on
+    # any host OS (the primary is Windows, the worker Linux, sharing one DB).
+    assert checkout_manager._resolve_checkout_path("/workspace/x") == "/workspace/x"
+    assert checkout_manager._resolve_checkout_path(r"C:\x") == r"C:\x"
+
+
+def test_resolve_checkout_path_relative_joins_workspace(workspace_root):
+    # A workspace-relative path is joined under effective_workspace_dir (#654).
+    resolved = checkout_manager._resolve_checkout_path("ai-shuffle")
+    assert resolved == str(workspace_root / "ai-shuffle")
+
+
+def test_base_resolves_workspace_relative_legacy_path(project, mock_db, workspace_root):
+    # A #654 legacy base row whose path is workspace-RELATIVE resolves under the
+    # runner's workspace_dir and materializes normally.
+    (workspace_root / "relrepo").mkdir()
+    _insert_relative_checkout_row(project["id"], RUNNER, "relrepo")
+
+    path = checkout_manager.ensure_checkout(project, runner_id=RUNNER)
+    assert path == str(workspace_root / "relrepo")
+    # Read-only normalization — the DB row is NOT rewritten to the absolute path.
+    rows = checkouts_db.list_checkouts(project["id"])
+    assert [r["path"] for r in rows] == ["relrepo"]

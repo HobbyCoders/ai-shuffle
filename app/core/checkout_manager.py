@@ -28,7 +28,9 @@ No callers are wired in this commit (P4 does that). Reuses ``git_service`` and
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
+import posixpath
 import re
 import shutil
 import tempfile
@@ -67,6 +69,28 @@ def _checkout_root() -> Path:
     workspace override is honored. No new setting is introduced.
     """
     return Path(settings.effective_workspace_dir) / _CHECKOUTS_SUBDIR
+
+
+def _resolve_checkout_path(path: str) -> str:
+    """Resolve a ``checkouts.path`` read from the DB against this runner's workspace.
+
+    A ``checkouts.path`` is authoritative and, for rows written by V2, absolute.
+    But the v60 collapse migration (#654) seeded some rows verbatim from legacy
+    ``projects.path``, which could be workspace-RELATIVE (e.g. ``ai-shuffle``);
+    pre-V2 ``get_project_working_dir`` resolved those against ``workspace_dir`` at
+    runtime. Mirror that here: an ABSOLUTE path is returned unchanged; a RELATIVE
+    one is joined under ``settings.effective_workspace_dir`` so it resolves the
+    same way. Read-only normalization — the DB row is NEVER rewritten (a relative
+    row is repaired out-of-band; new relative writes are rejected by
+    ``checkouts.upsert_checkout``).
+
+    A path absolute on EITHER POSIX or Windows counts as absolute, so a path
+    authored on one runner's OS is never mangled when read on another (the primary
+    is Windows, the worker is Linux, and they share one Postgres).
+    """
+    if os.path.isabs(path) or ntpath.isabs(path) or posixpath.isabs(path):
+        return path
+    return str(Path(settings.effective_workspace_dir) / path)
 
 
 def _slugify(text: str) -> str:
@@ -330,12 +354,20 @@ def _ensure_base_checkout(
     if not row:
         return _seed_base_checkout(project_v2_row, project_id, runner_id)
     path = row.get("path")
-    if not path or not os.path.isdir(path):
+    if not path:
+        return None
+    # Normalize a workspace-relative legacy path (#654) before the on-disk check
+    # and the return; the raw DB value is left untouched (read-only normalization).
+    resolved = _resolve_checkout_path(path)
+    if not os.path.isdir(resolved):
         # Row survives but the dir was removed on this device — do NOT recreate.
         return None
-    if row.get("status") != "active":
+    # Status-refresh reuses the row's ORIGINAL path (its uniqueness key) so it
+    # updates in place — but only when that path is absolute, so a legacy relative
+    # row (repaired out-of-band) never trips upsert_checkout's relative-path guard.
+    if row.get("status") != "active" and os.path.isabs(path):
         checkouts_db.upsert_checkout(project_id, runner_id, path, status="active")
-    return path
+    return resolved
 
 
 def _adopt_legacy_worktree(
@@ -434,17 +466,23 @@ def _ensure_branch_checkout(
     row = checkouts_db.get_checkout(project_id, runner_id, branch=branch)
     if row:
         path = row.get("path")
-        if path and os.path.isdir(path):
-            if _dir_is_worktree(path):
-                if row.get("status") != "active":
+        # Normalize a workspace-relative legacy path (#654) for the on-disk checks
+        # and return; the raw DB value is left untouched (read-only normalization).
+        resolved = _resolve_checkout_path(path) if path else path
+        if resolved and os.path.isdir(resolved):
+            if _dir_is_worktree(resolved):
+                # Status-refresh reuses the ORIGINAL path (its uniqueness key) so it
+                # updates in place — only when absolute, so a legacy relative row
+                # never trips upsert_checkout's relative-path guard.
+                if row.get("status") != "active" and os.path.isabs(path):
                     checkouts_db.upsert_checkout(
                         project_id, runner_id, path, branch=branch, status="active"
                     )
-                return path
+                return resolved
             # Dir present but not a worktree — never destroy; surface not-materialized.
             logger.warning(
                 "checkout_manager: %s exists but is not a worktree; refusing to touch it",
-                path,
+                resolved,
             )
             return None
         # Row exists but its dir is gone → fall through and re-materialize below
