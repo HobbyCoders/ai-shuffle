@@ -82,7 +82,7 @@ async def test_eviction_lock_released_before_slow_teardown():
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _slow_disconnect():
+    async def _slow_disconnect(*args, **kwargs):
         started.set()
         await release.wait()
 
@@ -221,7 +221,7 @@ async def test_concurrent_evict_and_remove_same_session_single_teardown():
     pool = SessionPool(max_size=1)
     state = _make_state()
 
-    async def _yielding_disconnect():
+    async def _yielding_disconnect(*args, **kwargs):
         await asyncio.sleep(0)
 
     state.adapter.disconnect = AsyncMock(side_effect=_yielding_disconnect)
@@ -252,7 +252,7 @@ async def test_concurrent_sweeps_and_removals_stress():
         # subprocesses so evict_dead has candidates too.
         st = _make_state(idle_seconds=7200, alive=(i < 6))
 
-        async def _yielding_disconnect():
+        async def _yielding_disconnect(*args, **kwargs):
             await asyncio.sleep(0)
             await asyncio.sleep(0)
 
@@ -306,7 +306,7 @@ async def test_parallel_evict_if_needed_calls_are_serialized_and_safe():
     for i in range(4):
         st = _make_state()
 
-        async def _yielding_disconnect():
+        async def _yielding_disconnect(*args, **kwargs):
             await asyncio.sleep(0)
 
         st.adapter.disconnect = AsyncMock(side_effect=_yielding_disconnect)

@@ -41,12 +41,18 @@ class ProviderAdapter(ABC):
         """
 
     @abstractmethod
-    async def disconnect(self, grace_period: float = 5.0) -> None:
+    async def disconnect(
+        self, grace_period: float = 5.0, *, session_id: Optional[str] = None
+    ) -> None:
         """Disconnect from the provider backend.
 
         Should allow the backend time to flush any pending writes (e.g., JSONL)
         before forcefully terminating. The grace_period (seconds) controls how
         long to wait for a natural exit before sending SIGTERM.
+
+        ``session_id`` (optional, app-level) lets the adapter flag an intentional
+        teardown so expected shutdown noise from the backend can be classified
+        as such rather than persisted as a durable error.
         """
 
     @abstractmethod

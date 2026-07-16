@@ -105,6 +105,31 @@ class ErrorLogDBHandler(logging.Handler):
                 except Exception:
                     session_id = None
 
+            # Expected-shutdown demotion: when the fatal-reader record belongs to
+            # a session the adapter just flagged for intentional teardown (options
+            # reconnect, rewind, idle/LRU or interrupt eviction), the non-zero
+            # subprocess exit is the force-terminate we asked for — not a live
+            # crash. Log it at WARNING for visibility but do NOT persist a durable
+            # ERROR row. One-shot + time-bounded (see expected_shutdown.py), so a
+            # genuine reader crash on a later turn of the same session still lands
+            # as an ERROR. Records without a flag keep the current behavior.
+            if session_id and _FATAL_READER_MARKER in message:
+                try:
+                    from app.core.expected_shutdown import consume_expected_shutdown
+
+                    if consume_expected_shutdown(session_id):
+                        logger.warning(
+                            "Suppressed expected-shutdown fatal-reader error for "
+                            "session %s (adapter-initiated teardown): %s",
+                            session_id,
+                            message,
+                        )
+                        return
+                except Exception:
+                    # Never let the demotion check break the logging path — fall
+                    # through and persist the record as before.
+                    pass
+
             # Enrich the fatal-reader record with the real CLI stderr tail the
             # SDK's ProcessError never carries. Conservative substring match;
             # fully guarded so a missing state / empty ring is a no-op.

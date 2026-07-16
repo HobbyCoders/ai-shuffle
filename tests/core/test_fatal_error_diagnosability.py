@@ -36,6 +36,13 @@ from app.core.session_context import (
 )
 from app.core import error_log_handler
 from app.core.error_log_handler import ErrorLogDBHandler
+from app.core import expected_shutdown
+from app.core.expected_shutdown import (
+    mark_expected_shutdown,
+    consume_expected_shutdown,
+    clear_expected_shutdown,
+    _EXPECTED_SHUTDOWN_TTL_SECONDS,
+)
 
 
 # =============================================================================
@@ -255,3 +262,138 @@ class TestFatalStderrEnrichment:
         rows = _rows(test_db, "sess-plain")
         assert len(rows) == 1
         assert "[Captured CLI stderr]" not in (rows[0]["detail"] or "")
+
+
+# =============================================================================
+# Expected-shutdown registry (one-shot + TTL)  — issue #626
+# =============================================================================
+
+class TestExpectedShutdownRegistry:
+    def teardown_method(self):
+        # Never leak a mark between tests.
+        clear_expected_shutdown("sess-es")
+
+    def test_mark_then_consume_is_one_shot(self):
+        mark_expected_shutdown("sess-es")
+        # First consume matches, second does not (mark popped).
+        assert consume_expected_shutdown("sess-es") is True
+        assert consume_expected_shutdown("sess-es") is False
+
+    def test_unmarked_session_returns_false(self):
+        assert consume_expected_shutdown("never-marked") is False
+
+    def test_empty_or_none_session_id_is_noop(self):
+        mark_expected_shutdown(None)
+        mark_expected_shutdown("")
+        assert consume_expected_shutdown(None) is False
+        assert consume_expected_shutdown("") is False
+
+    def test_expired_mark_not_honored(self, monkeypatch):
+        # Set the mark "in the past" beyond the TTL: consume must discard it.
+        base = 1000.0
+        monkeypatch.setattr(expected_shutdown.time, "monotonic", lambda: base)
+        mark_expected_shutdown("sess-es")
+        # Jump the clock past the TTL window.
+        monkeypatch.setattr(
+            expected_shutdown.time,
+            "monotonic",
+            lambda: base + _EXPECTED_SHUTDOWN_TTL_SECONDS + 1.0,
+        )
+        assert consume_expected_shutdown("sess-es") is False
+
+    def test_fresh_mark_within_ttl_is_honored(self, monkeypatch):
+        base = 2000.0
+        monkeypatch.setattr(expected_shutdown.time, "monotonic", lambda: base)
+        mark_expected_shutdown("sess-es")
+        monkeypatch.setattr(
+            expected_shutdown.time,
+            "monotonic",
+            lambda: base + (_EXPECTED_SHUTDOWN_TTL_SECONDS / 2.0),
+        )
+        assert consume_expected_shutdown("sess-es") is True
+
+    def test_stale_marks_pruned_on_new_mark(self, monkeypatch):
+        base = 3000.0
+        monkeypatch.setattr(expected_shutdown.time, "monotonic", lambda: base)
+        mark_expected_shutdown("stale-1")
+        # Advance past TTL, then mark a different session — prune should evict
+        # the stale one so it can never suppress a later crash.
+        monkeypatch.setattr(
+            expected_shutdown.time,
+            "monotonic",
+            lambda: base + _EXPECTED_SHUTDOWN_TTL_SECONDS + 5.0,
+        )
+        mark_expected_shutdown("stale-2")
+        assert consume_expected_shutdown("stale-1") is False
+        # Cleanup the second one.
+        clear_expected_shutdown("stale-2")
+
+
+# =============================================================================
+# Expected-shutdown demotion in emit()  — issue #626
+# =============================================================================
+
+class TestExpectedShutdownDemotion:
+    def teardown_method(self):
+        clear_expected_shutdown("sess-shut")
+
+    def test_flagged_fatal_reader_not_persisted_warns(self, mock_db, test_db,
+                                                      monkeypatch, caplog):
+        # No pooled state needed; ensure enrichment lookup is a no-op regardless.
+        import app.core.session_pool as sp
+        monkeypatch.setattr(sp, "_session_pool", None, raising=False)
+
+        mark_expected_shutdown("sess-shut")
+
+        token = current_session_id.set("sess-shut")
+        try:
+            with caplog.at_level(logging.WARNING, logger="app.core.error_log_handler"):
+                _emit("Fatal error in message reader: Command failed with exit code 1")
+        finally:
+            current_session_id.reset(token)
+
+        # No durable ERROR row for the flagged, expected teardown.
+        rows = _rows(test_db, "sess-shut")
+        assert rows == []
+        # But a WARNING was emitted for visibility.
+        warns = [r for r in caplog.records
+                 if r.levelno == logging.WARNING and "sess-shut" in r.getMessage()]
+        assert len(warns) == 1
+        # One-shot: the mark was consumed.
+        assert consume_expected_shutdown("sess-shut") is False
+
+    def test_unflagged_fatal_reader_still_persisted(self, mock_db, test_db,
+                                                    monkeypatch):
+        # Same message + session, but NO expected-shutdown flag: a genuine
+        # mid-turn reader crash must still land as a durable ERROR row.
+        import app.core.session_pool as sp
+        monkeypatch.setattr(sp, "_session_pool", None, raising=False)
+
+        token = current_session_id.set("sess-shut")
+        try:
+            _emit("Fatal error in message reader: Command failed with exit code 1")
+        finally:
+            current_session_id.reset(token)
+
+        rows = _rows(test_db, "sess-shut")
+        assert len(rows) == 1
+        assert rows[0]["message"].startswith("Fatal error in message reader")
+
+    def test_flag_is_one_shot_second_fatal_persisted(self, mock_db, test_db,
+                                                     monkeypatch):
+        # A single flag suppresses exactly one fatal; a subsequent fatal for the
+        # same session (e.g. a real crash after a later reconnect) is persisted.
+        import app.core.session_pool as sp
+        monkeypatch.setattr(sp, "_session_pool", None, raising=False)
+
+        mark_expected_shutdown("sess-shut")
+
+        token = current_session_id.set("sess-shut")
+        try:
+            _emit("Fatal error in message reader: exit code 1")   # suppressed
+            _emit("Fatal error in message reader: exit code 1")   # persisted
+        finally:
+            current_session_id.reset(token)
+
+        rows = _rows(test_db, "sess-shut")
+        assert len(rows) == 1

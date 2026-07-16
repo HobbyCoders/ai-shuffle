@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+from app.core.expected_shutdown import mark_expected_shutdown
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import ProviderEvent, SessionOptions, mcp_servers_equivalent
 from app.core.sdk_process_handle import SdkProcessHandle
@@ -88,12 +89,26 @@ class ClaudeAgentAdapter(ProviderAdapter):
         self._connected = True
         self._connect_options = sdk_options
 
-    async def disconnect(self, grace_period: float = _SUBPROCESS_EXIT_GRACE_SECONDS) -> None:
-        """Disconnect, giving the subprocess time to flush JSONL writes."""
+    async def disconnect(
+        self,
+        grace_period: float = _SUBPROCESS_EXIT_GRACE_SECONDS,
+        *,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Disconnect, giving the subprocess time to flush JSONL writes.
+
+        ``session_id`` (the app-level session id, matching the one attributed to
+        the SDK reader task via ``set_current_session_id``) lets us flag this as
+        an *expected* teardown before force-terminating: the SDK's still-live
+        message-reader task logs "Fatal error in message reader" at ERROR when
+        its subprocess is killed, and ``error_log_handler`` demotes that flagged
+        record to WARNING instead of persisting expected-shutdown noise.
+        """
         if not self._client:
             return
 
-        handle = SdkProcessHandle(self._client)
+        client = self._client
+        handle = SdkProcessHandle(client)
 
         # Wait for natural subprocess exit before forcing termination
         if handle.is_alive():
@@ -101,21 +116,39 @@ class ClaudeAgentAdapter(ProviderAdapter):
                 await handle.wait(timeout=grace_period)
                 logger.debug(f"[Adapter] Subprocess exited naturally (rc={handle.returncode})")
             except asyncio.TimeoutError:
+                # This teardown is intentional; the terminate below will provoke
+                # the SDK reader-task fatal. Flag it as expected shutdown BEFORE
+                # anything can kill the subprocess so error_log_handler (which
+                # runs on a different task/thread) can demote the fatal.
+                mark_expected_shutdown(session_id)
                 logger.warning(f"[Adapter] Subprocess didn't exit in {grace_period}s, terminating")
-                handle.terminate()
+                # Close the SDK client/reader FIRST: this sets Query._closed so
+                # the reader exits via its clean `if self._closed: break` path and
+                # its read task is cancelled (CancelledError, not ProcessError),
+                # shrinking the terminate->fatal race window before we force-kill.
                 try:
-                    await handle.wait(timeout=2.0)
-                except asyncio.TimeoutError:
-                    handle.kill()
-                    logger.warning("[Adapter] Sent SIGKILL to subprocess")
+                    await client.disconnect()
+                except RuntimeError as e:
+                    if "cancel scope" not in str(e):
+                        raise
+                    # anyio cancel scope issue from asyncio.shield — fall through
+                    # to the manual terminate below.
+                # Safety net: force-terminate if the SDK close left it alive.
+                if handle.is_alive():
+                    handle.terminate()
+                    try:
+                        await handle.wait(timeout=2.0)
+                    except asyncio.TimeoutError:
+                        handle.kill()
+                        logger.warning("[Adapter] Sent SIGKILL to subprocess")
 
-        # SDK disconnect (no-op if process already exited)
+        # SDK disconnect (no-op if already closed above / process already exited)
         try:
-            await self._client.disconnect()
+            await client.disconnect()
         except RuntimeError as e:
             if "cancel scope" in str(e):
                 # anyio cancel scope issue from asyncio.shield — fall back
-                SdkProcessHandle(self._client).terminate()
+                SdkProcessHandle(client).terminate()
             else:
                 raise
         finally:

@@ -184,7 +184,11 @@ async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> N
     waiting for natural exit, SIGTERM, then SIGKILL if needed.
     """
     try:
-        await adapter.disconnect()
+        # Pass the session id so the adapter can flag an intentional teardown:
+        # the SDK reader-task "Fatal error in message reader" that a force-
+        # terminate provokes is then demoted to WARNING instead of persisted as
+        # a durable error_log ERROR (see app/core/expected_shutdown.py).
+        await adapter.disconnect(session_id=session_id)
         logger.debug(f"[Pool] Disconnected adapter for session {session_id}")
     except Exception as e:
         logger.warning(f"[Pool] Error during graceful disconnect for {session_id}: {e}")
