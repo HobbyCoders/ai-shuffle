@@ -77,6 +77,7 @@ class SessionRow(TypedDict):
     fork_point_message_index: Optional[int]
     v2_stream: bool
     working_set_ref: Optional[str]
+    context_usage_json: Optional[Dict[str, Any]]
 
 
 class SessionSearchResult(TypedDict):
@@ -580,6 +581,57 @@ def update_session(
         )
 
     return get_session(session_id)
+
+
+def set_session_context_usage(session_id: str, data: Dict[str, Any]) -> None:
+    """Persist the latest SDK context-window usage breakdown for a session.
+
+    ``data`` is the raw SDK ``get_context_usage()`` payload. It is wrapped as
+    ``{"captured_at": <iso>, "data": <data>}`` and stored in the nullable
+    ``sessions.context_usage_json`` JSONB column, overwriting any prior
+    snapshot. Serialized to a JSON string so the SQLite test shim (which stores
+    JSONB columns as TEXT) round-trips identically to Postgres.
+    """
+    _ph = ph()
+    wrapped = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "data": data,
+    }
+    payload_json = json.dumps(wrapped)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET context_usage_json = {_ph} WHERE id = {_ph}",
+            (payload_json, session_id),
+        )
+
+
+def get_session_context_usage_snapshot(session_id: str) -> Optional[Dict[str, Any]]:
+    """Read the persisted context-usage snapshot for a session.
+
+    Returns the wrapped ``{"captured_at": <iso>, "data": {...}}`` dict, or
+    ``None`` when the column is empty / the session does not exist. Decodes the
+    JSONB value (Postgres returns a dict; the SQLite test shim stores TEXT).
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT context_usage_json FROM sessions WHERE id = {_ph}",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    raw = row["context_usage_json"] if not isinstance(row, (tuple, list)) else row[0]
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw
 
 
 def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:

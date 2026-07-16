@@ -4,10 +4,11 @@ Persistence helpers for query turn results.
 Extracted from query_engine.py to isolate DB write logic.
 """
 
+import asyncio
 import collections
 import collections.abc
 import logging
-from typing import Deque, Optional, Callable
+from typing import Any, Deque, Optional, Callable, Set
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -17,6 +18,101 @@ logger = logging.getLogger(__name__)
 
 
 _STDERR_CAPTURE_MAXLEN = 50
+
+# Bound on the live SDK get_context_usage() control call. This is the SINGLE
+# source of truth for the timeout: both the turn-end capture below and the GET
+# context-usage endpoint drive the call through ``shielded_get_context_usage``.
+# A wedged CLI must never hang or delay a request or turn completion.
+SDK_CONTEXT_USAGE_TIMEOUT_SECONDS = 5.0
+
+# Strong references to detached capture tasks. asyncio only keeps a weak
+# reference to a bare create_task() result, so without this the task could be
+# garbage-collected mid-flight; the done-callback discards it on completion.
+_context_usage_capture_tasks: "Set[asyncio.Task]" = set()
+
+
+async def shielded_get_context_usage(adapter: Any) -> Optional[dict]:
+    """Run ``adapter.get_context_usage()`` bounded, without cancelling it midflight.
+
+    This is the SINGLE copy of the pattern shared by the turn-end capture and
+    the GET context-usage endpoint. The SDK control call runs on a DETACHED task
+    guarded by a SHIELD: on timeout we must NOT cancel the in-flight control
+    request — cancelling it mid-flight leaks the entry in the SDK client's
+    pending_control_responses, which can wedge later control calls. Shielding
+    lets the ``wait_for`` time out while the underlying call keeps running to
+    completion in the background.
+
+    Returns the raw usage dict on success, or ``None`` when the SDK returns
+    ``None`` (control call unsupported). Raises ``asyncio.TimeoutError`` when the
+    call does not complete within the bound, so callers can distinguish a
+    timeout from an unsupported call.
+    """
+    usage_task = asyncio.create_task(adapter.get_context_usage())
+    # Retrieve any exception on the detached task so a failure after we've timed
+    # out doesn't surface as "Task exception was never retrieved".
+    usage_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    return await asyncio.wait_for(
+        asyncio.shield(usage_task),
+        timeout=SDK_CONTEXT_USAGE_TIMEOUT_SECONDS,
+    )
+
+
+async def capture_context_usage(
+    session_id: str,
+    log_prefix: str = "",
+) -> None:
+    """Capture and persist the SDK context-usage breakdown for a finished turn.
+
+    Self-contained and best-effort: this peeks the session pool itself (so
+    callers need only pass the session id), runs ``adapter.get_context_usage()``
+    via ``shielded_get_context_usage``, and writes the payload to
+    ``sessions.context_usage_json``. Intended to run DETACHED — see
+    ``schedule_context_usage_capture`` — so it never delays a turn's terminal
+    event. Any failure/timeout is logged at debug and swallowed: capturing must
+    NEVER raise or delay the turn.
+
+    Known gap: ``execute_query`` in query_engine.py holds no live adapter, so a
+    turn that completes only through that path is not captured here; the GET
+    endpoint's live path still serves such a session while it stays pooled.
+    """
+    # Lazy import to mirror the endpoint and avoid an import cycle with the pool.
+    from app.core.session_pool import get_session_pool
+    try:
+        state = get_session_pool().peek(session_id)
+        if state is None or not state.is_connected or state.adapter is None:
+            return
+        result = await shielded_get_context_usage(state.adapter)
+        if result is None:
+            logger.debug(
+                f"{log_prefix}context-usage capture unavailable for {session_id}"
+            )
+            return
+        await run_sync(
+            database.set_session_context_usage,
+            session_id=session_id,
+            data=result,
+        )
+        logger.debug(f"{log_prefix}Captured context-usage for {session_id}")
+    except Exception as e:
+        logger.debug(
+            f"{log_prefix}context-usage capture failed for {session_id}: {e}"
+        )
+
+
+def schedule_context_usage_capture(session_id: str, log_prefix: str = "") -> None:
+    """Fire-and-forget the turn-end context-usage capture on a detached task.
+
+    ``capture_context_usage`` self-guards (peeks the pool, checks the
+    connection), so turn-end call sites just hand off the session id and move on
+    — the capture runs detached and never delays the terminal event. The task is
+    held in a module-level set with a done-callback that discards it, giving the
+    event loop a strong reference so the detached task isn't GC'd mid-flight.
+    """
+    task = asyncio.create_task(
+        capture_context_usage(session_id, log_prefix=log_prefix)
+    )
+    _context_usage_capture_tasks.add(task)
+    task.add_done_callback(_context_usage_capture_tasks.discard)
 
 
 def _wrap_stderr_capture(

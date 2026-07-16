@@ -4,19 +4,21 @@
 	 * ContextUsageBar (context-window %) and UsageLimitIndicator (plan usage
 	 * limits) into ONE glass pill + ONE popover.
 	 *
-	 * The pill shows a small circular progress ring (context-window fraction),
-	 * coloured by the severity of MAX(context %, resolved five-hour %), plus the
-	 * rounded context percent. It is ALWAYS visible.
+	 * The pill is a single circular progress ring (context-window fraction),
+	 * coloured by the severity of MAX(context %, resolved five-hour %). No inline
+	 * text — the percentage rides on the button's aria-label. It is ALWAYS visible.
 	 *
-	 * The popover stacks, top → bottom:
-	 *   1. Context window — total row with a collapsible per-category breakdown.
-	 *      The breakdown is fetched from the live SDK (`/context-usage`) when the
-	 *      POPOVER opens and refreshed at turn end (never polled mid-stream); the
-	 *      poller estimate is the fallback before the first fetch lands. Expansion
-	 *      is persisted in localStorage (`aihub.contextBreakdownOpen`).
+	 * The popover is a wide, compact panel; every data row is one line (label left,
+	 * value right) with a thin full-width bar beneath. It stacks, top → bottom:
+	 *   1. Context window — header total plus an always-shown per-category
+	 *      breakdown. The breakdown is fetched from the SDK (`/context-usage`) when
+	 *      the POPOVER opens and refreshed at turn end (never polled mid-stream);
+	 *      `source: "persisted"` (final snapshot from the session's last turn end)
+	 *      is treated as a valid rich breakdown. The poller estimate is the fallback
+	 *      before the first fetch lands — a fresh session shows em-dash rows.
 	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
 	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
-	 *      and reset countdown. "No usage data yet" when the bucket is empty.
+	 *      and reset text inline. "No usage data yet" when the bucket is empty.
 	 *   3. Footer — breakdown status (left) + effective model label (right).
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
@@ -39,10 +41,12 @@
 		computeContextBreakdown,
 		mapSdkContextUsage,
 		decideBreakdownRefresh,
+		breakdownStatusLabel,
 		formatTokenCount,
 		usageSeverity,
 		type ContextBreakdown,
 		type BreakdownRefreshState,
+		type BreakdownSource,
 		type UsageSeverity,
 	} from './context-usage';
 	import {
@@ -101,12 +105,14 @@
 		open = !open;
 	}
 
-	// ── Live SDK breakdown = the single display source for the context section ─
+	// ── SDK/persisted breakdown = the single display source for the context section ─
 	let richBreakdown = $state<ContextBreakdown | null>(null);
+	// Where the current rich breakdown came from — drives the footer status. Both
+	// "live" and "persisted" render an identical breakdown; only the label differs.
+	let richSource = $state<BreakdownSource>(null);
 	const sessionId = $derived($activeSession.sessionId);
 	const isStreaming = $derived($activeSession.isStreaming);
 	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
-	const isRich = $derived(richBreakdown !== null);
 
 	let currentController: AbortController | null = null;
 	function cancelFetch() {
@@ -120,7 +126,10 @@
 		try {
 			const res = await getContextUsage(sid, { signal: controller.signal });
 			if (controller.signal.aborted) return;
-			if (res.available) richBreakdown = mapSdkContextUsage(res.usage);
+			if (res.available) {
+				richBreakdown = mapSdkContextUsage(res.usage);
+				richSource = res.source;
+			}
 		} catch {
 			// Aborted or network error → keep whatever is on screen.
 		}
@@ -138,9 +147,11 @@
 			case 'clear':
 				cancelFetch();
 				richBreakdown = null;
+				richSource = null;
 				break;
 			case 'open-fetch':
 				richBreakdown = null;
+				richSource = null;
 				fetchBreakdown(next.sessionId!);
 				break;
 			case 'refresh':
@@ -150,25 +161,6 @@
 				break;
 		}
 	});
-
-	// ── Category breakdown expand state (persisted) ───────────────────────
-	const BREAKDOWN_OPEN_KEY = 'aihub.contextBreakdownOpen';
-	function loadBreakdownOpen(): boolean {
-		try {
-			return localStorage.getItem(BREAKDOWN_OPEN_KEY) === '1';
-		} catch {
-			return false;
-		}
-	}
-	let breakdownOpen = $state(loadBreakdownOpen());
-	function toggleBreakdown() {
-		breakdownOpen = !breakdownOpen;
-		try {
-			localStorage.setItem(BREAKDOWN_OPEN_KEY, breakdownOpen ? '1' : '0');
-		} catch {
-			// best-effort persistence
-		}
-	}
 
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
@@ -257,7 +249,7 @@
 		type="button"
 		class="usage-indicator"
 		title="{formatTokenCount(breakdown.totalUsed)} / {formatTokenCount(contextMax)} tokens — click for details"
-		aria-label="Context and usage"
+		aria-label="Context and usage — {Math.round(contextPercent)}% of context window used"
 		aria-haspopup="dialog"
 		aria-expanded={open}
 		onclick={toggle}
@@ -276,42 +268,22 @@
 				stroke-dashoffset={ringDashoffset}
 			/>
 		</svg>
-		<span class="usage-text">{Math.round(contextPercent)}%</span>
 	</button>
 
 	{#if open}
 		<div class="usage-popover" role="dialog" aria-label="Context and usage">
 			<!-- ═══ Context window ═══ -->
 			<div class="ctx-section">
-				<div class="ctx-header">
+				<div class="row-line">
 					<span class="row-label">Context window</span>
-					<div class="ctx-summary">
-						<span class="ctx-tokens">
-							{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
-								displayBreakdown.contextMax
-							)}
-							(<span class="ctx-pct {displayBreakdown.severity}"
-								>{Math.round(displayBreakdown.totalPercent)}%</span
-							>)
-						</span>
-						<button
-							type="button"
-							class="ctx-chevron"
-							class:expanded={breakdownOpen}
-							aria-expanded={breakdownOpen}
-							aria-label={breakdownOpen ? 'Hide breakdown' : 'Show breakdown'}
-							onclick={toggleBreakdown}
+					<span class="ctx-value">
+						{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
+							displayBreakdown.contextMax
+						)}
+						<span class="ctx-pct {displayBreakdown.severity}"
+							>({Math.round(displayBreakdown.totalPercent)}%)</span
 						>
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="2"
-									d="M19 9l-7 7-7-7"
-								/>
-							</svg>
-						</button>
-					</div>
+					</span>
 				</div>
 				<div class="row-bar">
 					<div
@@ -320,22 +292,19 @@
 					></div>
 				</div>
 
-				{#if breakdownOpen}
-					{#each displayBreakdown.rows as row (row.key)}
-						<div class="popover-row breakdown-row">
-							<div class="row-head">
-								<span class="row-label">{row.label}</span>
-								<span class="row-pct">{formatTokenCount(row.tokens)}</span>
-							</div>
-							<div class="row-bar">
-								<div class="row-fill" style="width: {row.barPercent}%"></div>
-							</div>
-							{#if row.subline}
-								<div class="row-reset">{row.subline}</div>
-							{/if}
+				{#each displayBreakdown.rows as row (row.key)}
+					<div class="breakdown-row">
+						<div class="row-line">
+							<span class="breakdown-label">
+								{row.label}{#if row.subline}<span class="row-sub"> · {row.subline}</span>{/if}
+							</span>
+							<span class="breakdown-value">{row.empty ? '—' : formatTokenCount(row.tokens)}</span>
 						</div>
-					{/each}
-				{/if}
+						<div class="row-bar mini">
+							<div class="row-fill" style="width: {row.empty ? 0 : row.barPercent}%"></div>
+						</div>
+					</div>
+				{/each}
 			</div>
 
 			<div class="popover-divider"></div>
@@ -364,21 +333,23 @@
 				{#each items as item (item.type)}
 					{@const rowSeverity = usageSeverity(item.pct)}
 					<div class="popover-row">
-						<div class="row-head">
+						<div class="row-line">
 							<span class="row-label">{item.label}</span>
-							<span class="row-pct {rowSeverity}">{item.pct}%</span>
+							<span class="row-value">
+								<span class="row-reset-inline">
+									{#if item.countdown}
+										resets in {item.countdown}
+									{:else if item.hasReset}
+										resets soon
+									{:else}
+										no reset window
+									{/if}
+								</span>
+								<span class="row-pct {rowSeverity}">{item.pct}%</span>
+							</span>
 						</div>
 						<div class="row-bar">
 							<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
-						</div>
-						<div class="row-reset">
-							{#if item.countdown}
-								resets in {item.countdown}
-							{:else if item.hasReset}
-								resets soon
-							{:else}
-								no reset window
-							{/if}
 						</div>
 					</div>
 				{/each}
@@ -388,13 +359,7 @@
 
 			<!-- ═══ Footer ═══ -->
 			<div class="popover-footer">
-				<span class="footer-status">
-					{#if isRich}
-						{isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown'}
-					{:else}
-						estimated from last turn
-					{/if}
-				</span>
+				<span class="footer-status">{breakdownStatusLabel(richSource, isStreaming)}</span>
 				<span class="footer-model">{effectiveModelLabel}</span>
 			</div>
 		</div>
@@ -410,10 +375,12 @@
 	/* ===== USAGE INDICATOR - Glass styling to match desktop =====
 	   Rendered as a button here (clickable), so reset the button chrome. */
 	.usage-indicator {
-		display: flex;
+		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		padding: 4px 8px;
+		justify-content: center;
+		min-width: 32px;
+		min-height: 32px;
+		padding: 5px;
 		background: var(--glass-bg);
 		backdrop-filter: blur(var(--glass-blur, 12px));
 		-webkit-backdrop-filter: blur(var(--glass-blur, 12px));
@@ -436,7 +403,9 @@
 		transform-origin: center;
 	}
 	.ring-track {
-		stroke: color-mix(in oklch, var(--muted) 50%, var(--background));
+		/* Foreground-mix reads slightly lighter than the toolbar in dark mode and
+		   slightly darker in light mode, so the unfilled ring stays visible in both. */
+		stroke: color-mix(in oklch, var(--foreground) 12%, var(--background));
 	}
 	.ring-progress {
 		stroke: var(--primary);
@@ -449,23 +418,20 @@
 		stroke: var(--destructive);
 	}
 
-	.usage-text {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		letter-spacing: 0.02em;
-	}
-
-	/* ===== Popover — opens upward above the pill (dock sits at the bottom) ===== */
+	/* ===== Popover — wide + compact, opens upward above the pill (dock sits at
+	   the bottom). Width is clamped to the viewport so it never overflows on
+	   mobile. Per CSS, min-width is resolved after max-width and wins when the
+	   two conflict — so the viewport clamp must live inside min-width too, or a
+	   narrow viewport would still force the popover to the raw 340px floor. ===== */
 	.usage-popover {
 		position: absolute;
 		bottom: calc(100% + 6px);
 		left: 0;
 		z-index: 50;
-		min-width: 240px;
-		max-width: 300px;
-		padding: 10px;
+		width: max-content;
+		min-width: min(340px, calc(100vw - 24px));
+		max-width: min(380px, calc(100vw - 24px));
+		padding: 12px 14px;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -487,27 +453,27 @@
 	.ctx-section {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: 5px;
 	}
-	.ctx-header {
+
+	/* One-line row: label left, value right — shared by every data row. */
+	.row-line {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: 8px;
+		gap: 12px;
 	}
-	.ctx-summary {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-	}
-	.ctx-tokens {
-		font-size: 10.5px;
+
+	.ctx-value {
+		font-family: var(--font-mono);
+		font-size: 11px;
 		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
 	}
 	.ctx-pct {
-		font-family: var(--font-mono);
 		font-weight: 600;
+		color: var(--foreground);
 	}
 	.ctx-pct.warning {
 		color: var(--warning);
@@ -515,35 +481,29 @@
 	.ctx-pct.danger {
 		color: var(--destructive);
 	}
-	.ctx-chevron {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 18px;
-		height: 18px;
-		padding: 0;
-		background: transparent;
-		border: none;
-		border-radius: 4px;
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: background 0.15s ease, color 0.15s ease;
-	}
-	.ctx-chevron:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-	.ctx-chevron svg {
-		width: 14px;
-		height: 14px;
-		transition: transform 0.2s ease;
-	}
-	.ctx-chevron.expanded svg {
-		transform: rotate(180deg);
-	}
 
+	/* Per-category breakdown rows — indented + smaller, always shown. */
 	.breakdown-row {
-		margin-top: 2px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		padding-left: 12px;
+	}
+	.breakdown-label {
+		font-size: 11px;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+	}
+	.row-sub {
+		font-size: 10px;
+		opacity: 0.65;
+	}
+	.breakdown-value {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
 
 	.popover-divider {
@@ -558,23 +518,30 @@
 		gap: 4px;
 	}
 
-	.row-head {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 8px;
-	}
-
 	.row-label {
 		font-size: 12px;
 		color: var(--foreground);
+		white-space: nowrap;
+	}
+
+	/* Usage-row value: reset text (muted) + percentage (emphasized), inline right. */
+	.row-value {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 8px;
+		white-space: nowrap;
+	}
+	.row-reset-inline {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
 	}
 
 	.row-pct {
 		font-family: var(--font-mono);
 		font-size: 11px;
 		font-weight: 600;
-		color: var(--muted-foreground);
+		color: var(--foreground);
+		font-variant-numeric: tabular-nums;
 	}
 	.row-pct.warning {
 		color: var(--warning);
@@ -583,18 +550,23 @@
 		color: var(--destructive);
 	}
 
+	/* Thin full-width track — same foreground-mix as the pill ring so unfilled
+	   bars stay visible in both themes. */
 	.row-bar {
 		width: 100%;
-		height: 5px;
-		background: color-mix(in oklch, var(--muted) 50%, var(--background));
-		border-radius: 3px;
+		height: 3px;
+		background: color-mix(in oklch, var(--foreground) 12%, var(--background));
+		border-radius: 999px;
 		overflow: hidden;
+	}
+	.row-bar.mini {
+		height: 2px;
 	}
 
 	.row-fill {
 		height: 100%;
 		background: var(--primary);
-		border-radius: 3px;
+		border-radius: 999px;
 		transition: width 0.3s ease;
 	}
 	.row-fill.warning {

@@ -126,6 +126,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    schedule_context_usage_capture,
     log_captured_cli_stderr,
 )
 from app.core.session_context import set_current_session_id
@@ -1650,6 +1651,12 @@ async def stream_query(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Capture the SDK context-usage breakdown so the context-usage endpoint can
+    # serve a persisted snapshot after the subprocess is evicted from the pool.
+    # Runs DETACHED (self-guards on the pool's live adapter) so it never delays
+    # the terminal event below.
+    schedule_context_usage_capture(session_id, log_prefix="")
 
     # Push agent-memory the CLI wrote this turn up to the shared DB.
     await push_memory(project_id, getattr(options, "cwd", None))
@@ -3478,6 +3485,11 @@ async def _stream_to_websocket_impl(
         prompt=prompt,
         working_dir=getattr(options, "cwd", None),
     )
+
+    # Capture the SDK context-usage breakdown. Runs DETACHED and self-guards on
+    # the pool's live adapter (a no-op if the subprocess died mid-turn), so it
+    # never delays the terminal event below.
+    schedule_context_usage_capture(session_id, log_prefix="[WS] ")
 
     # Push any agent-memory the CLI wrote this turn up to the shared DB.
     await push_memory(project_id, getattr(options, "cwd", None))

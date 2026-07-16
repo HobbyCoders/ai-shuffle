@@ -33,6 +33,13 @@ export interface ContextBreakdownRow {
 	barPercent: number;
 	/** Muted caption under the row, or null for none. */
 	subline: string | null;
+	/**
+	 * True when this row has no real value to show yet (a fresh session with zero
+	 * usage): the popover renders an em-dash and an empty bar instead of "0". The
+	 * System overhead / Autocompact buffer row is never empty — it always shows the
+	 * fixed reserve — so the header still reads a non-zero total.
+	 */
+	empty: boolean;
 }
 
 export interface ContextBreakdown {
@@ -90,6 +97,17 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 	const totalUsed = AUTO_COMPACTION_BASE + Math.max(rawContextUsed, 0);
 	const totalPercent = barPercent(totalUsed, contextMax);
 
+	// Fresh session: no conversation tokens of any kind have landed yet. The
+	// per-category rows have nothing real to show, so they render as em-dashes
+	// with empty bars — EXCEPT the fixed System overhead reserve, which is always
+	// present (and keeps the header total non-zero).
+	const noUsageYet =
+		Math.max(rawContextUsed, 0) === 0 &&
+		inputTokens === 0 &&
+		outputTokens === 0 &&
+		cacheCreationTokens === 0 &&
+		cacheReadTokens === 0;
+
 	const rows: ContextBreakdownRow[] = [
 		{
 			key: 'input',
@@ -97,6 +115,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			tokens: inputTokens,
 			barPercent: barPercent(inputTokens, contextMax),
 			subline: null,
+			empty: noUsageYet,
 		},
 		{
 			key: 'cacheRead',
@@ -104,6 +123,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			tokens: cacheReadTokens,
 			barPercent: barPercent(cacheReadTokens, contextMax),
 			subline: null,
+			empty: noUsageYet,
 		},
 		{
 			key: 'cacheCreation',
@@ -111,6 +131,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			tokens: cacheCreationTokens,
 			barPercent: barPercent(cacheCreationTokens, contextMax),
 			subline: null,
+			empty: noUsageYet,
 		},
 		{
 			key: 'output',
@@ -118,6 +139,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			tokens: outputTokens,
 			barPercent: barPercent(outputTokens, contextMax),
 			subline: 'session total · not in context',
+			empty: noUsageYet,
 		},
 		{
 			key: 'overhead',
@@ -125,6 +147,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 			tokens: AUTO_COMPACTION_BASE,
 			barPercent: barPercent(AUTO_COMPACTION_BASE, contextMax),
 			subline: 'estimated',
+			empty: false,
 		},
 	];
 
@@ -216,6 +239,7 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 			tokens: c.tokens,
 			barPercent: barPercent(c.tokens, max),
 			subline: c.isDeferred ? 'deferred' : null,
+			empty: false,
 		}));
 
 	return {
@@ -225,4 +249,24 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		severity: usageSeverity(totalPercent),
 		rows,
 	};
+}
+
+/**
+ * Provenance of the breakdown currently on screen:
+ * - `'live'`      — fetched from a connected session's SDK just now.
+ * - `'persisted'` — the final snapshot the backend saved at the session's last
+ *                   turn end (the session is no longer connected).
+ * - `null`        — no rich breakdown; the popover is showing the poller estimate.
+ */
+export type BreakdownSource = 'live' | 'persisted' | null;
+
+/**
+ * The footer status label for the context section, derived from where the
+ * breakdown came from and whether a turn is streaming. Kept pure so the wording
+ * is unit-testable and matches the backend's live/persisted distinction.
+ */
+export function breakdownStatusLabel(source: BreakdownSource, isStreaming: boolean): string {
+	if (source === 'persisted') return 'final breakdown';
+	if (source === 'live') return isStreaming ? 'breakdown · refreshes at turn end' : 'live breakdown';
+	return 'estimated from last turn';
 }

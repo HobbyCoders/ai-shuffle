@@ -116,7 +116,12 @@ def _safe_json(value):
 #     runner (deterministic/boot-order-independent; stickiness per OD-6); legacy
 #     instance_id/cloud_branch/worktree_* NEVER written (sessions with no
 #     instance_id stay NULL = local-default)
-SCHEMA_VERSION = 61
+# 62: Add sessions.context_usage_json JSONB — the last-captured SDK
+#     context-window usage breakdown (wrapped as {"captured_at": iso, "data":
+#     <raw sdk response>}), written at turn end so the context-usage endpoint
+#     can serve a persisted snapshot after the SDK process is evicted from the
+#     local pool. Additive/nullable; NULL = never captured.
+SCHEMA_VERSION = 62
 
 
 def _run_column_migrations(cursor):
@@ -1188,6 +1193,14 @@ def _run_column_migrations(cursor):
         if pinned:
             migrations_applied.append(f"sessions.placement=runner({pinned})")
 
+    # Persisted SDK context-usage snapshot (v62). Additive/nullable JSONB,
+    # guarded so the ALTER never re-runs. Written at turn end so the
+    # context-usage endpoint can serve the last breakdown after the SDK process
+    # is evicted from the local pool.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "context_usage_json"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_usage_json JSONB")
+        migrations_applied.append("sessions.context_usage_json")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -1400,6 +1413,8 @@ from app.db.sessions import (  # noqa: F401
     create_session,
     create_session_with_stats,
     update_session,
+    set_session_context_usage,
+    get_session_context_usage_snapshot,
     delete_session,
     toggle_session_favorite,
     set_session_favorite,

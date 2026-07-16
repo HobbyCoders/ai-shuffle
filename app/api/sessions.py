@@ -1190,11 +1190,6 @@ async def get_sdk_session_info(
         }
 
 
-# Bound on the live SDK get_context_usage() control call. Mirrors
-# _SDK_INTERRUPT_TIMEOUT_SECONDS: a wedged CLI must not hang the request.
-_SDK_CONTEXT_USAGE_TIMEOUT_SECONDS = 5.0
-
-
 @router.get("/{session_id}/context-usage")
 async def get_session_context_usage(
     request: Request,
@@ -1203,44 +1198,62 @@ async def get_session_context_usage(
 ):
     """Get the live SDK context-window usage breakdown for a session.
 
-    Returns ``{"available": False, "reason": ...}`` when the breakdown cannot
-    be produced (session not connected in the local pool, SDK method
-    unsupported, or the control call times out), or
-    ``{"available": True, "usage": <ContextUsageResponse>}`` with the SDK's
-    breakdown passed through verbatim.
+    Live path (session connected in the local pool, control call succeeds):
+    ``{"available": True, "source": "live", "usage": <ContextUsageResponse>}``
+    with the SDK's breakdown passed through verbatim.
+
+    Persisted fallback applies ONLY when the session is not connected: the last
+    breakdown persisted at turn end is served from ``sessions.context_usage_json``
+    as ``{"available": True, "source": "persisted", "captured_at": <iso>,
+    "usage": {...}}`` — the same ``usage`` shape so the frontend renders it
+    identically. When no snapshot exists the response is
+    ``{"available": False, "reason": "not_connected"}``.
+
+    A CONNECTED session whose live call times out or is unsupported returns a
+    plain ``{"available": False, "reason": "timeout"|"unsupported"}`` — it does
+    NOT fall back to the persisted snapshot. A connected-but-slow session's
+    persisted snapshot is stale relative to the turn in flight, so the frontend
+    must fall back to its own live estimate rather than a stale snapshot
+    mislabeled as the current window.
     """
     await require_session(request, session_id)
 
+    async def _persisted_or_reason(reason: str) -> dict:
+        """Serve the persisted snapshot, else the original unavailable reason."""
+        try:
+            snapshot = await run_sync(database.get_session_context_usage_snapshot, session_id)
+        except Exception:
+            snapshot = None
+        if snapshot and snapshot.get("data") is not None:
+            return {
+                "available": True,
+                "source": "persisted",
+                "captured_at": snapshot.get("captured_at"),
+                "usage": snapshot["data"],
+            }
+        return {"available": False, "reason": reason}
+
     async with api_error_handler("get context usage"):
         from app.core.session_pool import get_session_pool
+        from app.core.query_persistence import shielded_get_context_usage
 
         # peek(): non-spawning, no LRU promotion. Returns None for parked,
         # never-opened, or remote-install sessions.
         state = get_session_pool().peek(session_id)
         if not state or not state.is_connected:
-            return {"available": False, "reason": "not_connected"}
+            return await _persisted_or_reason("not_connected")
 
-        # Run the SDK control call on a DETACHED task guarded by a SHIELD: on
-        # timeout we must NOT cancel the in-flight control request — cancelling
-        # it mid-flight leaks the entry in the SDK client's
-        # pending_control_responses, which can wedge later control calls.
-        # Shielding lets the wait_for time out while the underlying call keeps
-        # running to completion in the background.
-        usage_task = asyncio.create_task(state.adapter.get_context_usage())
-        usage_task.add_done_callback(
-            lambda t: t.cancelled() or t.exception()
-        )
+        # Bounded, shielded live control call (shared with turn-end capture).
+        # A timeout/unsupported result on a CONNECTED session returns a plain
+        # reason — no persisted fallback — so the frontend uses its live estimate.
         try:
-            result = await asyncio.wait_for(
-                asyncio.shield(usage_task),
-                timeout=_SDK_CONTEXT_USAGE_TIMEOUT_SECONDS,
-            )
+            result = await shielded_get_context_usage(state.adapter)
         except asyncio.TimeoutError:
             return {"available": False, "reason": "timeout"}
 
         if result is None:
             return {"available": False, "reason": "unsupported"}
-        return {"available": True, "usage": result}
+        return {"available": True, "source": "live", "usage": result}
 
 
 @router.post("/{session_id}/tasks/{task_id}/stop")

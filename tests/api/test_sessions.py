@@ -75,6 +75,10 @@ def mock_database():
         # (e.g. device_name must be a string or None, not a MagicMock).
         mock_db.get_installs_map.return_value = {}
         mock_db.get_project.return_value = None
+        # Context-usage persisted-snapshot fallback: default to no snapshot so
+        # the not-connected/failed-live paths keep returning available=False
+        # unless a test explicitly populates the column.
+        mock_db.get_session_context_usage_snapshot.return_value = None
         yield mock_db
 
 
@@ -2300,11 +2304,19 @@ class TestGetSessionContextUsage:
             response = client.get("/api/v1/sessions/test-session-id/context-usage")
 
         assert response.status_code == 200
-        assert response.json() == {"available": True, "usage": usage}
+        assert response.json() == {"available": True, "source": "live", "usage": usage}
 
     def test_context_usage_connected_unsupported(self, client, mock_database, sample_session):
-        """Connected + adapter returns None -> unsupported."""
+        """Connected + adapter returns None -> unsupported, NO persisted fallback.
+
+        A snapshot exists but must be ignored on a connected session: the
+        frontend falls back to its live estimate, not a stale snapshot.
+        """
         mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": {"totalTokens": 999, "maxTokens": 200000},
+        }
         state = self._make_state(usage_return=None)
 
         with self._patch_pool(state):
@@ -2314,14 +2326,65 @@ class TestGetSessionContextUsage:
         assert response.json() == {"available": False, "reason": "unsupported"}
 
     def test_context_usage_timeout(self, client, mock_database, sample_session):
-        """Connected + adapter call hangs past the bound -> timeout."""
+        """Connected + adapter call hangs past the bound -> timeout, NO fallback.
+
+        A snapshot exists but must be ignored on a connected session.
+        """
         mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": {"totalTokens": 999, "maxTokens": 200000},
+        }
         state = self._make_state(hang=True)
 
         with self._patch_pool(state), \
-                patch("app.api.sessions._SDK_CONTEXT_USAGE_TIMEOUT_SECONDS", 0.05):
+                patch(
+                    "app.core.query_persistence.SDK_CONTEXT_USAGE_TIMEOUT_SECONDS",
+                    0.05,
+                ):
             response = client.get("/api/v1/sessions/test-session-id/context-usage")
 
         assert response.status_code == 200
         assert response.json() == {"available": False, "reason": "timeout"}
+
+    def test_context_usage_persisted_when_not_connected(
+        self, client, mock_database, sample_session
+    ):
+        """Not connected + column populated -> persisted snapshot, source=persisted."""
+        mock_database.get_session.return_value = sample_session
+        usage = {
+            "categories": [{"name": "system", "tokens": 1200}],
+            "totalTokens": 1200,
+            "maxTokens": 200000,
+            "percentage": 0.6,
+        }
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": usage,
+        }
+
+        # Session exists but is not in the pool (evicted after finishing).
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "available": True,
+            "source": "persisted",
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "usage": usage,
+        }
+
+    def test_context_usage_not_connected_empty_column(
+        self, client, mock_database, sample_session
+    ):
+        """Not connected + no persisted snapshot -> available False, not_connected."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = None
+
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
 

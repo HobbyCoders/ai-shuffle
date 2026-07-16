@@ -261,13 +261,16 @@ export interface SdkContextUsage {
 }
 
 /**
- * Response of `GET /sessions/{id}/context-usage`. Either the live SDK breakdown
- * is available, or a machine reason it isn't (the caller then falls back to the
- * poller estimate).
+ * Response of `GET /sessions/{id}/context-usage`. The `usage` shape is identical
+ * whether it came from the live SDK (session connected) or the final snapshot the
+ * backend persisted at the session's last turn end (`source: "persisted"`, with
+ * the ISO `captured_at`). When neither is available a machine reason is returned
+ * and the caller falls back to the poller estimate.
  */
 export type ContextUsageResponse =
 	| { available: false; reason: 'not_connected' | 'unsupported' | 'timeout' }
-	| { available: true; usage: SdkContextUsage };
+	| { available: true; source: 'live'; usage: SdkContextUsage }
+	| { available: true; source: 'persisted'; captured_at: string; usage: SdkContextUsage };
 
 /**
  * Fetch the live per-category context-window breakdown for a session. Cheap and

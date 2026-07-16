@@ -307,6 +307,12 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     await persist_turn_end_state(session_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("idle_reader: CLI-turn finalize failed: %s", exc)
+                # Capture the SDK context-usage breakdown for this CLI-owned wake
+                # turn while its adapter is still live and pooled. Detached and
+                # self-guarding, so it never delays draining.
+                from app.core.query_persistence import schedule_context_usage_capture
+
+                schedule_context_usage_capture(session_id, log_prefix="[Drain] ")
                 continue
 
             # --- killed/stopped TaskUpdated-alone terminal --------------------

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 import {
+	breakdownStatusLabel,
 	computeContextBreakdown,
 	decideBreakdownRefresh,
 	formatTokenCount,
@@ -98,6 +99,61 @@ describe('computeContextBreakdown', () => {
 		});
 		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE);
 		expect(b.rows.every((r) => r.barPercent >= 0)).toBe(true);
+	});
+
+	it('marks every category empty on a fresh session EXCEPT the System overhead reserve', () => {
+		const b = computeContextBreakdown({
+			rawContextUsed: 0,
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheCreationTokens: 0,
+			cacheReadTokens: 0,
+			contextMax: 200_000,
+		});
+		const empties = b.rows.filter((r) => r.empty).map((r) => r.key);
+		expect(empties).toEqual(['input', 'cacheRead', 'cacheCreation', 'output']);
+		const overhead = b.rows.find((r) => r.key === 'overhead')!;
+		expect(overhead.empty).toBe(false);
+		expect(overhead.tokens).toBe(AUTO_COMPACTION_BASE);
+		// The header total is still the reserve, so the pill/header stay non-zero.
+		expect(b.totalUsed).toBe(AUTO_COMPACTION_BASE);
+	});
+
+	it('marks no row empty once any usage has landed', () => {
+		const b = computeContextBreakdown({ ...base });
+		expect(b.rows.every((r) => r.empty === false)).toBe(true);
+
+		// A single cache-read token is enough to leave the empty state.
+		const b2 = computeContextBreakdown({
+			rawContextUsed: 0,
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheCreationTokens: 0,
+			cacheReadTokens: 1,
+			contextMax: 200_000,
+		});
+		expect(b2.rows.every((r) => r.empty === false)).toBe(true);
+	});
+});
+
+describe('breakdownStatusLabel', () => {
+	it('reads "final breakdown" for a persisted snapshot', () => {
+		expect(breakdownStatusLabel('persisted', false)).toBe('final breakdown');
+		// Persistence wins even if the flag says streaming (a persisted session isn't).
+		expect(breakdownStatusLabel('persisted', true)).toBe('final breakdown');
+	});
+
+	it('reads "live breakdown" for a connected session at rest', () => {
+		expect(breakdownStatusLabel('live', false)).toBe('live breakdown');
+	});
+
+	it('notes the turn-end refresh cadence while a live turn streams', () => {
+		expect(breakdownStatusLabel('live', true)).toBe('breakdown · refreshes at turn end');
+	});
+
+	it('falls back to the estimate wording when there is no rich breakdown', () => {
+		expect(breakdownStatusLabel(null, false)).toBe('estimated from last turn');
+		expect(breakdownStatusLabel(null, true)).toBe('estimated from last turn');
 	});
 });
 

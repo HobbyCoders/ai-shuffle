@@ -1,14 +1,13 @@
 /**
  * ContextUsageBar — render + interaction behaviour for the MERGED pill.
  *
- * One glass pill (context-window ring + percent) opens ONE popover with two
- * sections: the context-window breakdown (collapsible) and the resolved
+ * One glass pill (context-window ring only) opens ONE popover with two
+ * sections: the always-shown context-window breakdown and the resolved
  * install's plan usage limits. The pill is ALWAYS visible; the limits section
  * shows the resolved bucket's windows, or "No usage data yet" when empty.
  *
  * The `rateLimit` store is a singleton; each test resets it via
- * `__resetForTests` and clears localStorage so the persisted breakdown-open
- * flag starts collapsed.
+ * `__resetForTests` and clears localStorage between tests.
  */
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -31,15 +30,17 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('ContextUsageBar — pill', () => {
-	it('always renders the pill with a progress ring and percent text', () => {
+	it('always renders the pill as a bare progress ring (no inline percent text)', () => {
 		const { container } = render(ContextUsageBar);
-		const pill = container.querySelector('.usage-indicator');
+		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
 		expect(pill).not.toBeNull();
 		const ring = container.querySelector('svg.usage-ring');
 		expect(ring).not.toBeNull();
 		// Background track + progress circle.
 		expect(ring?.querySelectorAll('circle').length).toBe(2);
-		expect(container.querySelector('.usage-text')?.textContent).toMatch(/^\d+%$/);
+		// The percent text span is gone — the percentage rides on the aria-label.
+		expect(container.querySelector('.usage-text')).toBeNull();
+		expect(pill.getAttribute('aria-label')).toMatch(/\d+%/);
 	});
 
 	it('renders the pill even when no usage windows are known', () => {
@@ -48,24 +49,31 @@ describe('ContextUsageBar — pill', () => {
 	});
 });
 
-describe('ContextUsageBar — context breakdown chevron', () => {
-	it('toggles the category breakdown and persists the state to localStorage', async () => {
+describe('ContextUsageBar — context breakdown', () => {
+	it('always renders the category breakdown rows on open (no chevron toggle)', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// Collapsed by default — no breakdown rows rendered.
-		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
-		expect(localStorage.getItem('aihub.contextBreakdownOpen')).not.toBe('1');
-
-		const chevron = container.querySelector('.ctx-chevron') as HTMLButtonElement;
-		await fireEvent.click(chevron);
-		// Expanded — the estimate breakdown rows appear and the flag persists.
+		// Breakdown is always shown — the estimate rows render without any toggle.
 		expect(container.querySelectorAll('.breakdown-row').length).toBeGreaterThan(0);
-		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('1');
+		// The collapse chevron is gone entirely.
+		expect(container.querySelector('.ctx-chevron')).toBeNull();
+	});
 
-		await fireEvent.click(chevron);
-		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
-		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('0');
+	it('shows em-dash values for a fresh session, keeping the System overhead reserve', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const rows = Array.from(container.querySelectorAll('.breakdown-row'));
+		const overhead = rows.find((r) => r.textContent?.includes('System overhead'))!;
+		// The fixed reserve keeps its real value even on an empty session.
+		expect(overhead.querySelector('.breakdown-value')?.textContent?.trim()).not.toBe('—');
+		// Every other category has no usage yet → em-dash.
+		const others = rows.filter((r) => !r.textContent?.includes('System overhead'));
+		expect(others.length).toBeGreaterThan(0);
+		for (const r of others) {
+			expect(r.querySelector('.breakdown-value')?.textContent?.trim()).toBe('—');
+		}
 	});
 });
 

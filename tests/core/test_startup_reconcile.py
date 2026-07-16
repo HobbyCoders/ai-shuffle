@@ -255,14 +255,14 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 61 for the V2 Phase-4 placement layer: additive columns
-    # (sessions.placement, sessions.working_set_ref, artifacts.runner_id) + the
-    # one-time placement backfill pinning in-flight remote-owned sessions to
-    # their owner. v60 was the Phase-3 origin collapse; v59 added the Phase-2
-    # turns table; v58 was the Phase-1 deletion (v2_stream forced TRUE + default
-    # flipped); v57 added the opt-in flag; v56 added the Phase-0 primitives.
-    assert db_version == 61
-    assert pg_version == 61
+    # Bumped to 62 for the persisted SDK context-usage snapshot (additive
+    # nullable sessions.context_usage_json JSONB). v61 was the V2 Phase-4
+    # placement layer; v60 was the Phase-3 origin collapse; v59 added the
+    # Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced TRUE +
+    # default flipped); v57 added the opt-in flag; v56 added the Phase-0
+    # primitives.
+    assert db_version == 62
+    assert pg_version == 62
     assert db_version == pg_version
 
 

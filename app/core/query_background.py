@@ -43,6 +43,7 @@ from app.core.query_persistence import (
     _wrap_stderr_capture,
     _extract_connection_error,
     _persist_turn_results,
+    schedule_context_usage_capture,
     log_captured_cli_stderr,
 )
 from app.core.query_streaming import truncate_large_payload
@@ -514,6 +515,11 @@ async def _run_background_query_impl(
         interrupted=interrupted,
         log_prefix="[Background] ",
     )
+
+    # Capture the SDK context-usage breakdown so the endpoint can serve a
+    # persisted snapshot post-eviction. Runs DETACHED (self-guards on the pool's
+    # live adapter) so it never delays completion.
+    schedule_context_usage_capture(session_id, log_prefix="[Background] ")
 
     # Push agent-memory the CLI wrote this turn up to the shared DB.
     await push_memory(
