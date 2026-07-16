@@ -279,6 +279,14 @@ class UserQuestionHandler:
                     exc_info=True,
                 )
 
+        # Durable lifecycle event (#653): emit AFTER the WS broadcast + fanout,
+        # swallowed on failure so it can never break the question flow.
+        from app.core import interaction_events
+
+        await interaction_events.emit_interaction_requested(
+            session_id, interaction_id, request_id, QUESTION_KIND, payload,
+        )
+
         try:
             from app.services.push_notification import fire_and_forget_notify
 
@@ -344,6 +352,13 @@ class UserQuestionHandler:
         if answered:
             interaction_wait.notify_changed(session_id)
             logger.debug(f"User question answered: {request_id}")
+            # Durable lifecycle event (#653): guarded answer won → emit exactly
+            # one interaction.answered. AFTER notify_changed.
+            from app.core import interaction_events
+
+            await interaction_events.emit_interaction_answered(
+                session_id, row["id"], request_id, answers,
+            )
         return answered
 
     async def respond(
@@ -424,12 +439,24 @@ class UserQuestionHandler:
             from app.db import interactions
 
             cancelled = 0
+            cancelled_rows: List[tuple] = []
             for row in self._v2_pending_questions(session_id):
                 if interactions.cancel_interaction(row["id"]):
                     cancelled += 1
+                    cancelled_rows.append(
+                        (row["id"], (row.get("payload") or {}).get("request_id"))
+                    )
             if cancelled:
                 interaction_wait.notify_changed(session_id)
                 logger.debug(f"Cancelled all pending questions for session {session_id}")
+                # Durable lifecycle events (#653): one interaction.expired
+                # (reason="cancelled") per row whose guarded cancel won.
+                from app.core import interaction_events
+
+                for cancelled_interaction_id, rid in cancelled_rows:
+                    await interaction_events.emit_interaction_expired(
+                        session_id, cancelled_interaction_id, rid, "cancelled",
+                    )
             return
 
         async with self._lock:

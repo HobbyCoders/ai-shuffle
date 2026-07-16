@@ -289,6 +289,18 @@
           "title": "Interaction Id",
           "type": "string"
         },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -364,6 +376,30 @@
         "interaction_id": {
           "title": "Interaction Id",
           "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
         },
         "run_id": {
           "anyOf": [
@@ -453,6 +489,18 @@
           "additionalProperties": true,
           "title": "Request",
           "type": "object"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
         },
         "run_id": {
           "anyOf": [

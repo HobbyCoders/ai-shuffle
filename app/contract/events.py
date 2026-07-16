@@ -187,6 +187,7 @@ class SystemCompactionBoundary(EventBase):
 class InteractionRequested(EventBase):
     type: Literal["interaction.requested"] = "interaction.requested"
     interaction_id: str
+    request_id: str | None = None
     kind: Literal["permission", "question"]
     request: dict = Field(default_factory=dict)
 
@@ -194,12 +195,15 @@ class InteractionRequested(EventBase):
 class InteractionAnswered(EventBase):
     type: Literal["interaction.answered"] = "interaction.answered"
     interaction_id: str
+    request_id: str | None = None
     answer: dict = Field(default_factory=dict)
 
 
 class InteractionExpired(EventBase):
     type: Literal["interaction.expired"] = "interaction.expired"
     interaction_id: str
+    request_id: str | None = None
+    reason: str | None = None
 
 
 class TranscriptRewound(EventBase):

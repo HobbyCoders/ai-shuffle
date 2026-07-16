@@ -461,6 +461,14 @@ class PermissionHandler:
         )
         await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
+        # Durable lifecycle event (#653): emit AFTER the WS broadcast, swallowed
+        # on failure so a log append can never break the permission flow.
+        from app.core import interaction_events
+
+        await interaction_events.emit_interaction_requested(
+            session_id, interaction_id, request_id, PERMISSION_KIND, payload,
+        )
+
         # Notify watching mobile devices (verbatim from the legacy path).
         try:
             from app.services.push_notification import fire_and_forget_notify
@@ -576,6 +584,13 @@ class PermissionHandler:
                     "deferred_ids": [request_id],
                     "remaining_count": self._v2_pending_count(session_id),
                 })
+            # Durable lifecycle event (#653): the guarded UPDATE won above, so
+            # emit exactly one interaction.answered. AFTER the WS broadcast.
+            from app.core import interaction_events
+
+            await interaction_events.emit_interaction_answered(
+                session_id, row["id"], request_id, {"decision": "defer"},
+            )
             return {
                 "resolved": True,
                 "deferred": True,
@@ -605,6 +620,7 @@ class PermissionHandler:
         interaction_wait.notify_changed(session_id)
 
         resolved_ids: List[str] = []
+        resolved_emits: List[tuple] = []
         if remember and remember != "none":
             profile_id = payload.get("profile_id") or ""
             rule = PermissionRule(
@@ -626,7 +642,9 @@ class PermissionHandler:
                     tool_pattern=rule.tool_pattern,
                     decision=rule.decision.value,
                 )
-            resolved_ids = self._v2_resolve_matching(session_id, rule, answered_by_device)
+            resolved_ids, resolved_emits = self._v2_resolve_matching(
+                session_id, rule, answered_by_device
+            )
             if resolved_ids:
                 interaction_wait.notify_changed(session_id)
                 if broadcast_func:
@@ -636,6 +654,20 @@ class PermissionHandler:
                         "resolved_ids": resolved_ids,
                         "remaining_count": self._v2_pending_count(session_id),
                     })
+
+        # Durable lifecycle events (#653): each guarded UPDATE that won emits
+        # exactly one interaction.answered, AFTER the notify_changed + WS
+        # broadcast above. The primary row plus every sibling row auto-resolved
+        # by a remember rule.
+        from app.core import interaction_events
+
+        await interaction_events.emit_interaction_answered(
+            session_id, row["id"], request_id, answer,
+        )
+        for emit_interaction_id, emit_request_id, emit_answer in resolved_emits:
+            await interaction_events.emit_interaction_answered(
+                session_id, emit_interaction_id, emit_request_id, emit_answer,
+            )
 
         return {
             "resolved": True,
@@ -648,12 +680,19 @@ class PermissionHandler:
         session_id: str,
         rule: PermissionRule,
         answered_by_device: Optional[str],
-    ) -> List[str]:
+    ) -> tuple:
         """Answer every OTHER pending permission row matching ``rule`` (table
-        analogue of :meth:`_resolve_matching_requests`)."""
+        analogue of :meth:`_resolve_matching_requests`).
+
+        Returns ``(resolved_request_ids, emits)`` where ``emits`` is a list of
+        ``(interaction_id, request_id, answer)`` tuples for every row whose
+        guarded UPDATE won — the async caller emits the durable
+        ``interaction.answered`` events (#653), one per winning transition.
+        """
         from app.db import interactions
 
         resolved: List[str] = []
+        emits: List[tuple] = []
         for r in self._v2_pending_permissions(session_id):
             payload = r.get("payload") or {}
             if not rule.matches(payload.get("tool_name", ""), payload.get("tool_input") or {}):
@@ -677,7 +716,8 @@ class PermissionHandler:
                 rid = payload.get("request_id")
                 if rid is not None:
                     resolved.append(rid)
-        return resolved
+                emits.append((r["id"], rid, answer))
+        return resolved, emits
 
     def _add_session_rule_idempotent(
         self,
@@ -725,19 +765,24 @@ class PermissionHandler:
 
         requeued_ids: List[str] = []
         new_payloads: List[Dict[str, Any]] = []
+        # (new_interaction_id, request_id, payload) for each freshly minted row,
+        # so the durable interaction.requested events (#653) fire after the WS
+        # re-broadcast below.
+        requested_emits: List[tuple] = []
         for r in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
             answer = r.get("answer") or {}
             if answer.get("decision") != "defer" or answer.get("requeued"):
                 continue
             payload = r.get("payload") or {}
             interactions.mark_interaction_requeued(r["id"])
-            interactions.create_interaction(
+            new_row = interactions.create_interaction(
                 session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS
             )
             rid = payload.get("request_id")
             if rid is not None:
                 requeued_ids.append(rid)
             new_payloads.append(payload)
+            requested_emits.append((new_row["id"], rid, payload))
 
         if requeued_ids:
             interaction_wait.notify_changed(session_id)
@@ -770,6 +815,16 @@ class PermissionHandler:
                     "requeued_ids": requeued_ids,
                     "remaining_count": self._v2_pending_count(session_id),
                 })
+
+        # Durable lifecycle events (#653): a requeue mints a fresh pending row
+        # with a NEW interaction_id (same FE request_id), so emitting a second
+        # interaction.requested is correct. AFTER the WS re-broadcast.
+        from app.core import interaction_events
+
+        for new_interaction_id, rid, payload in requested_emits:
+            await interaction_events.emit_interaction_requested(
+                session_id, new_interaction_id, rid, PERMISSION_KIND, payload,
+            )
 
         return requeued_ids
 
@@ -1134,6 +1189,13 @@ class PermissionHandler:
             cancelled = interactions.cancel_interaction(row["id"])
             if cancelled:
                 interaction_wait.notify_changed(session_id)
+                # Durable lifecycle event (#653): guarded cancel won → emit
+                # exactly one interaction.expired (reason="cancelled").
+                from app.core import interaction_events
+
+                await interaction_events.emit_interaction_expired(
+                    session_id, row["id"], request_id, "cancelled",
+                )
             return cancelled
 
         async with self._lock:
@@ -1159,11 +1221,23 @@ class PermissionHandler:
 
             rows = self._v2_pending_permissions(session_id)
             count = 0
+            cancelled_rows: List[tuple] = []
             for row in rows:
                 if interactions.cancel_interaction(row["id"]):
                     count += 1
+                    cancelled_rows.append(
+                        (row["id"], (row.get("payload") or {}).get("request_id"))
+                    )
             if count:
                 interaction_wait.notify_changed(session_id)
+                # Durable lifecycle events (#653): one interaction.expired
+                # (reason="cancelled") per row whose guarded cancel won.
+                from app.core import interaction_events
+
+                for cancelled_interaction_id, rid in cancelled_rows:
+                    await interaction_events.emit_interaction_expired(
+                        session_id, cancelled_interaction_id, rid, "cancelled",
+                    )
             return count
 
         async with self._lock:
