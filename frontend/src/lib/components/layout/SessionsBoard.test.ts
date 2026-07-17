@@ -4,7 +4,7 @@
  *
  * These mount the real board with its store/api dependencies mocked, then drive
  * the rail buttons that appear on every session row. Covered:
- *  - Fork/Favorite/Clear render on every row; Resume renders ONLY on remote
+ *  - Fork/Active-toggle/Delete render on every row; Resume renders ONLY on remote
  *    (cross-install) rows — a local row's own click already opens it, so a
  *    same-device "Open" button would be redundant and is hidden entirely
  *  - the Resume tooltip on a remote row reads "Resume here …" tagged with the
@@ -12,7 +12,8 @@
  *  - clicking Fork forks that row's session and opens the NEW one, and does NOT
  *    open the clicked row (stopPropagation) — the row click would open its own id
  *  - clicking Resume on a remote row adopts-then-opens
- *  - the pre-existing Favorite rail action still fires
+ *  - the state-based Active toggle: "Complete" on an active row (→ is_active=false)
+ *    and "Move to Active" on an inactive row (→ is_active=true) each fires the API
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
@@ -56,7 +57,7 @@ const mocks = vi.hoisted(() => {
 		isAdmin: store<boolean>(false),
 		forkSession: vi.fn(),
 		adoptSession: vi.fn(),
-		toggleSessionFavorite: vi.fn(),
+		setSessionActive: vi.fn(),
 		loadSessions: vi.fn(),
 		loadProjects: vi.fn(),
 		deleteSession: vi.fn(),
@@ -77,6 +78,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 		loadProjects: mocks.loadProjects,
 		deleteSession: mocks.deleteSession,
 		renameSession: mocks.renameSession,
+		setSessionActive: mocks.setSessionActive,
 		clearSession: mocks.clearSession
 	},
 	sessions: mocks.sessions,
@@ -97,7 +99,6 @@ vi.mock('$lib/stores/active-session', () => ({
 	backgroundPermissions: mocks.backgroundPermissions
 }));
 vi.mock('$lib/api/client', () => ({
-	toggleSessionFavorite: mocks.toggleSessionFavorite,
 	forkSession: mocks.forkSession,
 	adoptSession: mocks.adoptSession,
 	api: { post: mocks.apiPost, delete: mocks.apiDelete }
@@ -113,7 +114,7 @@ function makeSession(over: AnySession = {}): AnySession {
 	return {
 		id: 'a',
 		title: 'A session',
-		is_favorite: false,
+		is_active: false,
 		is_remote: false,
 		instance_id: null,
 		device_name: null,
@@ -165,7 +166,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.forkSession.mockResolvedValue({ session_id: 'forked-a' });
 	mocks.adoptSession.mockResolvedValue({ session_id: 'b', adopted: true });
-	mocks.toggleSessionFavorite.mockResolvedValue({});
+	mocks.setSessionActive.mockResolvedValue({});
 	mocks.loadSessions.mockResolvedValue(undefined);
 	mocks.clearSession.mockResolvedValue(undefined);
 	mocks.deleteSession.mockResolvedValue(undefined);
@@ -177,12 +178,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('SessionsBoard action rail', () => {
-	it('renders Fork/Favorite/Delete on every row, next to each other', () => {
+	it('renders Fork/Active-toggle/Delete on every row, next to each other', () => {
 		renderBoard();
-		// One Fork + one Delete + one Favorite per row (two rows).
+		// One Fork + one Delete + one Active-toggle per row (two rows). Both default
+		// fixtures are inactive, so each carries the "Move to Active" toggle.
 		expect(screen.getAllByTitle('Fork session')).toHaveLength(2);
 		expect(screen.getAllByTitle('Delete session')).toHaveLength(2);
-		expect(screen.getAllByTitle('Favorite')).toHaveLength(2);
+		expect(screen.getAllByTitle('Move to Active')).toHaveLength(2);
 	});
 
 	it('hides the Resume/Open action for a same-device (local) session row', () => {
@@ -221,13 +223,36 @@ describe('SessionsBoard action rail', () => {
 		await vi.waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('b'));
 	});
 
-	it('still fires the pre-existing Favorite rail action', async () => {
+	it('shows "Complete" on an active row and completing it calls the API with is_active=false', async () => {
+		mocks.sessions.set([makeSession({ id: 'a', title: 'Active one', is_active: true })]);
 		renderBoard();
-		const fav = rowFor('Local one').querySelector('[title="Favorite"]') as HTMLElement;
+		const complete = rowFor('Active one').querySelector('[title="Complete"]') as HTMLElement;
+		expect(complete).toBeTruthy();
 
-		await fireEvent.click(fav);
+		await fireEvent.click(complete);
 
-		expect(mocks.toggleSessionFavorite).toHaveBeenCalledWith('a');
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('a', false);
+	});
+
+	it('shows "Move to Active" on an inactive row and moving it calls the API with is_active=true', async () => {
+		// Default fixtures ("Local one") are inactive.
+		renderBoard();
+		const move = rowFor('Local one').querySelector('[title="Move to Active"]') as HTMLElement;
+		expect(move).toBeTruthy();
+
+		await fireEvent.click(move);
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('a', true);
+	});
+
+	it('no longer renders a star favorite button anywhere', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Active one', is_active: true }),
+			makeSession({ id: 'b', title: 'Inactive one', is_active: false })
+		]);
+		renderBoard();
+		expect(screen.queryByTitle('Favorite')).toBeNull();
+		expect(screen.queryByTitle('Unfavorite')).toBeNull();
 	});
 });
 
@@ -427,7 +452,7 @@ describe('SessionsBoard armed delete confirm freezes the rail', () => {
 		expect(row.querySelector('[title="Cancel"]')).toBeTruthy();
 		// …and the sibling actions are inert so a stray/second click can't fire them.
 		expect((row.querySelector('[title="Fork session"]') as HTMLButtonElement).disabled).toBe(true);
-		expect((row.querySelector('[title="Favorite"]') as HTMLButtonElement).disabled).toBe(true);
+		expect((row.querySelector('[title="Move to Active"]') as HTMLButtonElement).disabled).toBe(true);
 		// The Cancel and Confirm themselves stay actionable.
 		expect((row.querySelector('[title="Cancel"]') as HTMLButtonElement).disabled).toBe(false);
 		expect((row.querySelector('[title="Confirm delete"]') as HTMLButtonElement).disabled).toBe(false);
@@ -468,7 +493,7 @@ describe('SessionsBoard armed delete confirm freezes the rail', () => {
 		expect(row.querySelector('[title="Confirm delete"]')).toBeNull();
 		expect(row.querySelector('[title="Cancel"]')).toBeNull();
 		expect((row.querySelector('[title="Fork session"]') as HTMLButtonElement).disabled).toBe(false);
-		expect((row.querySelector('[title="Favorite"]') as HTMLButtonElement).disabled).toBe(false);
+		expect((row.querySelector('[title="Move to Active"]') as HTMLButtonElement).disabled).toBe(false);
 	});
 });
 
@@ -496,11 +521,11 @@ describe('SessionsBoard action tray open/close state', () => {
 		expect(isTrayOpen(title)).toBe(true);
 	}
 
-	it('closes the tray after clicking Favorite', async () => {
+	it('closes the tray after clicking the Active toggle', async () => {
 		renderBoard();
 		await openTray('Local one');
-		const fav = rowFor('Local one').querySelector('[title="Favorite"]') as HTMLElement;
-		await fireEvent.click(fav);
+		const move = rowFor('Local one').querySelector('[title="Move to Active"]') as HTMLElement;
+		await fireEvent.click(move);
 		expect(isTrayOpen('Local one')).toBe(false);
 	});
 
@@ -643,108 +668,108 @@ describe('SessionsBoard delete-session confirm never opens a new chat', () => {
 		await finish(resolveDelete);
 	});
 });
-
-/**
- * V2 projects (Phase 3 P6): the board groups sessions by the server-resolved
- * `origin` token, falling back to `link_group_id` then `project_id`. Because
- * `origin` is 1:1 with `link_group_id` for grouped projects, the fold is
- * identical with or without `origin` present — no card splits/merges across the
- * cutover. Manual-link groups (`manual:…` origins) flow through as ordinary
- * grouping keys, so their card and drill-in keep working.
- *
- * Groups render as `.proj-card` in the overview's project grid; the folded
- * session count is the card's `.proj-count-pill`.
- */
-describe('SessionsBoard groups by origin with link_group continuity', () => {
-	function projCards(): HTMLElement[] {
-		return Array.from(document.querySelectorAll('.proj-card')) as HTMLElement[];
-	}
-	function cardByName(name: string): HTMLElement | undefined {
-		return projCards().find((c) => c.querySelector('.proj-name')?.textContent?.trim() === name);
-	}
-	function foldCount(name: string): number {
-		return Number(cardByName(name)?.querySelector('.proj-count-pill')?.textContent?.trim() ?? '0');
-	}
-
-	it('folds two same-origin clones into ONE card (origin is the grouping key)', () => {
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' }),
-			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' })
-		]);
-		renderBoard();
-		expect(projCards()).toHaveLength(1);
-		expect(foldCount('Repo')).toBe(2);
-	});
-
-	it('groups identically whether origin is present or only link_group_id (no regroup flash)', () => {
-		// Pass 1 — pre-cutover shape: only link_group_id, no origin.
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', link_group_id: 'git:xyz' }),
-			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', link_group_id: 'git:xyz' })
-		]);
-		const first = renderBoard();
-		expect(projCards()).toHaveLength(1);
-		expect(foldCount('Repo')).toBe(2);
-		first.unmount();
-		cleanup();
-
-		// Pass 2 — post-cutover shape: origin === the SAME link_group_id token.
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' }),
-			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' })
-		]);
-		renderBoard();
-		expect(projCards()).toHaveLength(1);
-		expect(foldCount('Repo')).toBe(2);
-	});
-
-	it('keeps distinct origins in separate cards', () => {
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Alpha', origin: 'git:alpha', link_group_id: 'git:alpha' }),
-			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Beta', origin: 'git:beta', link_group_id: 'git:beta' })
-		]);
-		renderBoard();
-		expect(projCards()).toHaveLength(2);
-		expect(foldCount('Alpha')).toBe(1);
-		expect(foldCount('Beta')).toBe(1);
-	});
-
-	it('folds manual-linked clones (manual:… origin) into one card and drills in', async () => {
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'Fork A one', project_id: 'p-a', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' }),
-			makeSession({ id: 'b', title: 'Fork B one', project_id: 'p-b', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' })
-		]);
-		renderBoard();
-		const card = cardByName('Fork');
-		expect(card).toBeTruthy();
-		expect(projCards()).toHaveLength(1);
-		expect(foldCount('Fork')).toBe(2);
-
-		await fireEvent.click(card as HTMLElement);
-		expect(rowFor('Fork A one')).toBeTruthy();
-		expect(rowFor('Fork B one')).toBeTruthy();
-	});
-});
-
-describe('SessionsBoard degraded (V2 Q7) chip', () => {
-	it('renders the "Waiting — device offline" chip only on degraded rows', () => {
-		mocks.sessions.set([
-			makeSession({ id: 'a', title: 'Waiting one', degraded: true }),
-			makeSession({ id: 'b', title: 'Fine one', degraded: false })
-		]);
-		renderBoard();
-		// The chip surfaces exactly once — on the degraded row, not the healthy one.
-		expect(screen.getAllByText('Waiting — device offline')).toHaveLength(1);
-		expect(rowFor('Waiting one').textContent).toContain('Waiting — device offline');
-		expect(rowFor('Fine one').textContent).not.toContain('Waiting — device offline');
-	});
-
-	it('shows no degraded chip when nothing is degraded', () => {
-		mocks.sessions.set([makeSession({ id: 'a', title: 'Fine one' })]);
-		renderBoard();
-		expect(screen.queryByText('Waiting — device offline')).toBeNull();
-	});
-});
+
+/**
+ * V2 projects (Phase 3 P6): the board groups sessions by the server-resolved
+ * `origin` token, falling back to `link_group_id` then `project_id`. Because
+ * `origin` is 1:1 with `link_group_id` for grouped projects, the fold is
+ * identical with or without `origin` present — no card splits/merges across the
+ * cutover. Manual-link groups (`manual:…` origins) flow through as ordinary
+ * grouping keys, so their card and drill-in keep working.
+ *
+ * Groups render as `.proj-card` in the overview's project grid; the folded
+ * session count is the card's `.proj-count-pill`.
+ */
+describe('SessionsBoard groups by origin with link_group continuity', () => {
+	function projCards(): HTMLElement[] {
+		return Array.from(document.querySelectorAll('.proj-card')) as HTMLElement[];
+	}
+	function cardByName(name: string): HTMLElement | undefined {
+		return projCards().find((c) => c.querySelector('.proj-name')?.textContent?.trim() === name);
+	}
+	function foldCount(name: string): number {
+		return Number(cardByName(name)?.querySelector('.proj-count-pill')?.textContent?.trim() ?? '0');
+	}
+
+	it('folds two same-origin clones into ONE card (origin is the grouping key)', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:abc', link_group_id: 'git:abc' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+	});
+
+	it('groups identically whether origin is present or only link_group_id (no regroup flash)', () => {
+		// Pass 1 — pre-cutover shape: only link_group_id, no origin.
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', link_group_id: 'git:xyz' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', link_group_id: 'git:xyz' })
+		]);
+		const first = renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+		first.unmount();
+		cleanup();
+
+		// Pass 2 — post-cutover shape: origin === the SAME link_group_id token.
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Repo', origin: 'git:xyz', link_group_id: 'git:xyz' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Repo')).toBe(2);
+	});
+
+	it('keeps distinct origins in separate cards', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'A', project_id: 'p-a', project_name: 'Alpha', origin: 'git:alpha', link_group_id: 'git:alpha' }),
+			makeSession({ id: 'b', title: 'B', project_id: 'p-b', project_name: 'Beta', origin: 'git:beta', link_group_id: 'git:beta' })
+		]);
+		renderBoard();
+		expect(projCards()).toHaveLength(2);
+		expect(foldCount('Alpha')).toBe(1);
+		expect(foldCount('Beta')).toBe(1);
+	});
+
+	it('folds manual-linked clones (manual:… origin) into one card and drills in', async () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Fork A one', project_id: 'p-a', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' }),
+			makeSession({ id: 'b', title: 'Fork B one', project_id: 'p-b', project_name: 'Fork', origin: 'manual:grp', link_group_id: 'manual:grp' })
+		]);
+		renderBoard();
+		const card = cardByName('Fork');
+		expect(card).toBeTruthy();
+		expect(projCards()).toHaveLength(1);
+		expect(foldCount('Fork')).toBe(2);
+
+		await fireEvent.click(card as HTMLElement);
+		expect(rowFor('Fork A one')).toBeTruthy();
+		expect(rowFor('Fork B one')).toBeTruthy();
+	});
+});
+
+describe('SessionsBoard degraded (V2 Q7) chip', () => {
+	it('renders the "Waiting — device offline" chip only on degraded rows', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Waiting one', degraded: true }),
+			makeSession({ id: 'b', title: 'Fine one', degraded: false })
+		]);
+		renderBoard();
+		// The chip surfaces exactly once — on the degraded row, not the healthy one.
+		expect(screen.getAllByText('Waiting — device offline')).toHaveLength(1);
+		expect(rowFor('Waiting one').textContent).toContain('Waiting — device offline');
+		expect(rowFor('Fine one').textContent).not.toContain('Waiting — device offline');
+	});
+
+	it('shows no degraded chip when nothing is degraded', () => {
+		mocks.sessions.set([makeSession({ id: 'a', title: 'Fine one' })]);
+		renderBoard();
+		expect(screen.queryByText('Waiting — device offline')).toBeNull();
+	});
+});
 
 /**
  * Inline rename (issue #589): the Sessions list rows gain a "Rename" action in

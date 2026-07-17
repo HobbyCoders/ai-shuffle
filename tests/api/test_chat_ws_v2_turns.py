@@ -239,6 +239,8 @@ async def test_handle_query_ignores_legacy_worktree_id_key(mock_db):
     assert sess.get("worktree_id") is None
     assert sess.get("worktree_branch") is None
     assert sess.get("worktree_path") is None
+    # a user-initiated new-chat session is created in the Active group
+    assert bool(sess.get("is_active")) is True
 
     # submit invoked without a worktree_id kwarg
     submit.assert_called_once()

@@ -13,7 +13,7 @@ AI Shuffle is a self-hosted web interface for Claude Code — Anthropic's AI cod
 ### Chat Interface
 A real-time chat workspace powered by Claude via the Agent SDK. Features include:
 - Streaming responses with tool use visualization
-- Session management with search, tags, and favorites
+- Session management with search, tags, and an Active group — sessions you're working in stay in Active until you mark them Complete, which moves them to Recent
 - Session forking to branch conversations
 - Git worktree integration for isolated development
 - File sharing and media generation

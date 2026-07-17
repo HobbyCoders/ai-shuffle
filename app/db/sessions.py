@@ -66,7 +66,7 @@ class SessionRow(TypedDict):
     automation_id: Optional[str]
     title: Optional[str]
     status: str
-    is_favorite: bool
+    is_active: bool
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
@@ -88,7 +88,7 @@ class SessionSearchResult(TypedDict):
     api_user_id: Optional[str]
     title: Optional[str]
     status: str
-    is_favorite: bool
+    is_active: bool
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
@@ -108,7 +108,7 @@ class SessionSearchResultPaginated(TypedDict):
     api_user_id: Optional[str]
     title: Optional[str]
     status: str
-    is_favorite: bool
+    is_active: bool
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
@@ -184,7 +184,7 @@ def get_sessions(
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
     api_users_only: bool = False,
-    favorites_only: bool = False,
+    active_only: bool = False,
     tag_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
@@ -212,8 +212,8 @@ def get_sessions(
     if status:
         query += f" AND s.status = {_ph}" if tag_id else f" AND status = {_ph}"
         params.append(status)
-    if favorites_only:
-        query += " AND s.is_favorite = TRUE" if tag_id else " AND is_favorite = TRUE"
+    if active_only:
+        query += " AND s.is_active = TRUE" if tag_id else " AND is_active = TRUE"
     if api_users_only:
         # Filter for sessions that have an API user (exclude admin sessions)
         query += " AND s.api_user_id IS NOT NULL" if tag_id else " AND api_user_id IS NOT NULL"
@@ -239,7 +239,7 @@ def get_sessions_paginated(
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
     api_users_only: bool = False,
-    favorites_only: bool = False,
+    active_only: bool = False,
     tag_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
@@ -273,8 +273,8 @@ def get_sessions_paginated(
     if status:
         base_query += f" AND {col_prefix}status = {_ph}"
         params.append(status)
-    if favorites_only:
-        base_query += f" AND {col_prefix}is_favorite = TRUE"
+    if active_only:
+        base_query += f" AND {col_prefix}is_active = TRUE"
     if api_users_only:
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
@@ -313,7 +313,7 @@ def get_sessions_cursor(
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
     api_users_only: bool = False,
-    favorites_only: bool = False,
+    active_only: bool = False,
     tag_id: Optional[str] = None,
     limit: int = 50,
     cursor: Optional[str] = None,
@@ -349,8 +349,8 @@ def get_sessions_cursor(
     if status:
         base_query += f" AND {col_prefix}status = {_ph}"
         params.append(status)
-    if favorites_only:
-        base_query += f" AND {col_prefix}is_favorite = TRUE"
+    if active_only:
+        base_query += f" AND {col_prefix}is_active = TRUE"
     if api_users_only:
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
@@ -404,6 +404,8 @@ def create_session(
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
     automation_id: Optional[str] = None,
+    *,
+    is_active: bool = False,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -423,16 +425,18 @@ def create_session(
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         automation_id: Automation that created this session (NULL = user/API session)
+        is_active: Whether the session starts in the Active group (user-initiated
+            sessions are created active; imported/background ones are not)
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs15 = ", ".join([_ph] * 15)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, v2_stream, created_at, updated_at)
-               VALUES ({_phs15})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, True, now, now)
+    _phs16 = ", ".join([_ph] * 16)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at)
+               VALUES ({_phs16})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -842,31 +846,15 @@ def _cleanup_working_set_ref(session_id: str) -> None:
         )
 
 
-def toggle_session_favorite(session_id: str) -> Optional[SessionRow]:
-    """Toggle the is_favorite flag for a session and return the updated session"""
-    _ph = ph()
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        # Toggle the favorite status
-        cursor.execute(
-            f"""UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = {_ph}
-               WHERE id = {_ph}""",
-            (datetime.now(timezone.utc).isoformat(), session_id)
-        )
-        if cursor.rowcount == 0:
-            return None
-    return get_session(session_id)
-
-
-def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[SessionRow]:
-    """Set the is_favorite flag for a session and return the updated session"""
+def set_session_active(session_id: str, is_active: bool) -> Optional[SessionRow]:
+    """Set the is_active flag for a session and return the updated session"""
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"""UPDATE sessions SET is_favorite = {_ph}, updated_at = {_ph}
+            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}
                WHERE id = {_ph}""",
-            (is_favorite, datetime.now(timezone.utc).isoformat(), session_id)
+            (is_active, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None
@@ -1561,7 +1549,7 @@ def search_sessions(
         WITH title_matches AS (
             SELECT
                 s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
-                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.status, s.is_active, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
                 s.turn_count, s.created_at, s.updated_at,
                 'title' as match_type,
                 s.title as match_snippet,
@@ -1573,7 +1561,7 @@ def search_sessions(
         content_matches AS (
             SELECT DISTINCT ON (s.id)
                 s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
-                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.status, s.is_active, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
                 s.turn_count, s.created_at, s.updated_at,
                 'content' as match_type,
                 ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),
@@ -1589,7 +1577,7 @@ def search_sessions(
         store_matches AS (
             SELECT DISTINCT ON (s.id)
                 s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
-                s.status, s.is_favorite, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.status, s.is_active, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
                 s.turn_count, s.created_at, s.updated_at,
                 'content' as match_type,
                 ts_headline('english', sse_entry_text(sse.entry), plainto_tsquery('english', {_ph}),

@@ -159,7 +159,7 @@
 	 */
 	function handleOpenSessions() {
 		layout.openBoard();
-		// Pull fresh sessions so cross-install mutations (favorites starred on
+		// Pull fresh sessions so cross-install mutations (active-state changes on
 		// another install) show up the moment the board opens, not just on next
 		// focus. Debounced via _refreshBoard so a rapid open/close/open doesn't
 		// stampede the API.
@@ -176,11 +176,11 @@
 	let swMessageHandler: ((event: MessageEvent) => void) | null = null;
 	let openSessionEventHandler: ((event: Event) => void) | null = null;
 
-	// Cross-install freshness: favorites (and other mutations) land in the shared
-	// DB from OTHER installs, but our board only reloads on mount + local mutations
-	// — so an open board goes stale. Refresh it when the board becomes visible /
-	// the window regains focus. Debounced so rapid focus flaps (alt-tabbing) don't
-	// stampede the API.
+	// Cross-install freshness: active-state changes (and other mutations) land in
+	// the shared DB from OTHER installs, but our board only reloads on mount +
+	// local mutations — so an open board goes stale. Refresh it when the board
+	// becomes visible / the window regains focus. Debounced so rapid focus flaps
+	// (alt-tabbing) don't stampede the API.
 	let _lastBoardRefresh = 0;
 	const BOARD_REFRESH_MIN_INTERVAL_MS = 4000;
 	function _refreshBoard() {
@@ -283,7 +283,7 @@
 
 		// Sync from server when window regains focus / the tab becomes visible.
 		// Keeps the sessions board fresh with cross-install mutations (e.g. a
-		// favorite starred on another install) that our board otherwise never
+		// session marked active on another install) that our board otherwise never
 		// picks up until a manual reload.
 		visibilityChangeHandler = () => {
 			if (document.visibilityState === 'visible') {

@@ -38,6 +38,11 @@ class BatchDeleteRequest(BaseModel):
     session_ids: List[str]
 
 
+class SessionActiveUpdate(BaseModel):
+    """Request body for setting a session's active status"""
+    is_active: bool
+
+
 class SessionImportData(BaseModel):
     """Data structure for imported session"""
     session: dict

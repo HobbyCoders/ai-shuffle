@@ -26,7 +26,7 @@ List sessions with optional filters.
 | `tag_id` | string | Filter by tag |
 | `admin_only` | boolean | Only admin sessions |
 | `api_users_only` | boolean | Only API user sessions |
-| `favorites_only` | boolean | Only favorited sessions |
+| `active_only` | boolean | Only active-group sessions |
 | `limit` | integer | Max results (default: 50) |
 | `offset` | integer | Pagination offset |
 
@@ -107,7 +107,7 @@ curl http://localhost:8000/api/v1/sessions/sess_abc123 \
   ],
   "created_at": "2025-01-15T10:30:00Z",
   "updated_at": "2025-01-15T10:35:00Z",
-  "is_favorite": false,
+  "is_active": false,
   "tags": []
 }
 ```
@@ -157,13 +157,15 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
 
 Archive a session.
 
-### PATCH /api/v1/sessions/{session_id}/favorite
+### PATCH /api/v1/sessions/{session_id}/active
 
-Toggle favorite status. This endpoint takes no request body — it flips the current value and returns the updated session.
+Set whether a session is in the Active group. Send a JSON body with the new value; the endpoint returns the updated session. Passing `false` marks the session complete (it drops into Recent); passing `true` moves it back to Active.
 
 ```bash
-curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/favorite \
-  -H "Authorization: Bearer aih_your_key"
+curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
 ```
 
 ## Session Sync

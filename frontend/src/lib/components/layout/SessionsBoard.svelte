@@ -12,12 +12,12 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil } from 'lucide-svelte';
+	import { Plus, X, CircleDot, Undo2, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
-	import { toggleSessionFavorite, forkSession, adoptSession, api } from '$lib/api/client';
+	import { forkSession, adoptSession, api } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { toast } from '$lib/stores/toast';
@@ -37,7 +37,7 @@
 	const RECENT_LIMIT = 10;
 
 	// --- Collapsible board sections ---
-	// Users with many sessions can fold away the Pinned / Recent / Projects
+	// Users with many sessions can fold away the Active / Recent / Projects
 	// sections they don't need. State persists across reloads (per browser).
 	const COLLAPSE_KEY = 'ai-shuffle-board-collapsed-sections';
 	function loadCollapsed(): string[] {
@@ -123,7 +123,7 @@
 	}
 
 	// Sessions after applying the device filter — every list below derives from
-	// this so the filter cuts across pinned/recent/projects uniformly.
+	// this so the filter cuts across active/recent/projects uniformly.
 	const visibleSessions = $derived(
 		deviceFilter ? $sessions.filter((s) => sessionDeviceId(s) === deviceFilter) : $sessions
 	);
@@ -155,7 +155,7 @@
 	}
 	function sortSessions(list: Session[]): Session[] {
 		return [...list].sort((a, b) => {
-			if (!!a.is_favorite !== !!b.is_favorite) return a.is_favorite ? -1 : 1;
+			if (!!a.is_active !== !!b.is_active) return a.is_active ? -1 : 1;
 			return tsOf(b) - tsOf(a);
 		});
 	}
@@ -238,12 +238,13 @@
 		return arr;
 	});
 
-	// Pinned (favorited) sessions get their own section so they always stay
-	// visible at the top instead of competing with everything else for the
-	// limited Recent slots. Recent therefore excludes favorites.
-	const pinned = $derived(visibleSessions.filter((s) => s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)));
+	// Active sessions (the ones the user is currently working in) get their own
+	// section so they always stay visible at the top instead of competing with
+	// everything else for the limited Recent slots. Recent therefore excludes
+	// active sessions.
+	const active = $derived(visibleSessions.filter((s) => s.is_active).sort((a, b) => tsOf(b) - tsOf(a)));
 	const recent = $derived(
-		visibleSessions.filter((s) => !s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT)
+		visibleSessions.filter((s) => !s.is_active).sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT)
 	);
 
 	const selectedGroup = $derived(selectedKey ? projectGroups.find((g) => g.key === selectedKey) ?? null : null);
@@ -358,18 +359,20 @@
 		}
 	}
 
-	async function toggleFavorite(s: Session) {
-		try {
-			await toggleSessionFavorite(s.id);
-			await appData.loadSessions();
-		} catch {
-			toast.push('Failed to update favorite', { tone: 'error' });
-		}
-	}
-	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, s: Session) {
+	// Flip a session's Active membership: an active row is marked complete
+	// (is_active=false → it drops into Recent), an inactive row is moved back to
+	// Active. State-based so it also reads correctly in an opened project's list
+	// where active and inactive rows mix.
+	async function handleToggleActive(e: MouseEvent | KeyboardEvent, s: Session) {
 		e.stopPropagation();
 		actionsOpenId = null;
-		await toggleFavorite(s);
+		try {
+			// Optimistic in-place update (re-groups Active/Recent without a full
+			// paginated refetch); the store rolls back on error.
+			await appData.setSessionActive(s.id, !s.is_active);
+		} catch {
+			toast.push('Failed to update session', { tone: 'error' });
+		}
 	}
 
 	// Mobile: the ⋮ toggle expands/collapses a row's action rail. Collapsing also
@@ -741,16 +744,19 @@
 						</button>
 					</div>
 				{:else}
-					{#if pinned.length}
+					{#if active.length}
 						<section class="board-section">
+							<!-- 'pinned' is the legacy persisted collapse key for the Active
+							     section (the group was formerly Favorites/Pinned). Kept as-is to
+							     preserve users' saved collapse preference across the rename. -->
 							<button class="section-label section-toggle" onclick={() => toggleSection('pinned')} aria-expanded={!isCollapsed('pinned')}>
 								<ChevronDown size={13} strokeWidth={2.2} class="section-caret {isCollapsed('pinned') ? 'collapsed' : ''}" />
-								<Star size={12} strokeWidth={2} fill="currentColor" class="section-icon" />
-								Pinned <span class="section-count">{pinned.length}</span>
+								<CircleDot size={12} strokeWidth={2} class="section-icon" />
+								Active <span class="section-count">{active.length}</span>
 							</button>
 							{#if !isCollapsed('pinned')}
 								<div class="row-list">
-									{#each pinned as s (s.id)}{@render sessionRow(s, true)}{/each}
+									{#each active as s (s.id)}{@render sessionRow(s, true)}{/each}
 								</div>
 							{/if}
 						</section>
@@ -837,8 +843,8 @@
 	<!-- Armed = the clear confirm is showing OR its request is in flight. While
 	     armed, the rail freezes: every non-confirm action is inert and the icons
 	     never move, so a second/stray click can only ever hit Confirm or Cancel —
-	     never a different action (the old reflow silently pinned instead of
-	     clearing). -->
+	     never a different action (the old reflow silently fired a neighbour
+	     action instead of clearing). -->
 	{@const isArmed = deletingSessionId === session.id || deleteInFlightId === session.id}
 	<div
 		class="row"
@@ -944,7 +950,7 @@
 		>
 			<!-- Cancel is a LEADING icon that only exists while armed. Because the
 			     rail is right-anchored, growing it on the LEFT leaves every
-			     following icon (Fork / Star / delete) at its exact resting x — so
+			     following icon (Fork / Complete / delete) at its exact resting x — so
 			     the trash icon the user just clicked stays put and a second click
 			     lands on Confirm, never a shifted neighbour. -->
 			{#if isArmed}
@@ -978,14 +984,21 @@
 			>
 				<GitFork size={13} strokeWidth={1.6} />
 			</button>
+			<!-- State-based Active toggle: an active row gets "Complete" (drops it into
+			     Recent), an inactive row gets "Move to Active". State- not group-based
+			     so mixed opened-project lists render the right action per row. -->
 			<button
-				class="row-action fav"
-				class:is-fav={session.is_favorite}
-				title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
+				class="row-action"
+				title={session.is_active ? 'Complete' : 'Move to Active'}
+				aria-label={session.is_active ? 'Complete session' : 'Move session to Active'}
 				disabled={isArmed}
-				onclick={(e) => handleToggleFavorite(e, session)}
+				onclick={(e) => handleToggleActive(e, session)}
 			>
-				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
+				{#if session.is_active}
+					<Check size={13} strokeWidth={1.6} />
+				{:else}
+					<Undo2 size={13} strokeWidth={1.6} />
+				{/if}
 			</button>
 			<!-- ONE trash icon that stays mounted through arm → in-flight, keeping its
 			     slot (rightmost) fixed: it only swaps resting→danger styling and its
@@ -1537,10 +1550,8 @@
 		cursor: pointer;
 	}
 	.row-action:hover { color: var(--foreground); background: color-mix(in oklch, var(--muted) 60%, transparent); }
-	/* Active favourite + armed-delete + its cancel stay visible at rest, even
-	   unhovered — the armed confirm must never depend on hover to be seen. */
-	.row-action.fav.is-fav { --ram-reveal: 1; color: var(--warning); }
-	.row-action.fav:hover { color: var(--warning); }
+	/* Armed-delete + its cancel stay visible at rest, even unhovered — the armed
+	   confirm must never depend on hover to be seen. */
 	.row-action.cancel { --ram-reveal: 1; }
 	.row-action.danger {
 		position: relative;

@@ -141,7 +141,7 @@ def sample_session():
         "profile_id": "default",
         "project_id": None,
         "status": "active",
-        "is_favorite": False,
+        "is_active": False,
         "sdk_session_id": "sdk-123",
         "total_cost_usd": 0.01,
         "total_tokens_in": 100,
@@ -419,16 +419,16 @@ class TestListSessions:
         call_kwargs = mock_database.get_sessions.call_args[1]
         assert call_kwargs["status"] == "active"
 
-    def test_list_sessions_favorites_only(self, client, mock_database, sample_session):
-        """Should filter to favorites only."""
-        sample_session["is_favorite"] = True
+    def test_list_sessions_active_only(self, client, mock_database, sample_session):
+        """Should filter to active sessions only."""
+        sample_session["is_active"] = True
         mock_database.get_sessions.return_value = [sample_session]
 
-        response = client.get("/api/v1/sessions?favorites_only=true")
+        response = client.get("/api/v1/sessions?active_only=true")
 
         assert response.status_code == 200
         call_kwargs = mock_database.get_sessions.call_args[1]
-        assert call_kwargs["favorites_only"] is True
+        assert call_kwargs["active_only"] is True
 
     def test_list_sessions_admin_only(self, client, mock_database, sample_session):
         """Should filter to admin sessions only."""
@@ -526,33 +526,33 @@ class TestSearchSessions:
         assert len(data) == 1
         mock_database.search_sessions.assert_called_once()
 
-    def test_search_sessions_returns_is_favorite(self, client, mock_database):
-        """Regression: a favorited session must surface is_favorite=True through
-        the search endpoint. The DB layer's search_sessions CTEs previously
-        omitted is_favorite from their SELECT lists, so the API response model
-        defaulted it to False and starred sessions rendered unstarred in search
-        results (cross-install favorites bug). This guards the response-model
-        contract; the SQL-column fix is exercised by the DB layer against
-        Postgres (no reachable PG in this sandbox — see report)."""
+    def test_search_sessions_returns_is_active(self, client, mock_database):
+        """Regression: an active session must surface is_active=True through
+        the search endpoint. The DB layer's search_sessions CTEs must keep
+        is_active in their SELECT lists (previously is_favorite), otherwise the
+        API response model defaults it to False and active sessions render
+        inactive in search results (cross-install bug). This guards the
+        response-model contract; the SQL-column fix is exercised by the DB
+        layer against Postgres (no reachable PG in this sandbox — see report)."""
         mock_database.search_sessions.return_value = [
             {
-                "id": "fav-session",
-                "title": "Starred chat",
+                "id": "active-session",
+                "title": "Active chat",
                 "profile_id": "default",
                 "status": "active",
-                "is_favorite": True,
+                "is_active": True,
                 "created_at": "2024-01-15T10:30:00",
                 "updated_at": "2024-01-15T10:30:00",
                 "match_type": "title",
             }
         ]
 
-        response = client.get("/api/v1/sessions/search/query?q=starred")
+        response = client.get("/api/v1/sessions/search/query?q=active")
 
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["is_favorite"] is True
+        assert data[0]["is_active"] is True
 
     def test_search_sessions_passes_match_count(self, client, mock_database):
         """match_count from the DB layer must surface in the search response so
@@ -1501,43 +1501,68 @@ class TestArchiveSession:
 
 
 # =============================================================================
-# Test Toggle Favorite Endpoint
+# Test Set Session Active Endpoint
 # =============================================================================
 
-class TestToggleFavorite:
-    """Test PATCH /api/v1/sessions/{session_id}/favorite endpoint."""
+class TestSetSessionActive:
+    """Test PATCH /api/v1/sessions/{session_id}/active endpoint."""
 
-    def test_toggle_favorite_success(self, client, mock_database, sample_session):
-        """Should toggle session favorite status."""
+    def test_set_active_false_success(self, client, mock_database, sample_session):
+        """Should mark a session complete (is_active=False)."""
         mock_database.get_session.return_value = sample_session
-        favorited = {**sample_session, "is_favorite": True}
-        mock_database.toggle_session_favorite.return_value = favorited
+        completed = {**sample_session, "is_active": False}
+        mock_database.set_session_active.return_value = completed
 
-        response = client.patch("/api/v1/sessions/test-session-id/favorite")
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False},
+        )
 
         assert response.status_code == 200
-        mock_database.toggle_session_favorite.assert_called_once_with("test-session-id")
+        assert response.json()["is_active"] is False
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False)
 
-    def test_toggle_favorite_not_found(self, client, mock_database):
+    def test_set_active_true_success(self, client, mock_database, sample_session):
+        """Should re-activate a session (is_active=True)."""
+        mock_database.get_session.return_value = sample_session
+        activated = {**sample_session, "is_active": True}
+        mock_database.set_session_active.return_value = activated
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": True},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["is_active"] is True
+        mock_database.set_session_active.assert_called_once_with("test-session-id", True)
+
+    def test_set_active_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
         mock_database.get_session.return_value = None
 
-        response = client.patch("/api/v1/sessions/non-existent/favorite")
+        response = client.patch(
+            "/api/v1/sessions/non-existent/active",
+            json={"is_active": True},
+        )
 
         assert response.status_code == 404
 
-    def test_toggle_favorite_failure(self, client, mock_database, sample_session):
-        """Should return 500 if toggle fails."""
+    def test_set_active_failure(self, client, mock_database, sample_session):
+        """Should return 500 if the DB update returns None."""
         mock_database.get_session.return_value = sample_session
-        mock_database.toggle_session_favorite.return_value = None
+        mock_database.set_session_active.return_value = None
 
-        response = client.patch("/api/v1/sessions/test-session-id/favorite")
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": True},
+        )
 
         assert response.status_code == 500
-        assert "Failed to toggle" in response.json()["detail"]
+        assert "Failed to update active status" in response.json()["detail"]
 
-    def test_toggle_favorite_access_denied(self, client, mock_database, mock_api_user, sample_session):
-        """Should deny toggle for unauthorized API user."""
+    def test_set_active_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny setting active status for an unauthorized API user."""
         mock_api_user.return_value = {
             "id": "api-user-1",
             "project_id": "other-project"
@@ -1545,7 +1570,10 @@ class TestToggleFavorite:
         sample_session["project_id"] = "test-project"
         mock_database.get_session.return_value = sample_session
 
-        response = client.patch("/api/v1/sessions/test-session-id/favorite")
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False},
+        )
 
         assert response.status_code == 403
 

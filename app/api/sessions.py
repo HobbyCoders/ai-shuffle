@@ -82,6 +82,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     _annotate_cluster_fields,
     _apply_session_filters,
     BatchDeleteRequest,
+    SessionActiveUpdate,
     SessionImportData,
     SessionImportResponse,
     ImportJSONLRequest,
@@ -270,7 +271,7 @@ async def list_sessions(
     api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
     admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
     api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
-    favorites_only: bool = Query(False, description="Show only favorited sessions"),
+    active_only: bool = Query(False, description="Show only active sessions"),
     tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
     sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
     limit: int = Query(50, ge=1, le=100),
@@ -296,7 +297,7 @@ async def list_sessions(
         status=status_filter,
         api_user_id=filter_api_user_id,
         api_users_only=filter_api_users_only,
-        favorites_only=favorites_only,
+        active_only=active_only,
         tag_id=tag_id,
         limit=limit,
         offset=offset
@@ -313,7 +314,7 @@ async def list_sessions_paginated(
     api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
     admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
     api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
-    favorites_only: bool = Query(False, description="Show only favorited sessions"),
+    active_only: bool = Query(False, description="Show only active sessions"),
     tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
     sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
     limit: int = Query(50, ge=1, le=100),
@@ -335,7 +336,7 @@ async def list_sessions_paginated(
         status=status_filter,
         api_user_id=filter_api_user_id,
         api_users_only=filter_api_users_only,
-        favorites_only=favorites_only,
+        active_only=active_only,
         tag_id=tag_id,
         limit=limit,
         offset=offset
@@ -362,7 +363,7 @@ async def list_sessions_cursor(
     api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
     admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
     api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
-    favorites_only: bool = Query(False, description="Show only favorited sessions"),
+    active_only: bool = Query(False, description="Show only active sessions"),
     tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
     sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
     limit: int = Query(50, ge=1, le=100),
@@ -386,7 +387,7 @@ async def list_sessions_cursor(
         status=status_filter,
         api_user_id=filter_api_user_id,
         api_users_only=filter_api_users_only,
-        favorites_only=favorites_only,
+        active_only=active_only,
         tag_id=tag_id,
         limit=limit,
         cursor=cursor,
@@ -1554,16 +1555,21 @@ async def archive_session(request: Request, session_id: str, token: str = Depend
     return {"status": "ok", "message": "Session archived"}
 
 
-@router.patch("/{session_id}/favorite", response_model=Session)
-async def toggle_session_favorite(request: Request, session_id: str, token: str = Depends(require_auth)):
-    """Toggle the favorite status of a session. Returns the updated session."""
+@router.patch("/{session_id}/active", response_model=Session)
+async def set_session_active(
+    request: Request,
+    session_id: str,
+    payload: SessionActiveUpdate,
+    token: str = Depends(require_auth),
+):
+    """Set the active status of a session. Returns the updated session."""
     existing = await require_session(request, session_id)
 
-    session = await run_sync(database.toggle_session_favorite, session_id)
+    session = await run_sync(database.set_session_active, session_id, payload.is_active)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to toggle favorite status"
+            detail="Failed to update active status"
         )
 
     return session

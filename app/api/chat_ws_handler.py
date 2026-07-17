@@ -583,6 +583,7 @@ class ChatWebSocketHandler:
                         project_id=project_id,
                         api_user_id=self.api_user_id,
                         title=title,
+                        is_active=True,
                         _conn=txn
                     )
                     _msg_role = "user"

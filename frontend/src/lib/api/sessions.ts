@@ -20,7 +20,7 @@ export interface Session {
 	project_id: string | null;
 	title: string | null;
 	status: string;
-	is_favorite: boolean;
+	is_active: boolean;
 	api_user_id?: string | null;
 	api_user_name?: string | null;
 	total_cost_usd: number;
@@ -188,16 +188,18 @@ export async function searchSessionsPaginated(
 }
 
 /**
- * Toggle the favorite status of a session
+ * Set whether a session is in the Active group. Passing `false` marks it complete
+ * (it drops into Recent); passing `true` moves it back to Active. The backend
+ * `PATCH /sessions/{id}/active` endpoint takes the new value as a JSON body and
+ * returns the updated Session.
  */
-export async function toggleSessionFavorite(sessionId: string): Promise<Session> {
-	return api.patch<Session>(`/sessions/${sessionId}/favorite`);
+export async function setSessionActive(sessionId: string, isActive: boolean): Promise<Session> {
+	return api.patch<Session>(`/sessions/${sessionId}/active`, { is_active: isActive });
 }
 
 /**
  * Rename a session. The backend `PATCH /sessions/{id}` endpoint takes the new
- * title as a query parameter (not a JSON body) and returns the updated Session;
- * this mirrors `toggleSessionFavorite`'s use of `api.patch` with no request body.
+ * title as a query parameter (not a JSON body) and returns the updated Session.
  */
 export async function renameSession(sessionId: string, title: string): Promise<Session> {
 	const params = new URLSearchParams({ title });

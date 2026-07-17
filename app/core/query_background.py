@@ -631,7 +631,8 @@ async def start_background_query(
             profile_id=profile_id,
             project_id=project_id,
             title=title,
-            api_user_id=api_user_id
+            api_user_id=api_user_id,
+            is_active=True,
         )
         logger.debug(f"Created new session {session_id} with title: {title}")
 

@@ -81,6 +81,20 @@ async def test_created_session_is_stamped_with_automation_id(engine_mocks):
 
 
 @pytest.mark.asyncio
+async def test_automation_session_is_not_active(engine_mocks):
+    """Automation-created sessions run headless and must NOT land in the
+    user's Active group (is_active False)."""
+    await qe.execute_query(
+        prompt="nightly report",
+        profile_id="principal-engineer",
+        automation_id=AUTOMATION_ID,
+    )
+
+    engine_mocks.create_session.assert_called_once()
+    assert engine_mocks.create_session.call_args.kwargs["is_active"] is False
+
+
+@pytest.mark.asyncio
 async def test_interactive_session_has_no_automation_id(engine_mocks):
     await qe.execute_query(
         prompt="hello",
@@ -89,3 +103,5 @@ async def test_interactive_session_has_no_automation_id(engine_mocks):
 
     engine_mocks.create_session.assert_called_once()
     assert engine_mocks.create_session.call_args.kwargs["automation_id"] is None
+    # Interactive (non-automation) sessions ARE active.
+    assert engine_mocks.create_session.call_args.kwargs["is_active"] is True

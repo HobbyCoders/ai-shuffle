@@ -121,7 +121,9 @@ def _safe_json(value):
 #     <raw sdk response>}), written at turn end so the context-usage endpoint
 #     can serve a persisted snapshot after the SDK process is evicted from the
 #     local pool. Additive/nullable; NULL = never captured.
-SCHEMA_VERSION = 62
+# 63 (2026-07-16): rename sessions.is_favorite -> is_active (favorites reworked
+#     into Active group); index idx_sessions_favorite -> idx_sessions_active.
+SCHEMA_VERSION = 63
 
 
 def _run_column_migrations(cursor):
@@ -194,6 +196,12 @@ def _run_column_migrations(cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
+        # NOTE: keep the legacy is_favorite index name here. This branch runs
+        # early (while an ancient DB may still have profile_id NOT NULL and the
+        # is_favorite column), long before the v63 block below renames the
+        # column to is_active — referencing is_active here would raise
+        # undefined-column and abort the whole migration pass. The v63 block
+        # renames this index to idx_sessions_active once the column is renamed.
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
@@ -1201,6 +1209,23 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_usage_json JSONB")
         migrations_applied.append("sessions.context_usage_json")
 
+    # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
+    # into an "Active group": the flag now marks the session the user is
+    # currently working in. Guarded so the rename runs exactly once (only when
+    # the legacy column exists and the new one does not). The index is renamed
+    # via guarded DROP+CREATE rather than ALTER INDEX: SQLite (the test pg_shim)
+    # has no ALTER INDEX ... RENAME, and DROP/CREATE IF [NOT] EXISTS is
+    # equivalent and idempotent on both backends.
+    if (
+        table_exists(cursor, "sessions")
+        and column_exists(cursor, "sessions", "is_favorite")
+        and not column_exists(cursor, "sessions", "is_active")
+    ):
+        cursor.execute("ALTER TABLE sessions RENAME COLUMN is_favorite TO is_active")
+        cursor.execute("DROP INDEX IF EXISTS idx_sessions_favorite")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
+        migrations_applied.append("sessions.is_favorite->is_active")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -1416,8 +1441,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_context_usage,
     get_session_context_usage_snapshot,
     delete_session,
-    toggle_session_favorite,
-    set_session_favorite,
+    set_session_active,
     set_session_parked_task_kind,
     adopt_session,
     set_session_project,

@@ -173,6 +173,7 @@ async def _create_v2_branch_session(
             project_id=body.project_id,
             title="",
             api_user_id=api_user_id,
+            is_active=True,
         )
         database.set_session_branch(session_id, branch_name, pv2["id"])
 

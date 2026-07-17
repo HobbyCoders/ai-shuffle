@@ -76,7 +76,7 @@ def _v2_session():
         "worktree_id": None,
         "worktree_branch": None,
         "status": "active",
-        "is_favorite": False,
+        "is_active": False,
         "sdk_session_id": "sdk-1",
         "created_at": "2024-01-15T10:30:00",
         "updated_at": "2024-01-15T10:30:00",

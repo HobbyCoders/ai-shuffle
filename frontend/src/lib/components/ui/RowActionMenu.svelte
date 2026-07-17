@@ -10,7 +10,7 @@
 	 * the inherited `--ram-reveal` custom property (0 hidden / 1 shown) so this
 	 * component never has to reach across a scoping boundary to know the row's
 	 * hover state — set `--ram-reveal: 1` on any button that should stay visible
-	 * at rest (e.g. an active favourite).
+	 * at rest (e.g. an armed delete confirm).
 	 *
 	 * Touch / narrow (≤1080px, the app-wide mobile cutoff): the four-ish buttons
 	 * collapse behind the ⋮. Tapping it floats the tray out to the LEFT so opening

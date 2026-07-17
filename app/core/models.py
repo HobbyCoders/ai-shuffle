@@ -320,7 +320,7 @@ class Session(SessionBase):
     id: str
     sdk_session_id: Optional[str] = None
     status: str = "active"
-    is_favorite: bool = False
+    is_active: bool = False
     api_user_id: Optional[str] = None
     api_user_name: Optional[str] = None
     total_cost_usd: float = 0.0

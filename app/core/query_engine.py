@@ -828,6 +828,10 @@ async def execute_query(
             title=title,
             api_user_id=api_user_id,
             automation_id=automation_id,
+            # Automation-created sessions (automation_id set) run headless and
+            # must NOT land in the user's Active group — only interactive,
+            # user-initiated sessions are "active".
+            is_active=automation_id is None,
         )
         resume_id = None
 
@@ -1214,7 +1218,11 @@ async def stream_query(
             profile_id=profile_id,
             project_id=project_id,
             title=title,
-            api_user_id=api_user_id
+            api_user_id=api_user_id,
+            # stream_query is the interactive SSE path only (called from
+            # app/api/query.py); it has no automation_id and is never reached
+            # from automation, so every session it creates is user-active.
+            is_active=True,
         )
         _is_new_session = True  # Flag available for future analytics/logging
         logger.debug(f"Created new session {session_id} with title: {title}")

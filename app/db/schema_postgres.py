@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 62
+SCHEMA_VERSION = 63
 
 
 def create_postgres_schema(cursor) -> None:
@@ -180,7 +180,7 @@ def create_postgres_schema(cursor) -> None:
             parked_task_kind TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
-            is_favorite BOOLEAN DEFAULT FALSE,
+            is_active BOOLEAN DEFAULT FALSE,
             total_cost_usd DOUBLE PRECISION DEFAULT 0,
             total_tokens_in INTEGER DEFAULT 0,
             total_tokens_out INTEGER DEFAULT 0,
@@ -1070,7 +1070,7 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")

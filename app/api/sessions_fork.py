@@ -148,7 +148,8 @@ async def fork_session(
         title=fork_title,
         api_user_id=api_user_id,
         parent_session_id=session_id,
-        fork_point_message_index=fork_message_index
+        fork_point_message_index=fork_message_index,
+        is_active=True,
     )
 
     # Update with SDK session ID

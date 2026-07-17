@@ -9,7 +9,7 @@
  */
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
-import { api, searchSessionsPaginated, renameSession as apiRenameSession } from '$lib/api/client';
+import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive } from '$lib/api/client';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
@@ -429,6 +429,27 @@ export const appData = {
 			await apiRenameSession(sessionId, title);
 		} catch (err) {
 			// Roll the optimistic title change back and let the caller surface the error.
+			_update(s => ({ ...s, sessions: prevSessions }));
+			throw err;
+		}
+	},
+
+	async setSessionActive(sessionId: string, isActive: boolean) {
+		// Optimistic Active-membership flip — patch the row's is_active in local
+		// state immediately (mirrors renameSession's optimistic splice) so it
+		// re-groups between the Active and Recent sections without a full
+		// paginated refetch. Snapshot the previous list to roll back if the PATCH
+		// fails.
+		const prevSessions = _state.sessions;
+		_update(s => ({
+			...s,
+			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, is_active: isActive } : x)),
+		}));
+
+		try {
+			await apiSetSessionActive(sessionId, isActive);
+		} catch (err) {
+			// Roll the optimistic change back and let the caller surface the error.
 			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}

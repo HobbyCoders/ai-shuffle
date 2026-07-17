@@ -378,13 +378,13 @@ class TestSessionOperations:
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
 
-    def test_get_sessions_favorites_only(self, mock_db, setup_profile):
-        """get_sessions should filter favorites."""
+    def test_get_sessions_active_only(self, mock_db, setup_profile):
+        """get_sessions should filter to active sessions."""
         db.create_session("session-1", setup_profile)
         db.create_session("session-2", setup_profile)
-        db.set_session_favorite("session-1", True)
+        db.set_session_active("session-1", True)
 
-        result = db.get_sessions(favorites_only=True)
+        result = db.get_sessions(active_only=True)
 
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
@@ -415,22 +415,25 @@ class TestSessionOperations:
         assert result is True
         assert db.get_session("session-1") is None
 
-    def test_toggle_session_favorite(self, mock_db, setup_profile):
-        """toggle_session_favorite should toggle is_favorite."""
+    def test_set_session_active(self, mock_db, setup_profile):
+        """set_session_active should set is_active to a specific value in both
+        directions."""
         db.create_session("session-1", setup_profile)
 
-        result = db.toggle_session_favorite("session-1")
-        assert result["is_favorite"] == 1
+        result = db.set_session_active("session-1", True)
+        assert result["is_active"] == 1
 
-        result = db.toggle_session_favorite("session-1")
-        assert result["is_favorite"] == 0
+        result = db.set_session_active("session-1", False)
+        assert result["is_active"] == 0
 
-    def test_set_session_favorite(self, mock_db, setup_profile):
-        """set_session_favorite should set is_favorite to specific value."""
-        db.create_session("session-1", setup_profile)
+    def test_create_session_is_active(self, mock_db, setup_profile):
+        """create_session should persist is_active=True when passed, and default
+        to False (inactive) when the param is omitted."""
+        db.create_session("session-active", setup_profile, is_active=True)
+        assert db.get_session("session-active")["is_active"] == 1
 
-        result = db.set_session_favorite("session-1", True)
-        assert result["is_favorite"] == 1
+        db.create_session("session-default", setup_profile)
+        assert db.get_session("session-default")["is_active"] == 0
 
     def test_session_has_forks(self, mock_db, setup_profile):
         """session_has_forks should detect forked sessions."""
@@ -696,8 +699,9 @@ class TestSearchSessionsSql:
     above), but the query's most fragile property is mechanical: the
     title_matches and content_matches CTEs feed ``SELECT * ... UNION ALL``,
     which silently mispairs values — or errors at runtime on Postgres only —
-    the moment one CTE's column list drifts from the other (how is_favorite
-    was originally missed). Capture the SQL without a database and assert the
+    the moment one CTE's column list drifts from the other (how a per-CTE
+    column like is_active can be missed). Capture the SQL without a database
+    and assert the
     two column lists stay symmetric.
     """
 
