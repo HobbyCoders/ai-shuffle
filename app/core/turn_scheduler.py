@@ -430,6 +430,30 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     Kicks after a merge/enqueue (never after the (a) no-op)."""
     try:
         task_id = frame.get("task_id")
+        # OWNERSHIP GATE (subagent task-notification leak): the reader hands off
+        # EVERY terminal background frame — including tasks launched INSIDE a
+        # sub-agent (grandchildren), which the main session never launched.
+        # Policy: the parent's OWN background work always wakes it; and ANY
+        # still-running background agent admits the wake, because the
+        # main-session pump is the ONLY resume path for a parked sub-agent
+        # (2026-07-10 strand repair) and a grandchild task is by construction
+        # launched WHILE its sub-agent is running — so no ownership-lane arming
+        # is required for the strand-repair case. Suppression happens only when
+        # the session is fully at rest with NO owner: an orphan grandchild or a
+        # synchronous sub-agent coming to rest (the "nothing to act on" leak).
+        from app.core.task_registry import task_registry
+        should_wake = (
+            task_registry.is_own_background_task(session_id, task_id)
+            or task_registry.has_active_background_agent(session_id)
+        )
+        if not should_wake:
+            logger.info(
+                "turn_scheduler: unpark-decision suppressed for %s — task %s "
+                "not the parent's background work and no active background agent",
+                session_id, task_id,
+            )
+            return
+
         existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
         if existing is not None:
             existing_payload = dict(existing.get("payload") or {})

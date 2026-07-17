@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.core import idle_reader, session_runtime, turn_manager, turn_scheduler
+from app.core.task_registry import task_registry
 from app.core.account_failover import FailoverDecision
 from app.core.compact_continue import AUTO_CONTINUE_PROMPT
 from app.db import session_events as se_db
@@ -423,6 +424,9 @@ async def test_unpark_synthesizes_notification_turn(mock_db):
     )
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["task-7"])
+    # task-7 is the parent's OWN background work (ownership gate admits it).
+    task_registry.start_task("u1", "task-7", "agent", "bg", tool_use_id="tu-7")
+    task_registry.mark_background_launch("u1", "tu-7")
 
     frame = {
         "task_id": "task-7", "status": "completed", "tool_use_id": "tu-7",
@@ -474,6 +478,10 @@ async def test_two_terminal_frames_batch_into_one_unpark(mock_db):
 
     f1 = _terminal_frame("task-a", "alpha done")
     f2 = _terminal_frame("task-b", "beta done")
+    # Both are the parent's OWN background work (ownership gate admits them).
+    for tid in ("task-a", "task-b"):
+        task_registry.start_task("ub1", tid, "agent", "bg", tool_use_id=f"tu-{tid}")
+        task_registry.mark_background_launch("ub1", f"tu-{tid}")
 
     with ExitStack() as stack:
         stack.enter_context(_patch_execute())
@@ -501,6 +509,9 @@ async def test_duplicate_terminal_frame_is_complete_noop(mock_db):
     live = turns_db.enqueue_turn("ub2", "user", prompt="working")
     turns_db.start_turn(live["id"], None, "runner")
     frame = _terminal_frame("task-d", "done once")
+    # task-d is the parent's OWN background work (ownership gate admits it).
+    task_registry.start_task("ub2", "task-d", "agent", "bg", tool_use_id="tu-task-d")
+    task_registry.mark_background_launch("ub2", "tu-task-d")
 
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())
@@ -530,6 +541,9 @@ async def test_unpark_enqueued_stays_queued_while_turn_live(mock_db):
     live = turns_db.enqueue_turn("ub3", "user", prompt="mid turn")
     turns_db.start_turn(live["id"], None, "runner")
     frame = _terminal_frame("task-x", "bg done")
+    # task-x is the parent's OWN background work (ownership gate admits it).
+    task_registry.start_task("ub3", "task-x", "agent", "bg", tool_use_id="tu-task-x")
+    task_registry.mark_background_launch("ub3", "tu-task-x")
 
     with ExitStack() as stack:
         stack.enter_context(_patch_execute())
@@ -543,6 +557,125 @@ async def test_unpark_enqueued_stays_queued_while_turn_live(mock_db):
     assert wake["state"] == "queued"
     # The live turn is untouched — no second live turn was created.
     assert turns_db.get_live_turn("ub3")["id"] == live["id"]
+
+
+# ---------------------------------------------------------------------------
+# (4) UNPARK — ownership gate (subagent task-notification leak, R1)
+# ---------------------------------------------------------------------------
+
+async def test_subagent_owned_terminal_without_parked_agent_no_unpark(mock_db):
+    # A background task launched BY a sub-agent (grandchild) goes terminal, but
+    # NO background agent is still running (orphan) → the main session must NOT
+    # be woken with a <task-notification> for work it never launched.
+    frame = _terminal_frame("gc-1", "grandchild done")
+    task_registry.mark_subagent_background_launch("sg1", frame["tool_use_id"])
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg1", frame)
+        await _drain_kicks()
+
+    assert _by_source("sg1", "unpark") == []
+    execute.assert_not_awaited()
+
+
+async def test_subagent_owned_terminal_with_parked_agent_fires_unpark(mock_db):
+    # 2026-07-10 regression: while a background sub-agent is still running, its
+    # grandchild's terminal notification MUST wake the parent — the main-session
+    # pump is the ONLY resume path for the parked sub-agent.
+    task_registry.start_task("sg2", "subagent-1", "agent", "spawning sub-agent")
+    frame = _terminal_frame("gc-2", "grandchild done")
+    task_registry.mark_subagent_background_launch("sg2", frame["tool_use_id"])
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg2", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("sg2", "unpark")
+    assert "<task-notification>" in wake["prompt"]
+    assert "<task-id>gc-2</task-id>" in wake["prompt"]
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == wake["id"]
+
+
+async def test_synchronous_subagent_at_rest_no_unpark(mock_db):
+    # A synchronous sub-agent (no background lane armed) comes to rest AFTER its
+    # turn: not own work, no running agent → suppress the spurious "nothing to
+    # act on" wake.
+    frame = _terminal_frame("sync-1", "nothing to act on")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg3", frame)
+        await _drain_kicks()
+
+    assert _by_source("sg3", "unpark") == []
+    execute.assert_not_awaited()
+
+
+async def test_parent_owned_terminal_still_fires_unpark(mock_db):
+    # The parent's OWN background work is unchanged — it still fires the unpark
+    # regardless of whether any background agent is currently running.
+    frame = _terminal_frame("own-1", "parent bg done")
+    task_registry.start_task(
+        "sg4", "own-1", "agent", "bg", tool_use_id=frame["tool_use_id"]
+    )
+    task_registry.mark_background_launch("sg4", frame["tool_use_id"])
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg4", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("sg4", "unpark")
+    assert "<task-id>own-1</task-id>" in wake["prompt"]
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == wake["id"]
+
+
+async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
+    # Under the simplified gate the ownership lane no longer drives the wake: an
+    # UNKNOWN terminal task (no lane armed) still wakes the parent as long as a
+    # background sub-agent is running — the arming-miss strand guard, since a
+    # grandchild is by construction launched while its sub-agent runs.
+    task_registry.start_task("sg5a", "subagent-a", "agent", "spawning")
+    frame_a = _terminal_frame("gc-5", "grandchild done")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg5a", frame_a)
+        await _drain_kicks()
+
+    assert len(_by_source("sg5a", "unpark")) == 1
+
+    # (b) same unknown task, NO running agent → suppressed.
+    frame_b = _terminal_frame("gc-6", "grandchild done")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sg5b", frame_b)
+        await _drain_kicks()
+
+    assert _by_source("sg5b", "unpark") == []
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +704,9 @@ async def test_unpark_enqueue_survives_shutdown_kick_suppression(mock_db):
     # suppressed while shutting down.
     frame = {"task_id": "task-1", "status": "completed", "tool_use_id": "tu-1",
              "summary": "done", "output_file": "", "usage": {}}
+    # task-1 is the parent's OWN background work (ownership gate admits it).
+    task_registry.start_task("k2", "task-1", "agent", "bg", tool_use_id="tu-1")
+    task_registry.mark_background_launch("k2", "tu-1")
 
     with ExitStack() as stack:
         execute = stack.enter_context(_patch_execute())

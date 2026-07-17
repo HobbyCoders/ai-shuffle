@@ -351,11 +351,24 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             if status not in _TERMINAL_TASK_STATUSES:
                 continue
             tool_use_id = frame.get("tool_use_id")
-            if tool_use_id:
+            # Suppress the chip ONLY when the task is POSITIVELY subagent-owned:
+            # a grandchild's terminal notification must not surface a "Task
+            # Updated" chip in the parent chat. But an UNKNOWN task (no lane
+            # armed either way) keeps the pre-existing always-chip behavior — the
+            # terminal chip is a settle path for subagent cards, so an
+            # ownership-arming MISS must not leave a card stuck-active
+            # (#617/#659 failure class).
+            n_task_id = frame.get("task_id")
+            if tool_use_id and not (
+                task_registry.is_subagent_background_task(session_id, n_task_id)
+                or task_registry.was_subagent_background_launch(
+                    session_id, tool_use_id
+                )
+            ):
                 try:
                     await record_drained_event(session_id, {
                         "type": "task_notification",
-                        "task_id": frame.get("task_id"),
+                        "task_id": n_task_id,
                         "tool_use_id": tool_use_id,
                         "status": status,
                         "usage": frame.get("usage"),

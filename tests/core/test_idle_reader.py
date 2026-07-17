@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core import idle_reader, session_runtime
+from app.core.task_registry import task_registry
 from app.core.query_engine import (
     ResultMessage,
     TaskNotificationMessage,
@@ -169,6 +170,10 @@ async def test_terminal_notification_record_includes_task_id(mock_db):
     bails on empty task_id and the agent's summary never reaches its card)."""
     turns_db.enqueue_turn("s2", "user", prompt="hi")
     idle_reader.register_on_task_terminal(AsyncMock())
+    # task-9 is the parent's OWN background work so the chip is recorded (the
+    # ownership gate would otherwise suppress a non-owned task's chip).
+    task_registry.start_task("s2", "task-9", "agent", "bg", tool_use_id="tu-9")
+    task_registry.mark_background_launch("s2", "tu-9")
 
     notif = _make_message(TaskNotificationMessage)
     frame = {"status": "completed", "task_id": "task-9", "tool_use_id": "tu-9",
@@ -187,6 +192,84 @@ async def test_terminal_notification_record_includes_task_id(mock_db):
     assert recorded["type"] == "task_notification"
     assert recorded["task_id"] == "task-9"
     assert recorded["tool_use_id"] == "tu-9"
+
+
+async def test_idle_reader_fires_handoff_regardless_of_ownership(mock_db):
+    """The reader stays GENERIC: a terminal notification for a NON-owned
+    (grandchild/synchronous) task still hands off to the scheduler seam — the
+    ownership policy lives in on_task_terminal, not in the reader."""
+    turns_db.enqueue_turn("sg", "user", prompt="hi")
+
+    handoff = AsyncMock()
+    idle_reader.register_on_task_terminal(handoff)
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "gc-x", "tool_use_id": "tu-gc-x",
+             "summary": "done"}
+    pool, _ = _make_pool([notif])
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        await idle_reader.run_idle_reader("sg")
+
+    handoff.assert_awaited_once_with("sg", frame)
+
+
+async def test_grandchild_terminal_chip_suppressed(mock_db):
+    """R2: the terminal task_notification CHIP is suppressed only for a task that
+    is POSITIVELY subagent-owned. A grandchild's terminal notification (its
+    launch tool_use armed as a subagent background launch) must NOT record a
+    task_notification chip in the parent chat — even though the handoff still
+    fires."""
+    turns_db.enqueue_turn("sg", "user", prompt="hi")
+    idle_reader.register_on_task_terminal(AsyncMock())
+    # Positively subagent-owned: the grandchild's launch tool_use is armed.
+    task_registry.mark_subagent_background_launch("sg", "tu-gc-x")
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "gc-x", "tool_use_id": "tu-gc-x",
+             "summary": "done", "usage": None}
+    pool, _ = _make_pool([notif])
+
+    rec = AsyncMock()
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=rec))
+        await idle_reader.run_idle_reader("sg")
+
+    # No task_notification chip recorded for a subagent-owned (grandchild) task.
+    assert not any(
+        call.args[1].get("type") == "task_notification"
+        for call in rec.call_args_list
+    )
+
+
+async def test_unknown_task_terminal_chip_recorded(mock_db):
+    """Pre-diff safety net: an UNKNOWN terminal task (no ownership lane armed
+    either way) keeps the always-chip behavior so an ownership-arming MISS can
+    never leave a subagent card stuck-active (the #617/#659 settle path)."""
+    turns_db.enqueue_turn("sg", "user", prompt="hi")
+    idle_reader.register_on_task_terminal(AsyncMock())
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "gc-x", "tool_use_id": "tu-gc-x",
+             "summary": "done", "usage": None}
+    pool, _ = _make_pool([notif])
+
+    rec = AsyncMock()
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=rec))
+        await idle_reader.run_idle_reader("sg")
+
+    # An unknown task still records its terminal task_notification chip.
+    assert any(
+        call.args[1].get("type") == "task_notification"
+        for call in rec.call_args_list
+    )
 
 
 async def test_non_terminal_notification_no_handoff(mock_db):
