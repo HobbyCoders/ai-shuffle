@@ -26,6 +26,11 @@ import type { QueuedMessage, Task } from '../../types';
 export interface FeedControllerDeps {
 	update: (fn: (s: ActiveSessionState) => ActiveSessionState) => void;
 	getState: () => ActiveSessionState;
+	/** #606 item 4: drop a pending/deferred permission or pending question by
+	 *  `request_id` when a durable `interaction.answered` / `interaction.expired`
+	 *  event says it was resolved (possibly on another device). Wired to
+	 *  activeSession.resolveInteractionByRequestId; a cheap no-op when absent. */
+	resolveInteractionByRequestId: (requestId: string) => void;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────────
@@ -302,6 +307,23 @@ export const feedController: FeedController = {
 				}
 				seedOptimistic();
 				reducerState = reduce(reducerState, ev);
+				// #606 item 4 — cross-device settle: the permission/question CARD was
+				// added on THIS device via the legacy `get_pending_*` WS relay on
+				// switch-in, but the user may ANSWER it on ANOTHER device, and no legacy
+				// removal frame reaches here. These durable `interaction.*` events are
+				// the only signal this device gets, so use them to clear the stale card.
+				// Runs for BOTH backfill and live events — removal is idempotent and a
+				// cheap no-op when the card isn't present (see the store method), so a
+				// backfilled event for an already-gone card does nothing. Card CREATION
+				// stays on the legacy relay by design (interaction.requested is not
+				// consumed here).
+				if (
+					(ev.type === 'interaction.answered' || ev.type === 'interaction.expired') &&
+					typeof ev.request_id === 'string' &&
+					ev.request_id
+				) {
+					deps?.resolveInteractionByRequestId(ev.request_id);
+				}
 				// During backfill (!caughtUp) accumulate silently — the single fold
 				// happens on `caught_up`. After catch-up, keep the existing
 				// incremental per-frame paint so live streaming is unchanged.

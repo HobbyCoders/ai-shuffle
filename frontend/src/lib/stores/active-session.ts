@@ -507,7 +507,16 @@ const messageSender = createMessageSender({
 // V2 Phase 1: inject the private writer into the feed-controller singleton so it
 // can fold SSE-fed reducer state into activeSession as the single writer for
 // v2_stream sessions.
-feedController.attach({ update: _update, getState: () => _state });
+feedController.attach({
+	update: _update,
+	getState: () => _state,
+	// #606 item 4: let the SSE feed clear a permission/question card by request_id
+	// when it tails a durable interaction.answered / interaction.expired event
+	// (routed through the same injection the feed already uses for update/getState,
+	// avoiding a circular import). Lazy ref: activeSession is defined just below and
+	// this only runs at feed-event time.
+	resolveInteractionByRequestId: (requestId: string) => activeSession.resolveInteractionByRequestId(requestId),
+});
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
@@ -546,6 +555,34 @@ export const activeSession = {
 	sendUserQuestionResponse: permissionHandler.sendUserQuestionResponse,
 	syncPendingPermissions: permissionHandler.syncPendingPermissions,
 	syncPendingQuestions: permissionHandler.syncPendingQuestions,
+
+	/**
+	 * Cross-device settle (#606 item 4): drop any pending permission, deferred
+	 * permission, or pending question whose `request_id` matches. The card was
+	 * seeded here from the legacy WS `get_pending_permissions` /
+	 * `get_pending_questions` relay on switch-in, but the user may ANSWER it on
+	 * ANOTHER device — no legacy removal frame reaches this device. The durable
+	 * `interaction.answered` / `interaction.expired` events tailed off the SSE feed
+	 * are then the only signal to clear the stale card (the feed-controller calls
+	 * this when it sees them). Cheap no-op — no store write / notification — when
+	 * nothing matches, so it is safe to fire on backfilled events too.
+	 */
+	resolveInteractionByRequestId(requestId: string) {
+		if (!requestId) return;
+		_update(s => {
+			const matches =
+				s.pendingPermissions.some(p => p.request_id === requestId) ||
+				s.deferredPermissions.some(p => p.request_id === requestId) ||
+				s.pendingQuestions.some(q => q.request_id === requestId);
+			if (!matches) return s; // nothing to remove — identity return skips the write
+			return {
+				...s,
+				pendingPermissions: s.pendingPermissions.filter(p => p.request_id !== requestId),
+				deferredPermissions: s.deferredPermissions.filter(p => p.request_id !== requestId),
+				pendingQuestions: s.pendingQuestions.filter(q => q.request_id !== requestId),
+			};
+		});
+	},
 
 	// ── Profile & Project ───────────────────────────────────────────
 

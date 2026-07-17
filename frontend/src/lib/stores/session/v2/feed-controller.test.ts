@@ -73,15 +73,30 @@ function makeDeps(initial?: Partial<ActiveSessionState>) {
 		isStreaming: false,
 		activeTasks: [],
 		queuedMessages: [],
+		pendingPermissions: [],
+		deferredPermissions: [],
+		pendingQuestions: [],
 		...initial,
 	} as unknown as ActiveSessionState;
 	const update = vi.fn((fn: (s: ActiveSessionState) => ActiveSessionState) => {
 		state = fn(state);
 	});
 	const getState = vi.fn(() => state);
+	// Mirror the real activeSession.resolveInteractionByRequestId filtering so the
+	// controller's cross-device settle wiring can be asserted against `deps.state`.
+	const resolveInteractionByRequestId = vi.fn((requestId: string) => {
+		if (!requestId) return;
+		state = {
+			...state,
+			pendingPermissions: (state.pendingPermissions ?? []).filter((p) => p.request_id !== requestId),
+			deferredPermissions: (state.deferredPermissions ?? []).filter((p) => p.request_id !== requestId),
+			pendingQuestions: (state.pendingQuestions ?? []).filter((q) => q.request_id !== requestId),
+		};
+	});
 	return {
 		update,
 		getState,
+		resolveInteractionByRequestId,
 		get state() {
 			return state;
 		},
@@ -119,6 +134,24 @@ function userMessage(id: string, turnId: string, content = 'queued text'): Recor
 // The history/live boundary sentinel emitted by the backend after backfill.
 function caughtUp(seq = 0): Record<string, unknown> {
 	return { type: 'caught_up', seq };
+}
+
+// Durable interaction lifecycle events (#606 item 4). The FE consumes these only
+// to SETTLE a card the legacy relay seeded — top-level `request_id` correlates to
+// the pending permission / question's request_id.
+function interaction(
+	type: 'interaction.answered' | 'interaction.expired',
+	requestId: string | null | undefined,
+): Record<string, unknown> {
+	return {
+		type,
+		id: `evt-${type}-${requestId ?? 'none'}`,
+		seq: 0,
+		session_id: 's1',
+		created_at: '2026-07-12T00:00:00.000Z',
+		interaction_id: 'int-1',
+		request_id: requestId,
+	};
 }
 
 beforeEach(() => {
@@ -316,6 +349,82 @@ describe('feedController queue reconciliation (#588)', () => {
 
 		const queued = deps.state.queuedMessages as Array<{ id: string }>;
 		expect(queued.map((q) => q.id)).toEqual(['turn-9']);
+	});
+});
+
+describe('feedController cross-device interaction settle (#606 item 4)', () => {
+	it('interaction.answered with request_id clears a seeded pending permission', () => {
+		const deps = makeDeps({
+			pendingPermissions: [
+				{ request_id: 'perm-1' },
+				{ request_id: 'perm-2' },
+			],
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(interaction('interaction.answered', 'perm-1'));
+
+		expect(deps.resolveInteractionByRequestId).toHaveBeenCalledWith('perm-1');
+		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
+		expect(perms.map((p) => p.request_id)).toEqual(['perm-2']);
+	});
+
+	it('interaction.expired with request_id clears a seeded pending question', () => {
+		const deps = makeDeps({
+			pendingQuestions: [{ request_id: 'q-1' }],
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(interaction('interaction.expired', 'q-1'));
+
+		expect(deps.resolveInteractionByRequestId).toHaveBeenCalledWith('q-1');
+		const qs = deps.state.pendingQuestions as Array<{ request_id: string }>;
+		expect(qs).toHaveLength(0);
+	});
+
+	it('does nothing when the interaction event carries no request_id', () => {
+		const deps = makeDeps({
+			pendingPermissions: [{ request_id: 'perm-1' }],
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		hoisted.onEvent!(interaction('interaction.answered', undefined));
+		hoisted.onEvent!(interaction('interaction.expired', ''));
+
+		expect(deps.resolveInteractionByRequestId).not.toHaveBeenCalled();
+		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
+		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
+	});
+
+	it('other event types never trigger a settle', () => {
+		const deps = makeDeps({
+			pendingPermissions: [{ request_id: 'perm-1' }],
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		// A requested event (card creation stays on the legacy relay) and a text
+		// delta must NOT settle anything.
+		hoisted.onEvent!({
+			type: 'interaction.requested',
+			id: 'evt-req',
+			seq: 0,
+			session_id: 's1',
+			request_id: 'perm-1',
+		});
+		hoisted.onEvent!(textDelta('e1', 'foo'));
+		flushRaf();
+
+		expect(deps.resolveInteractionByRequestId).not.toHaveBeenCalled();
+		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
+		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
 	});
 });
 
