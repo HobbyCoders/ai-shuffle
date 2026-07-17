@@ -663,6 +663,85 @@ describe('turn.completed settles stale background work (#609)', () => {
 	});
 });
 
+// ─── turn.parked reverts the premature turn.completed settle ─────────────────
+// The backend emits turn.completed UNCONDITIONALLY when the pump drains, THEN
+// evaluates the park gate and emits turn.parked if background work remains
+// (session_runtime._finalize). Ordering in the log: task.updated(running) →
+// turn.completed → turn.parked. So a turn.parked immediately following a
+// turn.completed PROVES the #609 self-heal settled prematurely — revert it.
+
+describe('turn.parked reverts a premature turn.completed settle', () => {
+	it('restores a running task summary settled by turn.completed when turn.parked follows', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
+			ev('turn.completed', {}),
+			ev('turn.parked', {}),
+		]);
+		// Queue strip visibility restored: deriveActiveTasks keeps status==='running'.
+		expect(s.activeTaskSummaries[0].status).toBe('running');
+	});
+
+	it('restores a running subagent card settled by turn.completed when turn.parked follows', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('turn.completed', {}),
+			ev('turn.parked', {}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('running');
+	});
+
+	it('keeps the settle (stays completed) when NO turn.parked follows (#609 self-heal preserved)', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('a genuine terminal task.updated before turn.parked wins (stays completed)', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
+			ev('turn.completed', {}),
+			ev('task.updated', { task_id: 'bg-1', state: 'completed', summary: 'ok' }),
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('a genuine subagent.completed before turn.parked wins (card stays terminal)', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('turn.completed', {}),
+			ev('subagent.completed', { task_id: 'toolu-1', status: 'failed', result_preview: 'boom' }),
+			ev('turn.parked', {}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('error');
+		expect(card?.content).toBe('boom');
+	});
+
+	it('the settle record does not leak: a later bare turn.parked reverts nothing', () => {
+		// turn.completed with something stale records it; a subsequent CLEAN
+		// turn.completed (nothing stale) overwrites the record with an empty set,
+		// so a later park cannot revive the earlier settle.
+		const s = fold([
+			ev('turn.started'),
+			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
+			ev('turn.completed', {}), // settles bg-1, records it
+			ev('turn.started'),
+			ev('turn.completed', {}), // nothing stale → clears the record
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries[0].status).toBe('completed');
+	});
+});
+
 // ─── System + unknown ───────────────────────────────────────────────────────
 
 describe('system + unknown events', () => {

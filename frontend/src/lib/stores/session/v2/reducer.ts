@@ -77,6 +77,15 @@ export interface V2SessionState {
 	messageOriginSeq: Record<string, number>;
 	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
 	taskOriginSeq: Record<string, number>;
+	/** Ids of subagent cards that the LAST `turn.completed` speculatively settled
+	 *  to 'completed' via `settleStaleBackgroundWork`. If a `turn.parked` follows
+	 *  (background work genuinely remains — the park gate ran AFTER turn.completed),
+	 *  these were settled wrongly and are restored to 'running'. A genuine terminal
+	 *  event (subagent.completed / terminal task.updated) removes an id; the next
+	 *  turn.completed overwrites the whole set — so it never leaks across turns. */
+	speculativelySettledCardIds: string[];
+	/** Same, for `activeTaskSummaries` entries (keyed by task id). */
+	speculativelySettledTaskIds: string[];
 }
 
 export function initialState(): V2SessionState {
@@ -94,6 +103,8 @@ export function initialState(): V2SessionState {
 		liveRequestedModel: null,
 		messageOriginSeq: {},
 		taskOriginSeq: {},
+		speculativelySettledCardIds: [],
+		speculativelySettledTaskIds: [],
 	};
 }
 
@@ -154,10 +165,17 @@ function closeOpen(state: V2SessionState): V2SessionState {
  * (only status === 'running' is rewritten).
  */
 function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
+	// Record exactly which cards/summaries THIS turn.completed speculatively
+	// settles so a following turn.parked can revert them — the park gate
+	// runs AFTER turn.completed, so turn.parked proves the settle was premature.
+	// This set OVERWRITES any prior turn's record (below), which is what stops it
+	// leaking across turns.
 	let cardsTouched = false;
+	const settledCardIds: string[] = [];
 	const messages = state.messages.map((m) => {
 		if (m.type === 'subagent' && m.agentStatus === 'running') {
 			cardsTouched = true;
+			settledCardIds.push(m.id);
 			const children = (m.agentChildren ?? []).map((c) =>
 				c.streaming ? { ...c, streaming: false } : c
 			);
@@ -166,18 +184,31 @@ function settleStaleBackgroundWork(state: V2SessionState): V2SessionState {
 		return m;
 	});
 	let summariesTouched = false;
+	const settledTaskIds: string[] = [];
 	const activeTaskSummaries = state.activeTaskSummaries.map((t) => {
 		if (t.status === 'running') {
 			summariesTouched = true;
+			settledTaskIds.push(t.id);
 			return { ...t, status: 'completed' as const };
 		}
 		return t;
 	});
-	if (!cardsTouched && !summariesTouched) return state; // preserve identity (no-op)
+	if (!cardsTouched && !summariesTouched) {
+		// Nothing stale this turn. Still overwrite (clear) any prior record so a
+		// stale settle from an earlier turn can never be revived by a later park.
+		if (
+			state.speculativelySettledCardIds.length === 0 &&
+			state.speculativelySettledTaskIds.length === 0
+		)
+			return state; // preserve identity (true no-op)
+		return { ...state, speculativelySettledCardIds: [], speculativelySettledTaskIds: [] };
+	}
 	return {
 		...state,
 		messages: cardsTouched ? messages : state.messages,
 		activeTaskSummaries: summariesTouched ? activeTaskSummaries : state.activeTaskSummaries,
+		speculativelySettledCardIds: settledCardIds,
+		speculativelySettledTaskIds: settledTaskIds,
 	};
 }
 
@@ -403,14 +434,55 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				liveRequestedModel: null,
 			};
 
-		case 'turn.parked':
+		case 'turn.parked': {
 			// A turn parked on background work: not "streaming" but still live.
-			return closeOpen({ ...state, isStreaming: false, parked: true });
+			let next = closeOpen({ ...state, isStreaming: false, parked: true });
+			// turn.parked lands AFTER turn.completed (backend emits turn.completed
+			// unconditionally, then the park gate emits turn.parked if background
+			// work remains — session_runtime._finalize). So any card / task summary
+			// the preceding turn.completed speculatively settled to 'completed'
+			// (settleStaleBackgroundWork) was settled WRONGLY: the park proves that
+			// work is still running. Restore those to 'running' so the ActiveTasks
+			// strip / subagent card stay visible. Ids that got a genuine
+			// terminal event since the settle were already dropped from the record
+			// and are left settled.
+			const { speculativelySettledCardIds: cardIds, speculativelySettledTaskIds: taskIds } = next;
+			if (cardIds.length || taskIds.length) {
+				let messages = next.messages;
+				if (cardIds.length) {
+					const revert = new Set(cardIds);
+					messages = messages.map((m) =>
+						revert.has(m.id) && m.type === 'subagent' && m.agentStatus === 'completed'
+							? { ...m, agentStatus: 'running' as const }
+							: m
+					);
+				}
+				let activeTaskSummaries = next.activeTaskSummaries;
+				if (taskIds.length) {
+					const revert = new Set(taskIds);
+					activeTaskSummaries = activeTaskSummaries.map((t) =>
+						revert.has(t.id) && t.status === 'completed'
+							? { ...t, status: 'running' as const }
+							: t
+					);
+				}
+				next = {
+					...next,
+					messages,
+					activeTaskSummaries,
+					speculativelySettledCardIds: [],
+					speculativelySettledTaskIds: [],
+				};
+			}
+			return next;
+		}
 
 		case 'turn.completed':
-			// turn.completed ⟹ no background work remains (park gate), so settle any
-			// still-'running' subagent card / task summary that missed its terminal
-			// event (#609). See settleStaleBackgroundWork.
+			// turn.completed fires unconditionally when the pump drains — background
+			// work may still remain, in which case the park gate emits turn.parked
+			// right after. Speculatively settle any still-'running' subagent card /
+			// task summary that missed its terminal event (#609 self-heal); a
+			// following turn.parked reverts that settle. See settleStaleBackgroundWork.
 			return settleStaleBackgroundWork(
 				closeOpen({
 					...state,
@@ -840,8 +912,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const children = (card.agentChildren ?? []).map((c) =>
 				c.streaming ? { ...c, streaming: false } : c
 			);
+			// Genuine terminal for this card: drop it from the speculative-settle
+			// record so a following turn.parked cannot revive it to 'running'.
+			const speculativelySettledCardIds = state.speculativelySettledCardIds.includes(card.id)
+				? state.speculativelySettledCardIds.filter((c) => c !== card.id)
+				: state.speculativelySettledCardIds;
 			return {
 				...state,
+				speculativelySettledCardIds,
 				messages: replaceById(state.messages, card.id, {
 					agentStatus,
 					agentChildren: children,
@@ -924,6 +1002,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				: [...state.activeTaskSummaries, summary];
 			const taskOriginSeq = withOrigin(state.taskOriginSeq, taskId, seq);
 			let messages = state.messages;
+			let speculativelySettledCardIds = state.speculativelySettledCardIds;
+			let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
 			// A background subagent finishing BETWEEN turns reports only via this
 			// chip (the drain pump dispatches no subagent.completed), so a
 			// terminal update must also settle the joined subagent card — else a
@@ -943,8 +1023,24 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						agentChildren: children,
 					});
 				}
+				// This is a GENUINE terminal event: drop this summary (and any joined
+				// card) from the speculative-settle record so a following turn.parked
+				// does NOT revive it to 'running' (terminal event wins).
+				if (speculativelySettledTaskIds.includes(taskId)) {
+					speculativelySettledTaskIds = speculativelySettledTaskIds.filter((t) => t !== taskId);
+				}
+				if (card && speculativelySettledCardIds.includes(card.id)) {
+					speculativelySettledCardIds = speculativelySettledCardIds.filter((c) => c !== card.id);
+				}
 			}
-			return { ...state, messages, activeTaskSummaries, taskOriginSeq };
+			return {
+				...state,
+				messages,
+				activeTaskSummaries,
+				taskOriginSeq,
+				speculativelySettledCardIds,
+				speculativelySettledTaskIds,
+			};
 		}
 
 		// ── System messages ─────────────────────────────────────────────
