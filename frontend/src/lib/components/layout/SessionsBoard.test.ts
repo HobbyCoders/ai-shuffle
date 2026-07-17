@@ -245,6 +245,40 @@ describe('SessionsBoard action rail', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('a', true);
 	});
 
+	it('hoists an active row\'s Complete into the always-visible persistent slot, but leaves an inactive row\'s Move to Active in the tray', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Active one', is_active: true }),
+			makeSession({ id: 'b', title: 'Inactive one', is_active: false })
+		]);
+		renderBoard();
+
+		// Complete (active row) is in .ram-persistent (kept out of the ⋮ tray so it
+		// stays visible on mobile), NOT inside the collapsing .ram-tray.
+		const complete = rowFor('Active one').querySelector('[title="Complete"]') as HTMLElement;
+		expect(complete).toBeTruthy();
+		expect(complete.closest('.ram-persistent')).toBeTruthy();
+		expect(complete.closest('.ram-tray')).toBeNull();
+
+		// Move to Active (inactive row) stays in the tray (behind the ⋮ on mobile).
+		const move = rowFor('Inactive one').querySelector('[title="Move to Active"]') as HTMLElement;
+		expect(move).toBeTruthy();
+		expect(move.closest('.ram-tray')).toBeTruthy();
+		expect(move.closest('.ram-persistent')).toBeNull();
+		// The active row carries no Move to Active, and vice-versa.
+		expect(rowFor('Active one').querySelector('[title="Move to Active"]')).toBeNull();
+		expect(rowFor('Inactive one').querySelector('[title="Complete"]')).toBeNull();
+	});
+
+	it('freezes the persistent Complete button while an armed delete is confirming', async () => {
+		mocks.sessions.set([makeSession({ id: 'a', title: 'Active one', is_active: true })]);
+		renderBoard();
+		// Arm the delete confirm on the active row.
+		await fireEvent.click(rowFor('Active one').querySelector('[title="Delete session"]') as HTMLElement);
+		const complete = rowFor('Active one').querySelector('[title="Complete"]') as HTMLButtonElement;
+		expect(complete.closest('.ram-persistent')).toBeTruthy();
+		expect(complete.disabled).toBe(true);
+	});
+
 	it('no longer renders a star favorite button anywhere', () => {
 		mocks.sessions.set([
 			makeSession({ id: 'a', title: 'Active one', is_active: true }),

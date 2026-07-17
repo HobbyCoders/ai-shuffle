@@ -943,10 +943,26 @@
 			</div>
 		</div>
 		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
+		<!-- Complete lives in the always-visible `persistent` slot so on mobile it
+		     stays on the row instead of hiding behind the ⋮ tray — completing an
+		     active session is its most-reached action. Desktop is unchanged: it
+		     rides the same hover-reveal rail. Armed-delete still freezes it. -->
+		{#snippet completeAction()}
+			<button
+				class="row-action"
+				title="Complete"
+				aria-label="Complete session"
+				disabled={isArmed}
+				onclick={(e) => handleToggleActive(e, session)}
+			>
+				<Check size={13} strokeWidth={1.6} />
+			</button>
+		{/snippet}
 		<RowActionMenu
 			open={actionsOpenId === session.id}
 			onToggle={(e) => toggleRowActions(e, session.id)}
 			label="Session actions"
+			persistent={session.is_active ? completeAction : undefined}
 		>
 			<!-- Cancel is a LEADING icon that only exists while armed. Because the
 			     rail is right-anchored, growing it on the LEFT leaves every
@@ -984,22 +1000,21 @@
 			>
 				<GitFork size={13} strokeWidth={1.6} />
 			</button>
-			<!-- State-based Active toggle: an active row gets "Complete" (drops it into
-			     Recent), an inactive row gets "Move to Active". State- not group-based
-			     so mixed opened-project lists render the right action per row. -->
-			<button
-				class="row-action"
-				title={session.is_active ? 'Complete' : 'Move to Active'}
-				aria-label={session.is_active ? 'Complete session' : 'Move session to Active'}
-				disabled={isArmed}
-				onclick={(e) => handleToggleActive(e, session)}
-			>
-				{#if session.is_active}
-					<Check size={13} strokeWidth={1.6} />
-				{:else}
+			<!-- State-based Active toggle. An INACTIVE row's "Move to Active" stays in
+			     the tray here (buried behind the ⋮ on mobile is fine — it's a promote,
+			     not a frequent action). An ACTIVE row's "Complete" is hoisted OUT to
+			     the RowActionMenu `persistent` slot above so it's always visible. -->
+			{#if !session.is_active}
+				<button
+					class="row-action"
+					title="Move to Active"
+					aria-label="Move session to Active"
+					disabled={isArmed}
+					onclick={(e) => handleToggleActive(e, session)}
+				>
 					<Undo2 size={13} strokeWidth={1.6} />
-				{/if}
-			</button>
+				</button>
+			{/if}
 			<!-- ONE trash icon that stays mounted through arm → in-flight, keeping its
 			     slot (rightmost) fixed: it only swaps resting→danger styling and its
 			     handler intent (arm, then confirm). Disabled only while the request

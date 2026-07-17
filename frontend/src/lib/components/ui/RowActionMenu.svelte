@@ -21,6 +21,15 @@
 	 * Open/close state lives with the parent (one-open-at-a-time, outside-click and
 	 * Escape to close), which keeps this component presentational. Built on theme
 	 * tokens only.
+	 *
+	 * Optional `persistent` snippet — action(s) that must stay visible on the row
+	 * even where `children` collapse behind the ⋮. On desktop it renders inline at
+	 * the end of the rail with the same hover-reveal as `children` (via the shared
+	 * `--ram-reveal`), visually indistinguishable from a `children` button. On
+	 * touch / narrow it sits OUTSIDE the collapsing tray, always visible, just left
+	 * of the ⋮ toggle and sized to match it. Omit it and every existing consumer is
+	 * untouched. Use it for the one action a row can't afford to bury (e.g. a
+	 * session's Complete).
 	 */
 	import { EllipsisVertical } from 'lucide-svelte';
 	import type { Snippet } from 'svelte';
@@ -35,9 +44,12 @@
 		label?: string;
 		/** The action buttons. Each direct child animates independently. */
 		children: Snippet;
+		/** Optional always-visible action(s): inline in the rail on desktop, but
+		 *  kept OUT of the collapsing tray (always shown) on touch / narrow. */
+		persistent?: Snippet;
 	}
 
-	let { open, onToggle, label = 'Actions', children }: Props = $props();
+	let { open, onToggle, label = 'Actions', children, persistent }: Props = $props();
 
 	function handleToggle(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
@@ -46,6 +58,9 @@
 </script>
 
 <span class="ram" class:open>
+	{#if persistent}
+		<span class="ram-persistent">{@render persistent()}</span>
+	{/if}
 	<span class="ram-tray">{@render children()}</span>
 	<button
 		class="ram-toggle"
@@ -73,11 +88,21 @@
 		align-items: center;
 		gap: 2px;
 	}
+	/* The always-visible slot lives beside the tray. On desktop it's just another
+	   inline segment of the rail (same reveal below); on touch/narrow it's the one
+	   thing that stays put while the tray collapses (media block further down). */
+	.ram-persistent {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+	}
 
 	/* Desktop reveal is the parent's call, signalled through the inherited
 	   `--ram-reveal` custom property; default 1 keeps buttons visible if a caller
-	   opts out of hover-reveal entirely. */
-	.ram-tray > :global(*) {
+	   opts out of hover-reveal entirely. The persistent slot rides the same signal
+	   so it's indistinguishable from a tray button at rest and on hover. */
+	.ram-tray > :global(*),
+	.ram-persistent > :global(*) {
 		opacity: var(--ram-reveal, 1);
 		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
 	}
@@ -112,6 +137,14 @@
 	   mobile cutoff so the desktop resize-test path works too. */
 	@media (hover: none), (max-width: 1080px) {
 		.ram-toggle { display: flex; }
+
+		/* The persistent slot is NOT part of the collapsing tray: it stays in normal
+		   flow just left of the ⋮ and is always shown. There's no row hover on touch,
+		   so the desktop `--ram-reveal` (0 at rest) would otherwise hide it — pin it. */
+		.ram-persistent > :global(*) {
+			opacity: 1;
+			transform: none;
+		}
 
 		/* Float the tray out to the LEFT of the ⋮ so opening never reflows the
 		   row. top/bottom:0 against the stretched .ram makes the tray match the
@@ -175,7 +208,8 @@
 		   area grows (buttons centre their icon via grid/flex place-items). It's
 		   an idempotent min-size, so SessionsBoard's own 38px buttons here stay
 		   pixel-identical. */
-		.ram-tray > :global(button) {
+		.ram-tray > :global(button),
+		.ram-persistent > :global(button) {
 			min-width: 38px;
 			min-height: 38px;
 		}
@@ -191,7 +225,8 @@
 	@media (prefers-reduced-motion: reduce) {
 		/* Snap the rail in/out — no slide, no stagger. */
 		.ram-tray,
-		.ram-tray > :global(*) { transition: none; }
+		.ram-tray > :global(*),
+		.ram-persistent > :global(*) { transition: none; }
 		.ram-tray { transform: none; }
 		.ram.open .ram-tray > :global(*) { transform: none; transition-delay: 0s; }
 	}
