@@ -15,6 +15,8 @@ Usage::
 
 import logging
 
+from app.db.base import column_exists
+
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
@@ -1070,7 +1072,14 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
+    # idx_sessions_active references is_active, which v63 renames from
+    # is_favorite in _run_column_migrations — and that pass runs AFTER this
+    # schema pass. On a pre-v63 database the sessions table already exists
+    # with is_favorite, so indexing is_active here would raise
+    # undefined-column and abort startup. Skip it; the v63 migration block
+    # creates this index immediately after renaming the column.
+    if column_exists(cursor, "sessions", "is_active"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")

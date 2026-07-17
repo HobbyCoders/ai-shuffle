@@ -79,3 +79,34 @@ def test_v63_rename_is_idempotent(test_db):
         assert column_exists(cur, "sessions", "is_active")
         cur.execute("SELECT is_active FROM sessions WHERE id = %s", ("sess-fav",))
         assert cur.fetchone()["is_active"] == 1
+
+
+def test_full_init_sequence_upgrades_pre_v63_db(test_db):
+    """Regression for the worker startup crash: init_database() runs
+    create_postgres_schema() (which unconditionally indexed is_active) BEFORE
+    _run_column_migrations() (which performs the v63 is_favorite->is_active
+    rename). On a pre-v63 database the sessions table still has is_favorite,
+    so indexing is_active during the schema pass raised psycopg2
+    UndefinedColumn and crashed app startup. This test reproduces the real
+    init_database ordering end-to-end and asserts it no longer raises."""
+    from tests.pg_shim import route_db_to
+    from app.db.base import column_exists
+
+    with route_db_to(test_db) as shim:
+        _revert_to_pre_v63(shim)
+        shim.cursor().execute(
+            "INSERT INTO sessions (id, instance_id, is_favorite) VALUES (%s, %s, %s)",
+            ("sess-fav", "", True),
+        )
+
+        from app.db.schema_postgres import create_postgres_schema
+
+        create_postgres_schema(shim.cursor())
+        database._run_column_migrations(shim.cursor())
+
+        cur = shim.cursor()
+        assert column_exists(cur, "sessions", "is_active")
+        assert not column_exists(cur, "sessions", "is_favorite")
+
+        cur.execute("SELECT is_active FROM sessions WHERE id = %s", ("sess-fav",))
+        assert cur.fetchone()["is_active"] == 1
