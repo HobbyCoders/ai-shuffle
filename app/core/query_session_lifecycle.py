@@ -143,6 +143,98 @@ async def interrupt_session(session_id: str) -> bool:
         return False
 
 
+async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]:
+    """Force-settle a task from DURABLE truth when the registry is empty.
+
+    Post-restart the in-memory registry holds nothing, so a task the UI still
+    shows "running" cannot be reaped through the registry. Settle it from what
+    survived the restart and, crucially, emit the terminal ``task.updated`` frame
+    the frontend replays to settle the chip/card (a silent DB flip leaves the UI
+    stuck "running" forever). Emission routes through the shared
+    ``record_task_settle_frame`` emitter — the single source of truth every
+    terminal-settle producer uses.
+
+    Idempotent across repeated stop clicks: guarded by the same
+    ``task_registry.mark_chipped(..., "terminal")`` once-per-task latch the
+    terminal-surface path uses, so a second call emits nothing and returns
+    ``{"ok": True, ..., "detail": "already settled"}``.
+
+    Order of durable truth:
+
+    1. ``background_tasks`` row → flip to ``killed`` if still non-terminal; emit
+       the terminal frame carrying the row's actual terminal status (so an
+       already-terminal row settles the UI to the truth). Returns ok.
+    2. else a ``subagent.started`` event for this ``task_id`` → emit the killed
+       frame with ``tool_use_id == task_id`` (subagent cards join on the launch
+       task_id). Returns ok.
+    3. else → ``None`` (caller reports the honest dead-session failure).
+    """
+    from app.db.background_tasks import (
+        TERMINAL_STATUSES,
+        get_background_task,
+        mark_background_task_killed,
+    )
+    from app.db.session_events import has_subagent_started
+    from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_task_settle_frame
+
+    row = await asyncio.to_thread(get_background_task, task_id, session_id)
+    if row is not None:
+        status = row.get("status")
+        kind = row.get("kind") or "agent"
+        tool_use_id = row.get("tool_use_id")
+        is_terminal = status in TERMINAL_STATUSES
+        # Once-per-task-lifetime latch (shared with the terminal-surface path):
+        # repeated stop clicks after a restart must settle the UI exactly once.
+        if not task_registry.mark_chipped(session_id, task_id, "terminal"):
+            return {
+                "ok": True,
+                "kind": kind,
+                "task_id": task_id,
+                "detail": "already settled",
+            }
+        emit_status = status if is_terminal else "killed"
+        if not is_terminal:
+            await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+        await record_task_settle_frame(
+            session_id, task_id, emit_status,
+            "Background task stopped (stale)",
+            reason="stale_reap", tool_use_id=tool_use_id,
+        )
+        return {
+            "ok": True,
+            "kind": kind,
+            "task_id": task_id,
+            "detail": "reaped (stale row)",
+        }
+
+    if await asyncio.to_thread(has_subagent_started, session_id, task_id):
+        if not task_registry.mark_chipped(session_id, task_id, "terminal"):
+            return {
+                "ok": True,
+                "kind": "agent",
+                "task_id": task_id,
+                "detail": "already settled",
+            }
+        await record_task_settle_frame(
+            session_id, task_id, "killed",
+            # We cannot know a restart happened (sibling _reap_task_killed gates
+            # restart wording on startup.is_shutting_down for the same reason).
+            "Subagent stopped (stale)",
+            reason="stale_reap",
+            # Subagent cards settle on tool_use_id == their launch task_id.
+            tool_use_id=task_id,
+        )
+        return {
+            "ok": True,
+            "kind": "agent",
+            "task_id": task_id,
+            "detail": "reaped (orphan subagent)",
+        }
+
+    return None
+
+
 async def stop_session_task(session_id: str, task_id: str) -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
@@ -213,9 +305,17 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
                 "task_id": task_id,
                 "detail": "reaped (session gone)",
             }
-        # The registry never knew the task and there is no live session — there
-        # is nothing to reap and nothing the UI is showing. Report the dead
-        # session honestly (distinguishing gone-from-pool vs disconnected).
+        # The registry never knew the task — but after a restart the in-memory
+        # registry is EMPTY, so a task the UI still shows "running" has no
+        # registry row to reap even though the durable truth (a background_tasks
+        # row, or a subagent.started event in the log) is still rendering it.
+        # Force-settle from that durable truth before reporting the dead session.
+        reaped = await _durable_force_settle(session_id, task_id)
+        if reaped is not None:
+            return reaped
+        # Nothing durable to settle and no live session — there is nothing to
+        # reap and nothing the UI is showing. Report the dead session honestly
+        # (distinguishing gone-from-pool vs disconnected).
         if not state:
             return {"ok": False, "kind": "agent", "detail": "session not active"}
         return {"ok": False, "kind": "agent", "detail": "session not connected"}

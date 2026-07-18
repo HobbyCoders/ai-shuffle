@@ -949,6 +949,44 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
         )
 
 
+async def record_task_settle_frame(
+    session_id: str,
+    task_id: Optional[str],
+    status: str,
+    summary: Optional[str],
+    *,
+    reason: Optional[str] = None,
+    tool_use_id: Optional[str] = None,
+) -> None:
+    """Emit the terminal task-settle frame the FE reducer consumes.
+
+    Single source of truth for the ``system``/``task_updated`` frame that
+    settles a background-task chip/subagent card to a terminal state — every
+    producer (boot reconcile, the durable force-settle fallback, the
+    terminal-surface guarantee) MUST route through here so the frame's shape
+    stays identical across paths. Builds the ``data`` payload
+    (``task_id``/``status``/``summary`` + a ``patch`` the reducer prefers),
+    including ``reason``/``tool_use_id`` only when truthy, and hands it to
+    :func:`record_drained_event` (unfenced — legal between turns / at boot).
+    """
+    data: Dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        "patch": {"status": status},
+    }
+    if reason:
+        data["reason"] = reason
+    if tool_use_id:
+        data["tool_use_id"] = tool_use_id
+    await record_drained_event(session_id, {
+        "type": "system",
+        "subtype": "task_updated",
+        "content": summary,
+        "data": data,
+    })
+
+
 async def record_parked(session_id: str, task_ids: List[str]) -> None:
     """Append ``turn.parked`` when the drain pump starts over active bg work."""
     try:

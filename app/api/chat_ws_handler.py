@@ -163,14 +163,12 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     if task_registry.mark_chipped(session_id, task_id, "terminal"):
         task_registry.mark_chipped(session_id, task_id, "start")
         try:
-            from app.core.turn_recorder import record_drained_event
+            from app.core.turn_recorder import record_task_settle_frame
 
-            await record_drained_event(session_id, {
-                "type": "system",
-                "subtype": "task_updated",
-                "content": summary or "",
-                "data": data,
-            })
+            await record_task_settle_frame(
+                session_id, task_id, status, summary,
+                reason=task.get("reason"), tool_use_id=tool_use_id,
+            )
         except Exception:
             logger.debug(
                 "terminal-surface live chip failed for %s/%s",
