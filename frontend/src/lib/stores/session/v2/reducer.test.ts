@@ -530,6 +530,19 @@ describe('quiet-pump wake notifications', () => {
 		expect(s.pendingPumpAck).toBe(null);
 	});
 
+	it('suppresses a CLOSED whitespace-only assistant message (silent no-reply)', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('message.assistant', { id: 'a1', content: '   \n  ' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages.some((m) => m.role === 'assistant')).toBe(false);
+		expect(s.pendingPumpAck).toBe(null);
+		expect(s.pumpAckBuffer).toBe('');
+	});
+
 	it('turn.aborted clears an armed pump watch and its buffered ack-prefix', () => {
 		const s = fold([
 			ev('turn.started', { turn_id: 'turn-p' }),

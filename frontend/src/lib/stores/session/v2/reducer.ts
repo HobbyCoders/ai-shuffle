@@ -776,13 +776,16 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const content = str(event.content);
 			const kind = str(event.kind) === 'thinking' ? 'thinking' : 'text';
 			// Quiet-pump suppression, closed / no-delta path (R8 replay parity):
-			// a closed assistant text that is exactly an "ok" ack, arriving while
-			// we watch the live pump turn, is dropped entirely.
+			// a closed assistant text arriving while we watch the live pump turn is
+			// dropped entirely when it is either an exact "ok" ack OR empty /
+			// whitespace-only. The empty case covers the new silent no-reply
+			// instruction — the model ends the turn with no text — so a whitespace-
+			// only closed bubble never leaks into the transcript.
 			if (
 				kind === 'text' &&
 				state.pendingPumpAck &&
 				state.pendingPumpAck === state.liveTurnId &&
-				isAckContent(content)
+				(isAckContent(content) || content.trim() === '')
 			) {
 				return { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
 			}

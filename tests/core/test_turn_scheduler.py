@@ -726,7 +726,7 @@ async def test_pump_wake_enqueues_unpark_pump(mock_db):
     assert "<task-id>gc-1</task-id>" in wake["prompt"]
     assert "<result>step done</result>" in wake["prompt"]  # summary fallback
     assert "<usage>" not in wake["prompt"]                 # usage omitted for pump
-    assert "internal step of a background agent" in wake["prompt"]  # pump note
+    assert "do NOT respond at all" in wake["prompt"]  # pump note (silent no-reply)
     # Context inherited from the parked turn.
     assert wake["parent_turn_id"] == parked["id"]
     assert wake["profile_id"] == "pp"

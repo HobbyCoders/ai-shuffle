@@ -620,15 +620,17 @@ _TASK_NOTIFICATION_NOTE = (
 
 # Guidance for a PUMP wake (source="unpark_pump"): a single internal step of a
 # background agent that is STILL RUNNING, surfaced so the model can react if the
-# step's result demands it. The user is not waiting; the expected reply is a bare
-# "ok" (suppressed in the UI) UNLESS the result requires the model to act.
+# step's result demands it. The user is not waiting; when nothing needs doing the
+# model should end the turn SILENTLY (no text) rather than emit a bare "ok" — the
+# FE "ok"-ack suppression is kept only as a fallback for models that reply anyway.
 _TASK_NOTIFICATION_PUMP_NOTE = (
     "This is an internal step of a background agent that is STILL RUNNING; it is "
     "surfaced to you only so you can react if the step's result requires it. No "
-    "user-facing narration is expected and the user is not waiting on you. Reply "
-    "with exactly \"ok\" and nothing else — UNLESS this result reveals a problem, "
-    "a decision you must make, or an opportunity that requires you to act, in "
-    "which case take that action directly instead of replying \"ok\"."
+    "user-facing narration is expected and the user is not waiting on you. If no "
+    "action is needed, do NOT respond at all — end the turn with no text; do not "
+    "acknowledge, do not summarize. Respond ONLY if this result reveals a problem, "
+    "a decision you must make, or an opportunity that requires you to act — in that "
+    "case take the action directly."
 )
 
 
