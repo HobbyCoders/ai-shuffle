@@ -147,8 +147,8 @@ def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
 
     Returns ``(has_queued_unpark, has_parked_turn)``:
 
-    * ``has_queued_unpark`` — a ``queued`` ``source=unpark`` turn exists (a wake
-      is imminent) → contributes to ``waking``;
+    * ``has_queued_unpark`` — a ``queued`` ``source=unpark``/``unpark_pump`` turn
+      exists (a wake is imminent) → contributes to ``waking``;
     * ``has_parked_turn`` — a ``parked`` turn exists (foreground done, background
       work survives) → contributes to ``parked_with_work``.
 
@@ -160,7 +160,7 @@ def _v2_turn_signals(session_id: str) -> Tuple[bool, bool]:
         from app.db.base import get_db
 
         has_queued_unpark = any(
-            t.get("source") == "unpark"
+            t.get("source") in ("unpark", "unpark_pump")
             for t in turns_db.get_queued_turns(session_id)
         )
         with get_db() as conn:

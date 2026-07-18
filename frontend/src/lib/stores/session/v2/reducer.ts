@@ -60,6 +60,19 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
+	/** Quiet-pump "ok" ack suppression. When a `message.user` renders a
+	 *  `kind==='pump'` task-notification card we begin watching the live turn's
+	 *  assistant reply: an exact "ok" ack is a bookkeeping artifact of the pump
+	 *  wake and must not surface. Holds the `liveTurnId` we are watching (null =
+	 *  not watching). Purely event-derived, so a from_seq=0 replay reproduces the
+	 *  same suppression (R8). */
+	pendingPumpAck: string | null;
+	/** Buffered assistant text accumulated while `pendingPumpAck` is active and
+	 *  the content is still an ack-prefix. Never rendered while it stays an
+	 *  ack-prefix; the instant it exceeds the prefix the whole buffer is revealed
+	 *  as a normal streaming message (delta-buffering mechanism, R5b). Always an
+	 *  ack-prefix (or '') at any clear point, so dropping it is safe. */
+	pumpAckBuffer: string;
 	/** Model the SDK's MAIN lane is ACTUALLY running this turn, as reported by
 	 *  the backend `system.note`/`model_info` event (null before the first note).
 	 *  Drives the composer's reroute indicator (actual-vs-requested). Purely
@@ -99,6 +112,8 @@ export function initialState(): V2SessionState {
 		openTextId: null,
 		openThinkingId: null,
 		liveTurnId: null,
+		pendingPumpAck: null,
+		pumpAckBuffer: '',
 		liveModel: null,
 		liveRequestedModel: null,
 		messageOriginSeq: {},
@@ -330,6 +345,19 @@ function extractTag(block: string, tag: string): string {
 	return m ? m[1] : '';
 }
 
+/** The block's header slice — the text before the first `<summary>` or
+ *  `<result>` (whichever index is lower; the whole block if neither present).
+ *  The real `<kind>` element is emitted immediately after the opening
+ *  `<task-notification>` tag, always before those fields, so it is always inside
+ *  this slice. Restricting `<kind>` extraction to the header prevents an
+ *  injection via UNESCAPED summary/result text. */
+function kindHeaderSlice(block: string): string {
+	const s = block.indexOf('<summary>');
+	const r = block.indexOf('<result>');
+	const idxs = [s, r].filter((i) => i >= 0);
+	return idxs.length ? block.slice(0, Math.min(...idxs)) : block;
+}
+
 /** A usage number is kept as Number when it round-trips cleanly, otherwise the
  *  raw trimmed string; empty → undefined (so the field is omitted). */
 function parseUsageNum(raw: string): number | string | undefined {
@@ -355,8 +383,35 @@ function parseTaskNotification(block: string): Record<string, unknown> {
 		summary: extractTag(block, 'summary'),
 		result: extractTag(block, 'result'),
 		output_file: extractTag(block, 'output-file'),
+		// `own` (a task the parent itself launched → normal notification card) or
+		// `pump` (an internal step of a still-running background agent → compact
+		// chip + "ok" ack suppression). Absent tag = legacy own card. (R7/R5)
+		// Extracted from the block HEADER only (text before the first `<summary>`
+		// or `<result>`): the backend emits `<kind>` immediately after the opening
+		// `<task-notification>` tag (turn_scheduler.py) and does NOT XML-escape
+		// summary/result text, so an own notification whose body contains a literal
+		// `<kind>pump</kind>` must not be misclassified as pump.
+		kind: extractTag(kindHeaderSlice(block), 'kind') || 'own',
 		usage,
 	};
+}
+
+// ─── Quiet-pump "ok" ack classification (R5a) ─────────────────────────────────
+
+/** True while a streaming assistant accumulation is still within the "ok" ack
+ *  prefix set `{'', 'o', 'ok', 'ok.', 'ok!'}` (case-insensitive, trimmed) — the
+ *  content is suppressed only as long as this holds. */
+function isAckPrefix(content: string): boolean {
+	const t = content.trim().toLowerCase();
+	return t === '' || t === 'o' || t === 'ok' || t === 'ok.' || t === 'ok!';
+}
+
+/** True if `content` is a complete "ok" ack: trim + lowercase, strip ONE
+ *  trailing `.` or `!`, equals `"ok"`. */
+function isAckContent(content: string): boolean {
+	let t = content.trim().toLowerCase();
+	if (t.endsWith('.') || t.endsWith('!')) t = t.slice(0, -1);
+	return t === 'ok';
 }
 
 // ─── Task state mapping ───────────────────────────────────────────────────────
@@ -430,6 +485,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
+				pendingPumpAck: null,
+				pumpAckBuffer: '',
 				liveModel: null,
 				liveRequestedModel: null,
 			};
@@ -489,6 +546,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					isStreaming: false,
 					parked: false,
 					liveTurnId: null,
+					pendingPumpAck: null,
+					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
 				})
 			);
@@ -564,7 +623,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					}
 				}
 			}
-			return { ...next, isStreaming: false, parked: false, liveTurnId: null };
+			return {
+				...next,
+				isStreaming: false,
+				parked: false,
+				liveTurnId: null,
+				pendingPumpAck: null,
+				pumpAckBuffer: '',
+			};
 		}
 
 		case 'turn.usage':
@@ -585,19 +651,26 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				if (blocks.length > 0) {
 					const notifStamp = stampTs(event, createdAt);
 					let next = state;
+					let anyPump = false;
 					blocks.forEach((block, i) => {
+						const data = parseTaskNotification(block);
+						if (data.kind === 'pump') anyPump = true;
 						const msg: ChatMessage = {
 							id: blocks.length === 1 ? event.id : `${event.id}-tn-${i}`,
 							role: 'system',
 							type: 'system',
 							content: '',
 							systemSubtype: 'task_notification',
-							systemData: parseTaskNotification(block),
+							systemData: data,
 							timestamp: notifStamp || undefined,
 						};
 						next = appendMessage(next, msg, seq);
 					});
-					return next;
+					// A pump card arms "ok"-ack suppression for the live turn; a purely
+					// own notification (or nothing pumped) clears any stale watch.
+					return anyPump
+						? { ...next, pendingPumpAck: next.liveTurnId, pumpAckBuffer: '' }
+						: { ...next, pendingPumpAck: null, pumpAckBuffer: '' };
 				}
 				// substring present but no complete block parsed → safe fallback.
 			}
@@ -637,15 +710,46 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				const keepId = state.messages[idx].id;
 				const messages = [...state.messages];
 				messages[idx] = userMsg(keepId);
-				return { ...state, messages, messageOriginSeq: withOrigin(state.messageOriginSeq, keepId, seq) };
+				return {
+					...state,
+					messages,
+					messageOriginSeq: withOrigin(state.messageOriginSeq, keepId, seq),
+					pendingPumpAck: null,
+					pumpAckBuffer: '',
+				};
 			}
-			return appendMessage(state, userMsg(event.id), seq);
+			return { ...appendMessage(state, userMsg(event.id), seq), pendingPumpAck: null, pumpAckBuffer: '' };
 		}
 
 		// ── Assistant text / thinking deltas ────────────────────────────
 		case 'assistant.text_delta': {
 			const text = str(event.text);
 			let next = closeOpenThinking(state);
+			// Quiet-pump suppression: while watching the live pump turn's reply,
+			// buffer assistant text instead of rendering it. As long as the
+			// accumulation is still an ack-prefix it stays hidden (no message
+			// created — avoids any visible flash / renderer leak). The instant it
+			// exceeds the prefix (the model is narrating/acting) reveal the whole
+			// buffer as a normal streaming message and stop watching. (R5a/R5b)
+			if (next.pendingPumpAck && next.pendingPumpAck === next.liveTurnId && !next.openTextId) {
+				const buffer = next.pumpAckBuffer + text;
+				if (isAckPrefix(buffer)) {
+					return { ...next, pumpAckBuffer: buffer };
+				}
+				const revealId = `text-${event.id}`;
+				const revealMsg: ChatMessage = {
+					id: revealId,
+					role: 'assistant',
+					type: 'text',
+					content: buffer,
+					streaming: true,
+					timestamp: createdAt || undefined,
+				};
+				return {
+					...appendMessage({ ...next, pendingPumpAck: null, pumpAckBuffer: '' }, revealMsg, seq),
+					openTextId: revealId,
+				};
+			}
 			if (next.openTextId) {
 				const open = next.messages.find((m) => m.id === next.openTextId);
 				return {
@@ -671,6 +775,17 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'message.assistant': {
 			const content = str(event.content);
 			const kind = str(event.kind) === 'thinking' ? 'thinking' : 'text';
+			// Quiet-pump suppression, closed / no-delta path (R8 replay parity):
+			// a closed assistant text that is exactly an "ok" ack, arriving while
+			// we watch the live pump turn, is dropped entirely.
+			if (
+				kind === 'text' &&
+				state.pendingPumpAck &&
+				state.pendingPumpAck === state.liveTurnId &&
+				isAckContent(content)
+			) {
+				return { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
+			}
 			// Always a CLOSED bubble: close any open stream first, then append.
 			// It must never merge into or reopen a streaming text/thinking msg.
 			const next = closeOpen(state);
@@ -687,7 +802,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				...(str(event.profile_id) ? { profileId: str(event.profile_id) } : {}),
 				...(Object.keys(metadata).length ? { metadata } : {}),
 			};
-			return appendMessage(next, msg, seq);
+			// A rendered (non-ack) closed text means the model narrated → stop
+			// watching. Thinking closes never clear the watch (mirror deltas).
+			const settled = appendMessage(next, msg, seq);
+			return kind === 'text'
+				? { ...settled, pendingPumpAck: null, pumpAckBuffer: '' }
+				: settled;
 		}
 
 		case 'assistant.thinking_delta': {
@@ -718,7 +838,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		case 'tool.use': {
 			const toolUseId = str(event.tool_use_id);
 			if (!toolUseId) return state;
-			let next = closeOpen(state);
+			// A tool use means the model is acting → stop watching for an "ok" ack.
+			let next = { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
 			const input = obj(event.input);
 			const screenshot = str(event.screenshot);
 			const existing = findByToolId(next.messages, toolUseId);

@@ -403,11 +403,58 @@ def _enqueue(session_id: str, source: str, **kwargs: Any) -> Dict[str, Any]:
 def _queued_unpark_turn(session_id: str) -> Optional[Dict[str, Any]]:
     """The session's front-most still-``queued`` ``source=unpark`` wake, if any
     (there is at most one by construction — near-simultaneous completions batch
-    into it)."""
+    into it). PUMP wakes (``source=unpark_pump``) are deliberately excluded — the
+    own lane never merges into a pump turn and vice-versa."""
     for turn in turns_db.get_queued_turns(session_id):
         if turn.get("source") == "unpark":
             return turn
     return None
+
+
+def _queued_pump_turn_with_task(
+    session_id: str, task_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """A still-``queued`` ``source=unpark_pump`` wake whose ``payload.task_ids``
+    already contains ``task_id`` (pump dedup, ruling R4). Pump wakes are NEVER
+    merged — this is only a cheap idempotent safety net against a double-delivered
+    frame. ``None`` (never dedup) for a missing ``task_id``."""
+    if not task_id:
+        return None
+    for turn in turns_db.get_queued_turns(session_id):
+        if turn.get("source") != "unpark_pump":
+            continue
+        payload = turn.get("payload") or {}
+        if task_id in (payload.get("task_ids") or []):
+            return turn
+    return None
+
+
+async def _enqueue_context_wake(
+    session_id: str,
+    source: str,
+    frame: Dict[str, Any],
+    task_id: Optional[str],
+    prompt: str,
+) -> Dict[str, Any]:
+    """Enqueue a fresh context-carrying wake turn (shared by the own and pump
+    lanes' fall-through enqueue). Reads the session's latest context turn for
+    profile/project/worktree/parent linkage, attaches the single ``frame`` and
+    its ``task_id`` to the payload, and returns the enqueued turn."""
+    context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
+    payload = _context_payload(context)
+    payload["pending_frames"] = [frame]
+    payload["task_ids"] = [task_id] if task_id else []
+    return await asyncio.to_thread(
+        _enqueue,
+        session_id,
+        source,
+        prompt=prompt,
+        profile_id=context.get("profile_id"),
+        project_id=context.get("project_id"),
+        worktree_id=context.get("worktree_id"),
+        payload=payload,
+        parent_turn_id=context.get("id"),
+    )
 
 
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
@@ -427,92 +474,109 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     * (c) otherwise enqueue a new unpark wake carrying ``pending_frames`` +
       ``task_ids`` (context inherited from the parked turn).
 
-    Kicks after a merge/enqueue (never after the (a) no-op)."""
+    Kicks after a merge/enqueue (never after the (a) no-op).
+
+    Three lanes, by ownership (subagent task-notification leak):
+
+    * OWN — ``is_own_background_task`` true: the parent's own background work came
+      to rest. EXISTING behavior verbatim (rich ``source=unpark`` wake, merge +
+      idempotency branches below).
+    * PUMP — not own, but ``has_active_background_agent`` true: one internal step
+      of a still-running background sub-agent. ONE quiet ``source=unpark_pump``
+      wake per completion, NEVER merged/batched (the model must react to each step
+      individually while the others run), with only a dedup safety net (R4). The
+      main-session pump is the ONLY resume path for a parked sub-agent (2026-07-10
+      strand repair), and a grandchild is by construction launched WHILE its
+      sub-agent runs — so the active-agent signal is the admission gate.
+    * else — fully at rest with NO owner (orphan grandchild / synchronous
+      sub-agent coming to rest): suppress (the "nothing to act on" leak)."""
     try:
         task_id = frame.get("task_id")
-        # OWNERSHIP GATE (subagent task-notification leak): the reader hands off
-        # EVERY terminal background frame — including tasks launched INSIDE a
-        # sub-agent (grandchildren), which the main session never launched.
-        # Policy: the parent's OWN background work always wakes it; and ANY
-        # still-running background agent admits the wake, because the
-        # main-session pump is the ONLY resume path for a parked sub-agent
-        # (2026-07-10 strand repair) and a grandchild task is by construction
-        # launched WHILE its sub-agent is running — so no ownership-lane arming
-        # is required for the strand-repair case. Suppression happens only when
-        # the session is fully at rest with NO owner: an orphan grandchild or a
-        # synchronous sub-agent coming to rest (the "nothing to act on" leak).
         from app.core.task_registry import task_registry
-        should_wake = (
-            task_registry.is_own_background_task(session_id, task_id)
-            or task_registry.has_active_background_agent(session_id)
-        )
-        if not should_wake:
-            logger.info(
-                "turn_scheduler: unpark-decision suppressed for %s — task %s "
-                "not the parent's background work and no active background agent",
-                session_id, task_id,
+
+        if task_registry.is_own_background_task(session_id, task_id):
+            # ── OWN lane — rich consolidated source=unpark wake (unchanged) ──
+            existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
+            if existing is not None:
+                existing_payload = dict(existing.get("payload") or {})
+                existing_task_ids = list(existing_payload.get("task_ids") or [])
+                if task_id and task_id in existing_task_ids:
+                    # (a) idempotent: this task is already folded into the wake.
+                    logger.info(
+                        "turn_scheduler: unpark for %s — task %s already in wake "
+                        "turn %s, no-op", session_id, task_id, existing.get("id"),
+                    )
+                    return
+                # (b) merge this frame into the pending wake and rebuild its prompt.
+                pending = list(existing_payload.get("pending_frames") or [])
+                pending.append(frame)
+                merged_payload = dict(existing_payload)
+                merged_payload["pending_frames"] = pending
+                merged_payload["task_ids"] = existing_task_ids + (
+                    [task_id] if task_id else []
+                )
+                prompt = await asyncio.to_thread(
+                    _build_task_notification_prompt, pending
+                )
+                updated = await asyncio.to_thread(
+                    turns_db.update_queued_turn_prompt,
+                    existing["id"], prompt, merged_payload,
+                )
+                if updated is not None:
+                    logger.info(
+                        "turn_scheduler: unpark for %s — task %s terminal (%s) "
+                        "merged into wake turn %s (%d pending)",
+                        session_id, task_id, frame.get("status"),
+                        updated["id"], len(pending),
+                    )
+                    kick(session_id)
+                    return
+                # The guarded UPDATE lost (the wake left the queue) — enqueue fresh.
+
+            # (c) enqueue a new consolidated unpark wake.
+            prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
+            turn = await _enqueue_context_wake(
+                session_id, "unpark", frame, task_id, prompt
             )
+            logger.info(
+                "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
+                session_id, task_id, frame.get("status"), turn["id"],
+            )
+            kick(session_id)
             return
 
-        existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
-        if existing is not None:
-            existing_payload = dict(existing.get("payload") or {})
-            existing_task_ids = list(existing_payload.get("task_ids") or [])
-            if task_id and task_id in existing_task_ids:
-                # (a) idempotent: this task is already folded into the wake.
+        if task_registry.has_active_background_agent(session_id):
+            # ── PUMP lane — one quiet source=unpark_pump wake per step ──
+            # Dedup (R4): a double-delivered frame for a task already carried by a
+            # queued pump wake is a complete no-op (skip, never merge).
+            dupe = await asyncio.to_thread(
+                _queued_pump_turn_with_task, session_id, task_id
+            )
+            if dupe is not None:
                 logger.info(
-                    "turn_scheduler: unpark for %s — task %s already in wake "
-                    "turn %s, no-op", session_id, task_id, existing.get("id"),
+                    "turn_scheduler: pump for %s — task %s already in pump wake "
+                    "turn %s, no-op", session_id, task_id, dupe.get("id"),
                 )
                 return
-            # (b) merge this frame into the pending wake and rebuild its prompt.
-            pending = list(existing_payload.get("pending_frames") or [])
-            pending.append(frame)
-            merged_payload = dict(existing_payload)
-            merged_payload["pending_frames"] = pending
-            merged_payload["task_ids"] = existing_task_ids + (
-                [task_id] if task_id else []
-            )
             prompt = await asyncio.to_thread(
-                _build_task_notification_prompt, pending
+                _build_task_notification_prompt, [frame], "pump"
             )
-            updated = await asyncio.to_thread(
-                turns_db.update_queued_turn_prompt,
-                existing["id"], prompt, merged_payload,
+            turn = await _enqueue_context_wake(
+                session_id, "unpark_pump", frame, task_id, prompt
             )
-            if updated is not None:
-                logger.info(
-                    "turn_scheduler: unpark for %s — task %s terminal (%s) "
-                    "merged into wake turn %s (%d pending)",
-                    session_id, task_id, frame.get("status"),
-                    updated["id"], len(pending),
-                )
-                kick(session_id)
-                return
-            # The guarded UPDATE lost (the wake left the queue) — enqueue fresh.
+            logger.info(
+                "turn_scheduler: pump wake for %s — task %s terminal (%s), "
+                "wake turn %s", session_id, task_id, frame.get("status"), turn["id"],
+            )
+            kick(session_id)
+            return
 
-        # (c) enqueue a new consolidated unpark wake.
-        prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
-        context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
-        payload = _context_payload(context)
-        payload["pending_frames"] = [frame]
-        payload["task_ids"] = [task_id] if task_id else []
-        turn = await asyncio.to_thread(
-            _enqueue,
-            session_id,
-            "unpark",
-            prompt=prompt,
-            profile_id=context.get("profile_id"),
-            project_id=context.get("project_id"),
-            worktree_id=context.get("worktree_id"),
-            payload=payload,
-            parent_turn_id=context.get("id"),
-        )
+        # ── else — no owner, no active agent → suppress ──
         logger.info(
-            "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
-            session_id, task_id, frame.get("status"), turn["id"],
+            "turn_scheduler: unpark-decision suppressed for %s — task %s "
+            "not the parent's background work and no active background agent",
+            session_id, task_id,
         )
-        kick(session_id)
     except Exception:  # noqa: BLE001 — a wake failure must never kill the reader.
         logger.warning(
             "turn_scheduler: on_task_terminal failed for %s", session_id,
@@ -551,6 +615,20 @@ _TASK_NOTIFICATION_NOTE = (
     "the outcome is already reflected in your earlier work, or needs no follow-up, "
     "stop after a brief acknowledgement; do not invent next steps or re-explain "
     "what already finished."
+)
+
+
+# Guidance for a PUMP wake (source="unpark_pump"): a single internal step of a
+# background agent that is STILL RUNNING, surfaced so the model can react if the
+# step's result demands it. The user is not waiting; the expected reply is a bare
+# "ok" (suppressed in the UI) UNLESS the result requires the model to act.
+_TASK_NOTIFICATION_PUMP_NOTE = (
+    "This is an internal step of a background agent that is STILL RUNNING; it is "
+    "surfaced to you only so you can react if the step's result requires it. No "
+    "user-facing narration is expected and the user is not waiting on you. Reply "
+    "with exactly \"ok\" and nothing else — UNLESS this result reveals a problem, "
+    "a decision you must make, or an opportunity that requires you to act, in "
+    "which case take that action directly instead of replying \"ok\"."
 )
 
 
@@ -606,7 +684,7 @@ def _extract_final_assistant_text(output_file: str) -> Optional[str]:
     return joined or None
 
 
-def _build_task_notification_prompt(pending: list) -> str:
+def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
     """Build ONE synthesized user prompt consolidating all pending notifications.
 
     Mirrors Claude Code's reference ``<task-notification>`` contract so the parent
@@ -619,12 +697,26 @@ def _build_task_notification_prompt(pending: list) -> str:
     to no assistant entries), then the short ``summary``. The returned string
     always contains the literal ``<task-notification>`` substring, so the existing
     user-message filters keep it from rendering as a chat bubble.
+
+    ``kind`` selects the contract variant:
+
+    * ``"own"`` (default) — the parent's own background work came to rest. Byte-
+      identical to the historical output: full ``<note>`` + trailing ``<usage>``
+      block, no ``<kind>`` element.
+    * ``"pump"`` — one internal step of a still-running background agent. Nests a
+      ``<kind>pump</kind>`` element right after the opening tag, uses the terse
+      pump note, and OMITS ``<usage>`` (the step is not a completed unit of work).
+      The full result fallback chain is KEPT — reactivity requires the model see
+      the step result.
     """
     from app.core.query_engine import _read_task_output_file
     from app.core.query_streaming import truncate_large_payload
 
     def _esc(value: Any) -> str:
         return "" if value is None else str(value)
+
+    is_pump = kind == "pump"
+    note_text = _TASK_NOTIFICATION_PUMP_NOTE if is_pump else _TASK_NOTIFICATION_NOTE
 
     blocks: List[str] = []
     for note in pending:
@@ -640,24 +732,31 @@ def _build_task_notification_prompt(pending: list) -> str:
             # truncate via the shared helper (matches query_engine's own use)
             # instead of a naive head-slice.
             result_text = truncate_large_payload(result_text, _MAX_TASK_RESULT_CHARS)
-        usage = note.get("usage") or {}
-        usage_xml = (
-            "  <usage>\n"
-            f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
-            f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
-            f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
-            "  </usage>"
-        )
+        # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
+        # OWN: no <kind> element; trailing <usage> block (byte-identical to before).
+        kind_xml = "  <kind>pump</kind>\n" if is_pump else ""
+        if is_pump:
+            usage_xml = ""
+        else:
+            usage = note.get("usage") or {}
+            usage_xml = (
+                "  <usage>\n"
+                f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
+                f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
+                f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
+                "  </usage>\n"
+            )
         blocks.append(
             "<task-notification>\n"
+            f"{kind_xml}"
             f"  <task-id>{_esc(note.get('task_id'))}</task-id>\n"
             f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
             f"  <output-file>{_esc(output_file)}</output-file>\n"
             f"  <status>{_esc(note.get('status'))}</status>\n"
             f"  <summary>{_esc(note.get('summary'))}</summary>\n"
-            f"  <note>{_TASK_NOTIFICATION_NOTE}</note>\n"
+            f"  <note>{note_text}</note>\n"
             f"  <result>{result_text}</result>\n"
-            f"{usage_xml}\n"
+            f"{usage_xml}"
             "</task-notification>"
         )
     return "\n".join(blocks)

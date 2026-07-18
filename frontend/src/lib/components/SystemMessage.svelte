@@ -143,6 +143,15 @@
 		return parts.length ? `— ${parts.join(' · ')}` : '';
 	}
 
+	// Shared status → badge-color mapping for task-notification cards/chips
+	// (own card and quiet-pump chip). Keeps 'stopped' → amber consistent.
+	function taskStatusColor(status: string): string {
+		return status === 'failed' ? 'red'
+			: status === 'completed' ? 'green'
+			: status === 'stopped' ? 'amber'
+			: 'gray';
+	}
+
 	// Get formatted content based on subtype
 	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string; rawInput?: string; taskStatus?: string } {
 		const subtype = message.systemSubtype || 'system';
@@ -508,6 +517,28 @@
 
 			case 'task_updated':
 			case 'task_notification': {
+				// Quiet-pump step notification: an internal step of a still-RUNNING
+				// background agent, surfaced only so the model can react. Render an
+				// ultra-compact, collapsed-by-default chip — muted "background step"
+				// with the status, the result tucked behind the collapse, and NO
+				// usage line. Distinct from an own notification's full 'Task' card.
+				if (subtype === 'task_notification' && data.kind === 'pump') {
+					const pumpStatus = (data.status as string) || '';
+					const pumpResult =
+						typeof data.result === 'string' && data.result.trim()
+							? data.result
+							: undefined;
+					return {
+						title: 'background step',
+						content: pumpStatus,
+						badge: pumpStatus || subtype,
+						badgeColor: taskStatusColor(pumpStatus),
+						taskStatus: pumpStatus || subtype,
+						collapsible: true,
+						rawOutput: pumpResult
+					};
+				}
+
 				// SDK task state patches (status changes, timing, usage).
 				// Internal telemetry — keep collapsible so users can inspect
 				// the raw patch without a huge JSON card dominating the chat.
@@ -524,11 +555,7 @@
 					(data.subject as string) ||
 					'';
 
-				const statusColor =
-					status === 'failed' ? 'red'
-					: status === 'completed' ? 'green'
-					: status === 'stopped' ? 'amber'
-					: 'gray';
+				const statusColor = taskStatusColor(status);
 
 				let rawOutput: string | undefined;
 				const resultText =

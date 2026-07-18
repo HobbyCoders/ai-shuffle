@@ -582,10 +582,12 @@ async def test_subagent_owned_terminal_without_parked_agent_no_unpark(mock_db):
     execute.assert_not_awaited()
 
 
-async def test_subagent_owned_terminal_with_parked_agent_fires_unpark(mock_db):
+async def test_subagent_owned_terminal_with_parked_agent_fires_pump(mock_db):
     # 2026-07-10 regression: while a background sub-agent is still running, its
     # grandchild's terminal notification MUST wake the parent — the main-session
-    # pump is the ONLY resume path for the parked sub-agent.
+    # pump is the ONLY resume path for the parked sub-agent. Under the quiet-pump
+    # split this is a grandchild STEP (not the parent's own work), so it wakes on
+    # the PUMP lane (source="unpark_pump"), not the rich unpark lane.
     task_registry.start_task("sg2", "subagent-1", "agent", "spawning sub-agent")
     frame = _terminal_frame("gc-2", "grandchild done")
     task_registry.mark_subagent_background_launch("sg2", frame["tool_use_id"])
@@ -598,8 +600,10 @@ async def test_subagent_owned_terminal_with_parked_agent_fires_unpark(mock_db):
         await turn_scheduler.on_task_terminal("sg2", frame)
         await _drain_kicks()
 
-    (wake,) = _by_source("sg2", "unpark")
+    assert _by_source("sg2", "unpark") == []
+    (wake,) = _by_source("sg2", "unpark_pump")
     assert "<task-notification>" in wake["prompt"]
+    assert "<kind>pump</kind>" in wake["prompt"]
     assert "<task-id>gc-2</task-id>" in wake["prompt"]
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == wake["id"]
@@ -646,11 +650,12 @@ async def test_parent_owned_terminal_still_fires_unpark(mock_db):
     assert execute.await_args.args[0]["id"] == wake["id"]
 
 
-async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
-    # Under the simplified gate the ownership lane no longer drives the wake: an
+async def test_unknown_task_with_active_agent_fires_pump(mock_db):
+    # Under the quiet-pump split the ownership lane no longer drives the wake: an
     # UNKNOWN terminal task (no lane armed) still wakes the parent as long as a
     # background sub-agent is running — the arming-miss strand guard, since a
-    # grandchild is by construction launched while its sub-agent runs.
+    # grandchild is by construction launched while its sub-agent runs. Not-own +
+    # active agent = the PUMP lane (source="unpark_pump").
     task_registry.start_task("sg5a", "subagent-a", "agent", "spawning")
     frame_a = _terminal_frame("gc-5", "grandchild done")
 
@@ -662,7 +667,8 @@ async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
         await turn_scheduler.on_task_terminal("sg5a", frame_a)
         await _drain_kicks()
 
-    assert len(_by_source("sg5a", "unpark")) == 1
+    assert _by_source("sg5a", "unpark") == []
+    assert len(_by_source("sg5a", "unpark_pump")) == 1
 
     # (b) same unknown task, NO running agent → suppressed.
     frame_b = _terminal_frame("gc-6", "grandchild done")
@@ -676,6 +682,170 @@ async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
         await _drain_kicks()
 
     assert _by_source("sg5b", "unpark") == []
+
+
+# ---------------------------------------------------------------------------
+# (4) PUMP — quiet subagent-step wakes (source="unpark_pump")
+# ---------------------------------------------------------------------------
+# A grandchild task (NOT background-launched by the parent → is_own false) going
+# terminal while a background sub-agent is STILL running is an internal step of
+# that sub-agent. It gets ONE quiet source="unpark_pump" wake per completion —
+# never merged/batched — with the pump prompt contract (nested <kind>pump</kind>,
+# pump note, NO <usage>).
+
+
+async def test_pump_wake_enqueues_unpark_pump(mock_db):
+    # active background sub-agent (kind=="agent") → has_active_background_agent.
+    task_registry.start_task("pw1", "subagent-1", "agent", "spawning sub-agent")
+    parked = turns_db.enqueue_turn(
+        "pw1", "user", prompt="kick off",
+        profile_id="pp", project_id="proj-p", worktree_id="wt-p",
+        payload={"api_user_id": "u-api"},
+    )
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["subagent-1"])
+
+    frame = {
+        "task_id": "gc-1", "status": "completed", "tool_use_id": "tu-gc-1",
+        "summary": "step done", "output_file": "",
+        "usage": {"total_tokens": 50, "tool_uses": 2, "duration_ms": 1000},
+    }
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("pw1", frame)
+        await _drain_kicks()
+
+    assert _by_source("pw1", "unpark") == []  # NOT the rich lane
+    (wake,) = _by_source("pw1", "unpark_pump")
+    assert "<task-notification>" in wake["prompt"]
+    assert "<kind>pump</kind>" in wake["prompt"]
+    assert "<task-id>gc-1</task-id>" in wake["prompt"]
+    assert "<result>step done</result>" in wake["prompt"]  # summary fallback
+    assert "<usage>" not in wake["prompt"]                 # usage omitted for pump
+    assert "internal step of a background agent" in wake["prompt"]  # pump note
+    # Context inherited from the parked turn.
+    assert wake["parent_turn_id"] == parked["id"]
+    assert wake["profile_id"] == "pp"
+    assert wake["project_id"] == "proj-p"
+    assert wake["worktree_id"] == "wt-p"
+    assert wake["payload"]["api_user_id"] == "u-api"
+    assert wake["payload"]["task_ids"] == ["gc-1"]
+    assert wake["payload"]["pending_frames"] == [frame]
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == wake["id"]
+
+
+async def test_pump_completions_never_merge(mock_db):
+    # Two grandchild steps → TWO separate unpark_pump rows (never folded); each
+    # payload.task_ids carries only its own task. A live turn keeps them queued.
+    task_registry.start_task("pm1", "subagent-1", "agent", "spawning")
+    live = turns_db.enqueue_turn("pm1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+
+    f1 = _terminal_frame("gc-a", "alpha")
+    f2 = _terminal_frame("gc-b", "beta")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("pm1", f1)
+        await _drain_kicks()
+        await turn_scheduler.on_task_terminal("pm1", f2)
+        await _drain_kicks()
+
+    assert _by_source("pm1", "unpark") == []
+    pumps = _by_source("pm1", "unpark_pump")
+    assert len(pumps) == 2
+    # Each pump row carries ONLY its own frame — no folding across steps.
+    by_task = {p["payload"]["task_ids"][0]: p for p in pumps}
+    assert set(by_task) == {"gc-a", "gc-b"}
+    assert by_task["gc-a"]["payload"]["pending_frames"] == [f1]
+    assert by_task["gc-b"]["payload"]["pending_frames"] == [f2]
+
+
+async def test_pump_duplicate_frame_noop(mock_db):
+    # The SAME grandchild frame twice → dedup-skip: one row, second call kicks
+    # nothing (matches the own-lane (a) idempotent no-op).
+    task_registry.start_task("pd1", "subagent-1", "agent", "spawning")
+    live = turns_db.enqueue_turn("pd1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    frame = _terminal_frame("gc-dup", "done once")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("pd1", frame)
+        await _drain_kicks()
+        (before,) = _by_source("pd1", "unpark_pump")
+        prompt_before, payload_before = before["prompt"], before["payload"]
+        execute.reset_mock()
+
+        await turn_scheduler.on_task_terminal("pd1", frame)  # duplicate
+        await _drain_kicks()
+
+    pumps = _by_source("pd1", "unpark_pump")
+    assert len(pumps) == 1
+    assert pumps[0]["prompt"] == prompt_before
+    assert pumps[0]["payload"] == payload_before
+    execute.assert_not_awaited()  # dedup no-op does not kick
+
+
+async def test_pump_suppressed_when_no_active_agent(mock_db):
+    # Grandchild terminal, is_own false, NO running sub-agent → fully suppressed
+    # (neither unpark nor unpark_pump).
+    frame = _terminal_frame("gc-orphan", "orphan done")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("ps1", frame)
+        await _drain_kicks()
+
+    assert _by_source("ps1", "unpark") == []
+    assert _by_source("ps1", "unpark_pump") == []
+    execute.assert_not_awaited()
+
+
+async def test_own_and_pump_coexist(mock_db):
+    # The parent's OWN background work completes (→ unpark, merge lane intact)
+    # while a grandchild step completes (→ separate unpark_pump). Neither folds
+    # into the other. A live turn keeps both rows queued.
+    live = turns_db.enqueue_turn("oc1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    # A running sub-agent so the grandchild admits the pump lane.
+    task_registry.start_task("oc1", "subagent-1", "agent", "spawning")
+    # Parent's OWN background work (is_own true → rich unpark lane).
+    task_registry.start_task("oc1", "own-x", "agent", "bg", tool_use_id="tu-own-x")
+    task_registry.mark_background_launch("oc1", "tu-own-x")
+    own = _terminal_frame("own-x", "own done")
+    gc = _terminal_frame("gc-x", "grandchild step")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("oc1", own)
+        await _drain_kicks()
+        await turn_scheduler.on_task_terminal("oc1", gc)
+        await _drain_kicks()
+
+    (unpark,) = _by_source("oc1", "unpark")
+    assert unpark["payload"]["task_ids"] == ["own-x"]
+    assert "<kind>pump</kind>" not in unpark["prompt"]
+    (pump,) = _by_source("oc1", "unpark_pump")
+    assert pump["payload"]["task_ids"] == ["gc-x"]
+    assert "<kind>pump</kind>" in pump["prompt"]
 
 
 # ---------------------------------------------------------------------------

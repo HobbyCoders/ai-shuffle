@@ -355,6 +355,193 @@ describe('task-notification wake prompts', () => {
 	});
 });
 
+// ─── Quiet-pump wake notifications (subagent-step + "ok" ack suppression) ──────
+
+// Mirrors app/core/turn_scheduler.py::_build_task_notification_prompt(kind="pump"):
+// a nested <kind>pump</kind> right after the opening tag and NO <usage> block.
+function pumpNotificationBlock(
+	o: { taskId?: string; status?: string; summary?: string; result?: string } = {}
+): string {
+	return (
+		'<task-notification>\n' +
+		'  <kind>pump</kind>\n' +
+		`  <task-id>${o.taskId ?? 'task-p'}</task-id>\n` +
+		'  <tool-use-id>toolu_p</tool-use-id>\n' +
+		'  <output-file>/tmp/p.txt</output-file>\n' +
+		`  <status>${o.status ?? 'completed'}</status>\n` +
+		`  <summary>${o.summary ?? 'A step'}</summary>\n` +
+		'  <note>internal step note</note>\n' +
+		`  <result>${o.result ?? 'stepped'}</result>\n` +
+		'</task-notification>'
+	);
+}
+
+describe('quiet-pump wake notifications', () => {
+	it('parses a pump block with kind==="pump" and no usage', () => {
+		const s = fold([ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() })]);
+		expect(s.messages).toHaveLength(1);
+		const data = s.messages[0].systemData as Record<string, unknown>;
+		expect(data.kind).toBe('pump');
+		expect(data.status).toBe('completed');
+		expect(data.usage).toEqual({});
+	});
+
+	it('an own notification (no <kind>) parses as kind==="own"', () => {
+		const s = fold([ev('message.user', { id: 'srv-own', content: taskNotificationBlock({}) })]);
+		expect((s.messages[0].systemData as Record<string, unknown>).kind).toBe('own');
+	});
+
+	it('splits two concatenated pump blocks into two pump chips', () => {
+		const content =
+			pumpNotificationBlock({ taskId: 'p-a', summary: 'first' }) +
+			'\n' +
+			pumpNotificationBlock({ taskId: 'p-b', summary: 'second' });
+		const s = fold([ev('message.user', { id: 'srv-mp', content })]);
+		expect(s.messages).toHaveLength(2);
+		expect(
+			s.messages.every((m) => (m.systemData as Record<string, unknown>).kind === 'pump')
+		).toBe(true);
+	});
+
+	it('suppresses a STREAMED "ok" ack after a pump card', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].systemSubtype).toBe('task_notification');
+		expect(s.messages.some((m) => m.role === 'assistant')).toBe(false);
+	});
+
+	it('suppresses a CLOSED "ok" ack (no-delta replay shape, R8)', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('message.assistant', { id: 'a1', content: 'ok' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages.some((m) => m.role === 'assistant')).toBe(false);
+	});
+
+	it('suppresses an "Ok." ack (case + one trailing punctuation, R5a)', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('message.assistant', { id: 'a1', content: 'Ok.' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages.some((m) => m.role === 'assistant')).toBe(false);
+	});
+
+	it('renders assistant text that exceeds the ack prefix (model acts)', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('assistant.text_delta', { text: 'okay, let me investigate that failure' }),
+			ev('turn.completed', {}),
+		]);
+		const assistant = s.messages.filter((m) => m.role === 'assistant');
+		expect(assistant).toHaveLength(1);
+		expect(assistant[0].content).toBe('okay, let me investigate that failure');
+	});
+
+	it('reveals buffered ack-prefix text once a later delta exceeds it', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('assistant.text_delta', { text: ' — on it, fixing now' }),
+			ev('turn.completed', {}),
+		]);
+		const assistant = s.messages.filter((m) => m.role === 'assistant');
+		expect(assistant).toHaveLength(1);
+		expect(assistant[0].content).toBe('ok — on it, fixing now');
+	});
+
+	it('a tool.use after a pump card clears the watch (trailing text renders)', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('tool.use', { tool_use_id: 'tool-1', name: 'Bash' }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages.some((m) => m.type === 'tool_use')).toBe(true);
+		expect(s.messages.some((m) => m.role === 'assistant' && m.type === 'text')).toBe(true);
+	});
+
+	it('does not suppress "ok" when there was no pump card', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-x' }),
+			ev('message.user', { id: 'u1', content: 'do the thing' }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('turn.completed', {}),
+		]);
+		const assistant = s.messages.filter((m) => m.role === 'assistant');
+		expect(assistant).toHaveLength(1);
+		expect(assistant[0].content).toBe('ok');
+	});
+
+	it('an own notification does NOT arm ack suppression', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-o' }),
+			ev('message.user', { id: 'srv-own', content: taskNotificationBlock({}) }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('turn.completed', {}),
+		]);
+		expect(s.messages.some((m) => m.role === 'assistant' && m.content === 'ok')).toBe(true);
+	});
+
+	it('an own notification with a literal <kind>pump</kind> in its <result> stays OWN', () => {
+		// The backend does NOT XML-escape summary/result text, so an own
+		// notification whose result body contains a literal <kind>pump</kind>
+		// must not be misclassified as pump (kind is read from the header only).
+		const content = taskNotificationBlock({
+			result: 'Investigated. The pump path uses <kind>pump</kind> internally.',
+		});
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-o' }),
+			ev('message.user', { id: 'srv-inj-result', content }),
+		]);
+		expect(s.messages).toHaveLength(1);
+		const data = s.messages[0].systemData as Record<string, unknown>;
+		expect(data.kind).toBe('own');
+		expect(data.status).toBe('completed');
+		expect(data.summary).toBe('Did the thing');
+		expect(data.usage).toEqual({ subagent_tokens: 88851, tool_uses: 57, duration_ms: 312000 });
+		expect(s.pendingPumpAck).toBe(null);
+	});
+
+	it('an own notification with a literal <kind>pump</kind> in its <summary> stays OWN', () => {
+		const content = taskNotificationBlock({
+			summary: 'Ran the <kind>pump</kind> step and finished',
+		});
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-o' }),
+			ev('message.user', { id: 'srv-inj-summary', content }),
+		]);
+		expect(s.messages).toHaveLength(1);
+		const data = s.messages[0].systemData as Record<string, unknown>;
+		expect(data.kind).toBe('own');
+		expect(data.summary).toBe('Ran the <kind>pump</kind> step and finished');
+		expect(s.pendingPumpAck).toBe(null);
+	});
+
+	it('turn.aborted clears an armed pump watch and its buffered ack-prefix', () => {
+		const s = fold([
+			ev('turn.started', { turn_id: 'turn-p' }),
+			ev('message.user', { id: 'srv-pump', content: pumpNotificationBlock() }),
+			ev('assistant.text_delta', { text: 'ok' }),
+			ev('turn.aborted', { reason: 'interrupt' }),
+		]);
+		expect(s.pendingPumpAck).toBe(null);
+		expect(s.pumpAckBuffer).toBe('');
+	});
+});
+
 // ─── Assistant deltas ───────────────────────────────────────────────────────
 
 describe('assistant deltas', () => {
