@@ -34,6 +34,13 @@ from app.core.model_registry import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
+# Sentinel distinguishing "caller passed no binding" (use the profile's
+# config.provider — today's behavior) from an explicit per-session binding
+# (authoritative, including an explicit None = native Claude). Multi-provider
+# phase-2 Chunk E: the generation path is session-less today, so callers that
+# have a bound session can pass its provider; everyone else keeps config.provider.
+_UNSET_PROVIDER = object()
+
 
 # Working directory for ALL generation-subprocess spawns. Resolved to the
 # configured workspace_dir on first use so CLAUDE.md / .claude/ auto-discovery
@@ -229,6 +236,7 @@ def build_generation_options(
     profile_config: Optional[Dict[str, Any]],
     model_override: Optional[str] = None,
     max_turns: Optional[int] = None,
+    session_provider_id: Any = _UNSET_PROVIDER,
 ) -> ClaudeAgentOptions:
     """
     Build a `ClaudeAgentOptions` for a one-shot generation call.
@@ -248,15 +256,28 @@ def build_generation_options(
 
     `max_turns` is passed through verbatim; callers typically set 1 for
     single-prompt generation.
+
+    `session_provider_id` (optional): a per-session provider binding. When
+    supplied it is authoritative over the profile's `config.provider` (an
+    explicit None keeps the call native). Omit it for the ordinary session-less
+    generation path, which uses `config.provider`.
     """
     config: Dict[str, Any] = profile_config or {}
 
     # Model: explicit override > profile > hard fallback
     model = model_override or config.get("model") or DEFAULT_MODEL
 
-    # Model provider (multi-provider). None = native Anthropic. When set, the env
-    # is overlaid with the gateway vars inside _resolve_env.
-    provider_id = config.get("provider")
+    # Model provider (multi-provider phase-2, Chunk E / ruling G2-r). None =
+    # native Anthropic; when set, the env is overlaid with the gateway vars
+    # inside _resolve_env. When a caller supplies a per-session binding
+    # (session_provider_id) it is authoritative — the session's bound provider
+    # wins over the profile's config.provider, and an explicit None keeps the
+    # session native even if the profile now carries a provider. Session-less
+    # callers (the default) fall back to config.provider (today's behavior).
+    if session_provider_id is _UNSET_PROVIDER:
+        provider_id = config.get("provider")
+    else:
+        provider_id = session_provider_id
 
     # Permission mode: profile value or bypassPermissions
     permission_mode = config.get("permission_mode") or "bypassPermissions"

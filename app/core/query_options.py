@@ -550,10 +550,25 @@ def build_options_from_profile(
     # as-is too.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
-    # Model provider resolves EXACTLY like model: a query-level override wins,
-    # else the profile config. None = native Anthropic; when set, the env is
-    # overlaid with the gateway vars (apply_provider_env) instead of native auth.
-    provider_id = overrides.get("provider") or config.get("provider")
+    # Model provider (multi-provider phase-2 Chunk E, ruling G2-r). Resolution:
+    # a query-level override wins; otherwise the SESSION's bound provider
+    # (sessions.provider_id, stamped at creation from the profile) is
+    # authoritative for a real session spawn — editing the profile later never
+    # reroutes a live session, and a NULL binding stays native even if the
+    # profile now carries a provider. Only session-LESS builds (e.g. tests /
+    # project-only spawns) fall back to the profile's config.provider (which is
+    # also what seeds the binding at creation). None = native Anthropic; when
+    # set, the env is overlaid with the gateway vars (apply_provider_env).
+    _binding_row = session_row
+    if _binding_row is None and session_id:
+        try:
+            _binding_row = database.get_session(session_id)
+        except Exception:  # noqa: BLE001 — a lookup failure falls back to config
+            _binding_row = None
+    if _binding_row is not None:
+        provider_id = overrides.get("provider") or _binding_row.get("provider_id")
+    else:
+        provider_id = overrides.get("provider") or config.get("provider")
     betas_to_use = []
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
