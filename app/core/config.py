@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     # network/fuse filesystems these installs commonly run on). 0 disables it.
     notes_sync_interval_seconds: int = 15
 
+    # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
+    # enabled Codex provider on this cadence and refreshes any whose access token
+    # is due (proactive 8-day interval, or JWT exp within 5 min — see
+    # app.core.codex_token_refresh). The Codex refresh token ROTATES, so refreshes
+    # are serialized per provider by a lock; this is just the wake-up cadence. 0
+    # disables the periodic worker (the refresh-on-401 hook still works on demand).
+    codex_token_refresh_interval_seconds: int = 3600
+
     # Timeouts (milliseconds)
     hook_timeout_ms: int = 30_000
     # Size limits

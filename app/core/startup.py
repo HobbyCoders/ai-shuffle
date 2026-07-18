@@ -484,6 +484,41 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(_periodic_usage_limits()))
     logger.info("Usage-limits poll task started (every 5 minutes, first run in 5s)")
 
+    codex_refresh_interval = settings.codex_token_refresh_interval_seconds
+    if codex_refresh_interval and codex_refresh_interval > 0:
+        async def _periodic_codex_token_refresh():
+            """Background task: refresh due Codex/ChatGPT provider OAuth tokens.
+
+            Scans every enabled Codex provider and refreshes any whose access
+            token is proactively due (8-day interval) or nearing JWT ``exp``
+            (5-min skew). Refreshes are serialized per provider (rotating refresh
+            token — a double refresh is permanent death), and permanent failures
+            flip ``needs_reauth`` + surface a reconnect prompt. See
+            app.core.codex_token_refresh.
+            """
+            from app.core import codex_token_refresh
+
+            await asyncio.sleep(20)  # let startup settle before the first sweep
+            while True:
+                try:
+                    n = await codex_token_refresh.refresh_due_providers()
+                    if n:
+                        logger.info(f"Codex token refresh: rotated {n} provider(s)")
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Periodic Codex token refresh failed: {e}")
+                try:
+                    await asyncio.sleep(codex_refresh_interval)
+                except asyncio.CancelledError:
+                    break
+
+        tasks.append(asyncio.create_task(_periodic_codex_token_refresh()))
+        logger.info(
+            f"Codex token-refresh task started "
+            f"(every {codex_refresh_interval}s, first run in 20s)"
+        )
+
     # Durable busy-status reconciler (v2 core): re-checks sessions last
     # broadcast as busy so a lease that expires with no terminal event (crashed
     # runner) still turns the board spinner off. Also registers the event
