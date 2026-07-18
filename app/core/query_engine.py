@@ -419,6 +419,14 @@ def _record_subagent_lane_launches(session_id: Optional[str], message: Any) -> N
             _implicit = getattr(block, "name", None) in _IMPLICIT_BACKGROUND_TOOL_NAMES
             if tool_id and (_flagged or _implicit):
                 task_registry.mark_subagent_background_launch(session_id, tool_id)
+                # B-1: link the child launch to its owner (this sub-agent's own
+                # launch id = message.parent_tool_use_id, gated non-null above) so
+                # the PUMP lane can defer the child's terminal against the owner's
+                # quiescence instead of pumping blindly.
+                task_registry.link_child_to_owner(
+                    session_id, tool_id,
+                    getattr(message, "parent_tool_use_id", None),
+                )
                 logger.info(
                     "task-launch-classification session=%s tool_id=%s "
                     "classification=%s (pump)",
@@ -2981,6 +2989,11 @@ async def _stream_to_websocket_impl(
                             # (2026-07-10 incident; the #470 top-level-only
                             # gate above is what kept it invisible).
                             task_registry.mark_subagent_background_launch(session_id, tool_id)
+                            # B-1: link the child launch to its owner (the
+                            # sub-agent's own launch id = parent_tool_id).
+                            task_registry.link_child_to_owner(
+                                session_id, tool_id, tool_entry["parent_tool_id"]
+                            )
                             logger.info(
                                 "task-launch-classification session=%s tool_id=%s "
                                 "classification=background-flag-subagent-lane",
@@ -3004,6 +3017,11 @@ async def _stream_to_websocket_impl(
                             # CLI-owned (queue enqueue + self-dequeue) and the
                             # app must keep suppressing them.
                             task_registry.mark_subagent_background_launch(session_id, tool_id)
+                            # B-1: link the child launch to its owner (the
+                            # sub-agent's own launch id = parent_tool_id).
+                            task_registry.link_child_to_owner(
+                                session_id, tool_id, tool_entry["parent_tool_id"]
+                            )
                             logger.info(
                                 "task-launch-classification session=%s tool_id=%s "
                                 "classification=background-builtin-subagent-lane",

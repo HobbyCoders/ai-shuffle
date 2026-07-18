@@ -259,6 +259,11 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             try:
                 inner_parent = getattr(message, "parent_tool_use_id", None)
                 if inner_parent and task_registry.was_background_launch(session_id, inner_parent):
+                    # B-prime item b: this drained message is inner activity of a
+                    # still-running own background sub-agent (an owner). Stamp its
+                    # activity so the deferred-pump discriminator can tell a running
+                    # owner (keeps emitting) from a parked one (goes silent).
+                    task_registry.note_owner_activity(session_id, inner_parent)
                     for sub_ev in _subagent_events_from_message(message):
                         await record_drained_event(session_id, sub_ev)
             except Exception as exc:  # noqa: BLE001

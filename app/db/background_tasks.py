@@ -47,9 +47,9 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
         cursor.execute(
             f"""INSERT INTO background_tasks (
                     task_id, session_id, instance_id, kind, is_sdk_background,
-                    tool_use_id, title, status, unparked, terminal_notified,
+                    tool_use_id, title, status, terminal_notified,
                     started_at, updated_at
-                ) VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})
+                ) VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -57,7 +57,6 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
                     tool_use_id = EXCLUDED.tool_use_id,
                     title = EXCLUDED.title,
                     status = EXCLUDED.status,
-                    unparked = EXCLUDED.unparked,
                     terminal_notified = EXCLUDED.terminal_notified,
                     started_at = EXCLUDED.started_at,
                     updated_at = EXCLUDED.updated_at""",
@@ -70,7 +69,6 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
                 snapshot.get("tool_use_id"),
                 snapshot.get("title"),
                 snapshot.get("status"),
-                bool(snapshot.get("unparked")),
                 bool(snapshot.get("terminal_notified")),
                 snapshot.get("started_at"),
                 snapshot.get("updated_at"),

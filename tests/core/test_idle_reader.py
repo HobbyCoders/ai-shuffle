@@ -380,3 +380,104 @@ async def test_killed_task_update_single_chip_and_tool_use_id_handoff(mock_db):
     assert frame["tool_use_id"] == "tu-k"
 
     task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# 6. Completed task: bare TaskUpdated + rich TaskNotification → ONE effective wake
+# ---------------------------------------------------------------------------
+
+async def test_completed_task_updated_plus_notification_single_effective_wake(mock_db):
+    """A completed background task streams BOTH frames the SDK emits: the bare
+    ``TaskUpdatedMessage`` (task_id/status/tool_use_id only) AND the rich
+    ``TaskNotificationMessage`` (summary/usage). Both branches hand off to the
+    scheduler (idle_reader.py:339, :385) — the historical DOUBLE handoff.
+
+    With the REAL ``turn_scheduler.on_task_terminal`` seam and a live (NOT parked)
+    parent, the bare frame builds the OWN wake and the rich frame UPGRADES it in
+    place (Fix A-2): the session ends with exactly ONE queued ``unpark`` row whose
+    prompt carries the rich summary — not two rows, not a bare-only wake.
+    """
+    from app.core.query_engine import TaskUpdatedMessage
+    from app.core import turn_scheduler
+
+    task_registry.reset_all()
+    turn = turns_db.enqueue_turn("s7", "user", prompt="kick off bg")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.settle_turn(turn["id"], "completed")  # settled, NOT parked
+    task_registry.start_task("s7", "task-bt", "agent", "bg", tool_use_id="tu-bt")
+    task_registry.mark_background_launch("s7", "tu-bt")
+
+    idle_reader.register_on_task_terminal(turn_scheduler.on_task_terminal)
+
+    upd = _make_message(
+        TaskUpdatedMessage, task_id="task-bt", subtype="task_updated",
+        data={"task_id": "task-bt", "patch": {"status": "completed"}},
+    )
+    notif = _make_message(TaskNotificationMessage, task_id="task-bt")
+    rich_frame = {
+        "type": "task_notification", "task_id": "task-bt", "status": "completed",
+        "tool_use_id": "tu-bt", "summary": "crawl done", "output_file": "",
+        "usage": {"total_tokens": 99, "tool_uses": 3, "duration_ms": 2000},
+    }
+    pool, _ = _make_pool([upd, notif])
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_update_terminal_status", return_value="completed"))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=rich_frame))
+        stack.enter_context(patch("app.core.query_engine._read_task_output_file", return_value=""))
+        stack.enter_context(patch("app.core.session_runtime.execute", new=AsyncMock(return_value="completed")))
+        await idle_reader.run_idle_reader("s7")
+        # Drain any kick tasks the scheduler spawned after the enqueue/upgrade.
+        for _ in range(10):
+            tasks = list(turn_scheduler._kick_tasks)
+            if not tasks:
+                break
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    wakes = [t for t in turns_db.get_queued_turns("s7") if t["source"] == "unpark"]
+    assert len(wakes) == 1                                   # ONE effective wake
+    assert "<summary>crawl done</summary>" in wakes[0]["prompt"]      # rich, upgraded
+    assert "<subagent_tokens>99</subagent_tokens>" in wakes[0]["prompt"]
+    assert wakes[0]["payload"]["task_ids"] == ["task-bt"]    # task not duplicated
+
+    task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# B-prime observability gate: the drain surfaces a running owner's inner
+# activity (parent_tool_use_id = the owner's own background launch) so the
+# deferred-pump discriminator can tell running from parked.
+# ---------------------------------------------------------------------------
+
+class _InnerMsg:
+    """A plain drained message (not a task/result frame) carrying inner activity
+    of a running sub-agent — only its ``parent_tool_use_id`` matters here."""
+
+
+async def test_owner_inner_activity_stamps_note(mock_db):
+    task_registry.reset_all()
+    # tu-A is one of the parent's OWN background launches (an owner sub-agent).
+    task_registry.mark_background_launch("s8", "tu-A")
+    msg = _make_message(_InnerMsg, parent_tool_use_id="tu-A")
+    pool, _ = _make_pool([msg])
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await idle_reader.run_idle_reader("s8")
+
+    # The inner-message dispatch stamped the owner's activity.
+    assert task_registry.owner_activity_ts("s8", "tu-A") is not None
+    task_registry.reset_all()
+
+
+async def test_non_owner_inner_activity_not_stamped(mock_db):
+    task_registry.reset_all()
+    # parent_tool_use_id is NOT a parent background launch → no owner activity.
+    msg = _make_message(_InnerMsg, parent_tool_use_id="tu-stranger")
+    pool, _ = _make_pool([msg])
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await idle_reader.run_idle_reader("s9")
+
+    assert task_registry.owner_activity_ts("s9", "tu-stranger") is None
+    task_registry.reset_all()
