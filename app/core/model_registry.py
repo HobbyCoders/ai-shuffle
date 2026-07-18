@@ -220,7 +220,15 @@ def _providers_payload() -> List[Dict[str, object]]:
             "name": row["name"],
             "provider_type": row["provider_type"],
             "models": [
-                {"id": model.get("id"), "label": model.get("label")}
+                {
+                    "id": model.get("id"),
+                    "label": model.get("label"),
+                    # Additive per-model metadata (Chunk D.4). Only what the
+                    # provider row itself carries — one value shared by all of
+                    # that provider's models (no per-model store, no models.dev).
+                    "context_window": row.get("context_window"),
+                    "max_output_tokens": row.get("max_output_tokens"),
+                }
                 for model in (row.get("models_json") or [])
             ],
             "default_model": row.get("default_model"),

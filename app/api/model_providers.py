@@ -22,12 +22,13 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.auth import require_admin
 from app.api.settings_crypto import mask_api_key
-from app.core import codex_oauth, encryption
+from app.core import codex_oauth, encryption, model_catalog_presets
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,18 @@ class ModelProviderResponse(BaseModel):
 
 class ModelProviderListResponse(BaseModel):
     providers: List[ModelProviderResponse]
+
+
+class FetchModelsResponse(BaseModel):
+    """Result of a catalog fetch for a provider.
+
+    ``source`` is ``"preset"`` for a ChatGPT/Codex provider (built-in roster, no
+    network) or ``"upstream"`` for a live ``GET {base_url}/models`` fetch. The UI
+    check-selects from ``models`` and PUTs the curated subset via the normal
+    update route — this endpoint never persists anything.
+    """
+    source: str
+    models: List[Dict[str, Any]]
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -222,6 +235,90 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     row["_codex_access_token_set"] = bool(codex_access)
     row["_codex_refresh_token_set"] = bool(codex_refresh)
     return row
+
+
+# Upstream catalog fetch (D.1) — cap so a pathological gateway can't return an
+# unbounded list into the picker. Timeout mirrors the codex OAuth calls.
+_FETCH_MODELS_CAP = 2000
+_FETCH_TIMEOUT = 30.0
+
+
+class UpstreamModelsError(Exception):
+    """Upstream ``/models`` fetch failed (non-2xx or transport error). The route
+    maps this to a 502 — the gateway, not our request, is at fault."""
+
+
+def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an upstream ``/models`` body into ``[{id, label}]``.
+
+    Handles both OpenAI-style ``{"data": [{"id": ...}]}`` and a bare list of
+    entries. Each entry may be an object (``id`` required; ``label``/``name``
+    optional, falling back to ``id``) or a bare string id. Entries without a
+    usable id are skipped. The list is capped at ``_FETCH_MODELS_CAP``.
+    """
+    if isinstance(payload, dict):
+        raw = payload.get("data")
+    else:
+        raw = payload
+    if not isinstance(raw, list):
+        return []
+    models: List[Dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            model_id = entry
+            label = entry
+        elif isinstance(entry, dict):
+            model_id = entry.get("id") or entry.get("model")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            label = entry.get("label") or entry.get("name") or model_id
+            if not isinstance(label, str) or not label:
+                label = model_id
+        else:
+            continue
+        if not model_id:
+            continue
+        models.append({"id": model_id, "label": label})
+        if len(models) >= _FETCH_MODELS_CAP:
+            break
+    return models
+
+
+async def fetch_upstream_models(
+    base_url: str,
+    token: Optional[str],
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch + normalize a provider's ``GET {base_url}/models`` catalog.
+
+    Injectable ``client`` (an ``httpx.AsyncClient`` over a ``MockTransport`` in
+    tests) mirrors the ``app.core.codex_oauth`` convention; production passes the
+    shared client. The decrypted ``token`` (when present) rides as
+    ``Authorization: Bearer``. Raises :class:`UpstreamModelsError` on any non-2xx
+    or transport failure.
+    """
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=_FETCH_TIMEOUT)
+    try:
+        resp = await client.get(url, headers=headers, timeout=_FETCH_TIMEOUT)
+    except httpx.HTTPError as e:
+        raise UpstreamModelsError(str(e)) from e
+    finally:
+        if owns_client and client is not None:
+            await client.aclose()
+
+    if resp.status_code >= 400:
+        raise UpstreamModelsError(f"http_{resp.status_code}")
+    try:
+        payload = resp.json()
+    except Exception as e:  # noqa: BLE001 — malformed upstream body
+        raise UpstreamModelsError("invalid_json") from e
+    return _parse_models_response(payload)
 
 
 def _row_with_token_flags(provider_id: str) -> Optional[Dict[str, Any]]:
@@ -390,6 +487,55 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
 
     full_row = _row_with_token_flags(provider_id)
     return _public_provider(full_row)
+
+
+@router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
+async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
+    """Fetch a provider's model catalog for the curation UI (phase-2 Chunk D.1/D.2).
+
+    Two sources, one endpoint:
+      * ChatGPT/Codex provider (``auth_mode == "chatgpt"``) → the built-in preset
+        roster, no network call (the roster is server-enforced upstream, F3).
+      * Any other provider → live ``GET {base_url}/models`` with the provider's
+        decrypted auth token as ``Authorization: Bearer``.
+
+    This route RETURNS the list only — the admin check-selects and persists the
+    curated subset through the existing ``PATCH /{id}`` update route. There is no
+    second write path here.
+    """
+    row = db.get_model_provider(provider_id, include_token=True)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+
+    # Preset path: ChatGPT/Codex subscription — no browsable /models endpoint.
+    preset = model_catalog_presets.preset_models_for(row)
+    if preset is not None:
+        return FetchModelsResponse(source="preset", models=preset)
+
+    # Upstream path: decrypt the stored token (if any) and fetch live.
+    enc_token = row.get("auth_token")
+    auth_token: Optional[str] = None
+    if enc_token:
+        if not encryption.is_encryption_ready():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Encryption is locked. Log in again as admin (or set "
+                       "ADMIN_PASSWORD) before fetching provider models.",
+            )
+        auth_token = encryption.decrypt_value(enc_token)
+
+    from app.core.http_client import get_http_client
+    try:
+        models = await fetch_upstream_models(
+            row["base_url"], auth_token, client=get_http_client()
+        )
+    except UpstreamModelsError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch models from the provider upstream: {e}",
+        )
+    return FetchModelsResponse(source="upstream", models=models)
 
 
 # ============================================================================

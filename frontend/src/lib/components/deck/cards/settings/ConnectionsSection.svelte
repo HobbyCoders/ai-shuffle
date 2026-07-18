@@ -10,6 +10,7 @@
 		updateModelProvider,
 		deleteModelProvider,
 		toggleModelProvider,
+		fetchProviderModels,
 		type ModelProvider,
 		type ProviderModelEntry,
 	} from '$lib/api/model-providers';
@@ -369,6 +370,78 @@
 	let formSaving = $state(false);
 	let formError = $state('');
 
+	// ----- Fetch-models catalog picker (Chunk D) -----
+	// "Fetch models" pulls the provider's catalog (upstream /models, or the Codex
+	// preset) into a check-select list; confirming persists the curated subset via
+	// the existing update call. Only available while editing a saved provider (the
+	// fetch + persist both need the provider id + its stored token).
+	let showFetchPicker = $state(false);
+	let fetchingModels = $state(false);
+	let fetchError = $state('');
+	let fetchSource = $state<'preset' | 'upstream' | ''>('');
+	let fetchResults = $state<{ id: string; label: string; checked: boolean }[]>([]);
+	let fetchSaving = $state(false);
+
+	async function openFetchModels() {
+		if (!editingProviderId) return;
+		fetchingModels = true;
+		fetchError = '';
+		fetchSource = '';
+		try {
+			const res = await fetchProviderModels(editingProviderId);
+			const curated = new Set(formModels.map((m) => m.id.trim()).filter(Boolean));
+			fetchSource = res.source;
+			fetchResults = (res.models ?? []).map((m) => ({
+				id: m.id,
+				label: m.label,
+				// Preselect ids already in the curated set.
+				checked: curated.has(m.id),
+			}));
+			showFetchPicker = true;
+		} catch (e) {
+			fetchError = getErrorMessage(e, 'Could not fetch models');
+			showFetchPicker = true;
+		} finally {
+			fetchingModels = false;
+		}
+	}
+
+	function toggleFetchResult(index: number) {
+		fetchResults = fetchResults.map((r, i) => (i === index ? { ...r, checked: !r.checked } : r));
+	}
+
+	function cancelFetchPicker() {
+		showFetchPicker = false;
+		fetchResults = [];
+		fetchError = '';
+		fetchSource = '';
+	}
+
+	// Confirm: the checked entries become the curated set, persisted through the
+	// existing update call (no second write path). The in-form list is kept in
+	// sync so a subsequent Save doesn't clobber it.
+	async function confirmFetchSelection() {
+		if (!editingProviderId) return;
+		const selected = fetchResults
+			.filter((r) => r.checked)
+			.map((r) => ({ id: r.id.trim(), label: (r.label || r.id).trim() }))
+			.filter((m) => m.id && m.label);
+		fetchSaving = true;
+		fetchError = '';
+		try {
+			await updateModelProvider(editingProviderId, { models: selected });
+			formModels = selected.map((m) => ({ id: m.id, label: m.label }));
+			showFetchPicker = false;
+			fetchResults = [];
+			fetchSource = '';
+			await refreshProviders();
+		} catch (e) {
+			fetchError = getErrorMessage(e, 'Could not save models');
+		} finally {
+			fetchSaving = false;
+		}
+	}
+
 	// Curated ids offered to the default / small-fast selects (blanks excluded).
 	let selectableModelIds = $derived(
 		formModels.map((m) => m.id.trim()).filter((id) => id.length > 0)
@@ -411,6 +484,10 @@
 		formContextWindow = '';
 		formMaxOutputTokens = '';
 		formError = '';
+		showFetchPicker = false;
+		fetchResults = [];
+		fetchError = '';
+		fetchSource = '';
 	}
 
 	function openAddProvider() {
@@ -922,8 +999,49 @@
 				</div>
 
 				<div class="mp-field">
-					<span class="mp-label">Models</span>
+					<div class="mp-models-head">
+						<span class="mp-label">Models</span>
+						{#if editingProviderId}
+							<button type="button" class="ed-btn mp-fetch-btn" onclick={openFetchModels} disabled={fetchingModels || fetchSaving}>
+								{#if fetchingModels}<Loader2 class="spin" />Fetching…{:else}<RefreshCw />Fetch models{/if}
+							</button>
+						{/if}
+					</div>
 					<div class="mp-models">
+						{#if editingProviderId == null}
+							<p class="mp-hint">Save the provider first to fetch its model catalog.</p>
+						{/if}
+
+						{#if showFetchPicker}
+							<div class="mp-fetch-panel">
+								{#if fetchError}
+									<div class="kc-foot err mp-formerr" role="alert">{fetchError}</div>
+								{:else}
+									<p class="mp-hint">
+										{#if fetchSource === 'preset'}Preset catalog — edit as needed, then confirm.{:else}Fetched {fetchResults.length} {fetchResults.length === 1 ? 'model' : 'models'}. Check the ones to offer.{/if}
+									</p>
+									<div class="mp-fetch-list">
+										{#each fetchResults as r, i (r.id)}
+											<label class="mp-fetch-row">
+												<input type="checkbox" checked={r.checked} onchange={() => toggleFetchResult(i)} />
+												<span class="mp-fetch-id">{r.id}</span>
+												{#if r.label && r.label !== r.id}<span class="mp-fetch-label">{r.label}</span>{/if}
+											</label>
+										{/each}
+										{#if fetchResults.length === 0}<p class="mp-hint">No models returned.</p>{/if}
+									</div>
+								{/if}
+								<div class="acct-addrow">
+									{#if !fetchError}
+										<button type="button" class="ed-btn primary" onclick={confirmFetchSelection} disabled={fetchSaving}>
+											{#if fetchSaving}<Loader2 class="spin" />Saving…{:else}Use selected{/if}
+										</button>
+									{/if}
+									<button type="button" class="ed-btn" onclick={cancelFetchPicker} disabled={fetchSaving}>Cancel</button>
+								</div>
+							</div>
+						{/if}
+
 						{#if formModels.length === 0}
 							<p class="mp-hint">No models yet. Add the gateway model ids you want to offer (e.g. <code>openai/gpt-5.6</code>).</p>
 						{/if}
@@ -1528,6 +1646,68 @@
 	.acct-add-btn :global(svg) {
 		width: 14px;
 		height: 14px;
+	}
+	/* ---- Fetch-models catalog picker (Chunk D) ------------------------- */
+	.mp-models-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+	.mp-fetch-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.mp-fetch-btn :global(svg) {
+		width: 14px;
+		height: 14px;
+	}
+	.mp-fetch-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 10px;
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		background: var(--muted);
+	}
+	.mp-fetch-list {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		max-height: 240px;
+		overflow-y: auto;
+	}
+	.mp-fetch-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 5px 6px;
+		border-radius: 6px;
+		font-size: 13px;
+		cursor: pointer;
+	}
+	.mp-fetch-row:hover {
+		background: var(--background);
+	}
+	.mp-fetch-row input {
+		flex-shrink: 0;
+		cursor: pointer;
+	}
+	.mp-fetch-id {
+		font-family: var(--font-mono, monospace);
+		font-size: 12px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.mp-fetch-label {
+		color: var(--muted-foreground);
+		font-size: 12px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.mp-formerr {
 		padding: 0;

@@ -162,9 +162,41 @@ class TestRegistryPayloadProviders:
             "id": "prov-1",
             "name": "OpenRouter",
             "provider_type": "openrouter",
-            "models": [{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+            "models": [{
+                "id": "openai/gpt-5.6",
+                "label": "GPT-5.6",
+                # Additive metadata (Chunk D.4) — null when the row omits them.
+                "context_window": None,
+                "max_output_tokens": None,
+            }],
             "default_model": "openai/gpt-5.6",
         }
+
+    def test_model_entries_carry_provider_context_and_output_metadata(self, mock_db):
+        """Chunk D.4 additive keys: each model entry echoes the provider row's
+        ``context_window`` / ``max_output_tokens`` (one value shared by all of
+        that provider's models — no per-model store)."""
+        db.create_model_provider(
+            provider_id="prov-meta",
+            name="Gateway",
+            provider_type="custom",
+            base_url="https://gw.example/api",
+            models=[
+                {"id": "model-a", "label": "Model A"},
+                {"id": "model-b", "label": "Model B"},
+            ],
+            context_window=200000,
+            max_output_tokens=8192,
+            enabled=True,
+        )
+        payload = m.registry_payload()
+        entry = payload["providers"][0]
+        assert entry["models"] == [
+            {"id": "model-a", "label": "Model A",
+             "context_window": 200000, "max_output_tokens": 8192},
+            {"id": "model-b", "label": "Model B",
+             "context_window": 200000, "max_output_tokens": 8192},
+        ]
 
     def test_no_auth_token_anywhere_in_payload(self, mock_db):
         db.create_model_provider(

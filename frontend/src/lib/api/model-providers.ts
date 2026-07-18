@@ -86,3 +86,20 @@ export async function deleteModelProvider(id: string): Promise<{ success: boolea
 export async function toggleModelProvider(id: string): Promise<ModelProvider> {
 	return api.post(`/model-providers/${id}/toggle`);
 }
+
+/**
+ * Result of a catalog fetch for a provider (phase-2 Chunk D).
+ *
+ * `source` is `"preset"` for a ChatGPT/Codex provider (built-in roster, no
+ * network) or `"upstream"` for a live `GET {base_url}/models` fetch. The caller
+ * check-selects from `models` and persists the curated subset via
+ * `updateModelProvider(id, { models })` — this call itself persists nothing.
+ */
+export interface FetchModelsResult {
+	source: 'preset' | 'upstream';
+	models: ProviderModelEntry[];
+}
+
+export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {
+	return api.post(`/model-providers/${id}/fetch-models`);
+}

@@ -10,9 +10,8 @@
 	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
+	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
-		getModels,
-		getProviders,
 		CUSTOM_VALUE,
 		getBaseModel,
 		has1MContext,
@@ -308,20 +307,18 @@
 				<div class="lab"><h4>Model</h4><p>The Claude model this profile runs on.</p></div>
 				<div class="ctl ctl-col">
 					<div class="grp-row">
-						<select
-							class="sel"
+						<ModelPicker
 							value={customModelMode
 								? CUSTOM_VALUE
 								: profileForm.provider
 									? `prov:${profileForm.provider}:${profileForm.model}`
 									: getBaseModel(profileForm.model)}
-							onchange={(e) => {
-								const v = (e.target as HTMLSelectElement).value;
+							onSelect={(v) => {
 								if (v === CUSTOM_VALUE) {
 									onCustomModelModeChange(true, '');
 									onFormChange('provider', null);
 								} else if (v.startsWith('prov:')) {
-									// Composite option value: `prov:<providerId>:<modelId>`. Split on the
+									// Composite value: `prov:<providerId>:<modelId>`. Split on the
 									// first colon only — provider model ids (e.g. OpenRouter's
 									// "meta-llama/llama-3.1:free") can contain colons themselves.
 									const rest = v.slice('prov:'.length);
@@ -335,21 +332,7 @@
 									onFormChange('provider', null);
 								}
 							}}
-						>
-							<optgroup label="Claude">
-								{#each getModels() as model (model.value)}
-									<option value={model.value}>{model.label}</option>
-								{/each}
-							</optgroup>
-							{#each getProviders() as p (p.id)}
-								<optgroup label={p.name}>
-									{#each p.models as pm (pm.id)}
-										<option value={`prov:${p.id}:${pm.id}`}>{pm.label}</option>
-									{/each}
-								</optgroup>
-							{/each}
-							<option value={CUSTOM_VALUE}>Custom…</option>
-						</select>
+						/>
 						{#if !customModelMode && modelSupports1M(profileForm.model)}
 							<label class="chk">
 								<input type="checkbox" checked={has1MContext(profileForm.model)} onchange={(e) => onFormChange('model', withContextSuffix(profileForm.model, (e.target as HTMLInputElement).checked))} />
@@ -637,7 +620,8 @@
 		gap: 8px;
 		width: 100%;
 	}
-	.grp-row :global(.sel) {
+	.grp-row :global(.sel),
+	.grp-row :global(.mpk) {
 		flex: 1;
 		min-width: 0;
 	}

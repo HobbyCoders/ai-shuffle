@@ -1,0 +1,210 @@
+"""API tests for the provider catalog-fetch route (phase-2 Chunk D.1/D.2).
+
+``POST /api/v1/model-providers/{id}/fetch-models`` returns (never persists) a
+provider's model roster for the curation UI:
+
+* ChatGPT/Codex providers (``auth_mode == "chatgpt"``) → the built-in preset
+  roster, no network.
+* Everything else → a live ``GET {base_url}/models`` fetch, parsing both the
+  OpenAI ``{"data": [...]}`` shape and a bare list, capped at 2000 entries. The
+  decrypted auth token rides as ``Authorization: Bearer``.
+
+All upstream HTTP is stubbed via ``httpx.MockTransport`` — NO network. The
+shared client used by the route is swapped for a MockTransport-backed one via a
+monkeypatch on ``app.core.http_client.get_http_client``.
+"""
+
+import httpx
+import pytest
+
+from app.api import model_providers as mp_api
+from app.core import encryption, model_catalog_presets
+from app.db import database as db
+
+
+ROOT = "/api/v1/model-providers"
+PROVIDER_ID = "prov-fetch-1"
+RAW_TOKEN = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _unlock(mock_db):
+    encryption.set_encryption_key("test-password", db)
+
+
+def _make_provider(*, base_url="https://openrouter.ai/api", auth_token=None):
+    db.create_model_provider(
+        provider_id=PROVIDER_ID,
+        name="OpenRouter",
+        provider_type="openrouter",
+        base_url=base_url,
+        auth_token=auth_token,
+        enabled=True,
+    )
+
+
+def _install_mock_transport(monkeypatch, handler):
+    """Point the route's shared HTTP client at a MockTransport running ``handler``.
+
+    Returns nothing; ``handler`` receives each ``httpx.Request`` and returns an
+    ``httpx.Response``. The route imports ``get_http_client`` from
+    ``app.core.http_client`` at call time, so patching that name suffices.
+    """
+    transport = httpx.MockTransport(handler)
+    mock_client = httpx.AsyncClient(transport=transport)
+
+    from app.core import http_client
+    monkeypatch.setattr(http_client, "get_http_client", lambda: mock_client)
+    return mock_client
+
+
+class TestUnauthenticated:
+    def test_requires_admin(self, client):
+        resp = client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models", json={})
+        assert resp.status_code in (401, 403), resp.status_code
+
+
+class TestPresetPath:
+    def test_chatgpt_provider_returns_preset(self, authenticated_client, mock_db):
+        _unlock(mock_db)
+        _make_provider()
+        # Flip the provider into ChatGPT/Codex mode (what enrollment does).
+        db.update_model_provider(PROVIDER_ID, auth_mode="chatgpt")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "preset"
+        assert body["models"] == model_catalog_presets.CODEX_PRESET_MODELS
+        # Every preset entry is a well-formed {id, label}.
+        for entry in body["models"]:
+            assert entry["id"] and entry["label"]
+
+    def test_preset_path_makes_no_network_call(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider()
+        db.update_model_provider(PROVIDER_ID, auth_mode="chatgpt")
+
+        def _boom(request):  # pragma: no cover — must never be reached
+            raise AssertionError("preset path must not hit the network")
+
+        _install_mock_transport(monkeypatch, _boom)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["source"] == "preset"
+
+
+class TestUpstreamPath:
+    def test_openai_shape(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "openai/gpt-5.6", "name": "GPT-5.6"},
+                {"id": "meta-llama/llama-3.1"},  # label falls back to id
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "upstream"
+        assert body["models"] == [
+            {"id": "openai/gpt-5.6", "label": "GPT-5.6"},
+            {"id": "meta-llama/llama-3.1", "label": "meta-llama/llama-3.1"},
+        ]
+
+    def test_bare_list_shape(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json=[
+                {"id": "a", "label": "Model A"},
+                "bare-string-id",
+            ])
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "upstream"
+        assert body["models"] == [
+            {"id": "a", "label": "Model A"},
+            {"id": "bare-string-id", "label": "bare-string-id"},
+        ]
+
+    def test_upstream_500_maps_to_502(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(500, text="upstream boom")
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 502, resp.text
+
+    def test_list_capped_at_2000(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": f"model-{i}"} for i in range(2500)
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["models"]) == 2000
+
+    def test_auth_header_carries_decrypted_token(self, authenticated_client, mock_db, monkeypatch):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        captured = {}
+
+        def _handler(request):
+            captured["auth"] = request.headers.get("authorization")
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"data": []})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        # The DECRYPTED plaintext token must ride the request, not the enc: blob.
+        assert captured["auth"] == f"Bearer {RAW_TOKEN}"
+        assert captured["url"] == "https://openrouter.ai/api/models"
+
+    def test_encryption_locked_returns_400(self, authenticated_client, mock_db, monkeypatch):
+        # Provider carries a token blob, but encryption is NOT unlocked → cannot
+        # decrypt → 400 (before any network call).
+        encryption.clear_encryption_key()
+        _make_provider(auth_token="enc:not-decryptable-while-locked")
+
+        def _boom(request):  # pragma: no cover
+            raise AssertionError("must 400 before any network call")
+
+        _install_mock_transport(monkeypatch, _boom)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 400, resp.text
+
+    def test_provider_not_found_404(self, authenticated_client, mock_db):
+        _unlock(mock_db)
+        resp = authenticated_client.post(f"{ROOT}/does-not-exist/fetch-models")
+        assert resp.status_code == 404, resp.text
+
+
+class TestHelperParsing:
+    """Direct unit coverage of the normalize helper (shape edge cases)."""
+
+    def test_parse_skips_entries_without_id(self):
+        out = mp_api._parse_models_response({"data": [
+            {"label": "no id"}, {"id": "keep", "label": "Keep"}, 42,
+        ]})
+        assert out == [{"id": "keep", "label": "Keep"}]
+
+    def test_parse_non_list_returns_empty(self):
+        assert mp_api._parse_models_response({"data": "nope"}) == []
+        assert mp_api._parse_models_response(123) == []
