@@ -19,7 +19,6 @@ class TestUnauthenticated:
         ("get", ROOT),
         ("post", f"{ROOT}/start"),
         ("post", f"{ROOT}/complete"),
-        ("put", f"{ROOT}/auto-switch"),
         ("post", f"{ROOT}/some-id/activate"),
         ("patch", f"{ROOT}/some-id"),
         ("delete", f"{ROOT}/some-id"),
@@ -39,24 +38,18 @@ class TestRegisteredAndAuthed:
         assert "active_account_id" in body
         assert "encryption_ready" in body
 
-    def test_list_includes_auto_switch_default_false(self, authenticated_client):
+    def test_list_omits_retired_auto_switch_field(self, authenticated_client):
+        # Native auto-switch was retired (OC-1); the flag no longer ships.
         resp = authenticated_client.get(ROOT)
         assert resp.status_code == 200
-        assert resp.json()["auto_switch_on_limit"] is False
+        assert "auto_switch_on_limit" not in resp.json()
 
-    def test_put_auto_switch_round_trips(self, authenticated_client, mock_db):
+    def test_put_auto_switch_route_removed(self, authenticated_client, mock_db):
+        # The PUT /auto-switch route was removed with native failover. The path
+        # still matches the /{account_id} template (PATCH/DELETE live there), so
+        # FastAPI answers 405 for the absent PUT method; 404 is also acceptable.
         resp = authenticated_client.put(f"{ROOT}/auto-switch", json={"enabled": True})
-        assert resp.status_code == 200, resp.text
-        assert resp.json() == {"success": True, "auto_switch_on_limit": True}
-        # GET reflects the new value.
-        assert authenticated_client.get(ROOT).json()["auto_switch_on_limit"] is True
-
-    def test_put_auto_switch_bad_body(self, authenticated_client, mock_db):
-        # Missing / non-bool 'enabled' → 400.
-        assert authenticated_client.put(f"{ROOT}/auto-switch", json={}).status_code == 400
-        assert authenticated_client.put(
-            f"{ROOT}/auto-switch", json={"enabled": "yes"}
-        ).status_code == 400
+        assert resp.status_code in (404, 405), resp.text
 
     def test_complete_409_when_encryption_locked(self, authenticated_client):
         encryption.clear_encryption_key()

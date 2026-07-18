@@ -44,10 +44,6 @@
 		onAddAccountNameChange: (value: string) => void;
 		addAccountMakeActive: boolean;
 		onAddAccountMakeActiveChange: (value: boolean) => void;
-		/** When on, a chat that hits a Claude usage limit auto-switches to another
-		 *  saved account and retries. Only meaningful with 2+ accounts. */
-		claudeAutoSwitchOnLimit: boolean;
-		onToggleClaudeAutoSwitch: () => void;
 		addAccountLoading: boolean;
 		addAccountCompleting: boolean;
 		/** Id of the row mid-switch (drives its inline spinner), else null. */
@@ -87,8 +83,6 @@
 		onAddAccountNameChange,
 		addAccountMakeActive,
 		onAddAccountMakeActiveChange,
-		claudeAutoSwitchOnLimit,
-		onToggleClaudeAutoSwitch,
 		addAccountLoading,
 		addAccountCompleting,
 		switchingAccountId,
@@ -730,26 +724,6 @@
 						</li>
 					{/each}
 				</ul>
-
-				<!-- Auto-switch on usage limits — only meaningful once there are at
-				     least two accounts to fail over between. -->
-				{#if claudeAccounts.length >= 2}
-					<div class="acct-autoswitch">
-						<div class="acct-autoswitch-lab">
-							<h5>Auto-switch on usage limits</h5>
-							<p>When a chat hits a Claude usage limit, automatically switch to another saved account and retry.</p>
-						</div>
-						<button
-							type="button"
-							class="switch"
-							class:on={claudeAutoSwitchOnLimit}
-							role="switch"
-							aria-checked={claudeAutoSwitchOnLimit}
-							aria-label="Auto-switch on usage limits"
-							onclick={onToggleClaudeAutoSwitch}
-						><i></i></button>
-					</div>
-				{/if}
 
 				<!-- Add-account panel: same code-paste UX as the primary connect flow. -->
 				{#if addPanelOpen}
@@ -1432,34 +1406,6 @@
 	.acct-addrow {
 		display: flex;
 		gap: 8px;
-	}
-	/* Auto-switch toggle row: label + hint on the left, .switch control on the
-	   right. Mirrors the .acct-row rhythm and reuses the shared .switch styling. */
-	.acct-autoswitch {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-		margin-top: 10px;
-		padding: 10px 12px;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: var(--muted);
-	}
-	.acct-autoswitch-lab {
-		min-width: 0;
-	}
-	.acct-autoswitch-lab h5 {
-		margin: 0;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-	.acct-autoswitch-lab p {
-		margin: 2px 0 0;
-		font-size: 11.5px;
-		line-height: 1.5;
-		color: var(--muted-foreground);
 	}
 	/* Switch-in-progress spinner (lucide Loader2). */
 	:global(.acct-sm .spin) {

@@ -15,7 +15,6 @@ import {
 	activateClaudeAccount,
 	renameClaudeAccount,
 	deleteClaudeAccount,
-	setClaudeAutoSwitchOnLimit,
 	type ClaudeAccount
 } from './auth';
 
@@ -57,8 +56,7 @@ describe('Claude accounts API', () => {
 			const payload = {
 				accounts: [mockAccount],
 				active_account_id: 'acc-1',
-				encryption_ready: true,
-				auto_switch_on_limit: false
+				encryption_ready: true
 			};
 			fetchMock.mockResolvedValueOnce(okJson(payload));
 
@@ -75,7 +73,6 @@ describe('Claude accounts API', () => {
 			expect(res.accounts).toHaveLength(1);
 			expect(res.active_account_id).toBe('acc-1');
 			expect(res.encryption_ready).toBe(true);
-			expect(res.auto_switch_on_limit).toBe(false);
 		});
 
 		it('surfaces encryption_ready:false from the server', async () => {
@@ -222,48 +219,6 @@ describe('Claude accounts API', () => {
 				status: 409,
 				detail: 'Switch to another account before deleting the active one.'
 			});
-		});
-	});
-
-	describe('setClaudeAutoSwitchOnLimit', () => {
-		it('PUTs the auto-switch endpoint with the enabled flag', async () => {
-			fetchMock.mockResolvedValueOnce(
-				okJson({ success: true, auto_switch_on_limit: true })
-			);
-
-			const res = await setClaudeAutoSwitchOnLimit(true);
-
-			expect(fetchMock).toHaveBeenCalledWith(
-				'/api/v1/auth/claude/accounts/auto-switch',
-				expect.objectContaining({
-					method: 'PUT',
-					body: JSON.stringify({ enabled: true })
-				})
-			);
-			expect(res.success).toBe(true);
-			expect(res.auto_switch_on_limit).toBe(true);
-		});
-
-		it('sends enabled:false to turn the setting off', async () => {
-			fetchMock.mockResolvedValueOnce(
-				okJson({ success: true, auto_switch_on_limit: false })
-			);
-
-			const res = await setClaudeAutoSwitchOnLimit(false);
-
-			expect(fetchMock).toHaveBeenCalledWith(
-				'/api/v1/auth/claude/accounts/auto-switch',
-				expect.objectContaining({
-					method: 'PUT',
-					body: JSON.stringify({ enabled: false })
-				})
-			);
-			expect(res.auto_switch_on_limit).toBe(false);
-		});
-
-		it('propagates a 403 when the caller is not admin', async () => {
-			fetchMock.mockResolvedValueOnce(errJson(403, { detail: 'Admin only' }));
-			await expect(setClaudeAutoSwitchOnLimit(true)).rejects.toMatchObject({ status: 403 });
 		});
 	});
 });
