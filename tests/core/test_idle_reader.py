@@ -481,3 +481,115 @@ async def test_non_owner_inner_activity_not_stamped(mock_db):
 
     assert task_registry.owner_activity_ts("s9", "tu-stranger") is None
     task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# CLI-owned wake forwarding (#691): the wake turn's render surface reaches the
+# session log AND is bracketed by a synthetic turn.started/turn.completed so an
+# already-open client renders it live (no user poke) and speculative subagent
+# cards settle.
+# ---------------------------------------------------------------------------
+
+class _WakeMsg:
+    """A plain top-level message of a CLI-driven wake turn (its events are
+    supplied by the mocked ``_cli_turn_events_from_message``)."""
+
+
+def _cli_side_effect(events_for_wake):
+    def _fn(session_id, message, tool_names):
+        return list(events_for_wake) if isinstance(message, _WakeMsg) else []
+    return _fn
+
+
+def _wake_events(session_id):
+    from app.db import session_events as se
+    return se.get_events(session_id)
+
+
+async def test_cli_wake_brackets_turn_and_records_render_surface(mock_db, caplog):
+    """The wake turn's chunk/tool_use render surface is recorded (NOT dropped),
+    wrapped in turn.started (before the first event) + turn.completed (on the
+    ResultMessage), all sharing one synthetic turn_id."""
+    import logging
+
+    wake = _make_message(_WakeMsg)
+    result_msg = _make_message(ResultMessage)
+    pool, _ = _make_pool([wake, result_msg])
+
+    cli = MagicMock(side_effect=_cli_side_effect([
+        {"type": "chunk", "content": "all agents done"},
+        {"type": "tool_use", "id": "tu-x", "name": "Bash", "input": {"command": "echo hi"}},
+    ]))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._cli_turn_events_from_message", new=cli))
+        stack.enter_context(patch("app.core.turn_finalize.persist_turn_end_state", new=AsyncMock()))
+        stack.enter_context(patch("app.core.query_persistence.schedule_context_usage_capture", new=MagicMock()))
+        with caplog.at_level(logging.INFO, logger="app.core.idle_reader"):
+            await idle_reader.run_idle_reader("cw1")
+
+    rows = _wake_events("cw1")
+    types = [r["event_type"] for r in rows]
+    assert types == [
+        "turn.started", "assistant.text_delta", "tool.use", "turn.completed",
+    ]
+    # One synthetic wake turn id ties the whole bracket together.
+    tid = rows[0]["turn_id"]
+    assert tid is not None and tid.startswith("cliwake-")
+    assert all(r["turn_id"] == tid for r in rows)
+    assert rows[1]["payload"]["text"] == "all agents done"
+
+    # Delivery-vs-drop proof line: nothing dropped.
+    proof = [r.message for r in caplog.records if "decision=cli-wake-record" in r.message]
+    assert proof, "expected the cli-wake-record INFO proof line"
+    assert "recorded=2" in proof[0]
+    assert "dropped={}" in proof[0]
+
+
+async def test_cli_wake_thinking_only_opens_no_turn(mock_db):
+    """A wake message that yields only thinking_block (never rendered live) must
+    NOT open a turn — so no unpaired turn.started/turn.completed lands."""
+    wake = _make_message(_WakeMsg)
+    result_msg = _make_message(ResultMessage)
+    pool, _ = _make_pool([wake, result_msg])
+
+    cli = MagicMock(side_effect=_cli_side_effect([
+        {"type": "thinking_block", "content": "hmm"},
+    ]))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._cli_turn_events_from_message", new=cli))
+        stack.enter_context(patch("app.core.turn_finalize.persist_turn_end_state", new=AsyncMock()))
+        stack.enter_context(patch("app.core.query_persistence.schedule_context_usage_capture", new=MagicMock()))
+        await idle_reader.run_idle_reader("cw2")
+
+    assert _wake_events("cw2") == []
+
+
+async def test_cli_wake_drain_mode_does_not_bracket(mock_db):
+    """In drain mode (aborting a wedged turn) the wide bracketing is OFF — the
+    forwarded events go through the narrow record_drained_event (which drops the
+    render surface), and NO turn.started is appended."""
+    turn = turns_db.enqueue_turn("cw3", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")  # live, drainable
+    session_runtime.register_scheduler(MagicMock())
+
+    wake = _make_message(_WakeMsg)
+    result_msg = _make_message(ResultMessage)
+    pool, _ = _make_pool([wake, result_msg])
+
+    cli = MagicMock(side_effect=_cli_side_effect([{"type": "chunk", "content": "x"}]))
+    drained = AsyncMock()
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._cli_turn_events_from_message", new=cli))
+        stack.enter_context(patch("app.core.turn_recorder.record_drained_event", new=drained))
+        await idle_reader.run_idle_reader("cw3", drain_turn_id=turn["id"])
+
+    # Drain mode routes through record_drained_event (chunk → dropped there) and
+    # never appends a synthetic turn.started.
+    drained.assert_awaited_once()
+    assert [r["event_type"] for r in _wake_events("cw3")] == []
