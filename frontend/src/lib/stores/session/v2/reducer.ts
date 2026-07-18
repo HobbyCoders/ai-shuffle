@@ -69,6 +69,12 @@ export interface V2SessionState {
 	 *  the same `model_info` note). Comparing actual-vs-requested per turn
 	 *  avoids flagging a mere selection change as a reroute. */
 	liveRequestedModel: string | null;
+	/** Resolved model provider for the turn `liveModel` reports on (from the
+	 *  same `model_info` note). null = native Anthropic; non-null = a gateway
+	 *  provider session (e.g. OpenRouter). A provider session can never be
+	 *  "rerouted" in the Anthropic-family sense, so the composer suppresses the
+	 *  reroute pill whenever this is non-null (R1). */
+	liveProvider: string | null;
 	/** `transcript.rewound` bookkeeping: message id → seq of the event that
 	 *  CREATED it. A message absent from this map is optimistic (seeded outside
 	 *  the reducer, not yet reconciled to an event) and is EXEMPT from rewind
@@ -101,6 +107,7 @@ export function initialState(): V2SessionState {
 		liveTurnId: null,
 		liveModel: null,
 		liveRequestedModel: null,
+		liveProvider: null,
 		messageOriginSeq: {},
 		taskOriginSeq: {},
 		speculativelySettledCardIds: [],
@@ -432,6 +439,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
 				liveModel: null,
 				liveRequestedModel: null,
+				liveProvider: null,
 			};
 
 		case 'turn.parked': {
@@ -1064,7 +1072,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (str(event.subtype) === 'model_info') {
 				const model = str(obj(event.data)?.model);
 				const requested = str(obj(event.data)?.requested_model);
-				return { ...state, liveModel: model || null, liveRequestedModel: requested || null };
+				const provider = str(obj(event.data)?.provider);
+				return {
+					...state,
+					liveModel: model || null,
+					liveRequestedModel: requested || null,
+					liveProvider: provider || null,
+				};
 			}
 			const data = obj(event.data);
 			const msg: ChatMessage = {

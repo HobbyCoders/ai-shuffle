@@ -104,6 +104,12 @@ export interface ActiveSessionState {
 	 *  the same `model_info` note). Transient — reset on every session switch /
 	 *  new chat and re-derived from the feed replay, same as `liveModel`. */
 	liveRequestedModel: string | null;
+	/** Resolved model provider for the turn `liveModel` reports on (from the same
+	 *  `model_info` note). null = native Anthropic; non-null = a gateway provider
+	 *  session, in which case the composer suppresses the reroute pill (a provider
+	 *  model never matches a Claude family). Transient — same lifecycle as
+	 *  `liveModel`. */
+	liveProvider: string | null;
 	wsConnected: boolean;
 	error: string | null;
 	profile: string;
@@ -223,6 +229,7 @@ function defaultState(): ActiveSessionState {
 		liveTurnId: null,
 		liveModel: null,
 		liveRequestedModel: null,
+		liveProvider: null,
 		wsConnected: false,
 		error: null,
 		profile: getPersistedProfile(),

@@ -1339,6 +1339,9 @@ async def stream_query(
                     old_model = getattr(old_opts, 'model', None)
                     if new_model and new_model != old_model:
                         try:
+                            # Live hot-swap stays within the session's current provider;
+                            # a provider change is caught by requires_reconnect() and
+                            # forces a respawn instead of reaching this set_model() call.
                             await state.client.set_model(new_model)
                             logger.debug(f"Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never
@@ -2000,6 +2003,9 @@ async def _stream_to_websocket_impl(
                     old_model = getattr(old_opts, 'model', None)
                     if new_model and new_model != old_model:
                         try:
+                            # Live hot-swap stays within the session's current provider;
+                            # a provider change is caught by requires_reconnect() and
+                            # forces a respawn instead of reaching this set_model() call.
                             await state.client.set_model(new_model)
                             logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never
@@ -2479,12 +2485,23 @@ async def _stream_to_websocket_impl(
         # (rerouting) re-emits. Main-lane only (subagent models are their own).
         last_model_info: Optional[str] = None
         requested_model = getattr(options, "model", None)
+        # Resolved provider for this session (None = native Anthropic). Mirrors the
+        # exact precedence used when building options (query_options.py): a
+        # query-level override wins, else the profile config. Carried in the
+        # model_info frame's `data` so the frontend can suppress the "rerouted"
+        # pill — a gateway model (e.g. openai/gpt-5.6) never matches a Claude
+        # family and would otherwise false-positive as rerouted (R1).
+        session_provider = (overrides.get("provider") if overrides else None) or config.get("provider")
 
         def _model_info_frame(model: str) -> dict:
             return {
                 "type": "system",
                 "subtype": "model_info",
-                "data": {"model": model, "requested_model": requested_model},
+                "data": {
+                    "model": model,
+                    "requested_model": requested_model,
+                    "provider": session_provider,
+                },
             }
 
         include_partial = options.include_partial_messages  # Track if streaming events are enabled

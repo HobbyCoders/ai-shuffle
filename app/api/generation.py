@@ -273,6 +273,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     """
     from app.core.profiles import get_default_ai_profile
     from app.core.generation_options import build_generation_options
+    from app.core.environment import ProviderConfigError
 
     profile = get_default_ai_profile()
     profile_config = (profile or {}).get("config") if profile else None
@@ -280,11 +281,17 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     # SDK subprocess path — full profile config applied.
     # Single-shot subprocess: max_turns=1 since we only send one prompt.
-    options = build_generation_options(
-        profile_config,
-        model_override=model,
-        max_turns=1,
-    )
+    try:
+        options = build_generation_options(
+            profile_config,
+            model_override=model,
+            max_turns=1,
+        )
+    except ProviderConfigError as e:
+        # Misconfigured/deleted/disabled model provider — a 400 carrying the
+        # provider message, not a generic "Internal server error:" 500 (this
+        # call is outside the api_error_handler block below).
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     t0 = time.perf_counter()
     response_text: list[str] = []

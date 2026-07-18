@@ -92,6 +92,11 @@ class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
     model: Optional[str] = DEFAULT_MODEL
+    # Model provider (multi-provider support). References ``model_providers.id``;
+    # None = native Anthropic. When set, the spawned session's env is overlaid
+    # with the gateway's ANTHROPIC_BASE_URL / auth token and mitigation flags
+    # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
+    provider: Optional[str] = None  # model_providers.id; None = native Anthropic
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets

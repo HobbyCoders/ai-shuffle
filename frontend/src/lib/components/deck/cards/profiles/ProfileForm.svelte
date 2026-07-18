@@ -12,6 +12,7 @@
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import {
 		getModels,
+		getProviders,
 		CUSTOM_VALUE,
 		getBaseModel,
 		has1MContext,
@@ -84,6 +85,8 @@
 		name: string;
 		description: string;
 		model: string;
+		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
+		provider: string | null;
 		permission_mode: string;
 		max_turns: number | null;
 		allowed_tools: string[];
@@ -305,9 +308,45 @@
 				<div class="lab"><h4>Model</h4><p>The Claude model this profile runs on.</p></div>
 				<div class="ctl ctl-col">
 					<div class="grp-row">
-						<select class="sel" value={customModelMode ? CUSTOM_VALUE : getBaseModel(profileForm.model)} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model))); } }}>
-							{#each getModels() as model (model.value)}
-								<option value={model.value}>{model.label}</option>
+						<select
+							class="sel"
+							value={customModelMode
+								? CUSTOM_VALUE
+								: profileForm.provider
+									? `prov:${profileForm.provider}:${profileForm.model}`
+									: getBaseModel(profileForm.model)}
+							onchange={(e) => {
+								const v = (e.target as HTMLSelectElement).value;
+								if (v === CUSTOM_VALUE) {
+									onCustomModelModeChange(true, '');
+									onFormChange('provider', null);
+								} else if (v.startsWith('prov:')) {
+									// Composite option value: `prov:<providerId>:<modelId>`. Split on the
+									// first colon only — provider model ids (e.g. OpenRouter's
+									// "meta-llama/llama-3.1:free") can contain colons themselves.
+									const rest = v.slice('prov:'.length);
+									const sep = rest.indexOf(':');
+									const providerId = rest.slice(0, sep);
+									const modelId = rest.slice(sep + 1);
+									onCustomModelModeChange(false, modelId);
+									onFormChange('provider', providerId);
+								} else {
+									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model)));
+									onFormChange('provider', null);
+								}
+							}}
+						>
+							<optgroup label="Claude">
+								{#each getModels() as model (model.value)}
+									<option value={model.value}>{model.label}</option>
+								{/each}
+							</optgroup>
+							{#each getProviders() as p (p.id)}
+								<optgroup label={p.name}>
+									{#each p.models as pm (pm.id)}
+										<option value={`prov:${p.id}:${pm.id}`}>{pm.label}</option>
+									{/each}
+								</optgroup>
 							{/each}
 							<option value={CUSTOM_VALUE}>Custom…</option>
 						</select>

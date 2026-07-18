@@ -76,6 +76,24 @@ export const INHERIT_VALUE = '';
 /** Sentinel value meaning "custom free-text entry" (used by the `Custom…` dropdown option). */
 export const CUSTOM_VALUE = '__custom__';
 
+/** A curated model offered by an admin-configured non-Anthropic gateway. */
+export interface ProviderModel {
+	id: string;
+	label: string;
+}
+
+/**
+ * An enabled `model_providers` row, as exposed by the registry (never
+ * carries the encrypted auth token — see `app/db/model_providers.py`).
+ */
+export interface ProviderEntry {
+	id: string;
+	name: string;
+	provider_type: string;
+	models: ProviderModel[];
+	default_model: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Reactive state — hydrated from `/api/v1/models` on boot.
 // ---------------------------------------------------------------------------
@@ -84,6 +102,7 @@ interface RegistryState {
 	models: ModelOption[];
 	default: string;
 	legacyMap: Record<string, string>;
+	providers: ProviderEntry[];
 	hydrated: boolean;
 }
 
@@ -91,6 +110,7 @@ const _registry = $state<RegistryState>({
 	models: [...STATIC_MODELS],
 	default: STATIC_DEFAULT,
 	legacyMap: { ...STATIC_LEGACY_MAP },
+	providers: [],
 	hydrated: false
 });
 
@@ -111,6 +131,15 @@ export function getDefaultModel(): string {
 /** True once the registry has been hydrated from the backend. */
 export function isRegistryHydrated(): boolean {
 	return _registry.hydrated;
+}
+
+/**
+ * Enabled non-Anthropic model gateways (admin-configured in "AI Providers").
+ * Empty until hydration completes — there is no static fallback, since
+ * providers are entirely db-sourced. Reactive in Svelte component contexts.
+ */
+export function getProviders(): readonly ProviderEntry[] {
+	return _registry.providers;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,11 +198,19 @@ export function isPresetModel(value: string | null | undefined): boolean {
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
  * 1M variants get a `" 1M"` suffix on the base label.
+ *
+ * Checks the Claude catalog first, then the hydrated provider registry (for
+ * non-Anthropic gateway model ids like `openai/gpt-5.6`), before falling
+ * back to the raw id.
  */
 export function getModelLabel(value: string | null | undefined): string {
 	const base = getBaseModel(value);
 	const match = _registry.models.find((m) => m.value === base);
 	if (match) return has1MContext(value) ? `${match.label} 1M` : match.label;
+	for (const provider of _registry.providers) {
+		const providerMatch = provider.models.find((m) => m.id === base);
+		if (providerMatch) return providerMatch.label;
+	}
 	return value && value.length > 0 ? value : 'Default';
 }
 
@@ -202,6 +239,40 @@ export function inferModelFamily(value: string | null | undefined): ModelFamily 
 }
 
 /**
+ * Curated models offered by a specific enabled gateway provider.
+ * Empty when the id is unknown or the registry hasn't hydrated. Used by the
+ * live model-switch UI to constrain a provider session's hot-swap to models
+ * of its OWN provider (cross-provider = profile edit + respawn — R7).
+ */
+export function getProviderModels(providerId: string | null | undefined): readonly ProviderModel[] {
+	if (!providerId) return [];
+	return _registry.providers.find((p) => p.id === providerId)?.models ?? [];
+}
+
+/**
+ * Live-reroute predicate for the composer's model pill.
+ *
+ * A "reroute" means the SDK's MAIN lane is running a DIFFERENT Claude family
+ * than was requested for that turn. It compares at FAMILY level (an exact-id
+ * check false-flags dated snapshot ids). When `providerId` is non-null the
+ * session targets a non-Anthropic gateway (e.g. `openai/gpt-5.6`), which never
+ * maps to a Claude family and would otherwise false-positive — so a provider
+ * session is NEVER considered rerouted (R1, deterministic guard).
+ */
+export function isReroute(
+	actualModel: string | null | undefined,
+	requestedModel: string | null | undefined,
+	providerId: string | null | undefined
+): boolean {
+	if (providerId) return false;
+	if (actualModel == null || requestedModel == null) return false;
+	const actualFamily = inferModelFamily(actualModel);
+	const requestedFamily = inferModelFamily(requestedModel);
+	if (actualFamily == null || requestedFamily == null) return false;
+	return actualFamily !== requestedFamily;
+}
+
+/**
  * CSS badge class for a stored model value. Pairs with the
  * `card-badge--{haiku,sonnet,opus,fable,inherit,muted}` classes in
  * `card-design-system.css`.
@@ -224,12 +295,21 @@ interface RegistryModelPayload {
 	supports_1m?: boolean;
 }
 
+interface RegistryProviderPayload {
+	id: string;
+	name: string;
+	provider_type: string;
+	models: ProviderModel[];
+	default_model: string | null;
+}
+
 interface RegistryPayload {
 	models: RegistryModelPayload[];
 	default: string;
 	inherit_value?: string;
 	context_1m_suffix?: string;
 	legacy_map: Record<string, string>;
+	providers?: RegistryProviderPayload[];
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
@@ -261,10 +341,13 @@ export async function hydrateModelRegistry(): Promise<void> {
 			return;
 		}
 		const models = payload.models.map(mapPayloadModel);
+		// Drift-checked against the static Claude bundle only — providers are
+		// entirely db-sourced (no static baseline to drift from).
 		warnOnDrift(models, STATIC_MODELS);
 		_registry.models = models;
 		_registry.default = payload.default || STATIC_DEFAULT;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
+		_registry.providers = Array.isArray(payload.providers) ? payload.providers : [];
 		_registry.hydrated = true;
 	} catch (e) {
 		console.error('[model-registry] hydrate failed, keeping static fallback', e);

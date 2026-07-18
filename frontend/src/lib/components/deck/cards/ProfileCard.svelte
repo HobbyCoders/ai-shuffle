@@ -164,6 +164,7 @@
 		name: '',
 		description: '',
 		model: getDefaultModel(),
+		provider: null as string | null,
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
@@ -315,6 +316,7 @@
 			name: '',
 			description: '',
 			model: getDefaultModel(),
+			provider: null,
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
@@ -387,13 +389,17 @@
 			toolSelectionMode = 'all';
 		}
 
-		customModelMode = !isPresetModel(config.model || getDefaultModel());
+		// A provider model (e.g. "openai/gpt-5.6") isn't a Claude preset, but it's
+		// also not free-text custom — it lives in its own optgroup. Only fall back
+		// to custom-model mode when no provider is set.
+		customModelMode = !config.provider && !isPresetModel(config.model || getDefaultModel());
 
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
 			model: normalizeModel(config.model) || getDefaultModel(),
+			provider: config.provider ?? null,
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
@@ -573,6 +579,9 @@
 	function handleCustomModelModeChange(custom: boolean, model: string) {
 		customModelMode = custom;
 		profileForm.model = model;
+		// Free-text custom models are always native Anthropic — a provider
+		// selection only comes from the dedicated provider optgroup.
+		if (custom) profileForm.provider = null;
 	}
 
 	// Save profile
@@ -582,6 +591,8 @@
 		const config: any = {
 			model: profileForm.model,
 			permission_mode: profileForm.permission_mode,
+			// model_providers.id, or omitted (→ native Anthropic) when unset.
+			...(profileForm.provider ? { provider: profileForm.provider } : {}),
 			include_partial_messages: profileForm.include_partial_messages,
 			enable_file_checkpointing: profileForm.enable_file_checkpointing,
 			app_config_tools: profileForm.app_config_tools,
@@ -782,6 +793,9 @@
 			name: agent.name,
 			description: agent.description || '',
 			model: normalizeModel(agent.model) || getDefaultModel(),
+			// AI-generated/imported profiles are always native Anthropic today —
+			// the export format doesn't carry a provider id.
+			provider: null,
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,

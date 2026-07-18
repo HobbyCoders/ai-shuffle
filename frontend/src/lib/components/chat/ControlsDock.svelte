@@ -12,9 +12,10 @@
 	import { Monitor } from 'lucide-svelte';
 	import {
 		getModels,
+		getProviderModels,
 		getModelLabel,
 		getDefaultModel,
-		inferModelFamily,
+		isReroute,
 		type ModelFamily
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
@@ -68,12 +69,28 @@
 		opus: 'Deep reasoning',
 		fable: 'Most capable'
 	};
+	// The session's resolved provider (null = native Anthropic). Prefer the
+	// running session's own `model_info` note; before its first note (fresh
+	// compose) fall back to the active profile's configured provider so the
+	// picker is scoped correctly on the very first turn too.
+	const sessionProviderId = $derived(
+		$activeSession.liveProvider ?? activeProfile?.config?.provider ?? null
+	);
+	// Live model-switch options. Native session → curated Claude models. Provider
+	// session → ONLY that provider's curated models: a hot-swap stays within the
+	// session's provider; cross-provider is a profile edit + respawn (R7).
 	const modelOptions = $derived(
-		getModels().map((m) => ({
-			value: m.value,
-			label: m.label,
-			description: MODEL_FAMILY_BLURB[m.family] ?? ''
-		}))
+		sessionProviderId
+			? getProviderModels(sessionProviderId).map((m) => ({
+					value: m.id,
+					label: m.label,
+					description: ''
+				}))
+			: getModels().map((m) => ({
+					value: m.value,
+					label: m.label,
+					description: MODEL_FAMILY_BLURB[m.family] ?? ''
+				}))
 	);
 	// Effective selection: the per-session override if set, else the profile's
 	// model, else the registry default. Selecting the profile's own model clears
@@ -92,15 +109,12 @@
 	const liveRequestedModel = $derived($activeSession.liveRequestedModel);
 	// Compare actual vs what was REQUESTED for that same turn (both from the
 	// model_info note) — never the live selection, which the user may have
-	// changed since.
-	const actualFamily = $derived(inferModelFamily(liveModel));
-	const requestedFamily = $derived(inferModelFamily(liveRequestedModel));
+	// changed since. A provider session (model_info carried a non-null
+	// `provider`) is NEVER rerouted: its gateway model can't map to a Claude
+	// family, so the family comparison is meaningless and would false-positive
+	// (R1). `isReroute` short-circuits to false on a non-null provider.
 	const rerouted = $derived(
-		liveModel != null &&
-			liveRequestedModel != null &&
-			actualFamily != null &&
-			requestedFamily != null &&
-			actualFamily !== requestedFamily
+		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider)
 	);
 	const selectedModelLabel = $derived(getModelLabel(modelValue));
 	const actualModelLabel = $derived(getModelLabel(liveModel));

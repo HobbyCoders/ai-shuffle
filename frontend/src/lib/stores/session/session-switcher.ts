@@ -384,6 +384,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// must not flag a phantom reroute on the target before its feed replays.
 			liveModel: null,
 			liveRequestedModel: null,
+			liveProvider: null,
 			pendingInterruptPrompt: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
@@ -576,6 +577,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// fresh compose screen (mirrors defaultState).
 			liveModel: null,
 			liveRequestedModel: null,
+			liveProvider: null,
 			pendingInterruptPrompt: null,
 			error: null,
 			title: 'New Chat',

@@ -175,7 +175,11 @@ def _resolve_thinking_display(profile_config: Optional[Dict[str, Any]]) -> Optio
     return None
 
 
-def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+def _resolve_env(
+    profile_config: Optional[Dict[str, Any]],
+    model: Optional[str] = None,
+    provider_id: Optional[str] = None,
+) -> Dict[str, str]:
     """
     Merge profile's env with the fixed generation overrides.
 
@@ -187,6 +191,13 @@ def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     stored anthropic_api_key is set, mirroring the main chat subprocess. AI
     generation authenticates exactly like every other Claude Code session: key
     set → API-key auth wins; key absent → connected OAuth account is used.
+
+    When ``provider_id`` is set the profile targets a non-Anthropic model
+    provider: the Anthropic key is NOT injected, and the gateway env is overlaid
+    via ``apply_provider_env`` (base URL, bearer token, mitigation flags,
+    small-fast/subagent model) — same as the chat path. A misconfigured provider
+    raises ``ProviderConfigError``; we never silently fall back to native
+    Anthropic.
     """
     env: Dict[str, str] = {}
     if profile_config:
@@ -196,13 +207,21 @@ def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     env["CLAUDECODE"] = ""
 
     # Inject the stored anthropic_api_key as the Claude Code auth credential
-    # (same precedence as chat sessions). Imported lazily to keep this module
-    # free of the heavier environment wiring at import time.
+    # (same precedence as chat sessions). For provider sessions this early-returns
+    # without injecting. Imported lazily to keep this module free of the heavier
+    # environment wiring at import time.
     try:
         from app.core.environment import inject_claude_code_auth
-        inject_claude_code_auth(env)
+        inject_claude_code_auth(env, provider_id)
     except Exception as e:  # noqa: BLE001 - auth injection is best-effort
         logger.debug(f"Could not inject Claude Code auth for generation: {e}")
+
+    # Overlay the model-provider gateway env when a provider is set. NOT wrapped
+    # in a best-effort try/except: a misconfigured provider must surface (R5),
+    # never silently route generation through native Anthropic.
+    if provider_id:
+        from app.core.environment import apply_provider_env
+        apply_provider_env(env, provider_id, model)
     return env
 
 
@@ -235,25 +254,31 @@ def build_generation_options(
     # Model: explicit override > profile > hard fallback
     model = model_override or config.get("model") or DEFAULT_MODEL
 
+    # Model provider (multi-provider). None = native Anthropic. When set, the env
+    # is overlaid with the gateway vars inside _resolve_env.
+    provider_id = config.get("provider")
+
     # Permission mode: profile value or bypassPermissions
     permission_mode = config.get("permission_mode") or "bypassPermissions"
 
     kwargs: Dict[str, Any] = {
         "model": model,
         "permission_mode": permission_mode,
-        "env": _resolve_env(config),
+        "env": _resolve_env(config, model, provider_id),
         "tools": [],  # Generation never uses tools.
         "include_partial_messages": False,
         "continue_conversation": False,
         "fork_session": False,
     }
 
-    # Force the standard 200k context window unless the model opted into 1M via
-    # the `[1m]` suffix (natively-1M models like `fable` otherwise default to 1M
-    # in the CLI). Lazy import mirrors _resolve_env — keep environment wiring off
-    # the import path.
-    from app.core.environment import apply_context_window_env
-    apply_context_window_env(kwargs["env"], model)
+    if not provider_id:
+        # Force the standard 200k context window unless the model opted into 1M
+        # via the `[1m]` suffix (natively-1M models like `fable` otherwise default
+        # to 1M in the CLI). The `[1m]`/1M logic is Claude-specific, so skip it for
+        # provider sessions — apply_provider_env owns the window vars there. Lazy
+        # import mirrors _resolve_env — keep environment wiring off the import path.
+        from app.core.environment import apply_context_window_env
+        apply_context_window_env(kwargs["env"], model)
 
     if max_turns is not None:
         kwargs["max_turns"] = max_turns

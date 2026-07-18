@@ -27,6 +27,79 @@ from app.core.provider.types import mcp_servers_equivalent
 
 logger = logging.getLogger(__name__)
 
+# Env keys that carry provider identity/config (base URL, auth, model overlays).
+# A change to any of these means the subprocess is talking to a different
+# provider/account and must be respawned — this is the CANONICAL definition
+# (mirrored, not imported, in app.core.provider.claude_adapter to avoid an
+# import cycle: session_pool already imports ClaudeAgentAdapter at module load).
+# Deliberately NOT full env-dict equality (benign env churn would force
+# respawns that kill background subagents) and NOT a narrower 3-key tuple
+# (would miss provider config edits) — see docs/MULTI_PROVIDER_PLAN.md R3.
+#
+# SPLIT into identity vs overlay keys (see provider_env_requires_reconnect):
+#   * IDENTITY keys select the provider/account and are ALWAYS compared.
+#   * OVERLAY keys (small/fast + subagent model, output/compaction tuning,
+#     upstream-mitigation flags) are only meaningful for a PROVIDER (gateway)
+#     session; comparing them on a NATIVE session wrongly forces a respawn.
+#     Concretely: a native [1m]-boundary model switch flips
+#     CLAUDE_CODE_AUTO_COMPACT_WINDOW between "200000" and absent, which must
+#     stay a hot-swap (respawning kills every background subagent). So overlay
+#     keys are compared ONLY when either side is a provider session.
+PROVIDER_IDENTITY_ENV_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+PROVIDER_OVERLAY_ENV_KEYS = (
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK",
+)
+# Kept as the union for existing importers/tests.
+PROVIDER_ENV_KEYS = PROVIDER_IDENTITY_ENV_KEYS + PROVIDER_OVERLAY_ENV_KEYS
+
+
+def provider_env_requires_reconnect(
+    old_env: Optional[Dict[str, str]], new_env: Optional[Dict[str, str]]
+) -> bool:
+    """True when a provider env change between queries requires a fresh subprocess.
+
+    Identity keys (base URL / auth) are always compared. Overlay keys are
+    compared ONLY when either side is a provider (gateway) session — detected by
+    KEY PRESENCE of ``ANTHROPIC_BASE_URL`` (presence, not truthiness), since a
+    provider overlay always sets it. This keeps native [1m]-boundary model
+    switches — which flip ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` between "200000"
+    and absent — as hot-swaps rather than subagent-killing respawns.
+
+    Logs the differing key NAME only, never its value (provider env carries the
+    decrypted auth token).
+    """
+    old_env = old_env or {}
+    new_env = new_env or {}
+
+    for key in PROVIDER_IDENTITY_ENV_KEYS:
+        if old_env.get(key) != new_env.get(key):
+            logger.debug(
+                f"[SessionPool] requires_reconnect: provider identity env key differs: {key}"
+            )
+            return True
+
+    # Overlay keys only matter for a provider session on either side.
+    is_provider = ("ANTHROPIC_BASE_URL" in old_env) or ("ANTHROPIC_BASE_URL" in new_env)
+    if is_provider:
+        for key in PROVIDER_OVERLAY_ENV_KEYS:
+            if old_env.get(key) != new_env.get(key):
+                logger.debug(
+                    f"[SessionPool] requires_reconnect: provider overlay env key differs: {key}"
+                )
+                return True
+
+    return False
+
 
 @dataclass
 class SessionState:
@@ -964,6 +1037,13 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if (old.tools or []) != (new_options.tools or []):
         return True
     if not _agents_equivalent(old.agents, new_options.agents):
+        return True
+
+    # Provider identity/config (base URL, auth, model overlays) — a change here
+    # means the subprocess would be talking to a different provider/account.
+    # Overlay-key comparison is scoped to provider sessions so native
+    # [1m]-boundary switches stay hot-swaps (see provider_env_requires_reconnect).
+    if provider_env_requires_reconnect(old.env, new_options.env):
         return True
 
     # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect

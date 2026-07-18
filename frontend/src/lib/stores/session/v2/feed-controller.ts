@@ -193,6 +193,7 @@ function fold(): void {
 					liveTurnId: reducerState.liveTurnId,
 					liveModel: reducerState.liveModel,
 					liveRequestedModel: reducerState.liveRequestedModel,
+					liveProvider: reducerState.liveProvider,
 					activeTasks,
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					...usagePatch,

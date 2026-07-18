@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 63
+SCHEMA_VERSION = 64
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1058,6 +1058,42 @@ def create_postgres_schema(cursor) -> None:
     """)
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_memory_key ON agent_memory_files(memory_key)"
+    )
+
+    # ------------------------------------------------------------------
+    # 48. Model providers (v64). Admin-configured non-Anthropic model
+    #     gateways (OpenRouter / custom Anthropic-compatible endpoints)
+    #     injected per spawned session as the officially supported Claude
+    #     Code LLM-gateway env vars. Self-contained block WITH its index
+    #     inline so it is immune to the schema-pass-before-column-migrations
+    #     ordering trap (see the idx_sessions_active note below and the
+    #     idx_agent_memory_key pattern above). ``auth_token`` holds an
+    #     ``enc:``-prefixed Fernet blob (never exposed on public reads);
+    #     ``models_json`` is a TEXT-encoded [{id,label}] curated list and
+    #     ``extra_env_json`` a TEXT-encoded extra-env map. ``small_fast_model``
+    #     is nullable (falls back to default_model / session model in the
+    #     env overlay).
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS model_providers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            provider_type TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            auth_token TEXT,
+            models_json TEXT DEFAULT '[]',
+            default_model TEXT,
+            small_fast_model TEXT,
+            extra_env_json TEXT DEFAULT '{}',
+            context_window INTEGER,
+            max_output_tokens INTEGER,
+            enabled BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_providers_enabled ON model_providers(enabled)"
     )
 
     # ==================================================================

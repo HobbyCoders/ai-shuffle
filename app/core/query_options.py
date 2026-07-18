@@ -45,6 +45,7 @@ from app.core.environment import (  # noqa: F401
     _build_extra_args,
     _build_env_with_ai_tools,
     apply_context_window_env,
+    apply_provider_env,
     generate_environment_details,
 )
 
@@ -549,6 +550,10 @@ def build_options_from_profile(
     # as-is too.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
+    # Model provider resolves EXACTLY like model: a query-level override wins,
+    # else the profile config. None = native Anthropic; when set, the env is
+    # overlaid with the gateway vars (apply_provider_env) instead of native auth.
+    provider_id = overrides.get("provider") or config.get("provider")
     betas_to_use = []
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
@@ -645,12 +650,24 @@ def build_options_from_profile(
     # Build AI tool environment (API keys + provider settings) ONCE, then pass to both:
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
-    full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
+    full_env = _build_env_with_ai_tools(
+        config.get("env"), ai_tools_config, api_user_id, provider_id
+    )
 
-    # Force the standard 200k context window unless the profile opted into 1M
-    # via the model's `[1m]` suffix (natively-1M models like `fable` otherwise
-    # default to 1M in the CLI). See apply_context_window_env.
-    apply_context_window_env(full_env, model_to_use)
+    if not provider_id:
+        # Force the standard 200k context window unless the profile opted into 1M
+        # via the model's `[1m]` suffix (natively-1M models like `fable` otherwise
+        # default to 1M in the CLI). See apply_context_window_env. The `[1m]`/1M
+        # logic is Claude-specific, so it is skipped for provider sessions —
+        # apply_provider_env owns the window vars there.
+        apply_context_window_env(full_env, model_to_use)
+    else:
+        # Overlay the model-provider gateway env (base URL, bearer token,
+        # mitigation flags, small-fast/subagent model, optional window/output
+        # caps). Raises ProviderConfigError (a ValueError) for a missing/disabled
+        # provider or an undecryptable token — the query engines convert it into
+        # a user-visible error rather than silently running native Anthropic.
+        apply_provider_env(full_env, provider_id, model_to_use)
 
     ai_tool_env = full_env if full_env else None
 

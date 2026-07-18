@@ -281,6 +281,7 @@ export interface AuthStatus {
 // Profile types
 export interface ProfileConfig {
 	model?: string;
+	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty

@@ -34,7 +34,18 @@ async def list_models(token: str = Depends(require_auth)) -> dict:
           ],
           "default": "sonnet",
           "inherit_value": "",
-          "legacy_map": {"claude-sonnet-4-6": "sonnet", ...}
+          "legacy_map": {"claude-sonnet-4-6": "sonnet", ...},
+          "providers": [
+            {"id": "prov-1",
+             "name": "OpenRouter",
+             "provider_type": "openrouter",
+             "models": [{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+             "default_model": "openai/gpt-5.6"},
+            ...
+          ]
         }
+
+    ``providers`` lists only enabled ``model_providers`` rows and never
+    includes the encrypted ``auth_token`` blob.
     """
     return registry_payload()

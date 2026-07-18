@@ -340,6 +340,37 @@ async def test_background_init_stamps_launched_model(mock_db):
     )
 
 
+# ─── build_session_options guard (FIX 5) ────────────────────────────────────
+
+
+async def test_background_provider_config_error_records_aborted_no_escape(mock_db):
+    """FIX 5: a misconfigured/deleted/disabled model provider raises
+    ProviderConfigError (a ValueError) from build_session_options. Unguarded, it
+    escapes the create_task'd coroutine → messageless turn.aborted + an
+    unretrieved-exception log. The guard must surface it as a turn error event
+    (turn.aborted reason=error carrying the message) and NOT let it escape."""
+    from app.core.environment import ProviderConfigError
+
+    sid = "bg-provider-config-err"
+    sessions_db.create_session(sid, "default")
+    pool = _StubPool(None)
+
+    with ExitStack() as stack:
+        _bg_patches(stack, pool)
+        stack.enter_context(patch(
+            "app.core.sdk_options.build_session_options",
+            side_effect=ProviderConfigError("provider 'op' is disabled"),
+        ))
+        # Must not raise.
+        await _run(sid)
+
+    types = _types(sid)
+    assert types == ["turn.started", "message.user", "turn.aborted"], types
+    aborted = se.get_events(sid)[-1]["payload"]
+    assert aborted["reason"] == "error"
+    assert "provider 'op' is disabled" in (aborted.get("message") or "")
+
+
 # ─── persist_turn_end_state (turn_finalize) ─────────────────────────────────
 
 

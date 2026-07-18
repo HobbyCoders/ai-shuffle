@@ -169,15 +169,27 @@ async def _run_background_query_impl(
     # through the shared sdk_options seam — previously only the WebSocket path
     # attached hooks here (issue #567).
     from app.core.sdk_options import build_session_options
-    options, agents_dict = build_session_options(
-        profile=profile,
-        project=project,
-        overrides=overrides,
-        resume_session_id=resume_id,
-        api_user_id=api_user_id,
-        session_id=session_id,
-        hook_project_id=project.get("id") if project else None,
-    )
+    from app.core.query_options import WorktreeUnavailableError
+    try:
+        options, agents_dict = build_session_options(
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_session_id=resume_id,
+            api_user_id=api_user_id,
+            session_id=session_id,
+            hook_project_id=project.get("id") if project else None,
+        )
+    except (WorktreeUnavailableError, ValueError) as e:
+        # A misconfigured/deleted/disabled model provider raises
+        # ProviderConfigError (a ValueError); a flagged worktree raises
+        # WorktreeUnavailableError. Either escaping this create_task'd coroutine
+        # produces a messageless turn.aborted plus an unretrieved-exception log.
+        # Surface it as a turn error and stop — mirror the connect-failure path.
+        logger.error(f"[Background] Cannot build session options for {session_id}: {e}")
+        if recorder:
+            await recorder.on_event({"type": "error", "message": str(e)})
+        return
 
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
@@ -228,6 +240,9 @@ async def _run_background_query_impl(
                     old_model = getattr(old_opts, 'model', None)
                     if new_model and new_model != old_model:
                         try:
+                            # Live hot-swap stays within the session's current provider;
+                            # a provider change is caught by requires_reconnect() and
+                            # forces a respawn instead of reaching this set_model() call.
                             await state.client.set_model(new_model)
                             logger.debug(f"[Background] Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never

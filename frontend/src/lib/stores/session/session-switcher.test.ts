@@ -55,6 +55,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		liveTurnId: null,
 		liveModel: null,
 		liveRequestedModel: null,
+		liveProvider: null,
 		wsConnected: true,
 		error: null,
 		profile: 'profile-global',

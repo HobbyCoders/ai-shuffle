@@ -13,8 +13,11 @@ commit.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 ModelFamily = Literal["haiku", "sonnet", "opus", "fable"]
 
@@ -186,6 +189,46 @@ def model_values() -> List[str]:
     return values
 
 
+def _providers_payload() -> List[Dict[str, object]]:
+    """Serialized ``model_providers`` rows for the registry payload.
+
+    Lazily imports the db layer (core must not import db at module load —
+    that would create a core→db import cycle). Never includes the encrypted
+    ``auth_token`` blob: it reads via ``get_enabled_model_providers()``, whose
+    default (``include_token=False``) omits that column entirely. Degrades to
+    an empty list if the db layer can't be imported or isn't initialized yet
+    (early boot) — an empty table is a normal, distinct case that still
+    returns ``[]`` from the query itself.
+    """
+    try:
+        from app.db import database
+    except ImportError:
+        return []
+    try:
+        rows = database.get_enabled_model_providers()
+    except Exception as e:
+        # Degrade gracefully rather than failing the whole registry payload
+        # (which would 500 GET /api/models app-wide). Covers DB pool not yet
+        # initialized (early boot RuntimeError), a rolling-deploy missing table
+        # (psycopg2 ProgrammingError), and pool exhaustion (PoolError). A normal
+        # empty table is not this branch: the query itself returns [].
+        logger.warning("Could not load model providers for registry payload: %s", e)
+        return []
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "provider_type": row["provider_type"],
+            "models": [
+                {"id": model.get("id"), "label": model.get("label")}
+                for model in (row.get("models_json") or [])
+            ],
+            "default_model": row.get("default_model"),
+        }
+        for row in rows
+    ]
+
+
 def registry_payload() -> Dict[str, object]:
     """Serialized registry for the ``GET /api/models`` endpoint."""
     return {
@@ -203,4 +246,5 @@ def registry_payload() -> Dict[str, object]:
         "inherit_value": INHERIT_VALUE,
         "context_1m_suffix": CONTEXT_1M_SUFFIX,
         "legacy_map": dict(LEGACY_MODEL_MAP),
+        "providers": _providers_payload(),
     }

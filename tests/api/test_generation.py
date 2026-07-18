@@ -237,6 +237,29 @@ class TestGenerateWithClaude:
         assert query_called["n"] == 1
 
     @pytest.mark.asyncio
+    async def test_generate_with_claude_provider_config_error_is_400(self):
+        """FIX 7: a ProviderConfigError from build_generation_options (deleted /
+        disabled / undecryptable provider) surfaces as HTTP 400 carrying the
+        provider message — NOT a generic 500 'Internal server error:' (the call
+        is outside the api_error_handler block)."""
+        from app.api.generation import generate_with_claude
+        from app.core.environment import ProviderConfigError
+        from fastapi import HTTPException
+
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch(
+                    "app.core.generation_options.build_generation_options",
+                    side_effect=ProviderConfigError(
+                        "Model provider 'op' is disabled."
+                    ),
+                ):
+            with pytest.raises(HTTPException) as exc_info:
+                await generate_with_claude("Test prompt")
+
+        assert exc_info.value.status_code == 400
+        assert "Model provider 'op' is disabled." in exc_info.value.detail
+
+    @pytest.mark.asyncio
     async def test_generate_with_claude_does_not_depend_on_stored_key(self):
         """Generation must succeed whether or not an Anthropic key is stored.
 

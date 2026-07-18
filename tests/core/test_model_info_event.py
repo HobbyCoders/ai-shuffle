@@ -74,14 +74,17 @@ class _StubPool:
         self.state = None
 
 
-def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str, model=None):
+def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str, model=None, provider=None):
     """Patch the subprocess/profile boundaries; stub turn-end persistence.
 
     Returns the options MagicMock so the test can set ``options.model`` (the
-    ``requested_model`` passthrough source).
+    ``requested_model`` passthrough source). ``provider`` seeds the profile
+    config's ``provider`` (the resolved-provider source for the model_info
+    frame; None = native Anthropic).
     """
+    profile_config = {} if provider is None else {"provider": provider}
     stack.enter_context(patch.object(
-        qe, "get_profile", return_value={"id": "default", "config": {}}
+        qe, "get_profile", return_value={"id": "default", "config": profile_config}
     ))
     oauth = MagicMock()
     oauth.ensure_fresh_credentials = AsyncMock()
@@ -129,14 +132,14 @@ def _new_session(profile_id="default"):
     return session_id
 
 
-async def _run(messages, model=None, tmp_path=None):
+async def _run(messages, model=None, tmp_path=None, provider=None):
     """Drive the streaming loop over ``messages`` and return model_info frames."""
     session_id = _new_session()
     state = _make_state()
     pool = _StubPool(state)
     state.adapter.sdk_client.receive_response = _stream_response(messages)
     with ExitStack() as stack:
-        _engine_patches(stack, pool, str(tmp_path), model=model)
+        _engine_patches(stack, pool, str(tmp_path), model=model, provider=provider)
         events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))
     return [
         e for e in events
@@ -175,7 +178,12 @@ async def test_assistant_message_emits_single_model_info(mock_db, tmp_path):
     assert frames[0] == {
         "type": "system",
         "subtype": "model_info",
-        "data": {"model": "claude-actual", "requested_model": "claude-requested"},
+        "data": {
+            "model": "claude-actual",
+            "requested_model": "claude-requested",
+            # Native session → provider is nested under data and is None (R1).
+            "provider": None,
+        },
     }
 
 
@@ -231,6 +239,34 @@ async def test_requested_model_null_when_options_model_unset(mock_db, tmp_path):
     )
     assert len(frames) == 1
     assert frames[0]["data"]["requested_model"] is None
+
+
+async def test_provider_none_for_native_session(mock_db, tmp_path):
+    # R1 contract: the frame's `data` always carries a `provider` key; for a
+    # native Anthropic session (no profile/override provider) it is None.
+    frames = await _run(
+        [_init("sdk-1"), _asst("claude-x")],
+        model="claude-req",
+        tmp_path=tmp_path,
+    )
+    assert len(frames) == 1
+    assert "provider" in frames[0]["data"]
+    assert frames[0]["data"]["provider"] is None
+
+
+async def test_provider_present_for_gateway_session(mock_db, tmp_path):
+    # R1 contract: a provider session (profile config carries `provider`) nests
+    # the resolved provider id under `data.provider` so the frontend can
+    # suppress the reroute pill (a gateway model never maps to a Claude family).
+    frames = await _run(
+        [_init("sdk-1"), _asst("openai/gpt-5.6")],
+        model="openai/gpt-5.6",
+        provider="prov-openrouter",
+        tmp_path=tmp_path,
+    )
+    assert len(frames) == 1
+    assert frames[0]["data"]["provider"] == "prov-openrouter"
+    assert frames[0]["data"]["model"] == "openai/gpt-5.6"
 
 
 async def test_subagent_lane_assistant_never_emits(mock_db, tmp_path):

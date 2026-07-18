@@ -1,8 +1,19 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { KeyRound, Plug, Info, Image, AlertTriangle, RefreshCw, UserPlus, Check, X, Lock, Pencil, Trash2, Loader2, CircleAlert } from 'lucide-svelte';
+	import { KeyRound, Plug, Info, Image, AlertTriangle, RefreshCw, UserPlus, Check, X, Lock, Pencil, Trash2, Loader2, CircleAlert, Server, Plus } from 'lucide-svelte';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
 	import type { ClaudeAccount } from '$lib/api/auth';
+	import { getErrorMessage } from '$lib/api/client';
+	import {
+		listModelProviders,
+		createModelProvider,
+		updateModelProvider,
+		deleteModelProvider,
+		toggleModelProvider,
+		type ModelProvider,
+		type ProviderModelEntry,
+	} from '$lib/api/model-providers';
+	import { hydrateModelRegistry } from '$lib/constants/models.svelte';
 
 	interface Props {
 		claudeLoginLoading: boolean;
@@ -332,10 +343,205 @@
 		}
 	}
 
+	// ----- AI Providers (non-Anthropic model gateways, self-contained) -----
+	// Admin-configured OpenRouter / custom Anthropic-compatible gateways. The
+	// auth token is write-only (masked in responses); after any save/toggle/delete
+	// we re-hydrate the model registry so the profile editor picks up the change.
+	type ProviderPreset = 'openrouter' | 'custom';
+	const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
+
+	let providers: ModelProvider[] = $state([]);
+	let providersLoading = $state(false);
+	let providersError = $state('');
+	// Id mid-toggle (drives its inline spinner), or null.
+	let togglingProviderId: string | null = $state(null);
+	// Id armed for delete (inline confirm), or null.
+	let confirmDeleteProviderId: string | null = $state(null);
+
+	// Add/edit form — open when showProviderForm; editingProviderId null = adding.
+	let showProviderForm = $state(false);
+	let editingProviderId: string | null = $state(null);
+	let formPreset: ProviderPreset = $state('openrouter');
+	let formName = $state('');
+	let formBaseUrl = $state('');
+	let formToken = $state('');
+	// On edit, the masked existing token shown as the placeholder (blank = keep it).
+	let formTokenPlaceholder = $state('');
+	let formModels: ProviderModelEntry[] = $state([]);
+	let formDefaultModel = $state('');
+	let formSmallFastModel = $state('');
+	let formContextWindow = $state('');
+	let formMaxOutputTokens = $state('');
+	let formSaving = $state(false);
+	let formError = $state('');
+
+	// Curated ids offered to the default / small-fast selects (blanks excluded).
+	let selectableModelIds = $derived(
+		formModels.map((m) => m.id.trim()).filter((id) => id.length > 0)
+	);
+
+	function providerTypeLabel(t: string): string {
+		return t === 'openrouter' ? 'OpenRouter' : 'Custom';
+	}
+
+	async function loadProviders() {
+		providersLoading = true;
+		providersError = '';
+		try {
+			const res = await listModelProviders();
+			providers = res.providers ?? [];
+		} catch (e) {
+			providersError = getErrorMessage(e, 'Failed to load providers');
+		} finally {
+			providersLoading = false;
+		}
+	}
+
+	// Preset choice drives the base_url prefill: OpenRouter fills the canonical
+	// gateway URL, Custom clears it for a hand-entered endpoint.
+	function selectPreset(preset: ProviderPreset) {
+		formPreset = preset;
+		formBaseUrl = preset === 'openrouter' ? OPENROUTER_BASE_URL : '';
+	}
+
+	function resetForm() {
+		editingProviderId = null;
+		formPreset = 'openrouter';
+		formName = '';
+		formBaseUrl = OPENROUTER_BASE_URL;
+		formToken = '';
+		formTokenPlaceholder = '';
+		formModels = [];
+		formDefaultModel = '';
+		formSmallFastModel = '';
+		formContextWindow = '';
+		formMaxOutputTokens = '';
+		formError = '';
+	}
+
+	function openAddProvider() {
+		resetForm();
+		confirmDeleteProviderId = null;
+		showProviderForm = true;
+	}
+
+	function openEditProvider(p: ModelProvider) {
+		editingProviderId = p.id;
+		formPreset = p.provider_type === 'openrouter' ? 'openrouter' : 'custom';
+		formName = p.name;
+		formBaseUrl = p.base_url;
+		formToken = '';
+		// Write-only token: show the masked existing value as the placeholder so a
+		// blank submit means "keep it".
+		formTokenPlaceholder = p.auth_token_set ? p.auth_token_masked || '••••••••' : '';
+		formModels = p.models.map((m) => ({ id: m.id, label: m.label }));
+		formDefaultModel = p.default_model ?? '';
+		formSmallFastModel = p.small_fast_model ?? '';
+		formContextWindow = p.context_window != null ? String(p.context_window) : '';
+		formMaxOutputTokens = p.max_output_tokens != null ? String(p.max_output_tokens) : '';
+		formError = '';
+		confirmDeleteProviderId = null;
+		showProviderForm = true;
+	}
+
+	function cancelProviderForm() {
+		showProviderForm = false;
+		resetForm();
+	}
+
+	function addModelRow() {
+		formModels = [...formModels, { id: '', label: '' }];
+	}
+	function removeModelRow(index: number) {
+		formModels = formModels.filter((_, i) => i !== index);
+	}
+
+	// Parse an optional positive integer field; '' or non-finite → null (omit).
+	function parseOptionalInt(value: string): number | null {
+		const trimmed = value.trim();
+		if (!trimmed) return null;
+		const n = Number(trimmed);
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+	}
+
+	// Refresh both the provider list and the hydrated model registry together
+	// (they're independent reads — no need to sequence them).
+	async function refreshProviders() {
+		await Promise.all([loadProviders(), hydrateModelRegistry()]);
+	}
+
+	async function saveProvider() {
+		const name = formName.trim();
+		const baseUrl = formBaseUrl.trim();
+		if (!name || !baseUrl) return;
+		// Keep only fully-specified model rows so the backend never rejects a
+		// half-typed entry (both id and label are required).
+		const models = formModels
+			.map((m) => ({ id: m.id.trim(), label: m.label.trim() }))
+			.filter((m) => m.id && m.label);
+		const token = formToken.trim();
+
+		formSaving = true;
+		formError = '';
+		try {
+			const body = {
+				name,
+				provider_type: formPreset,
+				base_url: baseUrl,
+				models,
+				default_model: formDefaultModel || null,
+				small_fast_model: formSmallFastModel || null,
+				context_window: parseOptionalInt(formContextWindow),
+				max_output_tokens: parseOptionalInt(formMaxOutputTokens),
+				// Write-only: only send a non-blank token (blank = leave stored value).
+				...(token ? { auth_token: token } : {}),
+			};
+			if (editingProviderId) {
+				await updateModelProvider(editingProviderId, body);
+			} else {
+				await createModelProvider(body);
+			}
+			showProviderForm = false;
+			resetForm();
+			await refreshProviders();
+		} catch (e) {
+			formError = getErrorMessage(e, 'Save failed');
+		} finally {
+			formSaving = false;
+		}
+	}
+
+	async function toggleProvider(p: ModelProvider) {
+		togglingProviderId = p.id;
+		providersError = '';
+		try {
+			await toggleModelProvider(p.id);
+			await refreshProviders();
+		} catch (e) {
+			providersError = getErrorMessage(e, 'Could not update provider');
+		} finally {
+			togglingProviderId = null;
+		}
+	}
+
+	async function confirmDeleteProvider(id: string) {
+		confirmDeleteProviderId = null;
+		providersError = '';
+		try {
+			await deleteModelProvider(id);
+			// If the form was editing the row we just deleted, close it.
+			if (editingProviderId === id) cancelProviderForm();
+			await refreshProviders();
+		} catch (e) {
+			providersError = getErrorMessage(e, 'Could not delete provider');
+		}
+	}
+
 	// Fetch on mount. No reactivity needed — key status only changes via this
 	// component's own save/remove actions.
 	onMount(() => {
 		loadKeyStatus();
+		loadProviders();
 	});
 </script>
 
@@ -634,6 +840,173 @@
 
 	{#if anthropicError}<div class="kc-foot err" role="alert">{anthropicError}</div>{/if}
 	{#if anthropicSuccess}<div class="kc-foot ok">{anthropicSuccess}</div>{/if}
+</div>
+
+<!-- AI Providers (non-Anthropic model gateways) -->
+<div class="set-group">
+	<div class="set-grouphead">
+		<h3><Server />AI Providers</h3>
+		<p>Route models through OpenRouter or a custom Anthropic-compatible gateway. Enabled providers and their curated models appear in the profile editor.</p>
+	</div>
+
+	<div class="acct-block mp-block">
+		<div class="acct-head">
+			<h4>Configured providers</h4>
+			{#if !showProviderForm}
+				<button type="button" class="ed-btn acct-add-btn" onclick={openAddProvider} disabled={providersLoading}>
+					<Plus />Add provider
+				</button>
+			{/if}
+		</div>
+
+		{#if providersError}
+			<div class="kc-foot err" role="alert">{providersError}</div>
+		{/if}
+
+		{#if providersLoading && providers.length === 0}
+			<div class="acct-empty">Loading providers…</div>
+		{:else if providers.length === 0 && !showProviderForm}
+			<div class="acct-empty">No providers yet. Add OpenRouter or a custom gateway to run non-Anthropic models.</div>
+		{/if}
+
+		<ul class="acct-list">
+			{#each providers as p (p.id)}
+				<li class="acct-row" class:active={p.enabled}>
+					<div class="acct-ic" aria-hidden="true"><Server /></div>
+					<div class="acct-body">
+						<div class="acct-name">
+							<span class="acct-title">{p.name}</span>
+							<span class="sb off">{providerTypeLabel(p.provider_type)}</span>
+							{#if p.enabled}<span class="sb ok">Enabled</span>{:else}<span class="sb off">Disabled</span>{/if}
+						</div>
+						<p class="acct-meta">
+							<span class="mp-url">{p.base_url}</span>
+							<span class="acct-dot">·</span>
+							<span>{p.models.length} {p.models.length === 1 ? 'model' : 'models'}</span>
+							{#if !p.auth_token_set}<span class="acct-dot">·</span><span>no token</span>{/if}
+						</p>
+					</div>
+
+					<div class="acct-acts">
+						{#if confirmDeleteProviderId === p.id}
+							<span class="acct-confirm">Delete?</span>
+							<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDeleteProvider(p.id)}>Delete</button>
+							<button type="button" class="ed-btn acct-sm" onclick={() => (confirmDeleteProviderId = null)}>Cancel</button>
+						{:else}
+							{#if togglingProviderId === p.id}
+								<Loader2 class="spin mp-toggle-spin" />
+							{:else}
+								<button
+									type="button"
+									class="switch"
+									class:on={p.enabled}
+									role="switch"
+									aria-checked={p.enabled}
+									aria-label={p.enabled ? `Disable ${p.name}` : `Enable ${p.name}`}
+									onclick={() => toggleProvider(p)}
+								><i></i></button>
+							{/if}
+							<button type="button" class="acct-iconbtn" title="Edit" aria-label="Edit provider" onclick={() => openEditProvider(p)}><Pencil /></button>
+							<button type="button" class="acct-iconbtn danger" title="Delete" aria-label="Delete provider" onclick={() => (confirmDeleteProviderId = p.id)}><Trash2 /></button>
+						{/if}
+					</div>
+				</li>
+			{/each}
+		</ul>
+
+		{#if showProviderForm}
+			<div class="acct-addpanel mp-form">
+				<!-- Preset selector: OpenRouter prefills the gateway URL; Custom is blank. -->
+				<div class="mp-field">
+					<span class="mp-label">Preset</span>
+					<div class="mp-presets">
+						<button type="button" class="ed-btn mp-preset" class:primary={formPreset === 'openrouter'} onclick={() => selectPreset('openrouter')}>OpenRouter</button>
+						<button type="button" class="ed-btn mp-preset" class:primary={formPreset === 'custom'} onclick={() => selectPreset('custom')}>Custom</button>
+					</div>
+				</div>
+
+				<div class="mp-field">
+					<label class="mp-label" for="mp-name">Name</label>
+					<input id="mp-name" type="text" class="inp" bind:value={formName} placeholder="e.g. OpenRouter" />
+				</div>
+
+				<div class="mp-field">
+					<label class="mp-label" for="mp-baseurl">Base URL</label>
+					<input id="mp-baseurl" type="text" class="inp" bind:value={formBaseUrl} placeholder="https://openrouter.ai/api" spellcheck="false" autocapitalize="off" autocomplete="off" />
+				</div>
+
+				<div class="mp-field">
+					<label class="mp-label" for="mp-token">Auth token</label>
+					<input
+						id="mp-token"
+						type="password"
+						class="inp"
+						autocomplete="off"
+						bind:value={formToken}
+						placeholder={editingProviderId && formTokenPlaceholder ? `${formTokenPlaceholder} — leave blank to keep` : 'Provider API key'}
+					/>
+				</div>
+
+				<div class="mp-field">
+					<span class="mp-label">Models</span>
+					<div class="mp-models">
+						{#if formModels.length === 0}
+							<p class="mp-hint">No models yet. Add the gateway model ids you want to offer (e.g. <code>openai/gpt-5.6</code>).</p>
+						{/if}
+						{#each formModels as model, i (i)}
+							<div class="mp-modelrow">
+								<input type="text" class="inp mp-modelid" bind:value={model.id} placeholder="openai/gpt-5.6" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Model id" />
+								<input type="text" class="inp mp-modellabel" bind:value={model.label} placeholder="GPT-5.6" aria-label="Model label" />
+								<button type="button" class="acct-iconbtn danger" title="Remove model" aria-label="Remove model" onclick={() => removeModelRow(i)}><X /></button>
+							</div>
+						{/each}
+						<button type="button" class="ed-btn mp-addmodel" onclick={addModelRow}><Plus />Add model</button>
+					</div>
+				</div>
+
+				<div class="mp-field-row">
+					<div class="mp-field">
+						<label class="mp-label" for="mp-default">Default model</label>
+						<select id="mp-default" class="inp" bind:value={formDefaultModel}>
+							<option value="">— none —</option>
+							{#each selectableModelIds as id}
+								<option value={id}>{id}</option>
+							{/each}
+						</select>
+					</div>
+					<div class="mp-field">
+						<label class="mp-label" for="mp-smallfast">Small / fast model</label>
+						<select id="mp-smallfast" class="inp" bind:value={formSmallFastModel}>
+							<option value="">— none —</option>
+							{#each selectableModelIds as id}
+								<option value={id}>{id}</option>
+							{/each}
+						</select>
+					</div>
+				</div>
+
+				<div class="mp-field-row">
+					<div class="mp-field">
+						<label class="mp-label" for="mp-ctx">Context window <span class="mp-optional">(optional)</span></label>
+						<input id="mp-ctx" type="number" min="1" class="inp" bind:value={formContextWindow} placeholder="e.g. 200000" />
+					</div>
+					<div class="mp-field">
+						<label class="mp-label" for="mp-maxout">Max output tokens <span class="mp-optional">(optional)</span></label>
+						<input id="mp-maxout" type="number" min="1" class="inp" bind:value={formMaxOutputTokens} placeholder="e.g. 8192" />
+					</div>
+				</div>
+
+				{#if formError}<div class="kc-foot err mp-formerr" role="alert">{formError}</div>{/if}
+
+				<div class="acct-addrow">
+					<button type="button" class="ed-btn primary" onclick={saveProvider} disabled={formSaving || !formName.trim() || !formBaseUrl.trim()}>
+						{#if formSaving}<Loader2 class="spin" />Saving…{:else}{editingProviderId ? 'Save changes' : 'Add provider'}{/if}
+					</button>
+					<button type="button" class="ed-btn" onclick={cancelProviderForm} disabled={formSaving}>Cancel</button>
+				</div>
+			</div>
+		{/if}
+	</div>
 </div>
 
 <!-- Media & tools -->
@@ -1101,7 +1474,136 @@
 		}
 	}
 
+	/* ===== AI Providers ===== */
+	/* Reuses the .acct-* row/list/panel system. Only provider-specific bits live
+	   here: the row icon renders an svg (not an initial), and the add/edit form
+	   needs a labelled field stack. */
+	.mp-block .acct-ic :global(svg) {
+		width: 17px;
+		height: 17px;
+	}
+	.mp-url {
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 100%;
+	}
+	/* Toggle-in-progress spinner sits where the .switch would be. */
+	:global(.mp-toggle-spin) {
+		width: 18px;
+		height: 18px;
+		color: var(--muted-foreground);
+		animation: acct-spin 0.8s linear infinite;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		:global(.mp-toggle-spin) {
+			animation: none;
+		}
+	}
+
+	.mp-form {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	.mp-field {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 0;
+		flex: 1;
+	}
+	.mp-field-row {
+		display: flex;
+		gap: 12px;
+	}
+	.mp-label {
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.mp-optional {
+		font-weight: 500;
+		text-transform: none;
+		letter-spacing: 0;
+		opacity: 0.75;
+	}
+	.mp-field .inp {
+		width: 100%;
+	}
+	.mp-presets {
+		display: flex;
+		gap: 8px;
+	}
+	.mp-preset {
+		flex: 1;
+	}
+	.mp-models {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.mp-hint {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+	}
+	.mp-hint code {
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+	}
+	.mp-modelrow {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+	.mp-modelid {
+		flex: 2;
+		min-width: 0;
+		font-family: var(--font-mono, monospace);
+		font-size: 12px;
+	}
+	.mp-modellabel {
+		flex: 1;
+		min-width: 0;
+	}
+	.mp-addmodel {
+		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.mp-addmodel :global(svg),
+	.acct-add-btn :global(svg) {
+		width: 14px;
+		height: 14px;
+	}
+	.mp-formerr {
+		padding: 0;
+	}
+	/* Saving spinner inside the primary button. */
+	:global(.mp-form .ed-btn .spin) {
+		width: 14px;
+		height: 14px;
+		animation: acct-spin 0.8s linear infinite;
+	}
+
 	@media (max-width: 560px) {
+		.mp-field-row {
+			flex-direction: column;
+		}
+		.mp-modelrow {
+			flex-wrap: wrap;
+		}
+		.mp-modelid,
+		.mp-modellabel {
+			flex: 1 1 100%;
+		}
 		.acct-row {
 			flex-wrap: wrap;
 		}

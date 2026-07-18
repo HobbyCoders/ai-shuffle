@@ -7,7 +7,10 @@ the flipped legacy map (older full model IDs → shorthand), and the helpers tha
 round-trip the suffix.
 """
 
+import json
+
 from app.core import model_registry as m
+from app.db import database as db
 
 
 def test_registry_contents_and_default():
@@ -120,3 +123,86 @@ def test_registry_payload_shape():
     assert "supports_1m" in models[0]
     # Flipped legacy map is serialized for the frontend.
     assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
+
+
+class TestRegistryPayloadProviders:
+    """``providers`` is a lazily-sourced projection of enabled
+    ``model_providers`` rows — never carries the encrypted auth token, and
+    degrades to an empty list rather than exploding the whole registry
+    payload when the db isn't ready."""
+
+    def test_empty_table_returns_empty_list(self, mock_db):
+        payload = m.registry_payload()
+        assert payload["providers"] == []
+
+    def test_providers_sourced_from_enabled_rows_only(self, mock_db):
+        db.create_model_provider(
+            provider_id="prov-1",
+            name="OpenRouter",
+            provider_type="openrouter",
+            base_url="https://openrouter.ai/api",
+            auth_token="enc:tok-blob",
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+            default_model="openai/gpt-5.6",
+            enabled=True,
+        )
+        db.create_model_provider(
+            provider_id="prov-2",
+            name="Disabled Gateway",
+            provider_type="custom",
+            base_url="https://gw.example/api",
+            auth_token="enc:other-blob",
+            enabled=False,
+        )
+        payload = m.registry_payload()
+        providers = payload["providers"]
+        assert len(providers) == 1
+        entry = providers[0]
+        assert entry == {
+            "id": "prov-1",
+            "name": "OpenRouter",
+            "provider_type": "openrouter",
+            "models": [{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+            "default_model": "openai/gpt-5.6",
+        }
+
+    def test_no_auth_token_anywhere_in_payload(self, mock_db):
+        db.create_model_provider(
+            provider_id="prov-1",
+            name="OpenRouter",
+            provider_type="openrouter",
+            base_url="https://openrouter.ai/api",
+            auth_token="enc:super-secret-blob",
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+            enabled=True,
+        )
+        payload = m.registry_payload()
+        serialized = json.dumps(payload)
+        assert "auth_token" not in serialized
+        assert "enc:super-secret-blob" not in serialized
+
+    def test_db_not_initialized_degrades_to_empty_list(self, monkeypatch):
+        """Early-boot: the pg pool isn't initialized yet. ``get_db()`` raises
+        ``RuntimeError`` in that state — the payload must still build."""
+
+        def _raise_not_initialized(*_args, **_kwargs):
+            raise RuntimeError("PostgreSQL connection pool not initialized. Call init_pool() first.")
+
+        monkeypatch.setattr(db, "get_enabled_model_providers", _raise_not_initialized)
+        payload = m.registry_payload()
+        assert payload["providers"] == []
+
+    def test_db_generic_exception_degrades_to_empty_list(self, monkeypatch):
+        """FIX 6: a rolling-deploy missing table (psycopg2 ProgrammingError) or
+        pool exhaustion (PoolError) is a plain Exception, not RuntimeError. The
+        registry payload must still build (never 500 GET /api/models app-wide)."""
+
+        def _raise_generic(*_args, **_kwargs):
+            raise Exception('relation "model_providers" does not exist')
+
+        monkeypatch.setattr(db, "get_enabled_model_providers", _raise_generic)
+        payload = m.registry_payload()
+        assert payload["providers"] == []
+        # And the rest of the payload is intact.
+        assert payload["default"] == "sonnet"
+        assert isinstance(payload["models"], list)

@@ -104,6 +104,51 @@ def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
 # Eligibility
 # ---------------------------------------------------------------------------
 
+def _session_uses_provider(session_id: Optional[str]) -> bool:
+    """True when the session's profile is bound to a non-Anthropic model provider
+    (``config.provider`` is set).
+
+    R6 (binding): account failover rotates Claude *accounts* on an Anthropic 429.
+    A provider session's 429 comes from the gateway, not from an Anthropic-account
+    limit — switching accounts + evicting the session would be pure damage (and
+    the switched account's credentials are irrelevant to the gateway). This gate
+    lets ``attempt_failover`` no-op for provider sessions. Never raises; on any
+    lookup failure it treats the session as native (fail toward existing
+    behavior).
+    """
+    if not session_id:
+        return False
+    try:
+        # Prefer the LIVE pooled subprocess's env over the profile config: a
+        # mid-session profile edit (add/remove provider) would otherwise invert
+        # the decision — removing a provider mid-session lets a gateway 429
+        # rotate Claude accounts + evict the pooled client, and adding one
+        # suppresses legitimate native failover. peek() = no LRU promotion.
+        from app.core.session_pool import get_session_pool
+        state = get_session_pool().peek(session_id)
+        if state and state.connect_options:
+            env = state.connect_options.env or {}
+            return "ANTHROPIC_BASE_URL" in env  # KEY PRESENCE (provider overlay always sets it)
+
+        # Not pooled — fall back to the profile config.
+        from app.db import database
+        session = database.get_session(session_id)
+        if not session:
+            return False
+        profile_id = session.get("profile_id")
+        if not profile_id:
+            return False
+        profile = database.get_profile(profile_id)
+        config = (profile or {}).get("config") or {}
+        return bool(config.get("provider"))
+    except Exception as e:  # noqa: BLE001 — provider check must never break failover
+        logger.debug(
+            "provider-session check failed for %s (treating as native): %s",
+            session_id, e,
+        )
+        return False
+
+
 def failover_eligible() -> bool:
     """Whether a failover could run right now (cheap pre-check).
 
@@ -308,6 +353,19 @@ async def attempt_failover(
     Returns a :class:`FailoverDecision`. ``retry=True`` tells the caller to
     re-run the turn on the (now credential-switched or piggybacked) session.
     """
+    # R6: never rotate Claude accounts for a non-Anthropic provider session. A
+    # gateway 429 is not an Anthropic-account limit — switching accounts and
+    # evicting the pooled client would strand the user for no benefit. Runs the
+    # sync DB reads off the event loop.
+    if await run_sync(_session_uses_provider, session_id):
+        logger.info(
+            "Failover skipped for session %s: bound to a non-Anthropic model "
+            "provider — a gateway 429 is not an Anthropic-account limit, so not "
+            "switching accounts.",
+            session_id,
+        )
+        return FailoverDecision(retry=False)
+
     # Unified eligibility gate (enabled + encryption ready + >=2 accounts),
     # matching query_engine's toast-suppression check so a single-account
     # install with the toggle on returns silently here (only the generic

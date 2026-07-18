@@ -323,7 +323,24 @@ def _build_extra_args(
     return extra_args
 
 
-def inject_claude_code_auth(env: Dict[str, str]) -> Dict[str, str]:
+class ProviderConfigError(ValueError):
+    """A session references a model provider that cannot be applied — the
+    provider row is missing, disabled, or its stored auth token can't be
+    decrypted (encryption not ready / corrupt blob).
+
+    Subclasses ``ValueError`` deliberately: the query engines already convert a
+    ``ValueError`` raised out of ``build_options_from_profile`` (via their
+    ``except (WorktreeUnavailableError, ValueError)`` guards) into a
+    user-visible spawn/config error event. Reusing that channel means a
+    misconfigured provider surfaces as a clear error instead of an opaque
+    subprocess failure — and, per R5, we NEVER silently fall back to native
+    Anthropic (which would leak the prompt to / bill the wrong upstream).
+    """
+
+
+def inject_claude_code_auth(
+    env: Dict[str, str], provider_id: Optional[str] = None
+) -> Dict[str, str]:
     """Inject the Claude Code auth credential into a subprocess env (in place).
 
     The stored `anthropic_api_key` is an authentication credential for Claude
@@ -341,9 +358,18 @@ def inject_claude_code_auth(env: Dict[str, str]) -> Dict[str, str]:
     - **API key absent** → inject nothing; leave the env untouched so the CLI
       falls back to the existing OAuth account credentials.
 
+    When ``provider_id`` is truthy the session targets a non-Anthropic model
+    provider: DO NOT inject the stored Anthropic key. ``apply_provider_env``
+    owns auth for those spawns (it sets ANTHROPIC_AUTH_TOKEN for the gateway and
+    an explicitly-empty ANTHROPIC_API_KEY). Injecting the Anthropic key here
+    would either leak it to the gateway or cause a native-Anthropic fallback.
+
     We never delete or alter the OAuth login flow — this only ADDS the
     key-injection path. Returns the same dict for convenience.
     """
+    if provider_id:
+        # Provider session — leave Anthropic auth untouched (see apply_provider_env).
+        return env
     api_key = _get_decrypted_api_key("anthropic_api_key")
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
@@ -391,10 +417,160 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
     env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")
 
 
+def apply_provider_env(
+    env: Dict[str, str], provider_id: str, model: Optional[str]
+) -> Dict[str, str]:
+    """Overlay a non-Anthropic model-provider's gateway env vars onto ``env``
+    (in place) so the bundled Claude Code CLI talks to that gateway instead of
+    api.anthropic.com. Returns the same dict for convenience.
+
+    Looks up the enabled provider row (with its encrypted token) and applies the
+    officially-supported LLM-gateway env vars:
+
+    - ``ANTHROPIC_BASE_URL`` — the gateway (CLI appends ``/v1/messages``)
+    - ``ANTHROPIC_AUTH_TOKEN`` — the decrypted key (sent as ``Authorization: Bearer``)
+    - ``ANTHROPIC_API_KEY=""`` — MUST be explicitly empty to prevent an
+      Anthropic fallback
+    - mitigation flags for non-Anthropic upstreams
+      (``CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS``,
+      ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``,
+      ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
+    - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` / ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
+      (clamped ≥100k)
+    - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` + ``CLAUDE_CODE_SUBAGENT_MODEL`` set to
+      ``small_fast_model or default_model or first curated model id`` (a STABLE
+      provider-scoped value, NEVER the per-turn ``model``) so background probes /
+      title-gen / subagents never send an unknown Claude alias to the gateway,
+      and a within-provider composer switch doesn't churn these keys into a
+      subagent-killing respawn. Left unset if no curated models either.
+
+    The provider's ``extra_env_json`` entries are applied FIRST, then the forced
+    values LAST, so extra_env can never clobber the ``ANTHROPIC_API_KEY=""``
+    guard (or any other overlay-controlled key).
+
+    R5 (binding): a missing/disabled provider, or a token that cannot be
+    decrypted (encryption not ready / corrupt), raises :class:`ProviderConfigError`
+    — surfaced to the user as a spawn/config error. We NEVER silently fall back
+    to native Anthropic. A provider with NO stored token is allowed only when a
+    ``base_url`` is set (some self-hosted gateways are unauthenticated); the
+    token is then the empty string.
+    """
+    provider = database.get_model_provider(provider_id, include_token=True)
+    if not provider:
+        raise ProviderConfigError(
+            f"Model provider '{provider_id}' is not configured (it may have been "
+            f"deleted). Update the profile to pick an available model."
+        )
+    if not provider.get("enabled"):
+        raise ProviderConfigError(
+            f"Model provider '{provider.get('name') or provider_id}' is disabled. "
+            f"Re-enable it in Settings or pick a different model."
+        )
+
+    base_url = provider.get("base_url")
+    raw_token = provider.get("auth_token")
+
+    # Resolve the auth token. A stored token must be decryptable; a provider with
+    # NO token is allowed only when a base_url is configured (unauthenticated
+    # self-hosted gateway) — never a native-Anthropic fallback.
+    if raw_token:
+        if encryption.is_encrypted(raw_token):
+            if not encryption.is_encryption_ready():
+                raise ProviderConfigError(
+                    f"Cannot decrypt the auth token for model provider "
+                    f"'{provider.get('name') or provider_id}' — the encryption key "
+                    f"is not available (admin must be logged in). Refusing to spawn."
+                )
+            try:
+                token = encryption.decrypt_value(raw_token)
+            except Exception as e:  # noqa: BLE001 — surfaced as a config error
+                raise ProviderConfigError(
+                    f"Failed to decrypt the auth token for model provider "
+                    f"'{provider.get('name') or provider_id}': {e}"
+                ) from e
+        else:
+            # Plaintext (migration compatibility) — pass through.
+            token = raw_token
+    else:
+        if not base_url:
+            raise ProviderConfigError(
+                f"Model provider '{provider.get('name') or provider_id}' has neither "
+                f"an auth token nor a base URL configured — nothing to route to."
+            )
+        token = ""  # unauthenticated self-hosted gateway
+
+    # extra_env FIRST so the forced guard values below can never be clobbered.
+    extra_env = provider.get("extra_env_json") or {}
+    if isinstance(extra_env, dict):
+        for k, v in extra_env.items():
+            env[str(k)] = str(v)
+
+    # Forced overlay values LAST (extra_env cannot override these).
+    env["ANTHROPIC_BASE_URL"] = base_url or ""
+    env["ANTHROPIC_AUTH_TOKEN"] = token
+    env["ANTHROPIC_API_KEY"] = ""  # explicit empty → blocks the Anthropic fallback
+    env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "1"
+
+    max_output = provider.get("max_output_tokens")
+    if max_output:
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output)
+
+    context_window = provider.get("context_window")
+    if context_window:
+        # Clamp to ≥100k: the CLI's auto-compact window must not undercut a usable
+        # working context even if the provider advertises a tiny window. Use
+        # setdefault so a profile-supplied preset wins — preset-wins parity with
+        # the native path (see the setdefault at the top of this module).
+        env.setdefault(
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            str(max(int(context_window), 100000)),
+        )
+
+    # R4: point the small/fast + subagent models at something the gateway knows.
+    # Fall back to a STABLE provider-scoped value (never the per-turn `model`): a
+    # within-provider composer model switch must not change these overlay keys,
+    # or requires_reconnect() forces a respawn that kills background subagents.
+    small_fast = (
+        provider.get("small_fast_model")
+        or provider.get("default_model")
+        or _first_curated_model_id(provider)
+    )
+    if small_fast:
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = small_fast
+
+    return env
+
+
+def _first_curated_model_id(provider: Dict[str, Any]) -> Optional[str]:
+    """First curated model id from a provider row, or None.
+
+    Defensive about the row shape: ``models_json`` is normally a parsed list of
+    ``{id, label}`` dicts, but may arrive as a raw JSON string (or be absent).
+    Reads the first entry's ``id`` without raising.
+    """
+    models = provider.get("models_json")
+    if isinstance(models, str):
+        try:
+            models = json.loads(models)
+        except Exception:
+            return None
+    if not isinstance(models, list) or not models:
+        return None
+    first = models[0]
+    if isinstance(first, dict):
+        model_id = first.get("id")
+        return model_id if isinstance(model_id, str) and model_id else None
+    return None
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]],
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Build environment variables dict, injecting AI tool credentials when enabled.
@@ -439,7 +615,9 @@ def _build_env_with_ai_tools(
     # credential for EVERY session, regardless of whether AI tools are enabled.
     # Must happen BEFORE the ai_tools early-returns below — auth is not gated on
     # ai_tools. (Key set → API-key auth wins; key absent → OAuth account auth.)
-    inject_claude_code_auth(env)
+    # For provider sessions (provider_id set) the Anthropic key is NOT injected;
+    # apply_provider_env owns auth for the gateway.
+    inject_claude_code_auth(env, provider_id)
 
     # NOTE: The browser integration is now "Claude in Chrome" (the bundled CLI's
     # --chrome flag), not the Playwright MCP server. The CLI manages its own

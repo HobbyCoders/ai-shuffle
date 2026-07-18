@@ -123,7 +123,9 @@ def _safe_json(value):
 #     local pool. Additive/nullable; NULL = never captured.
 # 63 (2026-07-16): rename sessions.is_favorite -> is_active (favorites reworked
 #     into Active group); index idx_sessions_favorite -> idx_sessions_active.
-SCHEMA_VERSION = 63
+# 64 (2026-07-17): add model_providers table (admin-configured non-Anthropic
+#     model gateways) + idx_model_providers_enabled.
+SCHEMA_VERSION = 64
 
 
 def _run_column_migrations(cursor):
@@ -606,6 +608,37 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("claude_accounts")
+
+    # model_providers (v64). Admin-configured non-Anthropic model gateways
+    # (OpenRouter / custom Anthropic-compatible endpoints). Idempotent so
+    # upgrades from any older version land the table without needing the
+    # SCHEMA_VERSION bump to fire the bootstrap path (same defensive pattern as
+    # the SessionStore / error_log / installs / claude_accounts blocks above).
+    # The index is bootstrapped unconditionally (CREATE INDEX IF NOT EXISTS) so
+    # it exists on both fresh installs and upgrades.
+    if not table_exists(cursor, "model_providers"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS model_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider_type TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                auth_token TEXT,
+                models_json TEXT DEFAULT '[]',
+                default_model TEXT,
+                small_fast_model TEXT,
+                extra_env_json TEXT DEFAULT '{}',
+                context_window INTEGER,
+                max_output_tokens INTEGER,
+                enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("model_providers")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_providers_enabled ON model_providers(enabled)"
+    )
 
     # projects.link_group_id (Phase D). Groups same-repo project rows across
     # installs into one logical project on the shared-DB sessions board. The id
@@ -1593,6 +1626,16 @@ from app.db.claude_accounts import (  # noqa: F401
     mark_claude_account_sync_pending,
     touch_claude_account_last_used,
     count_claude_accounts,
+)
+
+from app.db.model_providers import (  # noqa: F401
+    create_model_provider,
+    get_model_provider,
+    get_all_model_providers,
+    get_enabled_model_providers,
+    update_model_provider,
+    delete_model_provider,
+    set_model_provider_enabled,
 )
 
 from app.db.usage_snapshots import (  # noqa: F401

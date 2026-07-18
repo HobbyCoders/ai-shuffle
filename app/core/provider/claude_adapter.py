@@ -269,6 +269,12 @@ class ClaudeAgentAdapter(ProviderAdapter):
         if (old.tools or []) != (new_options.tools or []):
             return True
 
+        # Lazy import at call time is cycle-safe: session_pool imports this
+        # module at load, so a module-level import would cycle.
+        from app.core.session_pool import provider_env_requires_reconnect
+        if provider_env_requires_reconnect(old.env, new_options.env):
+            return True
+
         return False
 
     def requires_reconnect_sdk(self, new_sdk_options: ClaudeAgentOptions) -> bool:
@@ -289,6 +295,12 @@ class ClaudeAgentAdapter(ProviderAdapter):
         if (old.plugins or []) != (new_sdk_options.plugins or []):
             return True
         if (old.tools or []) != (new_sdk_options.tools or []):
+            return True
+
+        # Lazy import at call time is cycle-safe: session_pool imports this
+        # module at load, so a module-level import would cycle.
+        from app.core.session_pool import provider_env_requires_reconnect
+        if provider_env_requires_reconnect(old.env, new_sdk_options.env):
             return True
 
         return False

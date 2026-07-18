@@ -255,15 +255,17 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 63 for the favorites->active rename (sessions.is_favorite ->
-    # is_active + idx_sessions_favorite -> idx_sessions_active). v62 added the
+    # Bumped to 64 for the model_providers table (admin-configured
+    # non-Anthropic model gateways) + idx_model_providers_enabled. v63 was
+    # the favorites->active rename (sessions.is_favorite -> is_active +
+    # idx_sessions_favorite -> idx_sessions_active). v62 added the
     # persisted SDK context-usage snapshot (additive nullable
     # sessions.context_usage_json JSONB). v61 was the V2 Phase-4 placement
     # layer; v60 was the Phase-3 origin collapse; v59 added the Phase-2 turns
     # table; v58 was the Phase-1 deletion (v2_stream forced TRUE + default
     # flipped); v57 added the opt-in flag; v56 added the Phase-0 primitives.
-    assert db_version == 63
-    assert pg_version == 63
+    assert db_version == 64
+    assert pg_version == 64
     assert db_version == pg_version
 
 

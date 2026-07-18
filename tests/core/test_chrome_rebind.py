@@ -214,9 +214,11 @@ class TestFailoverWiring:
              patch.object(af, "_evict_pooled_session", new=AsyncMock()), \
              patch.object(af, "_notify", new=AsyncMock()), \
              patch.object(af, "schedule_usage_refresh"):
-            # run_sync is awaited for: failover_eligible, get_active_account_id,
-            # _select_next_account, switch_account. Sequence the return values.
+            # run_sync is awaited for: _session_uses_provider, failover_eligible,
+            # get_active_account_id, _select_next_account, switch_account.
+            # Sequence the return values.
             run_sync.side_effect = [
+                False,                                   # _session_uses_provider
                 True,                                    # failover_eligible
                 "a",                                     # get_active_account_id
                 {"id": "b", "name": "Backup"},           # _select_next_account
