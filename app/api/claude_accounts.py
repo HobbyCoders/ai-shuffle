@@ -11,7 +11,6 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.auth import require_admin
-from app.core import account_failover
 from app.core import claude_accounts as accounts
 from app.core import encryption
 from app.core.oauth import direct_oauth
@@ -81,29 +80,7 @@ async def list_accounts(token: str = Depends(require_admin)):
         "accounts": [_public_account(r, active_id) for r in rows],
         "active_account_id": active_id,
         "encryption_ready": encryption_ready,
-        "auto_switch_on_limit": account_failover.get_auto_switch_enabled(),
     }
-
-
-@router.put("/auto-switch")
-async def set_auto_switch(request: Request, token: str = Depends(require_admin)):
-    """Toggle auto-switch-to-another-account on usage limit for this install.
-
-    Registered ABOVE the parameterized ``/{account_id}`` routes so the literal
-    path wins. Body: ``{"enabled": bool}``.
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Body must include a boolean 'enabled' field.",
-        )
-    account_failover.set_auto_switch_enabled(enabled)
-    return {"success": True, "auto_switch_on_limit": enabled}
 
 
 @router.post("/start")

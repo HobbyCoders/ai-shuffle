@@ -1114,19 +1114,15 @@ async def _emit_api_error_notification(
             status = 0
 
         if status == 429:
-            # If auto-switch-on-limit is eligible, the account_failover module
-            # emits its own "switched to X" / "all accounts exhausted" toast that
-            # supersedes this generic one — suppress the duplicate. Best-effort:
-            # any failure here falls through to the generic toast below.
-            try:
-                from app.core import account_failover
-                if await run_sync(account_failover.failover_eligible):
-                    return
-            except Exception:
-                logger.debug("failover eligibility check failed in api_error toast", exc_info=True)
-            severity = "warning"
-            message = "Rate limited — slow down or wait for the next window."
-            action = None  # transient + self-resolving — no "Fix with AI"
+            # Rate-limit (429) notifications are owned by ``account_failover``,
+            # which surfaces the "rate-limited — wait or sign into a different
+            # account" state on every 429 turn through its ``attempt_failover``
+            # seam (native auto-switch was retired — OC-1/OC-4). Suppressing the
+            # duplicate generic toast here keeps exactly one notification per
+            # 429 turn: every 429 that reaches this funnel is on a path that
+            # also runs ``attempt_failover`` (the streaming SSE wrapper,
+            # ``turn_scheduler``, or ``execute_query_with_failover``).
+            return
         elif 500 <= status < 600:
             severity = "error"
             message = f"Service error: HTTP {status}"
