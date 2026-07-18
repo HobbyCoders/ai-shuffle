@@ -18,15 +18,16 @@ are populated by the (later) device-code enrollment flow + refresh worker.
 """
 
 import logging
+import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.auth import require_admin
 from app.api.settings_crypto import mask_api_key
-from app.core import encryption
+from app.core import codex_oauth, encryption
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,21 @@ class ModelProviderResponse(BaseModel):
 
 class ModelProviderListResponse(BaseModel):
     providers: List[ModelProviderResponse]
+
+
+class CodexDeviceStartResponse(BaseModel):
+    """Device-code enrollment start: the admin enters ``user_code`` at
+    ``verification_uri`` in their own browser, then the frontend polls."""
+    user_code: str
+    verification_uri: str
+
+
+class CodexDevicePollResponse(BaseModel):
+    """One poll step. ``status`` is ``pending`` (keep polling), ``slow_down``
+    (keep polling, but slower), or ``complete`` (``provider`` carries the fresh
+    public row)."""
+    status: str
+    provider: Optional[ModelProviderResponse] = None
 
 
 # ============================================================================
@@ -324,12 +340,39 @@ async def update_provider(
 
 @router.delete("/{provider_id}")
 async def delete_provider(provider_id: str, token: str = Depends(require_admin)):
-    """Delete a model provider."""
+    """Delete a model provider.
+
+    Best-effort: if the provider carries a stored Codex refresh token, revoke it
+    upstream BEFORE deletion so we don't leave a live grant dangling. A revoke
+    failure NEVER blocks deletion (the credential row is going away regardless).
+    """
+    await _best_effort_revoke_codex(provider_id)
     deleted = db.delete_model_provider(provider_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
     return {"success": True}
+
+
+async def _best_effort_revoke_codex(provider_id: str) -> None:
+    """Revoke a stored Codex refresh token (if any) before provider delete.
+
+    Swallows every error — deletion must succeed even if revoke can't (network
+    down, encryption locked, token already dead).
+    """
+    try:
+        stored = db.get_codex_tokens(provider_id)
+        if not stored:
+            return
+        enc_refresh = stored.get("codex_refresh_token")
+        if not enc_refresh:
+            return
+        if not encryption.is_encryption_ready():
+            return
+        refresh_plain = encryption.decrypt_value(enc_refresh)
+        await codex_oauth.revoke_token(refresh_plain)
+    except Exception:  # noqa: BLE001 — revoke is best-effort, never blocks delete
+        logger.debug("codex revoke-on-delete failed for %s", provider_id, exc_info=True)
 
 
 @router.post("/{provider_id}/toggle", response_model=ModelProviderResponse)
@@ -345,5 +388,165 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
+    full_row = _row_with_token_flags(provider_id)
+    return _public_provider(full_row)
+
+
+# ============================================================================
+# Codex / ChatGPT-subscription device-code OAuth enrollment (phase-2 Chunk B.2)
+# ============================================================================
+#
+# Two-step, admin-driven device-code flow (plan B RULING: device-code, not the
+# loopback-1455 flow — the admin's browser is remote from the server):
+#   1. ``/device/start`` mints PKCE + a user-code; the admin types it into their
+#      own browser at the verification URL.
+#   2. ``/device/poll`` is called repeatedly by the frontend; on authorization it
+#      encrypts + persists the token bundle and returns the fresh public row.
+#
+# The PKCE ``code_verifier`` + ``device_code`` are pending-enrollment state that
+# MUST survive between the two calls but must NOT go to the browser (the verifier
+# is the PKCE secret). We keep them in a small in-memory map keyed by
+# provider_id. One backend process serves each install's CLI (per the
+# primary/worker split), so process-local state is sufficient; a lost map (e.g.
+# restart mid-enrollment) just means the admin restarts the flow.
+
+# provider_id -> (device_code, code_verifier, created_at_monotonic)
+_pending_enrollments: Dict[str, Tuple[str, str, float]] = {}
+# Drop pending enrollments older than this (device codes expire upstream anyway).
+_PENDING_TTL_SECONDS = 900
+
+
+def _prune_pending() -> None:
+    now = time.monotonic()
+    stale = [
+        pid for pid, (_, _, ts) in _pending_enrollments.items()
+        if now - ts > _PENDING_TTL_SECONDS
+    ]
+    for pid in stale:
+        _pending_enrollments.pop(pid, None)
+
+
+@router.post("/{provider_id}/codex/device/start",
+             response_model=CodexDeviceStartResponse)
+async def codex_device_start(provider_id: str, token: str = Depends(require_admin)):
+    """Start the Codex device-code enrollment for a provider.
+
+    Returns the ``user_code`` the admin enters at ``verification_uri`` in their
+    own browser. Stashes the PKCE verifier + device_code server-side for the
+    subsequent poll(s).
+    """
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin (or set "
+                   "ADMIN_PASSWORD) before enrolling a Codex login.",
+        )
+    if db.get_model_provider(provider_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+
+    try:
+        start = await codex_oauth.start_device_code()
+    except codex_oauth.CodexAuthError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Codex device-code start failed: {e.code}")
+
+    _prune_pending()
+    _pending_enrollments[provider_id] = (
+        start.device_code, start.code_verifier, time.monotonic()
+    )
+    return CodexDeviceStartResponse(
+        user_code=start.user_code,
+        verification_uri=start.verification_uri,
+    )
+
+
+@router.post("/{provider_id}/codex/device/poll",
+             response_model=CodexDevicePollResponse)
+async def codex_device_poll(provider_id: str, token: str = Depends(require_admin)):
+    """One poll step of the Codex device-code enrollment.
+
+    ``pending`` / ``slow_down`` → keep polling. On authorization: encrypt the
+    access+refresh blobs (same call-site convention as ``auth_token``), persist
+    the whole bundle atomically via ``set_codex_token_bundle`` (which sets
+    ``auth_mode='chatgpt'`` and clears ``needs_reauth``), and return the fresh
+    public row. Terminal upstream errors surface as 400.
+    """
+    pending = _pending_enrollments.get(provider_id)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pending Codex enrollment for this provider — start one first.",
+        )
+    device_code, code_verifier, _ = pending
+
+    try:
+        bundle = await codex_oauth.poll_device_code(device_code, code_verifier)
+    except codex_oauth.CodexAuthPending as pend:
+        return CodexDevicePollResponse(
+            status="slow_down" if pend.slow_down else "pending"
+        )
+    except codex_oauth.CodexAuthError as e:
+        _pending_enrollments.pop(provider_id, None)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Codex enrollment failed: {e.code}")
+
+    # Authorized — encrypt the secrets (same seam as auth_token) and persist.
+    enc_access = _encrypt_token_or_400(bundle.access_token)
+    enc_refresh = _encrypt_token_or_400(bundle.refresh_token)
+    exp_dt = _codex_id_token_exp(bundle)
+    id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
+
+    from datetime import datetime, timezone
+    row = db.set_codex_token_bundle(
+        provider_id,
+        access_token=enc_access,
+        refresh_token=enc_refresh,
+        account_id=bundle.account_id,
+        id_token_expires_at=id_token_exp,
+        last_refresh=datetime.now(timezone.utc).isoformat(),
+        needs_reauth=False,
+    )
+    _pending_enrollments.pop(provider_id, None)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+
+    full_row = _row_with_token_flags(provider_id)
+    return CodexDevicePollResponse(status="complete", provider=_public_provider(full_row))
+
+
+def _codex_id_token_exp(bundle: "codex_oauth.TokenBundle"):
+    """Best-effort ``exp`` from the enrolled id_token (falls back to the access
+    token) so the stored ``codex_id_token_expires_at`` reflects real expiry."""
+    from app.core import codex_token_refresh
+    return codex_token_refresh._access_token_exp(bundle.id_token or bundle.access_token)
+
+
+@router.post("/{provider_id}/codex/clear-reauth",
+             response_model=ModelProviderResponse)
+async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admin)):
+    """Clear ONLY the ``needs_reauth`` flag on a Codex provider.
+
+    Preserves the stored token bundle unchanged (re-supplies the existing
+    encrypted blobs); flips just the flag. Used to dismiss a stale reconnect
+    prompt without re-enrolling.
+    """
+    stored = db.get_codex_tokens(provider_id)
+    if stored is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
+    row = db.set_codex_token_bundle(
+        provider_id,
+        access_token=stored.get("codex_access_token"),
+        refresh_token=stored.get("codex_refresh_token"),
+        account_id=stored.get("codex_account_id"),
+        id_token_expires_at=stored.get("codex_id_token_expires_at"),
+        last_refresh=stored.get("codex_last_refresh"),
+        needs_reauth=False,
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Model provider not found")
     full_row = _row_with_token_flags(provider_id)
     return _public_provider(full_row)
