@@ -8,6 +8,13 @@ Chunk 3). Mounted under ``/api/v1/model-providers``.
 The stored ``auth_token`` (an ``enc:``-prefixed Fernet blob) is NEVER returned
 in a response body — only ``auth_token_set`` (bool) and ``auth_token_masked``
 (via ``mask_api_key``, same convention as ``IntegrationSettingsResponse``).
+
+The Codex/ChatGPT-subscription OAuth blobs (``codex_access_token`` /
+``codex_refresh_token``) get the same treatment: never in a response body, only
+the boolean ``codex_access_token_set`` / ``codex_refresh_token_set`` flags. The
+non-secret Codex fields (``auth_mode``, ``codex_account_id``, ``needs_reauth``)
+are exposed directly. This chunk has NO write path for the token blobs — they
+are populated by the (later) device-code enrollment flow + refresh worker.
 """
 
 import logging
@@ -78,6 +85,12 @@ class ModelProviderResponse(BaseModel):
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     enabled: bool
+    # Codex/ChatGPT-subscription OAuth surface (blobs never exposed — only flags).
+    auth_mode: Optional[str] = None
+    codex_account_id: Optional[str] = None
+    needs_reauth: bool = False
+    codex_access_token_set: bool = False
+    codex_refresh_token_set: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -166,19 +179,32 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         context_window=row.get("context_window"),
         max_output_tokens=row.get("max_output_tokens"),
         enabled=bool(row.get("enabled")),
+        auth_mode=row.get("auth_mode"),
+        codex_account_id=row.get("codex_account_id"),
+        needs_reauth=bool(row.get("needs_reauth")),
+        codex_access_token_set=bool(row.get("_codex_access_token_set")),
+        codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
 
 
 def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip the raw ``auth_token`` blob off a row and derive the public
-    ``_auth_token_set`` / ``_auth_token_masked`` flags in its place. Mutates and
-    returns the same row.
+    """Strip the raw token blobs off a row and derive the public ``_set`` flags
+    in their place. Mutates and returns the same row.
+
+    Covers ``auth_token`` (``_auth_token_set`` / ``_auth_token_masked``) and the
+    two Codex OAuth blobs ``codex_access_token`` / ``codex_refresh_token``
+    (``_codex_access_token_set`` / ``_codex_refresh_token_set``). The raw blobs
+    never survive this call, so they can never reach ``_public_provider``.
     """
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
     row["_auth_token_masked"] = mask_api_key(token) if token else ""
+    codex_access = row.pop("codex_access_token", None)
+    codex_refresh = row.pop("codex_refresh_token", None)
+    row["_codex_access_token_set"] = bool(codex_access)
+    row["_codex_refresh_token_set"] = bool(codex_refresh)
     return row
 
 

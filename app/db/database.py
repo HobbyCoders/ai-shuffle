@@ -125,7 +125,12 @@ def _safe_json(value):
 #     into Active group); index idx_sessions_favorite -> idx_sessions_active.
 # 64 (2026-07-17): add model_providers table (admin-configured non-Anthropic
 #     model gateways) + idx_model_providers_enabled.
-SCHEMA_VERSION = 64
+# 65 (2026-07-18): add Codex/ChatGPT-subscription OAuth columns to
+#     model_providers (one account per provider — plan amendment A1, no pool
+#     table): auth_mode, encrypted write-only codex_access_token /
+#     codex_refresh_token, codex_account_id, codex_id_token_expires_at,
+#     codex_last_refresh, needs_reauth. All additive/nullable.
+SCHEMA_VERSION = 65
 
 
 def _run_column_migrations(cursor):
@@ -639,6 +644,33 @@ def _run_column_migrations(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_model_providers_enabled ON model_providers(enabled)"
     )
+
+    # model_providers Codex/ChatGPT-subscription OAuth columns (v65). One
+    # account per provider (plan amendment A1 — no separate pool table): the
+    # Codex OAuth credential lives 1:1 on the provider's single-credential row.
+    # Additive/idempotent: on an EXISTING v64 model_providers table
+    # create_postgres_schema's CREATE TABLE IF NOT EXISTS is a no-op, so these
+    # guarded ADD COLUMNs are the sole path that lands them on an upgrade (same
+    # discipline as the column migrations above). ``codex_access_token`` /
+    # ``codex_refresh_token`` are encrypted (``enc:``) write-only blobs, never
+    # exposed on public reads (mirrors ``auth_token``). No index is added on any
+    # of these, so there is no schema-pass-before-column ordering trap here.
+    if table_exists(cursor, "model_providers"):
+        _codex_provider_columns = (
+            ("auth_mode", "TEXT"),
+            ("codex_access_token", "TEXT"),
+            ("codex_refresh_token", "TEXT"),
+            ("codex_account_id", "TEXT"),
+            ("codex_id_token_expires_at", "TIMESTAMP WITH TIME ZONE"),
+            ("codex_last_refresh", "TIMESTAMP WITH TIME ZONE"),
+            ("needs_reauth", "BOOLEAN DEFAULT FALSE"),
+        )
+        for _col, _decl in _codex_provider_columns:
+            if not column_exists(cursor, "model_providers", _col):
+                cursor.execute(
+                    f"ALTER TABLE model_providers ADD COLUMN {_col} {_decl}"
+                )
+                migrations_applied.append(f"model_providers.{_col}")
 
     # projects.link_group_id (Phase D). Groups same-repo project rows across
     # installs into one logical project on the shared-DB sessions board. The id
@@ -1636,6 +1668,8 @@ from app.db.model_providers import (  # noqa: F401
     update_model_provider,
     delete_model_provider,
     set_model_provider_enabled,
+    set_codex_token_bundle,
+    get_codex_tokens,
 )
 
 from app.db.usage_snapshots import (  # noqa: F401

@@ -11,6 +11,18 @@ NEVER returned on a normal read — it is fetched only when ``include_token=True
 ``models_json`` (a curated ``[{id, label}]`` list) and ``extra_env_json`` (an
 extra-env map) columns are TEXT-encoded JSON, serialized/parsed via
 ``json.dumps`` / ``json.loads`` (same convention as ``db/profiles.py``).
+
+Codex/ChatGPT-subscription OAuth (phase-2, plan amendment A1 — one account per
+provider, stored 1:1 on this same row, NOT a separate pool table):
+``codex_access_token`` / ``codex_refresh_token`` are two MORE ``enc:``-prefixed
+write-only blobs handled exactly like ``auth_token`` — excluded from the public
+columns, returned only under ``include_token=True``, and re-keyed on a password
+change (see ``app/core/encryption.py`` locations 7 & 8). The non-secret Codex
+fields (``auth_mode``, ``codex_account_id``, ``codex_id_token_expires_at``,
+``codex_last_refresh``, ``needs_reauth``) ARE public. :func:`set_codex_token_bundle`
+persists the whole rotated bundle in one atomic UPDATE (a later refresh worker
+relies on that atomicity because the Codex refresh token rotates); there is no
+public API write path for the token blobs in this chunk.
 """
 
 from __future__ import annotations
@@ -45,21 +57,40 @@ class ModelProviderRow(TypedDict, total=False):
     context_window: Optional[int]
     max_output_tokens: Optional[int]
     enabled: bool
+    auth_mode: Optional[str]
+    codex_access_token: Optional[str]
+    codex_refresh_token: Optional[str]
+    codex_account_id: Optional[str]
+    codex_id_token_expires_at: Optional[str]
+    codex_last_refresh: Optional[str]
+    needs_reauth: bool
     created_at: str
     updated_at: str
 
 
-# Columns exposed on a normal (non-token) read. ``auth_token`` is deliberately
-# excluded so the encrypted blob is only fetched on demand.
+# Columns exposed on a normal (non-token) read. ``auth_token`` and the two Codex
+# token blobs (``codex_access_token`` / ``codex_refresh_token``) are deliberately
+# excluded so the encrypted blobs are only fetched on demand. The non-secret
+# Codex fields (auth_mode, codex_account_id, expiry/last_refresh timestamps,
+# needs_reauth) ARE public.
 _PUBLIC_COLUMNS = (
     "id, name, provider_type, base_url, models_json, default_model, "
     "small_fast_model, extra_env_json, context_window, max_output_tokens, "
-    "enabled, created_at, updated_at"
+    "enabled, auth_mode, codex_account_id, codex_id_token_expires_at, "
+    "codex_last_refresh, needs_reauth, created_at, updated_at"
 )
 
+# The encrypted write-only token blobs, appended to the SELECT only when a caller
+# passes ``include_token=True`` (server-side use: env overlay / re-encryption /
+# the Codex refresh worker). Kept off ``_PUBLIC_COLUMNS`` so they never travel on
+# a normal read.
+_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token"
+
 # Columns that update_model_provider accepts as direct partial updates. JSON
-# columns are handled specially (see _dump_json_value); auth_token is here so a
-# caller CAN update it, but it is only touched when explicitly passed.
+# columns are handled specially (see _dump_json_value); auth_token and the two
+# Codex token blobs are here so a caller CAN update them, but they are only
+# touched when explicitly passed (the re-encryption plan writes one blob at a
+# time; set_codex_token_bundle writes the whole bundle atomically).
 _UPDATABLE_COLUMNS = (
     "name",
     "provider_type",
@@ -72,6 +103,13 @@ _UPDATABLE_COLUMNS = (
     "context_window",
     "max_output_tokens",
     "enabled",
+    "auth_mode",
+    "codex_access_token",
+    "codex_refresh_token",
+    "codex_account_id",
+    "codex_id_token_expires_at",
+    "codex_last_refresh",
+    "needs_reauth",
 )
 
 
@@ -159,7 +197,7 @@ def get_model_provider(
     provider_id: str, include_token: bool = False
 ) -> Optional[ModelProviderRow]:
     """Get one provider by id. Token blob included only when requested."""
-    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", auth_token"
+    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", " + _TOKEN_COLUMNS
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -171,7 +209,7 @@ def get_model_provider(
 
 def get_all_model_providers(include_token: bool = False) -> List[ModelProviderRow]:
     """List all providers, newest created first. Token omitted by default."""
-    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", auth_token"
+    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", " + _TOKEN_COLUMNS
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -187,7 +225,7 @@ def get_enabled_model_providers(include_token: bool = False) -> List[ModelProvid
     Token omitted by default (public/registry reads); the env overlay passes
     ``include_token=True`` to obtain the encrypted blob for decryption.
     """
-    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", auth_token"
+    cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", " + _TOKEN_COLUMNS
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -251,3 +289,90 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
         if cursor.rowcount == 0:
             return None
     return get_model_provider(provider_id)
+
+
+# ---------------------------------------------------------------------------
+# Codex/ChatGPT-subscription OAuth token bundle (phase-2, amendment A1).
+#
+# Stored 1:1 on the provider's single-credential row. The token blobs are
+# ENCRYPTED WRITE-ONLY (``enc:``-prefixed Fernet, encryption happens at the call
+# site — mirroring ``auth_token``) and are returned only via the explicit
+# include-token reader below, never on a public read. There is NO public API
+# write path for the blobs in this chunk; these are internal setters/readers a
+# later device-code enrollment flow + refresh worker call.
+# ---------------------------------------------------------------------------
+
+def set_codex_token_bundle(
+    provider_id: str,
+    *,
+    access_token: Optional[str],
+    refresh_token: Optional[str],
+    account_id: Optional[str],
+    id_token_expires_at: Optional[str] = None,
+    last_refresh: Optional[str] = None,
+    needs_reauth: bool = False,
+) -> Optional[ModelProviderRow]:
+    """Atomically persist the Codex OAuth token bundle on a provider row.
+
+    Writes ``codex_access_token`` + ``codex_refresh_token`` +
+    ``codex_account_id`` + ``codex_id_token_expires_at`` + ``codex_last_refresh``
+    in ONE UPDATE, and sets ``auth_mode='chatgpt'`` + ``needs_reauth`` (default
+    cleared) alongside. The Codex refresh token ROTATES on every refresh, so a
+    later refresh worker relies on this single-statement persist to avoid a
+    torn write between the new access and refresh tokens. ``access_token`` /
+    ``refresh_token`` are expected to already be ``enc:``-prefixed blobs
+    (encryption at the call site, same contract as ``auth_token``).
+
+    Returns the fresh public row (no blobs), or ``None`` if the provider is gone.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE model_providers
+               SET auth_mode = 'chatgpt',
+                   codex_access_token = %s,
+                   codex_refresh_token = %s,
+                   codex_account_id = %s,
+                   codex_id_token_expires_at = %s,
+                   codex_last_refresh = %s,
+                   needs_reauth = %s,
+                   updated_at = %s
+             WHERE id = %s
+            """,
+            (
+                access_token,
+                refresh_token,
+                account_id,
+                id_token_expires_at,
+                last_refresh,
+                needs_reauth,
+                now,
+                provider_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_model_provider(provider_id)
+
+
+def get_codex_tokens(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Explicit include-token reader for the Codex bundle (server-side only).
+
+    Returns the encrypted ``codex_access_token`` / ``codex_refresh_token`` blobs
+    plus the non-secret bundle fields (``auth_mode``, ``codex_account_id``,
+    ``codex_id_token_expires_at``, ``codex_last_refresh``, ``needs_reauth``).
+    These blobs are NEVER returned by the public readers — this is the Codex
+    analogue of ``get_model_provider(include_token=True)``. Returns ``None`` when
+    the provider does not exist.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT auth_mode, codex_access_token, codex_refresh_token, "
+            "codex_account_id, codex_id_token_expires_at, codex_last_refresh, "
+            "needs_reauth FROM model_providers WHERE id = %s",
+            (provider_id,),
+        )
+        return row_to_dict(cursor.fetchone())

@@ -174,3 +174,106 @@ class TestSetEnabledAndDelete:
 
     def test_delete_missing_returns_false(self, mock_db):
         assert db.delete_model_provider("nope") is False
+
+
+class TestCodexTokenBundle:
+    """Phase-2 Codex OAuth bundle: the two token blobs are write-only (never on a
+    public read, only under include_token), the bundle persists atomically, and
+    the non-secret Codex fields are public."""
+
+    def test_public_read_never_returns_codex_blobs(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1",
+            access_token="enc:codex-access",
+            refresh_token="enc:codex-refresh",
+            account_id="acct-123",
+        )
+        row = db.get_model_provider("prov-1")  # public read
+        assert "codex_access_token" not in row
+        assert "codex_refresh_token" not in row
+        # Non-secret Codex fields ARE public.
+        assert row["auth_mode"] == "chatgpt"
+        assert row["codex_account_id"] == "acct-123"
+        assert row["needs_reauth"] in (False, 0)
+
+    def test_include_token_returns_codex_blobs(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1",
+            access_token="enc:codex-access",
+            refresh_token="enc:codex-refresh",
+            account_id="acct-123",
+        )
+        row = db.get_model_provider("prov-1", include_token=True)
+        assert row["codex_access_token"] == "enc:codex-access"
+        assert row["codex_refresh_token"] == "enc:codex-refresh"
+        # The phase-1 gateway token blob is still there too.
+        assert row["auth_token"] == "enc:tok-blob"
+
+    def test_set_bundle_is_atomic_and_reader_round_trips(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1",
+            access_token="enc:acc-1",
+            refresh_token="enc:ref-1",
+            account_id="acct-1",
+            id_token_expires_at="2026-07-18T12:00:00+00:00",
+            last_refresh="2026-07-18T11:00:00+00:00",
+        )
+        bundle = db.get_codex_tokens("prov-1")
+        assert bundle["auth_mode"] == "chatgpt"
+        assert bundle["codex_access_token"] == "enc:acc-1"
+        assert bundle["codex_refresh_token"] == "enc:ref-1"
+        assert bundle["codex_account_id"] == "acct-1"
+        assert bundle["codex_id_token_expires_at"] == "2026-07-18T12:00:00+00:00"
+        assert bundle["codex_last_refresh"] == "2026-07-18T11:00:00+00:00"
+        assert bundle["needs_reauth"] in (False, 0)
+
+    def test_set_bundle_replaces_rotated_tokens_together(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:acc-1", refresh_token="enc:ref-1",
+            account_id="acct-1",
+        )
+        # A refresh rotates BOTH tokens; the new pair must land together.
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:acc-2", refresh_token="enc:ref-2",
+            account_id="acct-1",
+        )
+        bundle = db.get_codex_tokens("prov-1")
+        assert bundle["codex_access_token"] == "enc:acc-2"
+        assert bundle["codex_refresh_token"] == "enc:ref-2"
+
+    def test_set_bundle_can_flag_needs_reauth(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:a", refresh_token="enc:r",
+            account_id="acct-1", needs_reauth=True,
+        )
+        assert db.get_codex_tokens("prov-1")["needs_reauth"] in (True, 1)
+
+    def test_set_bundle_leaves_gateway_auth_token_intact(self, mock_db):
+        _create()
+        db.set_codex_token_bundle(
+            "prov-1", access_token="enc:a", refresh_token="enc:r", account_id="x",
+        )
+        row = db.get_model_provider("prov-1", include_token=True)
+        assert row["auth_token"] == "enc:tok-blob"
+
+    def test_set_bundle_missing_provider_returns_none(self, mock_db):
+        assert db.set_codex_token_bundle(
+            "nope", access_token="enc:a", refresh_token="enc:r", account_id="x",
+        ) is None
+
+    def test_get_codex_tokens_missing_provider_returns_none(self, mock_db):
+        assert db.get_codex_tokens("nope") is None
+
+    def test_provider_without_codex_bundle_has_null_fields(self, mock_db):
+        _create()
+        bundle = db.get_codex_tokens("prov-1")
+        assert bundle["codex_access_token"] is None
+        assert bundle["codex_refresh_token"] is None
+        assert bundle["codex_account_id"] is None
+        # auth_mode is NULL until a Codex bundle is stored (NULL == legacy apikey).
+        assert bundle["auth_mode"] is None

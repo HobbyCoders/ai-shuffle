@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 64
+SCHEMA_VERSION = 65
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1074,6 +1074,18 @@ def create_postgres_schema(cursor) -> None:
     #     is nullable (falls back to default_model / session model in the
     #     env overlay).
     # ------------------------------------------------------------------
+    #     v65 (2026-07-18) adds the Codex/ChatGPT-subscription OAuth credential
+    #     columns to this SAME single-credential row (one account per provider,
+    #     per plan amendment A1 — no separate pool table): ``auth_mode``
+    #     ('apikey' | 'chatgpt'; NULL == legacy 'apikey'), the encrypted
+    #     write-only ``codex_access_token`` / ``codex_refresh_token`` blobs
+    #     (``enc:``-prefixed Fernet, never exposed on public reads — same
+    #     treatment as ``auth_token``), ``codex_account_id`` (from the
+    #     ``chatgpt_account_id`` id_token claim), the ``codex_id_token_expires_at``
+    #     / ``codex_last_refresh`` timestamps (same TZ convention as
+    #     created_at/updated_at), and ``needs_reauth`` (permanent-refresh-failure
+    #     flag). All nullable/defaulted so the fresh CREATE and the additive
+    #     _run_column_migrations bootstrap agree.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS model_providers (
             id TEXT PRIMARY KEY,
@@ -1088,6 +1100,13 @@ def create_postgres_schema(cursor) -> None:
             context_window INTEGER,
             max_output_tokens INTEGER,
             enabled BOOLEAN DEFAULT TRUE,
+            auth_mode TEXT,
+            codex_access_token TEXT,
+            codex_refresh_token TEXT,
+            codex_account_id TEXT,
+            codex_id_token_expires_at TIMESTAMP WITH TIME ZONE,
+            codex_last_refresh TIMESTAMP WITH TIME ZONE,
+            needs_reauth BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

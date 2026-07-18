@@ -152,6 +152,65 @@ class TestListAndGet:
         assert "auth_token" not in provider
 
 
+class TestCodexOAuthReadSurface:
+    """GET exposes the Codex ``auth_mode`` / ``codex_account_id`` /
+    ``needs_reauth`` fields and the ``codex_*_token_set`` flags, but NEVER the
+    encrypted token blobs (parity with the auth_token contract)."""
+
+    def _create_with_codex_bundle(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "Codex",
+            "provider_type": "custom",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "auth_token": RAW_TOKEN,
+        })
+        assert resp.status_code == 200, resp.text
+        provider_id = resp.json()["id"]
+        # Store an encrypted Codex bundle at the DB layer (no public write path).
+        from app.db import database as db
+        db.set_codex_token_bundle(
+            provider_id,
+            access_token=encryption.encrypt_value("codex-access-secret"),
+            refresh_token=encryption.encrypt_value("codex-refresh-secret"),
+            account_id="acct-xyz",
+        )
+        return provider_id
+
+    def test_get_exposes_flags_not_blobs(self, authenticated_client, mock_db):
+        self._create_with_codex_bundle(authenticated_client, mock_db)
+        resp = authenticated_client.get(ROOT)
+        assert resp.status_code == 200
+        # No blob or plaintext ever appears in the response.
+        assert "codex-access-secret" not in resp.text
+        assert "codex-refresh-secret" not in resp.text
+        provider = resp.json()["providers"][0]
+        assert "codex_access_token" not in provider
+        assert "codex_refresh_token" not in provider
+        # Flags + non-secret fields present.
+        assert provider["codex_access_token_set"] is True
+        assert provider["codex_refresh_token_set"] is True
+        assert provider["auth_mode"] == "chatgpt"
+        assert provider["codex_account_id"] == "acct-xyz"
+        assert provider["needs_reauth"] is False
+
+    def test_provider_without_codex_bundle_reports_false_flags(
+        self, authenticated_client, mock_db
+    ):
+        _unlock_encryption(mock_db)
+        authenticated_client.post(ROOT, json={
+            "name": "Plain",
+            "provider_type": "openrouter",
+            "base_url": "https://openrouter.ai/api",
+        })
+        provider = authenticated_client.get(ROOT).json()["providers"][0]
+        assert provider["codex_access_token_set"] is False
+        assert provider["codex_refresh_token_set"] is False
+        assert provider["auth_mode"] is None
+        assert provider["codex_account_id"] is None
+        assert provider["needs_reauth"] is False
+
+
 class TestUpdate:
     def _create(self, authenticated_client, mock_db, **overrides):
         _unlock_encryption(mock_db)
