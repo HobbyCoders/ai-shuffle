@@ -54,7 +54,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from typing import Any, Dict, List, Optional, Set
 
 from app.db import turns as turns_db
@@ -82,20 +81,24 @@ _USER_SOURCES = ("user", "queue")
 # mid-flight (asyncio keeps only weak refs to tasks).
 _kick_tasks: Set[asyncio.Task] = set()
 
-# B-prime (bug 2): the quiet window a running sub-agent (owner) must stay SILENT
-# on the main session's drained stream after a child step goes terminal before
-# the app pumps that step. A still-running owner keeps emitting inner messages
-# (the CLI steers the child result to it for free, per #684), so activity inside
-# the window means "still running → suppress"; silence means "at rest → pump".
-# Module-level so tests can monkeypatch it small.
-PUMP_QUIET_WINDOW_SECONDS = 20.0
+# Content-empty guard (#690): the fields that carry a terminal task frame's
+# renderable content. A frame with NONE of them populated has nothing to render
+# in a ``<task-notification>`` and must never be enqueued as a parent-visible
+# wake (the reference harness never emits empty notifications). ``task_id`` /
+# ``tool_use_id`` are identity — a bare TaskUpdated frame carrying only those
+# still identifies WHICH background unit came to rest (and is later upgraded by
+# its rich frame, #688 A-2), so it counts as renderable; a frame with not even
+# an id is dropped at the single ``on_task_terminal`` choke point.
+_FRAME_CONTENT_FIELDS = ("task_id", "tool_use_id", "summary", "output_file")
 
-# B-prime deferred-pump stash, per session then per OWNER task_id:
-#   {"frames": {child_task_id: frame}, "latest_ts": <monotonic>, "task": <Task>}
-# ``frames`` coalesces multiple children of one owner into a single pump; a new
-# stash re-arms (debounce-extends) the per-owner deferred timer. Cleared per
-# session/all via the registry's pump-cleanup callback (see ``install``).
-_pending_pump: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+def _frame_has_renderable_content(frame: Dict[str, Any]) -> bool:
+    """True iff ``frame`` carries any renderable content (identity or result).
+
+    False only for a wholly-empty frame (no ``task_id``/``tool_use_id``/
+    ``summary``/``output_file``) — the caller drops those with a DEBUG log
+    instead of enqueueing a contentless notification turn."""
+    return any(frame.get(f) for f in _FRAME_CONTENT_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -427,24 +430,6 @@ def _queued_unpark_turn(session_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _queued_pump_turn_with_task(
-    session_id: str, task_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    """A still-``queued`` ``source=unpark_pump`` wake whose ``payload.task_ids``
-    already contains ``task_id`` (pump dedup, ruling R4). Pump wakes are NEVER
-    merged — this is only a cheap idempotent safety net against a double-delivered
-    frame. ``None`` (never dedup) for a missing ``task_id``."""
-    if not task_id:
-        return None
-    for turn in turns_db.get_queued_turns(session_id):
-        if turn.get("source") != "unpark_pump":
-            continue
-        payload = turn.get("payload") or {}
-        if task_id in (payload.get("task_ids") or []):
-            return turn
-    return None
-
-
 def _session_has_parked_turn(session_id: str) -> bool:
     """True iff the session currently has a ``parked`` turn.
 
@@ -518,12 +503,10 @@ async def _enqueue_context_wake(
     task_ids: List[str],
     prompt: str,
 ) -> Dict[str, Any]:
-    """Enqueue a fresh context-carrying wake turn (shared by the own and pump
-    lanes' fall-through enqueue). Reads the session's latest context turn for
+    """Enqueue a fresh context-carrying wake turn for the OWN lane's fall-through
+    enqueue. Reads the session's latest context turn for
     profile/project/worktree/parent linkage, attaches the ``frames`` and their
-    ``task_ids`` to the payload, and returns the enqueued turn. The own and
-    immediate-pump lanes pass a single-element list; the deferred pump passes the
-    owner's coalesced children."""
+    ``task_ids`` to the payload, and returns the enqueued turn."""
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
     payload["pending_frames"] = list(frames)
@@ -539,152 +522,6 @@ async def _enqueue_context_wake(
         payload=payload,
         parent_turn_id=context.get("id"),
     )
-
-
-# ---------------------------------------------------------------------------
-# B-prime — deferred (owner-quiescence) pump for child steps
-# ---------------------------------------------------------------------------
-
-def _stash_pump_child(
-    session_id: str, owner_task_id: str, child_task_id: str, frame: Dict[str, Any]
-) -> None:
-    """Stash a child terminal frame under its owner and (re)arm the per-owner
-    deferred-pump timer (debounce-extend on each new stash). Coalesces multiple
-    children of the same owner into one pending pump. Runs on the event loop
-    (``on_task_terminal`` is async), so ``asyncio.create_task`` is safe."""
-    owners = _pending_pump.setdefault(session_id, {})
-    entry = owners.get(owner_task_id)
-    if entry is None:
-        entry = {"frames": {}, "latest_ts": 0.0, "task": None}
-        owners[owner_task_id] = entry
-    entry["frames"][child_task_id] = frame
-    entry["latest_ts"] = time.monotonic()
-    prior = entry.get("task")
-    if prior is not None and not prior.done():
-        prior.cancel()
-    entry["task"] = asyncio.create_task(
-        _pump_after_quiet(session_id, owner_task_id)
-    )
-
-
-async def _pump_after_quiet(session_id: str, owner_task_id: str) -> None:
-    """Sleep the quiet window, then decide the deferred pump. Re-arming cancels
-    this task (a fresh sleep starts). Fully guarded — a timer failure must never
-    propagate (item f)."""
-    try:
-        await asyncio.sleep(PUMP_QUIET_WINDOW_SECONDS)
-        await _fire_deferred_pump(session_id, owner_task_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001 — a timer failure must never kill anything.
-        logger.warning(
-            "turn_scheduler: deferred pump timer failed for %s owner %s",
-            session_id, owner_task_id, exc_info=True,
-        )
-
-
-def _drop_pending_pump(session_id: str, owner_task_id: str) -> Optional[Dict[str, Any]]:
-    """Pop and return the pending-pump entry for an owner (pruning empty maps)."""
-    owners = _pending_pump.get(session_id)
-    if not owners:
-        return None
-    entry = owners.pop(owner_task_id, None)
-    if not owners:
-        _pending_pump.pop(session_id, None)
-    return entry
-
-
-async def _fire_deferred_pump(session_id: str, owner_task_id: str) -> None:
-    """At the quiet-window deadline: if the owner emitted inner activity AFTER the
-    latest stashed child terminal it is still running → drop the stash
-    (decision=suppress-consumed). Otherwise the owner is at rest → enqueue ONE
-    pump over the stashed frames, guarded per child by ``mark_woken``
-    (decision=quiet-owner-pump)."""
-    entry = _drop_pending_pump(session_id, owner_task_id)
-    if entry is None:
-        return
-    from app.core.task_registry import task_registry
-
-    latest_ts = entry.get("latest_ts") or 0.0
-    owner_tuid = await asyncio.to_thread(
-        task_registry.get_task_tool_use_id, session_id, owner_task_id
-    )
-    last_activity = (
-        task_registry.owner_activity_ts(session_id, owner_tuid)
-        if owner_tuid else None
-    )
-    if last_activity is not None and last_activity > latest_ts:
-        logger.info(
-            "turn_scheduler: deferred pump for %s owner %s — owner active after "
-            "latest child terminal, decision=suppress-consumed",
-            session_id, owner_task_id,
-        )
-        return
-
-    # Owner at rest → pump the stashed children. Guard each with mark_woken so a
-    # child already woken (e.g. a duplicate frame that already pumped) is skipped.
-    frames: List[Dict[str, Any]] = []
-    task_ids: List[str] = []
-    for child_task_id, child_frame in entry.get("frames", {}).items():
-        if task_registry.mark_woken(session_id, child_task_id):
-            frames.append(child_frame)
-            task_ids.append(child_task_id)
-    if not frames:
-        logger.info(
-            "turn_scheduler: deferred pump for %s owner %s — all stashed children "
-            "already woken, decision=quiet-owner-pump-noop",
-            session_id, owner_task_id,
-        )
-        return
-    prompt = await asyncio.to_thread(
-        _build_task_notification_prompt, frames, "pump"
-    )
-    turn = await _enqueue_context_wake(
-        session_id, "unpark_pump", frames, task_ids, prompt
-    )
-    logger.info(
-        "turn_scheduler: deferred pump for %s owner %s — %d child step(s) at rest, "
-        "pump wake turn %s, decision=quiet-owner-pump",
-        session_id, owner_task_id, len(frames), turn["id"],
-    )
-    kick(session_id)
-
-
-def _cancel_pending_pump(session_id: str, owner_task_id: str) -> None:
-    """Cancel and drop a deferred pump for an owner (its own terminal supersedes
-    the child steps — item e). No-op when nothing is pending."""
-    entry = _drop_pending_pump(session_id, owner_task_id)
-    if entry is None:
-        return
-    task = entry.get("task")
-    if task is not None and not task.done():
-        task.cancel()
-    logger.info(
-        "turn_scheduler: deferred pump for %s owner %s superseded by its own "
-        "terminal, decision=superseded-by-own",
-        session_id, owner_task_id,
-    )
-
-
-def _clear_pending_pump(session_id: Optional[str]) -> None:
-    """Registry pump-cleanup callback (item f): cancel a session's (or ALL, when
-    ``session_id`` is ``None``) deferred-pump timers and drop the stash."""
-    if session_id is None:
-        buckets = list(_pending_pump.values())
-        _pending_pump.clear()
-        for owners in buckets:
-            for entry in owners.values():
-                task = entry.get("task")
-                if task is not None and not task.done():
-                    task.cancel()
-        return
-    owners = _pending_pump.pop(session_id, None)
-    if not owners:
-        return
-    for entry in owners.values():
-        task = entry.get("task")
-        if task is not None and not task.done():
-            task.cancel()
 
 
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
@@ -706,31 +543,40 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
 
     Kicks after a merge/enqueue (never after the (a) no-op).
 
-    Three lanes, by ownership (subagent task-notification leak):
+    Two lanes, by ownership (#690 retired the PUMP lane — see below):
 
     * OWN — ``is_own_background_task`` true: the parent's own background work came
-      to rest. EXISTING behavior verbatim (rich ``source=unpark`` wake, merge +
-      idempotency branches below).
-    * PUMP — not own, but ``has_active_background_agent`` true: one internal step
-      of a still-running background sub-agent. ONE quiet ``source=unpark_pump``
-      wake per completion, NEVER merged/batched (the model must react to each step
-      individually while the others run), with only a dedup safety net (R4). The
-      main-session pump is the ONLY resume path for a parked sub-agent (2026-07-10
-      strand repair), and a grandchild is by construction launched WHILE its
-      sub-agent runs — so the active-agent signal is the admission gate.
-    * else — fully at rest with NO owner (orphan grandchild / synchronous
-      sub-agent coming to rest): suppress (the "nothing to act on" leak)."""
+      to rest. Rich ``source=unpark`` wake, with the #688 merge + idempotency
+      branches below.
+    * else — NOT the parent's own background work (a child/grandchild step of a
+      still-running sub-agent, an orphan, or a synchronous sub-agent at rest):
+      SUPPRESS. #690 deleted the per-child immediate/deferred PUMP lane that used
+      to enqueue a ``source=unpark_pump`` turn here: a child completion while its
+      owner is alive produced one parent-visible wake per child (the "3 shells →
+      3 wakes" storm) and, for shells with no tool_use_id, fired blindly. The
+      parent now hears about delegated work ONLY via its owner task's OWN-lane
+      terminal (the reference-harness contract: a background child notifies only
+      its owning agent; the CLI resumes a parked owner natively). A silent turn
+      is valid.
+
+    A wholly-contentless frame (no ``task_id``/``tool_use_id``/``summary``/
+    ``output_file``) is dropped at the choke point below with a DEBUG log — an
+    empty notification is never enqueued (#690)."""
     try:
         task_id = frame.get("task_id")
+        # Content-empty guard (#690): the single enqueue choke point. A frame that
+        # carries nothing renderable can only produce an empty <task-notification>
+        # turn — drop it (DEBUG) before any lane decides to enqueue.
+        if not _frame_has_renderable_content(frame):
+            logger.debug(
+                "turn_scheduler: dropping contentless task frame for %s (frame=%r)",
+                session_id, frame,
+            )
+            return
         from app.core.task_registry import task_registry
 
         if task_registry.is_own_background_task(session_id, task_id):
             # ── OWN lane — rich consolidated source=unpark wake ──
-            # B-prime item e: this own background agent is a potential pump OWNER.
-            # Its own terminal (completed→CLI wake, or killed/failed→app wake) has
-            # come to rest, so any deferred pump waiting on ITS quiescence is
-            # superseded by this rich notification — cancel it and drop the stash.
-            _cancel_pending_pump(session_id, task_id)
             # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a
             # top-level backgrounded agent resting while the parent is parked),
             # the CLI already injects the rich <task-notification> follow-up turn;
@@ -851,98 +697,15 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
             kick(session_id)
             return
 
-        if task_registry.has_active_background_agent(session_id):
-            # ── PUMP lane — one quiet source=unpark_pump wake per step ──
-            # A pump-lane terminal task may itself be a NESTED owner with a stashed
-            # deferred pump; its terminal supersedes its children's stash exactly
-            # like the OWN-lane item-e cancel.
-            if task_id:
-                _cancel_pending_pump(session_id, task_id)
-            # B-prime (bug 2): a CHILD step of a still-running sub-agent must not
-            # pump blindly — while the owner is running the CLI already steers the
-            # child result to it for free (#684). Resolve the child's OWNER; if it
-            # is resolvable, DEFER the pump against the owner's quiescence (fire
-            # only if the owner falls silent for PUMP_QUIET_WINDOW_SECONDS). An
-            # UNRESOLVABLE child (no linkage / no record) keeps today's
-            # immediate-fire behavior — never suppress blind (strand guard).
-            owner_task_id = task_registry.owner_task_for_child(session_id, task_id)
-            if owner_task_id is not None:
-                _stash_pump_child(session_id, owner_task_id, task_id, frame)
-                logger.info(
-                    "turn_scheduler: pump for %s — child %s under running owner "
-                    "%s, deferring pump (quiet-window arm)",
-                    session_id, task_id, owner_task_id,
-                )
-                return
-            # Dedup (R4): a double-delivered frame for a task already carried by a
-            # queued pump wake is a complete no-op (skip, never merge).
-            dupe = await asyncio.to_thread(
-                _queued_pump_turn_with_task, session_id, task_id
-            )
-            if dupe is not None:
-                # A-2: upgrade the queued pump frame in place if this one is richer
-                # (bare TaskUpdated followed by the rich TaskNotification).
-                dupe_payload = dict(dupe.get("payload") or {})
-                dupe_pending = list(dupe_payload.get("pending_frames") or [])
-                stored_idx = next(
-                    (i for i, f in enumerate(dupe_pending)
-                     if f.get("task_id") == task_id),
-                    None,
-                )
-                if stored_idx is not None and _frame_is_richer(
-                    frame, dupe_pending[stored_idx]
-                ):
-                    dupe_pending[stored_idx] = frame
-                    dupe_payload["pending_frames"] = dupe_pending
-                    prompt = await asyncio.to_thread(
-                        _build_task_notification_prompt, dupe_pending, "pump"
-                    )
-                    updated = await asyncio.to_thread(
-                        turns_db.update_queued_turn_prompt,
-                        dupe["id"], prompt, dupe_payload,
-                    )
-                    if updated is not None:
-                        logger.info(
-                            "turn_scheduler: pump for %s — task %s rich frame "
-                            "upgraded pump wake turn %s in place",
-                            session_id, task_id, updated["id"],
-                        )
-                        kick(session_id)
-                        return
-                logger.info(
-                    "turn_scheduler: pump for %s — task %s already in pump wake "
-                    "turn %s, no-op", session_id, task_id, dupe.get("id"),
-                )
-                return
-            # A-3 latch (pre-enqueue): mark this task woke BEFORE building the
-            # pump wake so a late/duplicate frame — whose wake already left the
-            # queue — can't re-enqueue an empty pump. Mirrors the OWN lane's (c)
-            # guard. Guarded on a truthy task_id (a task_id-less frame never
-            # latches).
-            if task_id and not task_registry.mark_woken(session_id, task_id):
-                logger.info(
-                    "turn_scheduler: pump for %s — task %s late frame; pump wake "
-                    "already produced, no re-enqueue", session_id, task_id,
-                )
-                return
-            prompt = await asyncio.to_thread(
-                _build_task_notification_prompt, [frame], "pump"
-            )
-            turn = await _enqueue_context_wake(
-                session_id, "unpark_pump", [frame], [task_id] if task_id else [],
-                prompt,
-            )
-            logger.info(
-                "turn_scheduler: pump wake for %s — task %s terminal (%s), "
-                "wake turn %s", session_id, task_id, frame.get("status"), turn["id"],
-            )
-            kick(session_id)
-            return
-
-        # ── else — no owner, no active agent → suppress ──
+        # ── else — NOT the parent's own background work → suppress (#690) ──
+        # A child/grandchild step of a still-running sub-agent, an orphan, or a
+        # synchronous sub-agent at rest. The retired PUMP lane used to enqueue a
+        # source=unpark_pump turn here; that produced the parent-visible
+        # notification storm and, for tool_use_id-less shells, fired blindly. The
+        # parent hears about this work only via its owner task's OWN-lane terminal.
         logger.info(
             "turn_scheduler: unpark-decision suppressed for %s — task %s "
-            "not the parent's background work and no active background agent",
+            "not the parent's background work (pump lane retired, #690)",
             session_id, task_id,
         )
     except Exception:  # noqa: BLE001 — a wake failure must never kill the reader.
@@ -959,13 +722,9 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
 def install() -> None:
     """Wire the scheduler into the three seams. Called once at boot (A6)."""
     from app.core import idle_reader, session_runtime, turn_manager
-    from app.core.task_registry import task_registry
     session_runtime.register_scheduler(on_turn_settled)
     idle_reader.register_on_task_terminal(on_task_terminal)
     turn_manager.register_kick(kick)
-    # B-prime item f: let the registry cancel our deferred-pump timers when a
-    # session is cleared / the registry is reset.
-    task_registry.set_pump_cleanup_callback(_clear_pending_pump)
     logger.info("turn_scheduler installed (settlement policies active)")
 
 
