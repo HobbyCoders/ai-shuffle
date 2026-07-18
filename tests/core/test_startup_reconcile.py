@@ -255,8 +255,11 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 65 for the model_providers Codex/ChatGPT-subscription OAuth
-    # columns (auth_mode + encrypted codex_access_token/codex_refresh_token +
+    # Bumped to 66 for the per-session provider binding (nullable
+    # sessions.provider_id TEXT — multi-provider phase-2 Chunk E / ruling G2-r;
+    # one column only, one account per provider). v65 added the model_providers
+    # Codex/ChatGPT-subscription OAuth columns (auth_mode + encrypted
+    # codex_access_token/codex_refresh_token +
     # codex_account_id/codex_id_token_expires_at/codex_last_refresh +
     # needs_reauth), stored 1:1 on the provider row (plan amendment A1). v64
     # added the model_providers table (admin-configured non-Anthropic model
@@ -268,8 +271,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 65
-    assert pg_version == 65
+    assert db_version == 66
+    assert pg_version == 66
     assert db_version == pg_version
 
 

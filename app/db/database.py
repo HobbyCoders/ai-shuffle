@@ -130,7 +130,15 @@ def _safe_json(value):
 #     table): auth_mode, encrypted write-only codex_access_token /
 #     codex_refresh_token, codex_account_id, codex_id_token_expires_at,
 #     codex_last_refresh, needs_reauth. All additive/nullable.
-SCHEMA_VERSION = 65
+# 66 (2026-07-18): add sessions.provider_id TEXT — per-session provider
+#     binding (multi-provider phase-2 Chunk E, ruling G2-r). Stamped at session
+#     creation from the profile's configured provider; every subsequent
+#     turn/spawn resolves the provider from THIS binding, not the live profile
+#     (editing a profile never reroutes an existing session). NULL = native
+#     Claude (gateway bypass, F1) — existing pre-migration sessions stay native.
+#     One nullable column only (one account per provider, amendment A1 — no
+#     provider_account_id). Additive/nullable, no index.
+SCHEMA_VERSION = 66
 
 
 def _run_column_migrations(cursor):
@@ -1273,6 +1281,16 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "context_usage_json"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_usage_json JSONB")
         migrations_applied.append("sessions.context_usage_json")
+
+    # Per-session provider binding (v66, multi-provider phase-2 Chunk E / ruling
+    # G2-r). One nullable TEXT column: the model_providers id this session is
+    # bound to, stamped at creation from the profile's configured provider. NULL
+    # = native Claude (gateway bypass). Additive/nullable, no index — same
+    # discipline as cloud_branch / context_usage_json above; guarded so the
+    # ALTER never re-runs.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "provider_id"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
+        migrations_applied.append("sessions.provider_id")
 
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is

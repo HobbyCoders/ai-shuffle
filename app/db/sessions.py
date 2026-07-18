@@ -78,6 +78,7 @@ class SessionRow(TypedDict):
     v2_stream: bool
     working_set_ref: Optional[str]
     context_usage_json: Optional[Dict[str, Any]]
+    provider_id: Optional[str]
 
 
 class SessionSearchResult(TypedDict):
@@ -432,11 +433,26 @@ def create_session(
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
+    # Per-session provider binding (Chunk E / G2-r): resolve the profile's
+    # configured provider ONCE, at creation, and stamp it into
+    # sessions.provider_id. Every subsequent turn/spawn reads THIS binding (see
+    # query_options.build_options_from_profile), so editing the profile later
+    # never reroutes a live session. NULL = native Claude (gateway bypass, F1);
+    # a native profile (no config.provider) and an unresolvable profile both
+    # stay NULL.
+    provider_id = None
+    try:
+        from app.db.profiles import get_profile
+        _profile = get_profile(profile_id)
+        if _profile:
+            provider_id = (_profile.get("config") or {}).get("provider") or None
+    except Exception:  # noqa: BLE001 — binding is best-effort; NULL = native
+        provider_id = None
     _ph = ph()
-    _phs16 = ", ".join([_ph] * 16)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at)
-               VALUES ({_phs16})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now)
+    _phs17 = ", ".join([_ph] * 17)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id)
+               VALUES ({_phs17})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, provider_id)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
