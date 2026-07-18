@@ -940,12 +940,108 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
             or etype.startswith("task_")
             or etype == "system"
         ):
+            # Deliberately narrow (other drain callers depend on it). Log the
+            # dropped type so a silently-unrendered drain event is diagnosable —
+            # the CLI-wake render surface (chunk/tool_use/tool_result) is served
+            # by record_cli_wake_event, NOT by widening this filter.
+            logger.debug(
+                "[TurnRecorder] record_drained_event dropped type=%r for %s",
+                etype, session_id,
+            )
             return
         await _append_unfenced(session_id, _translate_shared(event, session_id))
     except Exception:
         logger.warning(
             "[TurnRecorder] record_drained_event failed for %s", session_id,
             exc_info=True,
+        )
+
+
+async def record_cli_wake_event(
+    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
+) -> int:
+    """Record ONE forwarded CLI-owned wake-turn event to the session log.
+
+    The between-turns CLI wake turn (``idle_reader``) renders assistant TEXT and
+    top-level tool activity that :func:`record_drained_event` deliberately drops
+    (its filter accepts only ``subagent_*``/``task_*``/``system``). This entry
+    point widens the accepted set to the full render surface — ``chunk`` /
+    ``tool_use`` / ``tool_result`` PLUS everything ``record_drained_event``
+    accepts — and stamps the synthesized wake ``turn_id`` so each row ties to the
+    ``turn.started``/``turn.completed`` the reader brackets around the wake.
+
+    Unfenced append (run_id=None): the CLI wake runs between turns under the idle
+    reader's reader token, so no fenced ``TurnRecorder`` can be live for the same
+    session concurrently. Returns the number of contract rows appended (``0`` =
+    filtered out or untranslatable). Never raises.
+    """
+    try:
+        if not isinstance(event, dict):
+            return 0
+        etype = event.get("type") or ""
+        if not (
+            etype in ("chunk", "tool_use", "tool_result")
+            or etype.startswith("subagent_")
+            or etype.startswith("task_")
+            or etype == "system"
+        ):
+            return 0
+        rows = _translate_shared(event, session_id, turn_id=turn_id)
+        await _append_unfenced(session_id, rows)
+        return len(rows)
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] record_cli_wake_event failed for %s", session_id,
+            exc_info=True,
+        )
+        return 0
+
+
+async def record_cli_wake_turn_started(session_id: str, turn_id: str) -> None:
+    """Append a synthetic ``turn.started`` opening a CLI-owned wake turn.
+
+    Brackets the between-turns wake as a first-class turn so the FE reducer flips
+    its streaming indicator (``turn.started`` → ``isStreaming``) and — on the
+    paired ``turn.completed`` — settles any speculative subagent card. ``turn_id``
+    is a synthesized id with NO ``turns``-table row; the scheduler keys its
+    terminal reads by turns-table ids, so a synthetic wake turn is invisible to
+    the parked-turn state machine. Unfenced. Never raises.
+    """
+    try:
+        await _append_unfenced(session_id, [_build_event(
+            contract.TurnStarted, session_id, turn_id=turn_id,
+        )])
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] record_cli_wake_turn_started failed for %s",
+            session_id, exc_info=True,
+        )
+
+
+async def record_cli_wake_turn_completed(
+    session_id: str,
+    turn_id: str,
+    *,
+    usage: Optional[Dict[str, Any]] = None,
+    stop_reason: Optional[str] = None,
+) -> None:
+    """Append a synthetic ``turn.completed`` closing a CLI-owned wake turn.
+
+    Mirrors the fenced recorder's ``done`` terminal shape (``stop_reason`` +
+    ``usage`` summary) so the FE reducer treats the wake like a normal turn:
+    ``isStreaming`` off + ``settleStaleBackgroundWork``. Paired with
+    :func:`record_cli_wake_turn_started` (same ``turn_id``). Unfenced. Never
+    raises.
+    """
+    try:
+        await _append_unfenced(session_id, [_build_event(
+            contract.TurnCompleted, session_id, turn_id=turn_id,
+            stop_reason=stop_reason, usage=usage or {},
+        )])
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] record_cli_wake_turn_completed failed for %s",
+            session_id, exc_info=True,
         )
 
 
