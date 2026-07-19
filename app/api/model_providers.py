@@ -192,6 +192,14 @@ def _encrypt_token_or_400(token: str) -> str:
     return encryption.encrypt_value(token)
 
 
+def _iso(value: Any) -> Optional[str]:
+    """Timestamps arrive as ``str`` from the SQLite shim but ``datetime`` from
+    real Postgres — coerce to an ISO string either way."""
+    if value is None or isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
     return ModelProviderResponse(
@@ -213,8 +221,8 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         needs_reauth=bool(row.get("needs_reauth")),
         codex_access_token_set=bool(row.get("_codex_access_token_set")),
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
+        created_at=_iso(row.get("created_at")),
+        updated_at=_iso(row.get("updated_at")),
     )
 
 
