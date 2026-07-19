@@ -35,8 +35,10 @@ from app.core.translator_gateway.events import (
     NormalizedUsage,
 )
 from app.core.translator_gateway.router import (
+    LegRoute,
     _messages_response_body,
     anthropic_sse_from_events,
+    resolve_leg_model,
 )
 from app.core.translator_gateway.service import build_gateway_app
 
@@ -148,6 +150,127 @@ class TestRouting:
         token = routing.mint_session_token("sess", "prov")
         routing.get_registry().revoke_session("sess")
         assert routing.resolve(token) is None
+
+    # ── Chunk F: optional cross-provider subagent leg on the binding ──────────
+
+    def test_mint_carries_subagent_leg(self):
+        token = routing.mint_session_token(
+            "sess", "main-prov", "main-acct",
+            subagent_provider_id="sub-prov",
+            subagent_account_id="sub-acct",
+            subagent_model="gpt-5-codex",
+        )
+        b = routing.resolve(token)
+        assert b.provider_id == "main-prov"
+        assert b.subagent_provider_id == "sub-prov"
+        assert b.subagent_account_id == "sub-acct"
+        assert b.subagent_model == "gpt-5-codex"
+
+    def test_mint_without_leg_leaves_leg_fields_none(self):
+        token = routing.mint_session_token("sess", "main-prov")
+        b = routing.resolve(token)
+        assert b.subagent_provider_id is None
+        assert b.subagent_account_id is None
+        assert b.subagent_model is None
+
+    def test_remint_same_main_updates_leg_keeps_token(self):
+        """Re-minting the SAME session whose main route is unchanged but whose
+        subagent leg differs keeps the token and refreshes the leg in place."""
+        a = routing.mint_session_token(
+            "sess", "main-prov", "acct",
+            subagent_provider_id="sub-a", subagent_model="model-a",
+        )
+        b = routing.mint_session_token(
+            "sess", "main-prov", "acct",
+            subagent_provider_id="sub-b", subagent_model="model-b",
+        )
+        assert a == b  # same token
+        binding = routing.resolve(b)
+        assert binding.subagent_provider_id == "sub-b"
+        assert binding.subagent_model == "model-b"
+
+    def test_remint_dropping_leg_keeps_token(self):
+        """Removing the leg (same main route) also keeps the token, clearing it."""
+        a = routing.mint_session_token(
+            "sess", "main-prov", "acct",
+            subagent_provider_id="sub-a", subagent_model="model-a",
+        )
+        b = routing.mint_session_token("sess", "main-prov", "acct")
+        assert a == b
+        binding = routing.resolve(b)
+        assert binding.subagent_provider_id is None
+        assert binding.subagent_model is None
+
+    def test_remint_main_provider_change_drops_stale_even_with_leg(self):
+        """A change to the MAIN provider still drops the stale token (regression:
+        the leg-update path must not swallow a genuine main-route change)."""
+        a = routing.mint_session_token(
+            "sess", "prov1", "acct",
+            subagent_provider_id="sub", subagent_model="m",
+        )
+        b = routing.mint_session_token(
+            "sess", "prov2", "acct",
+            subagent_provider_id="sub", subagent_model="m",
+        )
+        assert a != b
+        assert routing.resolve(a) is None
+        assert routing.resolve(b).provider_id == "prov2"
+
+    def test_remint_identical_leg_reuses_token(self):
+        a = routing.mint_session_token(
+            "sess", "main-prov", "acct",
+            subagent_provider_id="sub", subagent_model="m",
+        )
+        b = routing.mint_session_token(
+            "sess", "main-prov", "acct",
+            subagent_provider_id="sub", subagent_model="m",
+        )
+        assert a == b
+
+
+# ─── Chunk F: leg resolution (requested model → served leg) ──────────────────
+
+class TestResolveLegModel:
+    def _binding(self, **kw):
+        return routing.RouteBinding(session_id="s", provider_id="main-prov", **kw)
+
+    def test_subagent_model_match_routes_to_subagent_leg(self):
+        binding = self._binding(
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
+        )
+        leg = resolve_leg_model(binding, "gpt-5-codex")
+        assert leg == LegRoute(provider_id="sub-prov", upstream_model="gpt-5-codex")
+
+    def test_other_model_stays_on_main_leg(self):
+        binding = self._binding(
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
+        )
+        leg = resolve_leg_model(binding, "claude-sonnet-4")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="claude-sonnet-4")
+
+    def test_no_subagent_fields_passthrough(self):
+        binding = self._binding()
+        leg = resolve_leg_model(binding, "any-model")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="any-model")
+
+    def test_subagent_model_set_but_provider_missing_stays_main(self):
+        """A leg needs BOTH fields; subagent_model alone must not reroute."""
+        binding = self._binding(subagent_model="gpt-5-codex")
+        leg = resolve_leg_model(binding, "gpt-5-codex")
+        assert leg.provider_id == "main-prov"
+
+    def test_subagent_provider_set_but_model_missing_stays_main(self):
+        binding = self._binding(subagent_provider_id="sub-prov")
+        leg = resolve_leg_model(binding, "gpt-5-codex")
+        assert leg.provider_id == "main-prov"
+
+    def test_none_requested_model_stays_main(self):
+        binding = self._binding(
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
+        )
+        leg = resolve_leg_model(binding, None)
+        assert leg.provider_id == "main-prov"
+        assert leg.upstream_model is None
 
 
 # ─── spawn-env branch (S3) ───────────────────────────────────────────────────
@@ -421,6 +544,101 @@ class TestEndpoints:
         assert body["content"][0]["type"] == "text"
         assert body["content"][0]["text"] == "Hello world"
         assert body["usage"]["input_tokens"] == 10
+
+
+# ─── Chunk F: leg dispatch through the endpoint (stubbed provider + upstream) ─
+
+class TestLegDispatch:
+    """The subagent model dispatches to the subagent provider; every other model
+    (and count_tokens for it) dispatches to the main provider. Uses a stubbed
+    provider fetch + stubbed upstream so the finite buffered body is safe through
+    ASGITransport."""
+
+    def setup_method(self):
+        routing.get_registry().clear()
+
+    def _stub(self, monkeypatch):
+        loaded: List[str] = []
+        streamed: List[str] = []
+
+        async def _fake_provider(provider_id):
+            loaded.append(provider_id)
+            return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
+
+        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+            streamed.append(provider_id)
+            return _async_source(_canned_text_turn())
+
+        monkeypatch.setattr(
+            "app.core.translator_gateway.router._load_provider", _fake_provider
+        )
+        monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)
+        return loaded, streamed
+
+    async def test_subagent_model_dispatches_to_subagent_provider(self, monkeypatch):
+        loaded, streamed = self._stub(monkeypatch)
+        token = routing.mint_session_token(
+            "sess", "main-prov",
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+        )
+        async with await _client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "gpt-5-codex",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+        assert resp.status_code == 200
+        assert loaded == ["sub-prov"]     # loaded the SUBAGENT leg's provider row
+        assert streamed == ["sub-prov"]   # dispatched to the SUBAGENT provider
+
+    async def test_other_model_dispatches_to_main_provider(self, monkeypatch):
+        loaded, streamed = self._stub(monkeypatch)
+        token = routing.mint_session_token(
+            "sess", "main-prov",
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+        )
+        async with await _client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "claude-sonnet-4",  # not the subagent model → MAIN
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+        assert resp.status_code == 200
+        assert loaded == ["main-prov"]
+        assert streamed == ["main-prov"]
+
+    async def test_count_tokens_honors_subagent_leg(self, monkeypatch):
+        loaded, _ = self._stub(monkeypatch)
+        token = routing.mint_session_token(
+            "sess", "main-prov",
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+        )
+        async with await _client() as c:
+            sub = await c.post(
+                "/v1/messages/count_tokens",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "gpt-5-codex",
+                      "messages": [{"role": "user", "content": "hello there"}]},
+            )
+            main = await c.post(
+                "/v1/messages/count_tokens",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "claude-sonnet-4",
+                      "messages": [{"role": "user", "content": "hello there"}]},
+            )
+        assert sub.status_code == 200 and main.status_code == 200
+        assert sub.json()["input_tokens"] > 0
+        # count_tokens for the subagent model loaded the subagent provider, and
+        # for the main model loaded the main provider.
+        assert loaded == ["sub-prov", "main-prov"]
 
 
 # ─── live integration (gated; real Codex backend; ruling R3 combined resend) ─

@@ -31,11 +31,22 @@ class RouteBinding:
     ``provider_account_id`` is optional context (the Codex ``chatgpt-account-id``
     when known at mint time); the gateway re-reads authoritative credentials from
     the provider row at request time regardless.
+
+    Chunk F (ruling A2/G2-r): a session may optionally name a cross-provider
+    SUBAGENT leg — a *second* provider that serves requests for one specific
+    upstream model (``subagent_model``). The leg is derived from profile config
+    at spawn time and lives ONLY here (never persisted on the session row). When
+    ``subagent_model`` + ``subagent_provider_id`` are set, a gateway request for
+    that exact model routes to ``subagent_provider_id``; every other request
+    stays on the main ``provider_id``.
     """
 
     session_id: Optional[str]
     provider_id: str
     provider_account_id: Optional[str] = None
+    subagent_provider_id: Optional[str] = None
+    subagent_account_id: Optional[str] = None
+    subagent_model: Optional[str] = None
 
 
 class SessionTokenRegistry:
@@ -56,12 +67,25 @@ class SessionTokenRegistry:
         session_id: Optional[str],
         provider_id: str,
         provider_account_id: Optional[str] = None,
+        *,
+        subagent_provider_id: Optional[str] = None,
+        subagent_account_id: Optional[str] = None,
+        subagent_model: Optional[str] = None,
     ) -> str:
-        """Mint (or reuse) an opaque routing token bound to ``provider_id``."""
+        """Mint (or reuse) an opaque routing token bound to ``provider_id``.
+
+        Chunk F: re-minting for the SAME session whose MAIN route (provider +
+        account) is unchanged but whose subagent leg differs keeps the same
+        token and refreshes the stored binding's leg fields in place. A change
+        to the main provider/account still drops the stale token (as before).
+        """
         binding = RouteBinding(
             session_id=session_id or None,
             provider_id=provider_id,
             provider_account_id=provider_account_id,
+            subagent_provider_id=subagent_provider_id,
+            subagent_account_id=subagent_account_id,
+            subagent_model=subagent_model,
         )
         with self._lock:
             if binding.session_id is not None:
@@ -70,8 +94,17 @@ class SessionTokenRegistry:
                     prior = self._by_token.get(existing)
                     if prior == binding:
                         return existing
-                    # Provider/account for this session changed — drop the stale
-                    # token so it can no longer route.
+                    if (
+                        prior is not None
+                        and prior.provider_id == binding.provider_id
+                        and prior.provider_account_id == binding.provider_account_id
+                    ):
+                        # Same main route; only the subagent leg changed (Chunk
+                        # F). Keep the token, refresh the leg fields in place.
+                        self._by_token[existing] = binding
+                        return existing
+                    # Main provider/account for this session changed — drop the
+                    # stale token so it can no longer route.
                     self._by_token.pop(existing, None)
             token = secrets.token_urlsafe(32)
             self._by_token[token] = binding
@@ -114,8 +147,19 @@ def mint_session_token(
     session_id: Optional[str],
     provider_id: str,
     provider_account_id: Optional[str] = None,
+    *,
+    subagent_provider_id: Optional[str] = None,
+    subagent_account_id: Optional[str] = None,
+    subagent_model: Optional[str] = None,
 ) -> str:
-    return _REGISTRY.mint_session_token(session_id, provider_id, provider_account_id)
+    return _REGISTRY.mint_session_token(
+        session_id,
+        provider_id,
+        provider_account_id,
+        subagent_provider_id=subagent_provider_id,
+        subagent_account_id=subagent_account_id,
+        subagent_model=subagent_model,
+    )
 
 
 def resolve(token: Optional[str]) -> Optional[RouteBinding]:

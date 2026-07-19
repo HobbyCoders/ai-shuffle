@@ -14,6 +14,7 @@ Covers:
   profile config.
 """
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -215,6 +216,158 @@ class TestApplyProviderEnv:
         engines' existing (WorktreeUnavailableError, ValueError) guards surface
         it as a user-visible error."""
         assert issubclass(ProviderConfigError, ValueError)
+
+    # ── Chunk F: cross-provider subagent leg (ruling A2/G2-r) ────────────────
+
+    def test_subagent_leg_overrides_only_subagent_model_key(self, mock_db):
+        """A leg overrides CLAUDE_CODE_SUBAGENT_MODEL to the leg model, but
+        ANTHROPIC_SMALL_FAST_MODEL keeps the MAIN provider's chain (small/fast
+        probes stay on the main leg)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", small_fast_model="op/small")
+        env = apply_provider_env(
+            {}, "op", "op/main",
+            subagent_provider_id="sub", subagent_model="sub/model",
+        )
+        assert env[SMALL_FAST_KEY] == "op/small"   # main chain unchanged
+        assert env[SUBAGENT_KEY] == "sub/model"    # overridden to the leg model
+
+    def test_no_subagent_leg_keeps_subagent_key_on_main_chain(self, mock_db):
+        """Regression: without a leg, CLAUDE_CODE_SUBAGENT_MODEL follows the main
+        small/fast chain (byte-identical to pre-Chunk-F)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", small_fast_model="op/small")
+        env = apply_provider_env({}, "op", "op/main")
+        assert env[SMALL_FAST_KEY] == "op/small"
+        assert env[SUBAGENT_KEY] == "op/small"
+
+    def test_leg_absent_env_identical_with_explicit_none(self, mock_db):
+        """Passing the leg kwargs as None yields the SAME env as omitting them —
+        the leg is inert unless both fields are set."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", small_fast_model="op/small")
+        env_omit = apply_provider_env({}, "op", "op/main")
+        env_none = apply_provider_env(
+            {}, "op", "op/main",
+            subagent_provider_id=None, subagent_model=None,
+        )
+        assert env_omit == env_none
+
+    def test_partial_leg_is_inert(self, mock_db):
+        """Only ONE leg field set (not both) leaves the subagent key on the main
+        chain — mirrors the gateway's both-fields-required rule."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", small_fast_model="op/small")
+        env = apply_provider_env(
+            {}, "op", "op/main", subagent_provider_id="sub", subagent_model=None
+        )
+        assert env[SUBAGENT_KEY] == "op/small"  # no override
+
+    def test_chatgpt_main_with_leg_mints_token_and_resolves_account(self, mock_db):
+        """A translated (chatgpt) main + chatgpt subagent leg: the minted routing
+        token carries the leg, and the leg's codex account id is resolved."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "sub/model", "label": "Sub"}],
+        )
+        db.set_codex_token_bundle(
+            "sub", access_token=None, refresh_token=None, account_id="acct-sub"
+        )
+        env = apply_provider_env(
+            {}, "gw", "gpt-5-codex", session_id="sess-leg",
+            subagent_provider_id="sub", subagent_model="sub/model",
+        )
+        binding = routing.resolve(env[AUTH_TOKEN_KEY])
+        assert binding is not None
+        assert binding.provider_id == "gw"
+        assert binding.subagent_provider_id == "sub"
+        assert binding.subagent_model == "sub/model"
+        assert binding.subagent_account_id == "acct-sub"
+        # small/fast falls back to the main provider's first curated model; the
+        # subagent key is overridden to the leg model.
+        assert env[SMALL_FAST_KEY] == "gpt-5-codex"
+        assert env[SUBAGENT_KEY] == "sub/model"
+
+
+# ---------------------------------------------------------------------------
+# query_options: subagent leg resolution (config-only) + A2 legality
+# ---------------------------------------------------------------------------
+
+class TestQueryOptionsSubagentLeg:
+    def test_native_session_drops_leg_and_logs_error(self, mock_db, tmp_path, caplog):
+        """A2: a native (no-provider) main cannot host a cross-provider subagent.
+        The leg is DROPPED with a logged error (never raised), env stays native."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "opus", "cwd": str(tmp_path),
+                "subagent_provider": "sub", "subagent_model": "sub/model",
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m, \
+                caplog.at_level(logging.ERROR):
+            env = _build_options(profile).env
+        m.assert_not_called()               # native path → no gateway overlay
+        assert env[DISABLE_1M_KEY] == "1"   # native window guard still applied
+        assert any("subagent" in r.getMessage().lower() for r in caplog.records)
+
+    def test_same_provider_leg_inherits(self, mock_db, tmp_path):
+        """A subagent provider equal to the main provider is redundant (the
+        small/fast chain already routes subagents there) → treated as inherit."""
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
+                "subagent_provider": "op", "subagent_model": "op/model",
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            _build_options(profile)
+        assert m.call_args.kwargs["subagent_provider_id"] is None
+        assert m.call_args.kwargs["subagent_model"] is None
+
+    def test_cross_provider_leg_threaded_into_overlay(self, mock_db, tmp_path):
+        """A legal cross-provider leg (provider main + different subagent provider)
+        is threaded into apply_provider_env."""
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
+                "subagent_provider": "sub", "subagent_model": "sub/model",
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            _build_options(profile)
+        assert m.call_args.kwargs["subagent_provider_id"] == "sub"
+        assert m.call_args.kwargs["subagent_model"] == "sub/model"
+
+    def test_no_leg_threads_none(self, mock_db, tmp_path):
+        """Regression: a provider profile with no subagent leg threads None/None."""
+        profile = {
+            "id": "t",
+            "config": {"model": "op/main", "provider": "op", "cwd": str(tmp_path)},
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            _build_options(profile)
+        assert m.call_args.kwargs["subagent_provider_id"] is None
+        assert m.call_args.kwargs["subagent_model"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -569,6 +569,36 @@ def build_options_from_profile(
         provider_id = overrides.get("provider") or _binding_row.get("provider_id")
     else:
         provider_id = overrides.get("provider") or config.get("provider")
+
+    # Chunk F (ruling A2 / G2-r): an optional cross-provider SUBAGENT leg. It is
+    # derived from the PROFILE config ONLY (no per-query override in v1 — a
+    # deliberate scope decision); the session never stores it (G2-r). Null/absent
+    # inherits today's single-leg behavior exactly.
+    subagent_provider = config.get("subagent_provider")
+    subagent_model = config.get("subagent_model")
+    if subagent_provider:
+        if not provider_id:
+            # A2 legality: a cross-provider subagent leg requires the MAIN leg to
+            # be gateway-routed. A native (Claude-subscription) session cannot
+            # host cross-provider subagents (F1). Drop the leg and continue
+            # native rather than raise.
+            logger.error(
+                "Dropping cross-provider subagent leg for a native session: "
+                "profile names subagent provider %r but the session has no "
+                "gateway provider. A native Claude-subscription main cannot mix "
+                "providers; put the main model on a provider (e.g. a Claude "
+                "API-key provider) to use a cross-provider subagent.",
+                subagent_provider,
+            )
+            subagent_provider = None
+            subagent_model = None
+        elif subagent_provider == provider_id:
+            # Same-provider subagent: the small_fast chain already routes
+            # subagents to this provider, so no separate leg is needed. Treat as
+            # inherit (skip minting a redundant leg).
+            subagent_provider = None
+            subagent_model = None
+
     betas_to_use = []
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
@@ -682,7 +712,14 @@ def build_options_from_profile(
         # caps). Raises ProviderConfigError (a ValueError) for a missing/disabled
         # provider or an undecryptable token — the query engines convert it into
         # a user-visible error rather than silently running native Anthropic.
-        apply_provider_env(full_env, provider_id, model_to_use, session_id=session_id)
+        apply_provider_env(
+            full_env,
+            provider_id,
+            model_to_use,
+            session_id=session_id,
+            subagent_provider_id=subagent_provider,
+            subagent_model=subagent_model,
+        )
 
     ai_tool_env = full_env if full_env else None
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Request
@@ -68,20 +69,49 @@ def _resolve_binding(request: Request) -> Optional[routing.RouteBinding]:
     return routing.resolve(_bearer_token(request))
 
 
-# ─── Chunk F seam: requested model → upstream leg model ──────────────────────
+# ─── Chunk F seam: requested model → served leg (provider + upstream model) ──
+
+@dataclass(frozen=True)
+class LegRoute:
+    """Which leg serves a gateway request: the provider row to load + the
+    upstream model id to send. For a non-leg session this is just the binding's
+    main provider and the passed-through requested model (today's behavior)."""
+
+    provider_id: str
+    upstream_model: Optional[str]
+
 
 def resolve_leg_model(
     binding: routing.RouteBinding,
     requested_model: Optional[str],
-    provider: Optional[Dict[str, Any]],
-) -> Optional[str]:
-    """Resolve the upstream model id for this request.
+) -> LegRoute:
+    """Decide which leg serves this request (Chunk F, ruling A2).
 
-    Today the requested model IS the upstream id (the CLI was spawned with real
-    upstream ids), so this passes it through. A future per-model leg map (Chunk F)
-    replaces the body of this one function — the endpoints never change.
+    Rule: if the binding names a subagent leg (``subagent_model`` +
+    ``subagent_provider_id``) AND the requested model is EXACTLY that subagent
+    model, the SUBAGENT leg serves it — the request routes to
+    ``subagent_provider_id`` with ``subagent_model`` as the upstream id.
+    Otherwise the MAIN leg serves it: the binding's ``provider_id`` with the
+    requested model passed through unchanged (byte-identical to pre-Chunk-F
+    behavior for every non-leg session).
+
+    Never logs a token; leg-resolution debug logs name provider/model ids only.
     """
-    return requested_model
+    if (
+        binding.subagent_model
+        and binding.subagent_provider_id
+        and requested_model == binding.subagent_model
+    ):
+        logger.debug(
+            "gateway leg: subagent model %s → provider %s",
+            binding.subagent_model,
+            binding.subagent_provider_id,
+        )
+        return LegRoute(
+            provider_id=binding.subagent_provider_id,
+            upstream_model=binding.subagent_model,
+        )
+    return LegRoute(provider_id=binding.provider_id, upstream_model=requested_model)
 
 
 # ─── SSE serialization (module-level generator — testable w/o ASGITransport) ─
@@ -215,7 +245,16 @@ async def create_message(request: Request):
     if not isinstance(body, dict):
         return _anthropic_error(400, "invalid_request_error", "Request body must be an object.")
 
-    provider = await _load_provider(binding.provider_id)
+    stream = bool(body.get("stream"))
+    requested_model = body.get("model")
+
+    # Chunk F: resolve which leg (provider + upstream model) serves this request,
+    # then load THAT leg's provider row and dispatch with the same provider_mode
+    # machinery. For a non-leg session the leg IS the main provider + the
+    # requested model, so every step below is byte-identical to pre-Chunk-F.
+    leg = resolve_leg_model(binding, requested_model)
+
+    provider = await _load_provider(leg.provider_id)
     if not provider:
         return _anthropic_error(
             404, "not_found_error", "The provider for this session no longer exists."
@@ -226,24 +265,20 @@ async def create_message(request: Request):
     except upstream.UpstreamError as exc:
         return _anthropic_error(exc.status_code, _err_type(exc.status_code), exc.message)
 
-    stream = bool(body.get("stream"))
-    requested_model = body.get("model")
-
     # ── Anthropic passthrough (A.7 / G3 / F1): forward VERBATIM, no translation.
     if mode == "anthropic_passthrough":
-        return await _handle_passthrough(binding.provider_id, body, stream)
+        return await _handle_passthrough(leg.provider_id, body, stream)
 
     # ── Codex / OpenAI: translate Anthropic Messages → Responses and back.
-    upstream_model = resolve_leg_model(binding, requested_model, provider)
     responses_body = translate_request(
         body,
         upstream_mode=("openai" if mode == "openai" else "codex"),
-        target_model=upstream_model,
+        target_model=leg.upstream_model,
     )
 
     if stream:
         event_source = upstream.stream_responses_events(
-            provider_id=binding.provider_id, mode=mode, responses_body=responses_body
+            provider_id=leg.provider_id, mode=mode, responses_body=responses_body
         )
         return StreamingResponse(
             anthropic_sse_from_events(event_source, request_model=requested_model),
@@ -254,7 +289,7 @@ async def create_message(request: Request):
     try:
         translator = ResponsesToAnthropicTranslator(request_model=requested_model)
         async for name, payload in upstream.stream_responses_events(
-            provider_id=binding.provider_id, mode=mode, responses_body=responses_body
+            provider_id=leg.provider_id, mode=mode, responses_body=responses_body
         ):
             translator.push(name, payload)
     except upstream.UpstreamError as exc:
@@ -303,4 +338,11 @@ async def count_message_tokens(request: Request):
         return _anthropic_error(400, "invalid_request_error", "Request body is not valid JSON.")
     if not isinstance(body, dict):
         return _anthropic_error(400, "invalid_request_error", "Request body must be an object.")
+
+    # Chunk F: honor the resolved leg here too — a count_tokens for the subagent
+    # model counts against the subagent leg's provider, other models against the
+    # main provider. The count itself is a local estimate (there is no upstream
+    # count-tokens call), so a missing leg provider row is non-fatal.
+    leg = resolve_leg_model(binding, body.get("model"))
+    await _load_provider(leg.provider_id)
     return JSONResponse(content={"input_tokens": count_tokens(body)})

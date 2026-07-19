@@ -558,6 +558,204 @@ class TestUpdateProfileEndpoint:
 
 
 # =============================================================================
+# Subagent Leg Validation Tests (Chunk F, ruling A2)
+# =============================================================================
+
+class TestSubagentLegValidation:
+    """POST/PUT profile validation for the optional cross-provider subagent leg."""
+
+    @pytest.mark.asyncio
+    async def test_create_leg_requires_subagent_model(self):
+        """subagent_provider set without a subagent_model → 400."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op", subagent_provider="sub",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "model" in exc_info.value.detail.lower()
+            mock_db.create_profile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_leg_requires_main_provider(self):
+        """A cross-provider subagent needs the main model on a provider too → 400
+        when config has no provider (native main)."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="opus", subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "provider" in exc_info.value.detail.lower()
+            mock_db.create_profile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_leg_provider_must_exist(self):
+        """A subagent provider that does not exist → 400."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_model_provider.return_value = None  # subagent provider gone
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "does not exist" in exc_info.value.detail.lower()
+
+    @pytest.mark.asyncio
+    async def test_create_leg_provider_must_be_enabled(self):
+        """A disabled subagent provider → 400."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_model_provider.return_value = {
+                "id": "sub", "name": "Sub", "enabled": False,
+            }
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "disabled" in exc_info.value.detail.lower()
+
+    @pytest.mark.asyncio
+    async def test_create_leg_happy_path(self):
+        """A legal cross-provider leg creates the profile."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+
+        now = datetime.now(timezone.utc).isoformat()
+        created = {
+            "id": "p", "name": "P", "description": None,
+            "config": {
+                "model": "op/main", "provider": "op",
+                "subagent_provider": "sub", "subagent_model": "sub/model",
+            },
+            "is_builtin": False, "created_at": now, "updated_at": now,
+        }
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_model_provider.return_value = {
+                "id": "sub", "name": "Sub", "enabled": True,
+            }
+            mock_db.get_profile.return_value = None  # id is free
+            mock_db.create_profile.return_value = created
+
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            result = await create_profile(request, token="test-token")
+            assert result["id"] == "p"
+            mock_db.create_profile.assert_called_once()
+            saved = mock_db.create_profile.call_args.kwargs["config"]
+            assert saved["subagent_provider"] == "sub"
+            assert saved["subagent_model"] == "sub/model"
+
+    @pytest.mark.asyncio
+    async def test_create_no_leg_skips_validation(self):
+        """A profile with no subagent leg never touches provider validation."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+
+        now = datetime.now(timezone.utc).isoformat()
+        created = {
+            "id": "p", "name": "P", "config": {"model": "sonnet"},
+            "is_builtin": False, "created_at": now, "updated_at": now,
+        }
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_profile.return_value = None
+            mock_db.create_profile.return_value = created
+
+            request = ProfileCreate(
+                id="p", name="P", config=ProfileConfig(model="sonnet")
+            )
+            await create_profile(request, token="test-token")
+            mock_db.get_model_provider.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_leg_requires_subagent_model(self):
+        """PUT validation mirrors create: leg without a model → 400."""
+        from app.api.profiles import update_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_profile.return_value = sample_profile()
+            request = ProfileUpdate(
+                config=ProfileConfig(
+                    model="op/main", provider="op", subagent_provider="sub",
+                )
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await update_profile("test-profile", request, token="test-token")
+            assert exc_info.value.status_code == 400
+            mock_db.update_profile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_leg_happy_path(self):
+        """PUT with a legal cross-provider leg persists it."""
+        from app.api.profiles import update_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+
+        profile = sample_profile()
+        updated = {**profile, "config": {
+            "model": "op/main", "provider": "op",
+            "subagent_provider": "sub", "subagent_model": "sub/model",
+        }}
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.get_model_provider.return_value = {
+                "id": "sub", "name": "Sub", "enabled": True,
+            }
+            mock_db.update_profile.return_value = updated
+
+            request = ProfileUpdate(
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                )
+            )
+            result = await update_profile("test-profile", request, token="test-token")
+            assert result["config"]["subagent_provider"] == "sub"
+            saved = mock_db.update_profile.call_args.kwargs["config"]
+            assert saved["subagent_model"] == "sub/model"
+
+
+# =============================================================================
 # Delete Profile Tests
 # =============================================================================
 

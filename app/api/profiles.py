@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileCreate, ProfileUpdate,
+    Profile, ProfileConfig, ProfileCreate, ProfileUpdate,
     AgentExport, AgentExportData, AgentImportRequest
 )
 from app.db import database
@@ -63,6 +63,50 @@ class UnifiedSubagentItem(BaseModel):
     model: Optional[str] = None
     source: str = Field(..., description="Source: 'profile', 'plugin', or 'project'")
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., plugin name)")
+
+
+def _validate_subagent_leg(config: ProfileConfig) -> None:
+    """Validate an optional cross-provider subagent leg (Chunk F, ruling A2).
+
+    A configured ``subagent_provider`` requires:
+      * a non-empty ``subagent_model``,
+      * the main model on a provider too (``provider`` set) — a native
+        Claude-subscription main cannot mix providers (F1),
+      * the subagent provider to exist and be enabled.
+
+    Raises HTTP 400 otherwise. No-op when no subagent leg is configured.
+    """
+    sub_provider = (config.subagent_provider or "").strip()
+    if not sub_provider:
+        return
+    if not (config.subagent_model or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A cross-provider subagent requires a subagent model to be selected.",
+        )
+    if not (config.provider or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "A cross-provider subagent needs the main model on a provider too — "
+                "a native Claude-subscription main cannot mix providers. Set the "
+                "main model to a provider (e.g. a Claude API-key provider) first."
+            ),
+        )
+    row = database.get_model_provider(sub_provider)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"The subagent provider '{sub_provider}' does not exist.",
+        )
+    if not row.get("enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"The subagent provider '{row.get('name') or sub_provider}' is "
+                f"disabled; enable it or pick a different provider."
+            ),
+        )
 
 
 def _check_profile_modified(profile: dict) -> None:
@@ -566,6 +610,7 @@ async def delete_profile_agent(
 @router.post("", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def create_profile(request: ProfileCreate, token: str = Depends(require_admin)):
     """Create a custom profile - Admin only"""
+    _validate_subagent_leg(request.config)
     # Derive ID from name if not provided
     if request.id:
         profile_id = request.id
@@ -615,6 +660,7 @@ async def update_profile(
 
     config = None
     if request.config:
+        _validate_subagent_leg(request.config)
         config = request.config.model_dump(exclude_none=True)
 
     profile = database.update_profile(

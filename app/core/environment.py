@@ -422,6 +422,9 @@ def apply_provider_env(
     provider_id: str,
     model: Optional[str],
     session_id: Optional[str] = None,
+    *,
+    subagent_provider_id: Optional[str] = None,
+    subagent_model: Optional[str] = None,
 ) -> Dict[str, str]:
     """Overlay a non-Anthropic model-provider's gateway env vars onto ``env``
     (in place) so the bundled Claude Code CLI talks to that gateway instead of
@@ -466,6 +469,16 @@ def apply_provider_env(
     to native Anthropic. A provider with NO stored token is allowed only when a
     ``base_url`` is set (some self-hosted gateways are unauthenticated); the
     token is then the empty string.
+
+    Chunk F (ruling A2/G2-r): an OPTIONAL cross-provider SUBAGENT leg. When
+    ``subagent_provider_id`` + ``subagent_model`` are both set, the gateway
+    routing token carries the leg (so a request for ``subagent_model`` routes to
+    that other provider) and ``CLAUDE_CODE_SUBAGENT_MODEL`` is set to
+    ``subagent_model`` — overriding the small-fast fallback for THAT variable
+    only. ``ANTHROPIC_SMALL_FAST_MODEL`` keeps its existing chain (small/fast
+    probes stay on the main provider). The caller (query_options) is responsible
+    for A2 legality (the main leg must be provider-routed) before threading the
+    leg here.
     """
     provider = database.get_model_provider(provider_id, include_token=True)
     if not provider:
@@ -491,6 +504,19 @@ def apply_provider_env(
     auth_mode = provider.get("auth_mode")
     is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
 
+    # Chunk F: a cross-provider subagent leg is active only when BOTH fields are
+    # present (mirrors the gateway's leg-resolution rule). Resolve the leg's
+    # account id (chatgpt-type leg → its codex account, like the main leg).
+    has_subagent_leg = bool(subagent_provider_id and subagent_model)
+    subagent_account_id: Optional[str] = None
+    if has_subagent_leg:
+        sub_row = database.get_model_provider(subagent_provider_id, include_token=False)
+        if sub_row and (
+            sub_row.get("provider_type") == "chatgpt"
+            or sub_row.get("auth_mode") == "chatgpt"
+        ):
+            subagent_account_id = sub_row.get("codex_account_id")
+
     if is_translated:
         from app.core.translator_gateway import routing
 
@@ -500,6 +526,9 @@ def apply_provider_env(
             session_id,
             provider_id,
             provider.get("codex_account_id"),
+            subagent_provider_id=subagent_provider_id if has_subagent_leg else None,
+            subagent_account_id=subagent_account_id,
+            subagent_model=subagent_model if has_subagent_leg else None,
         )
     else:
         base_url = provider.get("base_url")
@@ -576,6 +605,13 @@ def apply_provider_env(
     if small_fast:
         env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = small_fast
+
+    # Chunk F: a cross-provider subagent leg overrides ONLY the subagent model
+    # var (so subagents run on the other provider); ANTHROPIC_SMALL_FAST_MODEL
+    # keeps the main-provider chain above (small/fast probes stay on the main
+    # leg). Applied last so it wins over the small_fast fallback for this key.
+    if has_subagent_leg:
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
 
     return env
 
