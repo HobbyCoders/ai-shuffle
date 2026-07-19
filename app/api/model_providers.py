@@ -106,7 +106,7 @@ class FetchModelsResponse(BaseModel):
 
     ``source`` is ``"preset"`` for a ChatGPT/Codex provider (built-in roster, no
     network) or ``"upstream"`` for a live ``GET {base_url}/models`` fetch. The UI
-    check-selects from ``models`` and PUTs the curated subset via the normal
+    check-selects from ``models`` and PATCHes the curated subset via the normal
     update route — this endpoint never persists anything.
     """
     source: str

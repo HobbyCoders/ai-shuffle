@@ -820,8 +820,9 @@ class ChatWebSocketHandler:
             # turn running->interrupting (durable intent) and fire the executor,
             # which drives the live runtime's SDK interrupt + evict/drain
             # escalation (the safety-timeout/eviction choreography now lives in
-            # SessionRuntime, not here). A user stop settles the turn ``aborted``,
-            # so queued turns REMAIN untouched (F4) — no _stopped_sessions latch.
+            # SessionRuntime, not here). A user stop settles the turn ``aborted``;
+            # the settle path then drains queued turns like any other outcome (F4
+            # preserve-on-stop retired, PR #694) — no _stopped_sessions latch.
             # The ``stop_background`` opt-in still tears down surviving background
             # tasks transport-side (the runtime interrupt does not carry it).
             # #585: bind the stop to the turn the FE believed was live (optional

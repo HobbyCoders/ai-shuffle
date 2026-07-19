@@ -1,13 +1,14 @@
 """Frame semantics of ``app.api.query._stream_query_with_failover``.
 
-The transparent-retry wrapper must make an auto-switch invisible to the SSE
-consumer:
+Native account failover was retired (OC-1), so the wrapper is a single pass with
+no retry and no invisible account switch:
 
-* the retry's duplicate ``init`` frame is consumed (only the first stream's
-  ``init`` is forwarded), and
-* the failed attempt's 429 ``api_error`` frame is held back — DROPPED when the
-  failover retries (superseded), FLUSHED just before the terminal ``done`` when
-  the failover gives up.
+* 429 ``api_error`` frames are held back and FLUSHED just before the terminal
+  ``done`` frame; non-429 ``api_error`` frames pass through immediately.
+* on a usage-limit ``done`` the OC-1/OC-4 rate-limited notification is surfaced
+  via ``attempt_failover`` (which always returns ``retry=False`` — the call
+  exists only for its notification side effect), and no ``account_switched``
+  system frame is ever emitted.
 
 ``stream_query`` and ``attempt_failover`` are looked up as module attributes at
 call time (``app.api.query.stream_query`` and, via a call-time
@@ -40,41 +41,36 @@ async def _collect(agen):
     return [ev async for ev in agen]
 
 
-async def test_retry_hides_init_and_drops_429_api_error():
-    first = [
+async def test_usage_limit_done_notifies_and_flushes_429_without_switch():
+    only = [
         {"type": "init", "session_id": "s1"},
         {"type": "text", "content": "partial"},
         {"type": "api_error", "status": 429, "session_id": "s1"},
         {"type": "done", "session_id": "s1", "metadata": {"api_error_status": 429}},
     ]
-    second = [
-        {"type": "init", "session_id": "s1"},
-        {"type": "text", "content": "final"},
-        {"type": "done", "session_id": "s1", "metadata": {}},
-    ]
 
-    decision = MagicMock(retry=True, account_name="B")
-    with patch.object(query_mod, "stream_query", new=_stream_factory(first, second)), \
+    decision = MagicMock(retry=False, account_name=None)
+    with patch.object(query_mod, "stream_query", new=_stream_factory(only)), \
          patch("app.core.account_failover.attempt_failover",
-               new=AsyncMock(return_value=decision)):
+               new=AsyncMock(return_value=decision)) as af_mock:
         events = await _collect(query_mod._stream_query_with_failover(
             prompt="hi", profile_id="claude-code", session_id="s1",
         ))
 
+    # The usage-limit done triggers the OC-4 notification side effect exactly once.
+    af_mock.assert_awaited_once()
     types = [e.get("type") for e in events]
-    # Exactly ONE init forwarded (the retry's is consumed).
+    # Single pass → exactly one init.
     assert types.count("init") == 1
-    # No 429 api_error leaked.
-    assert not any(e.get("type") == "api_error" and e.get("status") == 429
+    # Failover retired → no account-switch system frame is ever emitted.
+    assert not any(e.get("type") == "system" and e.get("subtype") == "account_switched"
                    for e in events)
-    # The account-switch system frame was surfaced.
-    assert any(e.get("type") == "system" and e.get("subtype") == "account_switched"
-               for e in events)
-    # Terminal frame is the clean (non-429) done.
-    assert events[-1]["type"] == "done"
-    assert not events[-1]["metadata"]
-    # Both attempts' text passed through.
-    assert {"partial", "final"} <= {e.get("content") for e in events if e.get("type") == "text"}
+    # Held 429 is flushed just before the terminal usage-limit done.
+    assert types == ["init", "text", "api_error", "done"]
+    assert events[2]["status"] == 429
+    assert events[-1]["metadata"]["api_error_status"] == 429
+    # The streamed text passed through.
+    assert events[1]["content"] == "partial"
 
 
 async def test_give_up_flushes_held_429_before_done():

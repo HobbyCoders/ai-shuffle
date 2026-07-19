@@ -45,82 +45,61 @@ async def _stream_query_with_failover(
     *, prompt, profile_id, project_id=None, overrides=None,
     session_id=None, api_user_id=None, device_id=None,
 ):
-    """Async-generator wrapper over ``stream_query`` that transparently retries
-    on a usage-limit 429 via account auto-switch — and makes that retry INVISIBLE
-    to the SSE consumer:
+    """Single-pass async-generator wrapper over ``stream_query``.
 
-    * only the FIRST ``stream_query`` iteration's ``init`` frame is yielded (the
-      retry's ``init`` is consumed for its ``session_id`` but not forwarded), and
-    * the failed attempt's 429 ``api_error`` frame is held back rather than
-      leaked: if the failover retries it is dropped (the retry supersedes it); if
-      the failover gives up it is flushed just before the terminal ``done`` frame.
+    Native account failover was retired (OC-1), so there is no transparent retry
+    or invisible account switching — the stream is forwarded once, straight
+    through, with one piece of buffering:
 
-    Non-429 ``api_error`` frames pass through immediately.
+    * 429 ``api_error`` frames are held back rather than leaked, and flushed just
+      before the terminal ``done`` frame. Non-429 ``api_error`` frames pass
+      through immediately.
+    * On a usage-limit ``done`` the OC-1/OC-4 rate-limited notification is
+      surfaced via ``attempt_failover`` (which never retries — it exists purely
+      for its notification side effect) before the held 429 and the ``done`` are
+      flushed.
     """
     from app.core.account_failover import is_usage_limit_error, attempt_failover
 
-    attempted: set = set()
     sid = session_id
-    persist = True
-    first_stream = True
-    while True:
-        done_event = None
-        held_api_error = None  # most-recent 429 api_error, held for the done decision
-        async for event in stream_query(
-            prompt=prompt, profile_id=profile_id, project_id=project_id,
-            overrides=overrides, session_id=sid, api_user_id=api_user_id,
-            device_id=device_id, persist_user_message=persist,
-        ):
-            etype = event.get("type")
-            if etype == "init":
-                sid = event.get("session_id") or sid
-                # Suppress duplicate init frames: forward only the first stream's.
-                if first_stream:
-                    yield event
-                continue
-            if etype == "api_error":
-                try:
-                    is_429 = int(event.get("status")) == 429
-                except (TypeError, ValueError):
-                    is_429 = False
-                if is_429:
-                    held_api_error = event  # hold; decided at the done frame
-                    continue
-                yield event  # non-429 errors pass through immediately
-                continue
-            if etype == "done":
-                done_event = event
-                if is_usage_limit_error(event.get("metadata")):
-                    break  # hold the done frame; decide on a retry below
-                # Not a usage-limit done → flush any held api_error, then done.
-                if held_api_error is not None:
-                    yield held_api_error
-                yield event
-                return
+    held_api_error = None  # most-recent 429 api_error, held for the done decision
+    async for event in stream_query(
+        prompt=prompt, profile_id=profile_id, project_id=project_id,
+        overrides=overrides, session_id=sid, api_user_id=api_user_id,
+        device_id=device_id, persist_user_message=True,
+    ):
+        etype = event.get("type")
+        if etype == "init":
+            sid = event.get("session_id") or sid
             yield event
-
-        first_stream = False
-
-        # Reached only when a done frame carried a usage-limit 429.
-        if done_event is None:
+            continue
+        if etype == "api_error":
+            try:
+                is_429 = int(event.get("status")) == 429
+            except (TypeError, ValueError):
+                is_429 = False
+            if is_429:
+                held_api_error = event  # hold; decided at the done frame
+                continue
+            yield event  # non-429 errors pass through immediately
+            continue
+        if etype == "done":
+            if is_usage_limit_error(event.get("metadata")):
+                sid = event.get("session_id") or sid
+                # OC-4 side effect only: attempt_failover always returns
+                # retry=False (native failover retired) — the return value is
+                # ignored; the call surfaces the rate-limited notification.
+                await attempt_failover(sid, api_user_id, set())
             if held_api_error is not None:
                 yield held_api_error
+            yield event
             return
-        sid = done_event.get("session_id") or sid
-        decision = await attempt_failover(sid, api_user_id, attempted)
-        if not decision.retry:
-            # Giving up: surface the held api_error then the terminal done.
-            if held_api_error is not None:
-                yield held_api_error
-            yield done_event
-            return
-        # Retrying supersedes the failed attempt → DROP the held 429 api_error.
-        yield {
-            "type": "system",
-            "subtype": "account_switched",
-            "data": {"account_name": decision.account_name},
-        }
-        persist = False
+        yield event
+
+    # Stream ended without a done frame → flush any held api_error.
+    if held_api_error is not None:
+        yield held_api_error
+    return
 
 
 def require_claude_auth():
