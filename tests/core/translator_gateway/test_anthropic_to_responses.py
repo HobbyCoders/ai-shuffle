@@ -172,3 +172,87 @@ def test_our_envelope_thinking_becomes_reasoning_item():
     assert item["encrypted_content"] == "ENC_BLOB"
     assert item["summary"] == [{"type": "summary_text", "text": "s"}]
     assert "id" not in item and "status" not in item
+
+
+# ── system-role messages → developer (Codex 400s role:"system") ──────────────
+
+def test_system_role_message_becomes_developer_input_item():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "Available agent types: foo, bar"},
+        ],
+    }
+    body = translate_request(history)
+    items = body["input"]
+    # ordering preserved: user first, then the remapped system message
+    assert [it["role"] for it in items] == ["user", "developer"]
+    dev = items[1]
+    assert dev["type"] == "message"
+    assert dev["role"] == "developer"
+    assert dev["content"] == [{"type": "input_text", "text": "Available agent types: foo, bar"}]
+
+
+def test_system_role_message_with_block_list_content_maps_same():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "A"},
+                {"type": "text", "text": "B"},
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    items = body["input"]
+    assert len(items) == 1
+    dev = items[0]
+    assert dev["type"] == "message"
+    assert dev["role"] == "developer"
+    assert dev["content"] == [{"type": "input_text", "text": "AB"}]
+
+
+def test_assistant_text_still_output_text_after_content_type_change():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": "sure thing"},
+        ],
+    }
+    body = translate_request(history)
+    item = body["input"][0]
+    assert item["type"] == "message"
+    assert item["role"] == "assistant"
+    assert item["content"] == [{"type": "output_text", "text": "sure thing"}]
+
+
+# ── adaptive thinking → reasoning effort from output_config ──────────────────
+
+def test_adaptive_thinking_effort_from_output_config():
+    body = translate_request({
+        "model": "m",
+        "messages": [],
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+    })
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_adaptive_thinking_without_output_config_defaults_medium():
+    body = translate_request({
+        "model": "m",
+        "messages": [],
+        "thinking": {"type": "adaptive"},
+    })
+    assert body["reasoning"] == {"effort": "medium", "summary": "auto"}
+
+
+def test_adaptive_thinking_xhigh_clamps_to_high():
+    body = translate_request({
+        "model": "m",
+        "messages": [],
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "xhigh"},
+    })
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}

@@ -57,6 +57,20 @@ def _effort_from_budget(budget_tokens: Optional[int]) -> str:
     return "high"
 
 
+def _normalize_effort(effort: Any) -> str:
+    """Normalize the CLI's ``output_config.effort`` to a Responses effort enum.
+
+    Adaptive thinking (CLI 2.1.214) carries the requested effort in a top-level
+    ``output_config: {"effort": ...}`` instead of a token budget. Valid Responses
+    values pass through; "xhigh"/"max" clamp to "high"; anything unknown → "medium".
+    """
+    if effort in ("minimal", "low", "medium", "high"):
+        return effort
+    if effort in ("xhigh", "max"):
+        return "high"
+    return "medium"
+
+
 # ─── system → instructions ───────────────────────────────────────────────────
 
 def _system_to_instructions(system: Any) -> Optional[str]:
@@ -125,6 +139,11 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(message, dict):
             continue
         role = message.get("role", "user")
+        # The Codex backend 400s input items with role "system" ("System messages
+        # are not allowed") but accepts "developer" (live-verified 2026-07-19); the
+        # CLI's "Available agent types" context arrives as a role:"system" message,
+        # so remap system/developer → developer here.
+        out_role = "developer" if role in ("system", "developer") else role
         blocks = _normalize_message_content(message.get("content"))
 
         # Text blocks for this message are coalesced into one message item so we
@@ -135,11 +154,11 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if not text_segments:
                 return
             joined = "".join(text_segments)
-            content_type = "input_text" if role == "user" else "output_text"
+            content_type = "output_text" if out_role == "assistant" else "input_text"
             input_items.append(
                 {
                     "type": "message",
-                    "role": role,
+                    "role": out_role,
                     "content": [{"type": content_type, "text": joined}],
                 }
             )
@@ -325,6 +344,15 @@ def translate_request(
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
         body["reasoning"] = {
             "effort": _effort_from_budget(thinking.get("budget_tokens")),
+            "summary": "auto",
+        }
+    elif isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+        # Adaptive thinking (CLI 2.1.214) has no budget_tokens; the requested
+        # effort lives in the new top-level output_config.effort.
+        body["reasoning"] = {
+            "effort": _normalize_effort(
+                anthropic_body.get("output_config", {}).get("effort")
+            ),
             "summary": "auto",
         }
 
