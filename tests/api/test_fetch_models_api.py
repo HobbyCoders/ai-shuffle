@@ -31,11 +31,16 @@ def _unlock(mock_db):
     encryption.set_encryption_key("test-password", db)
 
 
-def _make_provider(*, base_url="https://openrouter.ai/api", auth_token=None):
+def _make_provider(
+    *,
+    provider_type="openrouter",
+    base_url="https://openrouter.ai/api",
+    auth_token=None,
+):
     db.create_model_provider(
         provider_id=PROVIDER_ID,
         name="OpenRouter",
-        provider_type="openrouter",
+        provider_type=provider_type,
         base_url=base_url,
         auth_token=auth_token,
         enabled=True,
@@ -91,6 +96,43 @@ class TestPresetPath:
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         assert resp.json()["source"] == "preset"
+
+    def test_chatgpt_provider_type_returns_codex_preset(self, authenticated_client, mock_db):
+        # New enrollments use provider_type='chatgpt' (plan PR1) — the preset
+        # selector must return the Codex roster from provider_type alone, even
+        # before any auth_mode bundle is persisted.
+        _unlock(mock_db)
+        _make_provider(provider_type="chatgpt",
+                       base_url="https://chatgpt.com/backend-api/codex")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "preset"
+        assert body["models"] == model_catalog_presets.CODEX_PRESET_MODELS
+
+    def test_openai_provider_type_returns_openai_preset(self, authenticated_client, mock_db):
+        # provider_type='openai' rows ship the public-API OpenAI roster with zero
+        # user model-picking (plan D4 / ruling PR3).
+        _unlock(mock_db)
+        _make_provider(provider_type="openai",
+                       base_url="https://api.openai.com/v1")
+
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "preset"
+        assert body["models"] == model_catalog_presets.OPENAI_PRESET_MODELS
+        # The OpenAI roster is distinct from the Codex roster.
+        assert body["models"] != model_catalog_presets.CODEX_PRESET_MODELS
+
+    def test_codex_roster_excludes_codex_auto_review(self):
+        # codex-auto-review is special-purpose — must never appear in the picker.
+        ids = {entry["id"] for entry in model_catalog_presets.CODEX_PRESET_MODELS}
+        assert "codex-auto-review" not in ids
+        # Sanity: the live-confirmed roster ids are present (spike 2026-07-18).
+        assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} == ids
 
 
 class TestUpstreamPath:

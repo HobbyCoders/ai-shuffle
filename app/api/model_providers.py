@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
 
-_VALID_PROVIDER_TYPES = ("openrouter", "custom")
+_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt")
 
 
 # ============================================================================

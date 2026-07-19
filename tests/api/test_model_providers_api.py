@@ -86,6 +86,24 @@ class TestCreate:
         assert body["models"] == []
         assert body["extra_env"] == {}
 
+    @pytest.mark.parametrize("provider_type,base_url", [
+        ("openai", "https://api.openai.com/v1"),
+        ("chatgpt", "https://chatgpt.com/backend-api/codex"),
+    ])
+    def test_create_accepts_new_provider_types(
+        self, authenticated_client, mock_db, provider_type, base_url
+    ):
+        # The two typed rows added for the providers-UI restructure (plan PR1)
+        # must create successfully now that _VALID_PROVIDER_TYPES includes them.
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": provider_type,
+            "provider_type": provider_type,
+            "base_url": base_url,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["provider_type"] == provider_type
+
     def test_create_rejects_invalid_provider_type(self, authenticated_client, mock_db):
         resp = authenticated_client.post(ROOT, json={
             "name": "Bad",
