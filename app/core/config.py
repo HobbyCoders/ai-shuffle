@@ -132,6 +132,19 @@ class Settings(BaseSettings):
     cluster_secret: Optional[str] = None
     cluster_advertise_url: Optional[str] = None
 
+    # Translator gateway (multi-provider phase-2 Chunk A). The in-process
+    # Anthropic<->OpenAI-Responses translation gateway runs as a SEPARATE uvicorn
+    # server bound to loopback ONLY; a Codex/OpenAI-subscription session's spawn
+    # env points ANTHROPIC_BASE_URL at http://127.0.0.1:<this port>. Loopback-only
+    # by construction (the server always binds 127.0.0.1 — the port is the sole
+    # tunable). Default 8788.
+    translator_gateway_port: int = Field(
+        default=8788,
+        validation_alias=AliasChoices(
+            "TRANSLATOR_GATEWAY_PORT", "translator_gateway_port"
+        ),
+    )
+
     # Session
     session_secret: Optional[str] = None
     session_expire_days: int = 30

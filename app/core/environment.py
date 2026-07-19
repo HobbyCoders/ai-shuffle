@@ -418,7 +418,10 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
 
 
 def apply_provider_env(
-    env: Dict[str, str], provider_id: str, model: Optional[str]
+    env: Dict[str, str],
+    provider_id: str,
+    model: Optional[str],
+    session_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Overlay a non-Anthropic model-provider's gateway env vars onto ``env``
     (in place) so the bundled Claude Code CLI talks to that gateway instead of
@@ -448,6 +451,15 @@ def apply_provider_env(
     values LAST, so extra_env can never clobber the ``ANTHROPIC_API_KEY=""``
     guard (or any other overlay-controlled key).
 
+    Codex/OpenAI-subscription providers (``provider_type`` in
+    ``{"openai", "chatgpt"}`` or ``auth_mode == "chatgpt"``) do NOT speak the
+    Anthropic wire protocol, so their sessions are pointed at the in-process
+    translator gateway (Chunk A) instead: ``ANTHROPIC_BASE_URL`` becomes the
+    loopback gateway and ``ANTHROPIC_AUTH_TOKEN`` a per-session opaque routing
+    token (G4) — the gateway holds/decrypts the REAL upstream credentials at
+    request time. All guard/mitigation/small-fast env is applied identically.
+    openrouter/custom keep the direct-decrypted-token path unchanged.
+
     R5 (binding): a missing/disabled provider, or a token that cannot be
     decrypted (encryption not ready / corrupt), raises :class:`ProviderConfigError`
     — surfaced to the user as a spawn/config error. We NEVER silently fall back
@@ -467,37 +479,61 @@ def apply_provider_env(
             f"Re-enable it in Settings or pick a different model."
         )
 
-    base_url = provider.get("base_url")
-    raw_token = provider.get("auth_token")
+    # A Codex/OpenAI-subscription provider does NOT speak the Anthropic wire
+    # protocol, so its session must talk to the in-process translator gateway
+    # (Chunk A) rather than the provider's own endpoint. We hand the CLI the
+    # LOOPBACK gateway base URL and a per-session opaque routing token (G4) as
+    # ``ANTHROPIC_AUTH_TOKEN``; the gateway holds and decrypts the REAL upstream
+    # credentials (Codex OAuth / OpenAI key) at request time. The CLI never sees
+    # a real upstream secret. openrouter/custom keep the direct-gateway path
+    # below UNCHANGED (they are already Anthropic-compatible endpoints).
+    provider_type = provider.get("provider_type")
+    auth_mode = provider.get("auth_mode")
+    is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
 
-    # Resolve the auth token. A stored token must be decryptable; a provider with
-    # NO token is allowed only when a base_url is configured (unauthenticated
-    # self-hosted gateway) — never a native-Anthropic fallback.
-    if raw_token:
-        if encryption.is_encrypted(raw_token):
-            if not encryption.is_encryption_ready():
-                raise ProviderConfigError(
-                    f"Cannot decrypt the auth token for model provider "
-                    f"'{provider.get('name') or provider_id}' — the encryption key "
-                    f"is not available (admin must be logged in). Refusing to spawn."
-                )
-            try:
-                token = encryption.decrypt_value(raw_token)
-            except Exception as e:  # noqa: BLE001 — surfaced as a config error
-                raise ProviderConfigError(
-                    f"Failed to decrypt the auth token for model provider "
-                    f"'{provider.get('name') or provider_id}': {e}"
-                ) from e
-        else:
-            # Plaintext (migration compatibility) — pass through.
-            token = raw_token
+    if is_translated:
+        from app.core.translator_gateway import routing
+
+        gateway_port = settings.translator_gateway_port
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        token = routing.mint_session_token(
+            session_id,
+            provider_id,
+            provider.get("codex_account_id"),
+        )
     else:
-        if not base_url:
-            raise ProviderConfigError(
-                f"Model provider '{provider.get('name') or provider_id}' has neither "
-                f"an auth token nor a base URL configured — nothing to route to."
-            )
-        token = ""  # unauthenticated self-hosted gateway
+        base_url = provider.get("base_url")
+        raw_token = provider.get("auth_token")
+
+        # Resolve the auth token. A stored token must be decryptable; a provider
+        # with NO token is allowed only when a base_url is configured
+        # (unauthenticated self-hosted gateway) — never a native-Anthropic
+        # fallback.
+        if raw_token:
+            if encryption.is_encrypted(raw_token):
+                if not encryption.is_encryption_ready():
+                    raise ProviderConfigError(
+                        f"Cannot decrypt the auth token for model provider "
+                        f"'{provider.get('name') or provider_id}' — the encryption key "
+                        f"is not available (admin must be logged in). Refusing to spawn."
+                    )
+                try:
+                    token = encryption.decrypt_value(raw_token)
+                except Exception as e:  # noqa: BLE001 — surfaced as a config error
+                    raise ProviderConfigError(
+                        f"Failed to decrypt the auth token for model provider "
+                        f"'{provider.get('name') or provider_id}': {e}"
+                    ) from e
+            else:
+                # Plaintext (migration compatibility) — pass through.
+                token = raw_token
+        else:
+            if not base_url:
+                raise ProviderConfigError(
+                    f"Model provider '{provider.get('name') or provider_id}' has neither "
+                    f"an auth token nor a base URL configured — nothing to route to."
+                )
+            token = ""  # unauthenticated self-hosted gateway
 
     # extra_env FIRST so the forced guard values below can never be clobbered.
     extra_env = provider.get("extra_env_json") or {}

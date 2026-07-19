@@ -682,7 +682,7 @@ def build_options_from_profile(
         # caps). Raises ProviderConfigError (a ValueError) for a missing/disabled
         # provider or an undecryptable token — the query engines convert it into
         # a user-visible error rather than silently running native Anthropic.
-        apply_provider_env(full_env, provider_id, model_to_use)
+        apply_provider_env(full_env, provider_id, model_to_use, session_id=session_id)
 
     ai_tool_env = full_env if full_env else None
 

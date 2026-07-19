@@ -225,12 +225,23 @@ async def lifespan(app: FastAPI):
         logger.exception("Cluster self-registration failed (non-fatal)")
     cluster_heartbeat_task = asyncio.create_task(_cluster_heartbeat_loop())
 
+    # Translator gateway (multi-provider phase-2 Chunk A): a SEPARATE loopback
+    # uvicorn server that Codex/OpenAI-subscription sessions point
+    # ANTHROPIC_BASE_URL at. Non-fatal to boot if it fails to start.
+    from app.core.translator_gateway.service import start_gateway
+    await start_gateway()
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
 
     # Shutdown
+    try:
+        from app.core.translator_gateway.service import stop_gateway
+        await stop_gateway()
+    except Exception:
+        logger.exception("translator gateway shutdown failed (non-fatal)")
     if not orphan_backfill_task.done():
         orphan_backfill_task.cancel()
     try:
