@@ -383,8 +383,8 @@ async def _exchange_authorization_code(
     )
     if resp.status_code >= 400:
         body = _safe_json(resp)
-        code, message = _error_code(body)
-        raise CodexAuthError(code or f"http_{resp.status_code}", message)
+        err_code, message = _error_code(body)
+        raise CodexAuthError(err_code or f"http_{resp.status_code}", message)
     return _bundle_from_token_response(_safe_json(resp))
 
 
