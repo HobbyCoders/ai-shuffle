@@ -14,10 +14,13 @@
 	 * is now removed, and folded the old AI-models tab into a "Manage media models"
 	 * drawer there).
 	 *
-	 * Data is loaded once per session via `providers.ensureLoaded()` (landmine L1 /
-	 * ruling PR6): the settings sections remount on every tab switch, so the store
-	 * caches the initial provider + account fetch across those remounts. Mutations
-	 * refresh the store independently, so the cache never goes stale.
+	 * Data is refetched on every mount via `providers.refreshAll()`: the settings
+	 * sections remount on every tab switch, so re-opening the Providers tab always
+	 * reconciles with the server (this fixes a Codex sign-in that completes after
+	 * the UI stopped watching leaving the row stuck on "Not connected"). The refresh
+	 * is SILENT — loaders keep their loading flags down when data already renders,
+	 * so nothing flickers. (`setup/+page.svelte` still uses the one-shot
+	 * `ensureLoaded()`; that path is untouched.)
 	 */
 	import { onMount } from 'svelte';
 	import { Info, Server, Plus } from 'lucide-svelte';
@@ -54,8 +57,11 @@
 	}
 
 	onMount(() => {
-		// Load once per session; cached across tab-switch remounts (L1 / PR6).
-		providers.ensureLoaded();
+		// Refetch on every card-open / tab-switch. A Codex sign-in that completes
+		// after the UI stops watching would otherwise leave the row stuck on "Not
+		// connected"; refetching on open reconciles it. Silent — already-rendered
+		// rows don't flicker while the background refresh runs.
+		providers.refreshAll();
 	});
 </script>
 

@@ -81,10 +81,19 @@ beforeEach(() => {
 		verification_uri: 'https://example.test/verify'
 	});
 	mocks.codexDevicePoll.mockResolvedValue({ status: 'pending' });
+	// Default integrations fetch: no Anthropic key set. Tests that need a key set
+	// override this before calling `providers.loadIntegrations()`.
+	vi.stubGlobal(
+		'fetch',
+		vi.fn().mockResolvedValue({ ok: true, json: async () => ({ anthropic_api_key_set: false }) })
+	);
 	providers.clear();
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	vi.unstubAllGlobals();
+});
 
 describe('ProviderList — ChatGPT row reconnect', () => {
 	it('clicking the ChatGPT row Reconnect button opens the reconnect dialog', async () => {
@@ -106,5 +115,58 @@ describe('ProviderList — ChatGPT row reconnect', () => {
 		// The hosted device flow reuses the existing row (no create).
 		expect(mocks.createModelProvider).not.toHaveBeenCalled();
 		await waitFor(() => expect(mocks.codexDeviceStart).toHaveBeenCalledWith('cg-1'));
+	});
+
+	it('chatgpt row exposes a Manage models button', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [chatgptProvider()] });
+		await providers.loadProviders();
+
+		const { getByRole } = render(ProviderList);
+		expect(getByRole('button', { name: 'Manage models' })).toBeTruthy();
+	});
+});
+
+describe('ProviderList — Anthropic API key row (conditional)', () => {
+	it('does NOT render the Anthropic key row when no key is set', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		await providers.loadProviders();
+		await providers.loadIntegrations(); // default stub → key unset
+
+		const { queryByText } = render(ProviderList);
+		expect(queryByText('Anthropic API key')).toBeNull();
+	});
+
+	it('renders the Anthropic key row with masked meta when a key is set', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		await providers.loadProviders();
+
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => ({
+					anthropic_api_key_set: true,
+					anthropic_api_key_masked: 'sk-ant-…xyz',
+					claude_code_auth_method: 'api_key'
+				})
+			})
+		);
+		await providers.loadIntegrations();
+
+		const { getByText } = render(ProviderList);
+		expect(getByText('Anthropic API key')).toBeTruthy();
+		// Masked key is shown as the row's meta line.
+		expect(getByText('sk-ant-…xyz')).toBeTruthy();
+	});
+});
+
+describe('ProviderList — Claude subscription row (conditional)', () => {
+	it('does NOT render the Claude subscription row when unauthenticated with no saved accounts', async () => {
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		await providers.loadProviders();
+
+		const { queryByText } = render(ProviderList);
+		// Default auth store is unauthenticated and no accounts were loaded.
+		expect(queryByText('Claude subscription')).toBeNull();
 	});
 });

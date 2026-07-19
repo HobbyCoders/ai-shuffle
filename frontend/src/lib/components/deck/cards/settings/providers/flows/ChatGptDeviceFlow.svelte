@@ -57,6 +57,7 @@
 	import {
 		createModelProvider,
 		deleteModelProvider,
+		updateModelProvider,
 		codexDeviceStart,
 		codexDevicePoll
 	} from '$lib/api/model-providers';
@@ -187,11 +188,12 @@
 		}
 	}
 
-	/** complete → refresh list + registry → onDone. */
+	/** complete → seed the preset roster → refresh list + registry → onDone. */
 	async function finish() {
 		clearPollTimer();
 		phase = 'finishing';
 		setBusy(true);
+		await seedModels();
 		try {
 			await providers.refreshProviders();
 		} catch {
@@ -200,6 +202,32 @@
 		if (destroyed) return;
 		setBusy(false);
 		onDone();
+	}
+
+	/**
+	 * Auto-seed the ChatGPT provider's model roster on completion (mirrors
+	 * OpenAiKeyFlow): fetch its catalog (`source:'preset'` — the built-in Codex
+	 * roster) and persist the FULL returned list. Best-effort: a fetch/persist
+	 * hiccup must not block the enrollment from completing.
+	 *
+	 * RECONNECT exception: never clobber a curated subset. When reconnecting an
+	 * existing row that already carries models, skip seeding entirely.
+	 */
+	async function seedModels() {
+		if (!providerId) return;
+		if (!ownsRow && existingHasModels()) return;
+		try {
+			const fetched = await providers.fetchProviderModels(providerId);
+			await updateModelProvider(providerId, { models: fetched.models ?? [] });
+		} catch {
+			// Best-effort — the row is enrolled regardless of a seeding failure.
+		}
+	}
+
+	/** Whether the existing (reconnect) row already carries a curated model list. */
+	function existingHasModels(): boolean {
+		const row = providers.current?.providers?.find((p) => p.id === providerId);
+		return !!row && row.models.length > 0;
 	}
 
 	function fail(message: string) {

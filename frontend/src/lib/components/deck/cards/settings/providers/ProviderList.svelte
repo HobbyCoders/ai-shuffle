@@ -2,14 +2,18 @@
 	/**
 	 * ProviderList — the unified, store-driven provider list (plan §1.1).
 	 *
-	 * Maps the two state clusters the `providers` store owns into one ordered list
-	 * of rows:
-	 *   1. Claude subscription (native-auth) — status pill + "Manage accounts"
-	 *      expander that reveals `ClaudeAccountsPanel` (switch / add / rename /
-	 *      delete). No enable toggle.
-	 *   2. Claude API key (native-auth) — `ClaudeApiKeyRow`, its own keycard. It
-	 *      reports which auth method Claude Code is using so row 1 can show
-	 *      "overridden by API key".
+	 * Every row is CONDITIONAL — it appears only once configured, so the page reads
+	 * as one mechanism where everything is added via "+ Add provider".
+	 *
+	 * Maps the state the `providers` store owns into one ordered list of rows:
+	 *   1. Claude subscription (native-auth) — rendered only when authenticated OR
+	 *      there is a saved account. Status pill + "Manage accounts" expander that
+	 *      reveals `ClaudeAccountsPanel` (switch / add / rename / delete). No toggle.
+	 *   2. Anthropic API key (native-auth) — rendered only when a key is stored
+	 *      (`s.anthropicKeySet`), as a uniform `ProviderRow`. Edit expands the
+	 *      replace-key panel (`ClaudeApiKeyRow`, now panel-only → `setAnthropicKey`);
+	 *      Remove inline-confirms → `clearAnthropicKey`. When set, `claudeCodeAuthMethod`
+	 *      is 'api_key', which row 1 shows as "Overridden by API key".
 	 *   3. model_providers rows, ordered ChatGPT → OpenRouter → OpenAI → custom:
 	 *        - ChatGPT subscription (auth_mode='chatgpt'): native-auth, status pill,
 	 *          no toggle, "Sign in / Reconnect" (opens the `ChatGptDeviceFlow` modal
@@ -38,14 +42,23 @@
 
 	const s = $derived(providers.current);
 
-	// Mirror of which auth method Claude Code is using, reported by ClaudeApiKeyRow.
-	// Drives the Claude-subscription row's "overridden by API key" status, exactly
-	// as ConnectionsSection derived it from the same backend signal today.
-	let usingApiKeyAuth = $state(false);
+	// Which auth method Claude Code is using, straight from the store's integration
+	// status. Drives the Claude-subscription row's "overridden by API key" status.
+	// API-key login wins whenever a key is set — no silent billing switch.
+	let usingApiKeyAuth = $derived(s.claudeCodeAuthMethod === 'api_key');
+
+	// ----- Claude subscription row visibility -----
+	// Only render the subscription row once there is something to show: an
+	// authenticated account OR at least one saved account.
+	let claudeRowVisible = $derived($claudeAuthenticated || s.claudeAccounts.length > 0);
 
 	// ----- Transient view state (component-local) -----
 	// Whether the Claude subscription row's saved-accounts panel is expanded.
 	let claudeExpanded = $state(false);
+	// Whether the Anthropic-key row's replace-key panel is expanded.
+	let keyEditOpen = $state(false);
+	// Whether the Anthropic-key row is armed for delete (inline confirm).
+	let confirmDeleteKey = $state(false);
 	// Which gateway row's inline edit form is open (its id), or null.
 	let editingId: string | null = $state(null);
 	// Which provider row is armed for delete (inline confirm), or null.
@@ -143,6 +156,28 @@
 		claudeExpanded = !claudeExpanded;
 	}
 
+	// Anthropic-key row: Edit toggles the replace-key panel; delete is inline-confirmed.
+	function toggleKeyEdit() {
+		confirmDeleteKey = false;
+		keyEditOpen = !keyEditOpen;
+	}
+	function armDeleteKey() {
+		keyEditOpen = false;
+		confirmDeleteKey = true;
+	}
+	function cancelDeleteKey() {
+		confirmDeleteKey = false;
+	}
+	async function confirmDeleteKey_() {
+		confirmDeleteKey = false;
+		try {
+			await providers.clearAnthropicKey();
+		} catch {
+			// The row's remove failure is non-fatal here; the reload leaves the row
+			// as-is and the user can retry. (Panel-level save owns its own surface.)
+		}
+	}
+
 	function openEdit(id: string) {
 		confirmDeleteId = null;
 		editingId = id;
@@ -166,28 +201,50 @@
 </script>
 
 <ul class="prov-list">
-	<!-- 1. Claude subscription (native-auth) -->
-	<li class="prov-item">
-		<ProviderRow
-			title="Claude subscription"
-			badge="Subscription"
-			iconKind="claude"
-			status={claudeStatus}
-			highlight={claudeHighlight}
-			onManageAccounts={onManageAccounts}
-			expanded={claudeExpanded}
-		/>
-		{#if claudeExpanded}
-			<div class="prov-sub">
-				<ClaudeAccountsPanel />
-			</div>
-		{/if}
-	</li>
+	<!-- 1. Claude subscription (native-auth) — only once there's an account to show. -->
+	{#if claudeRowVisible}
+		<li class="prov-item">
+			<ProviderRow
+				title="Claude subscription"
+				badge="Subscription"
+				iconKind="claude"
+				status={claudeStatus}
+				highlight={claudeHighlight}
+				onManageAccounts={onManageAccounts}
+				expanded={claudeExpanded}
+			/>
+			{#if claudeExpanded}
+				<div class="prov-sub">
+					<ClaudeAccountsPanel />
+				</div>
+			{/if}
+		</li>
+	{/if}
 
-	<!-- 2. Claude API key (native-auth) — reports the active auth method upward. -->
-	<li class="prov-item">
-		<ClaudeApiKeyRow onAuthMethodChange={(v) => (usingApiKeyAuth = v)} />
-	</li>
+	<!-- 2. Anthropic API key (native-auth) — only once a key is stored. It overrides
+	     the subscription, which the Claude row's "Overridden by API key" pill shows. -->
+	{#if s.anthropicKeySet}
+		<li class="prov-item">
+			<ProviderRow
+				title="Anthropic API key"
+				badge="API key"
+				iconKind="claude"
+				status={{ label: 'Active', tone: 'ok' }}
+				highlight={true}
+				meta={s.anthropicKeyMasked ?? undefined}
+				onEdit={toggleKeyEdit}
+				onRemove={armDeleteKey}
+				confirmingDelete={confirmDeleteKey}
+				onConfirmDelete={confirmDeleteKey_}
+				onCancelDelete={cancelDeleteKey}
+			/>
+			{#if keyEditOpen}
+				<div class="prov-sub">
+					<ClaudeApiKeyRow onClose={() => (keyEditOpen = false)} />
+				</div>
+			{/if}
+		</li>
+	{/if}
 
 	<!-- 3. model_providers rows (ChatGPT → OpenRouter → OpenAI → custom) -->
 	{#if s.providersError}
@@ -196,15 +253,15 @@
 
 	{#if s.providersLoading && s.providers.length === 0}
 		<li class="prov-item"><div class="prov-empty">Loading providers…</div></li>
-	{:else if s.providers.length === 0}
-		<li class="prov-item"><div class="prov-empty">No additional providers yet. Add OpenRouter, OpenAI or a custom gateway to run non-Anthropic models.</div></li>
+	{:else if !claudeRowVisible && !s.anthropicKeySet && s.providers.length === 0}
+		<li class="prov-item"><div class="prov-empty">No providers yet. Use “+ Add provider” to connect your Claude account, an Anthropic API key, or an OpenRouter / OpenAI / custom gateway.</div></li>
 	{/if}
 
 	{#each sortedProviders as p (p.id)}
 		{@const kind = classifyProvider(p)}
 		<li class="prov-item">
 			{#if kind === 'chatgpt'}
-				<!-- ChatGPT subscription: native-auth, no toggle, sign-in is no-op. -->
+				<!-- ChatGPT subscription: native-auth, no toggle/edit, sign-in + manage models. -->
 				<ProviderRow
 					title={p.name}
 					badge={badgeFor(kind)}
@@ -212,6 +269,7 @@
 					status={chatgptStatus(p)}
 					highlight={!!p.codex_access_token_set && !p.needs_reauth}
 					meta={providerMeta(p, kind)}
+					onManageModels={() => (manageModelsId = p.id)}
 					onSignIn={() => (reconnectId = p.id)}
 					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
 					onRemove={() => armDelete(p.id)}
@@ -219,6 +277,9 @@
 					onConfirmDelete={() => confirmDelete(p.id)}
 					onCancelDelete={cancelDelete}
 				/>
+				{#if manageModelsId === p.id}
+					<ManageModelsDrawer provider={p} onClose={() => (manageModelsId = null)} />
+				{/if}
 			{:else}
 				<!-- Gateway row: enable toggle + manage-models(no-op) + edit + remove. -->
 				<ProviderRow

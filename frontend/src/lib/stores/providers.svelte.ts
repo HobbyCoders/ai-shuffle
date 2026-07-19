@@ -96,6 +96,16 @@ interface ProvidersState {
 	providersError: string;
 	/** Id mid-toggle (drives its inline spinner), or null. */
 	togglingProviderId: string | null;
+
+	// ----- Anthropic API key integration (from /settings/integrations) -----
+	/** True when an Anthropic API key is stored (overrides the connected account). */
+	anthropicKeySet: boolean;
+	/** Masked form of the stored key, or null when none is set. */
+	anthropicKeyMasked: string | null;
+	/** Which auth method Claude Code runs with: 'api_key' overrides 'account'. */
+	claudeCodeAuthMethod: 'account' | 'api_key' | null;
+	/** Non-null when the integrations load failed unexpectedly. */
+	integrationsError: string | null;
 }
 
 // ============================================================================
@@ -128,7 +138,12 @@ const initialState: ProvidersState = {
 	providers: [],
 	providersLoading: false,
 	providersError: '',
-	togglingProviderId: null
+	togglingProviderId: null,
+
+	anthropicKeySet: false,
+	anthropicKeyMasked: null,
+	claudeCodeAuthMethod: null,
+	integrationsError: null
 };
 
 // ============================================================================
@@ -271,8 +286,11 @@ export const providers = {
 	 * UI stays a mirror of the server (switching is instant server-side). Never
 	 * throws — a locked store just flips `accountsEncryptionReady` false.
 	 */
-	async loadClaudeAccounts() {
-		_update((s) => ({ ...s, accountsLoading: true, accountsError: '' }));
+	async loadClaudeAccounts(silent = false) {
+		// SILENT background refresh: don't flip the loading flag when rows are
+		// already on screen, so a re-open refetch never flickers them.
+		const showLoading = !silent || _state.claudeAccounts.length === 0;
+		_update((s) => ({ ...s, accountsError: '', ...(showLoading ? { accountsLoading: true } : {}) }));
 		try {
 			const res = await listClaudeAccounts();
 			_update((s) => ({
@@ -286,7 +304,7 @@ export const providers = {
 			// error toast; only genuinely unexpected failures set accountsError.
 			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to load Claude accounts') }));
 		} finally {
-			_update((s) => ({ ...s, accountsLoading: false }));
+			if (showLoading) _update((s) => ({ ...s, accountsLoading: false }));
 		}
 	},
 
@@ -425,19 +443,117 @@ export const providers = {
 	async ensureLoaded() {
 		if (_initialLoadStarted) return;
 		_initialLoadStarted = true;
-		await Promise.all([providers.loadProviders(), providers.loadClaudeAccounts()]);
+		await Promise.all([
+			providers.loadProviders(),
+			providers.loadClaudeAccounts(),
+			providers.loadIntegrations()
+		]);
 	},
 
-	async loadProviders() {
-		_update((s) => ({ ...s, providersLoading: true, providersError: '' }));
+	/**
+	 * Refetch EVERYTHING on every card-open / tab-switch (ruling: fixes the stuck
+	 * "Not connected" bug where a Codex sign-in that finishes after the UI stopped
+	 * watching never surfaced). Unlike `ensureLoaded`, this ignores the one-shot
+	 * latch and always hits the network — but SILENTLY: each loader flips its
+	 * loading flag only when its data is still empty, so already-rendered rows
+	 * don't flicker while the background refresh runs.
+	 */
+	async refreshAll() {
+		_initialLoadStarted = true;
+		await Promise.all([
+			providers.loadProviders(true),
+			providers.loadClaudeAccounts(true),
+			providers.loadIntegrations()
+		]);
+	},
+
+	async loadProviders(silent = false) {
+		// SILENT background refresh: keep the loading flag down when rows already
+		// render, so a re-open refetch doesn't flash the "Loading…" placeholder.
+		const showLoading = !silent || _state.providers.length === 0;
+		_update((s) => ({ ...s, providersError: '', ...(showLoading ? { providersLoading: true } : {}) }));
 		try {
 			const res = await listModelProviders();
 			_update((s) => ({ ...s, providers: res.providers ?? [] }));
 		} catch (e) {
 			_update((s) => ({ ...s, providersError: getErrorMessage(e, 'Failed to load providers') }));
 		} finally {
-			_update((s) => ({ ...s, providersLoading: false }));
+			if (showLoading) _update((s) => ({ ...s, providersLoading: false }));
 		}
+	},
+
+	// ------------------------------------------------------------------------
+	// Anthropic API key integration (lifted from ClaudeApiKeyRow's raw fetches —
+	// mechanics unchanged, relocated into the store so ProviderList reads it from
+	// one place and refreshAll can refetch it on every open).
+	// ------------------------------------------------------------------------
+
+	/**
+	 * Load the Anthropic-key status from the shared `/settings/integrations`
+	 * payload. Never throws — a failed load surfaces via `integrationsError` (the
+	 * original row silently swallowed load errors; the field lets callers react).
+	 */
+	async loadIntegrations() {
+		try {
+			const res = await fetch('/api/v1/settings/integrations', { credentials: 'include' });
+			if (!res.ok) return;
+			const data = await res.json();
+			_update((s) => ({
+				...s,
+				anthropicKeySet: !!data.anthropic_api_key_set,
+				anthropicKeyMasked: data.anthropic_api_key_masked ?? null,
+				claudeCodeAuthMethod:
+					data.claude_code_auth_method ?? (data.anthropic_api_key_set ? 'api_key' : 'account'),
+				integrationsError: null
+			}));
+		} catch (e) {
+			_update((s) => ({ ...s, integrationsError: getErrorMessage(e, 'Failed to load integrations') }));
+		}
+	},
+
+	/**
+	 * Store an Anthropic API key (Claude Code then authenticates with it, overriding
+	 * the connected account), then reload the integration status. Throws with the
+	 * server's message on failure so the caller owns its own error surface — mirrors
+	 * ClaudeApiKeyRow's original save (which did NOT re-check auth).
+	 */
+	async setAnthropicKey(key: string) {
+		const trimmed = key.trim();
+		if (!trimmed) return;
+		let res: Response;
+		try {
+			res = await fetch('/api/v1/settings/integrations/anthropic', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ api_key: trimmed })
+			});
+		} catch (e) {
+			throw new Error(e instanceof Error ? e.message : 'Network error');
+		}
+		if (!res.ok) {
+			const body = await res.json().catch(() => ({}));
+			throw new Error(body.detail ?? `Save failed (${res.status})`);
+		}
+		await providers.loadIntegrations();
+	},
+
+	/**
+	 * Remove the stored Anthropic key (Claude Code reverts to the connected
+	 * account), then reload status. Throws on failure (mirrors the original remove).
+	 */
+	async clearAnthropicKey() {
+		let res: Response;
+		try {
+			res = await fetch('/api/v1/settings/integrations/anthropic', {
+				method: 'DELETE',
+				credentials: 'include'
+			});
+		} catch (e) {
+			throw new Error(e instanceof Error ? e.message : 'Network error');
+		}
+		if (!res.ok) throw new Error(`Remove failed (${res.status})`);
+		await providers.loadIntegrations();
 	},
 
 	/**

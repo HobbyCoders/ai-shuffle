@@ -55,7 +55,7 @@
 		choose: 'Add a provider',
 		'openai-key': 'OpenAI API key',
 		'openai-sub': 'OpenAI subscription',
-		'claude-key': 'Claude Code API key',
+		'claude-key': 'Anthropic API key',
 		'claude-sub': 'Claude Code subscription',
 		'openrouter-key': 'OpenRouter API key'
 	};
@@ -63,7 +63,7 @@
 	const CHOICES: { step: Step; icon: typeof KeyRound; name: string; subtitle: string }[] = [
 		{ step: 'openai-key', icon: Sparkles, name: 'OpenAI API key', subtitle: 'Paste a key. Models are set up for you.' },
 		{ step: 'openai-sub', icon: MessageSquare, name: 'OpenAI subscription', subtitle: 'Sign in with ChatGPT. No key needed.' },
-		{ step: 'claude-key', icon: KeyRound, name: 'Claude Code API key', subtitle: 'Paste an Anthropic key for Claude Code.' },
+		{ step: 'claude-key', icon: KeyRound, name: 'Anthropic API key', subtitle: 'Paste an Anthropic key for Claude Code.' },
 		{ step: 'claude-sub', icon: Bot, name: 'Claude Code subscription', subtitle: 'Sign in with your Claude account.' },
 		{ step: 'openrouter-key', icon: Network, name: 'OpenRouter API key', subtitle: 'One key, hundreds of models to choose from.' }
 	];

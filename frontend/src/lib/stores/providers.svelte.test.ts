@@ -15,11 +15,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ModelProvider } from '$lib/api/model-providers';
+import type { ClaudeAccount } from '$lib/api/auth';
 
 const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	toggleModelProvider: vi.fn(),
-	hydrateModelRegistry: vi.fn()
+	hydrateModelRegistry: vi.fn(),
+	listClaudeAccounts: vi.fn()
 }));
 
 vi.mock('$lib/api/model-providers', async (importOriginal) => {
@@ -29,6 +31,11 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		listModelProviders: mocks.listModelProviders,
 		toggleModelProvider: mocks.toggleModelProvider
 	};
+});
+
+vi.mock('$lib/api/auth', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/api/auth')>();
+	return { ...actual, listClaudeAccounts: mocks.listClaudeAccounts };
 });
 
 vi.mock('$lib/constants/models.svelte', async (importOriginal) => {
@@ -63,6 +70,7 @@ beforeEach(() => {
 	mocks.listModelProviders.mockReset();
 	mocks.toggleModelProvider.mockReset();
 	mocks.hydrateModelRegistry.mockReset();
+	mocks.listClaudeAccounts.mockReset();
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
 	providers.clear();
 });
@@ -101,5 +109,152 @@ describe('providers store — model_providers registry', () => {
 
 		expect(mocks.hydrateModelRegistry).toHaveBeenCalledTimes(1);
 		expect(mocks.listModelProviders).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('providers store — Anthropic API key integration', () => {
+	it('loadIntegrations populates the anthropic key status from /settings/integrations', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({
+				anthropic_api_key_set: true,
+				anthropic_api_key_masked: 'sk-ant-…zzz',
+				claude_code_auth_method: 'api_key'
+			})
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await providers.loadIntegrations();
+
+		expect(fetchMock).toHaveBeenCalledWith('/api/v1/settings/integrations', {
+			credentials: 'include'
+		});
+		expect(providers.current.anthropicKeySet).toBe(true);
+		expect(providers.current.anthropicKeyMasked).toBe('sk-ant-…zzz');
+		expect(providers.current.claudeCodeAuthMethod).toBe('api_key');
+		expect(providers.current.integrationsError).toBe(null);
+
+		vi.unstubAllGlobals();
+	});
+
+	it('setAnthropicKey POSTs the key then reloads the integration state', async () => {
+		const fetchMock = vi
+			.fn()
+			// 1) POST /anthropic
+			.mockResolvedValueOnce({ ok: true, json: async () => ({ masked_key: 'sk-ant-…new' }) })
+			// 2) reload GET /integrations
+			.mockResolvedValueOnce({
+				ok: true,
+				json: async () => ({
+					anthropic_api_key_set: true,
+					anthropic_api_key_masked: 'sk-ant-…new',
+					claude_code_auth_method: 'api_key'
+				})
+			});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await providers.setAnthropicKey('sk-ant-secret');
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/settings/integrations/anthropic');
+		expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+		// State reflects the reload, not a local write.
+		expect(providers.current.anthropicKeySet).toBe(true);
+		expect(providers.current.anthropicKeyMasked).toBe('sk-ant-…new');
+		expect(providers.current.claudeCodeAuthMethod).toBe('api_key');
+
+		vi.unstubAllGlobals();
+	});
+
+	it('setAnthropicKey throws the server message on failure', async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ detail: 'bad key' }) });
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(providers.setAnthropicKey('sk-ant-secret')).rejects.toThrow('bad key');
+		// No reload happened after a failed save.
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		vi.unstubAllGlobals();
+	});
+
+	it('clearAnthropicKey DELETEs then reloads the integration state', async () => {
+		const fetchMock = vi
+			.fn()
+			// 1) DELETE /anthropic
+			.mockResolvedValueOnce({ ok: true })
+			// 2) reload GET /integrations → now unset
+			.mockResolvedValueOnce({
+				ok: true,
+				json: async () => ({ anthropic_api_key_set: false, anthropic_api_key_masked: null })
+			});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await providers.clearAnthropicKey();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/settings/integrations/anthropic');
+		expect(fetchMock.mock.calls[0][1].method).toBe('DELETE');
+		expect(providers.current.anthropicKeySet).toBe(false);
+		expect(providers.current.anthropicKeyMasked).toBe(null);
+		expect(providers.current.claudeCodeAuthMethod).toBe('account');
+
+		vi.unstubAllGlobals();
+	});
+});
+
+describe('providers store — refreshAll silent refetch', () => {
+	function account(id: string): ClaudeAccount {
+		return { id, name: id, email: null, is_active: false } as unknown as ClaudeAccount;
+	}
+
+	it('refetches without raising loading flags when data is already present', async () => {
+		// Seed both clusters so their data is non-empty.
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1' })] });
+		mocks.listClaudeAccounts.mockResolvedValue({
+			accounts: [account('a1')],
+			active_account_id: 'a1',
+			encryption_ready: true
+		});
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue({ ok: true, json: async () => ({ anthropic_api_key_set: false }) })
+		);
+
+		await providers.loadProviders();
+		await providers.loadClaudeAccounts();
+		expect(providers.current.providers.length).toBe(1);
+		expect(providers.current.claudeAccounts.length).toBe(1);
+
+		// Re-arm the list APIs with in-flight promises so we can inspect state mid-refresh.
+		let resolveList!: (v: unknown) => void;
+		let resolveAccts!: (v: unknown) => void;
+		mocks.listModelProviders.mockReturnValueOnce(
+			new Promise((r) => {
+				resolveList = r;
+			})
+		);
+		mocks.listClaudeAccounts.mockReturnValueOnce(
+			new Promise((r) => {
+				resolveAccts = r;
+			})
+		);
+
+		const done = providers.refreshAll();
+
+		// Data already present + silent → loading flags never rose.
+		expect(providers.current.providersLoading).toBe(false);
+		expect(providers.current.accountsLoading).toBe(false);
+
+		resolveList({ providers: [provider({ id: 'p1' })] });
+		resolveAccts({ accounts: [account('a1')], active_account_id: 'a1', encryption_ready: true });
+		await done;
+
+		// The refetch still hit the network (list APIs called a second time).
+		expect(mocks.listModelProviders).toHaveBeenCalledTimes(2);
+		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
+
+		vi.unstubAllGlobals();
 	});
 });
