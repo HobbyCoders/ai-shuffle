@@ -137,6 +137,16 @@ const initialState: ProvidersState = {
 
 let _state = $state<ProvidersState>({ ...initialState });
 
+/**
+ * One-shot guard for the first Providers-tab open (landmine L1 / ruling PR6).
+ * The settings sections remount on every tab switch and re-run their `onMount`
+ * fetches; this flag lets `ensureLoaded()` cache the provider + account loads
+ * across those remounts so switching to Providers doesn't refetch every time.
+ * Reset by `clear()`. Not `$state` — it's a plain module-scope latch, never
+ * rendered.
+ */
+let _initialLoadStarted = false;
+
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
 	createSubscribers<ProvidersState>(
 		() => _state,
@@ -406,6 +416,18 @@ export const providers = {
 	// model_providers registry (lifted from ConnectionsSection:454-609)
 	// ------------------------------------------------------------------------
 
+	/**
+	 * Load providers + Claude accounts exactly once per session (L1/PR6). Safe to
+	 * call from every `ProvidersSection` mount — only the first call fetches; later
+	 * mounts read the already-populated store. Mutations refresh independently, so
+	 * the cache never goes stale after a create/toggle/delete/switch.
+	 */
+	async ensureLoaded() {
+		if (_initialLoadStarted) return;
+		_initialLoadStarted = true;
+		await Promise.all([providers.loadProviders(), providers.loadClaudeAccounts()]);
+	},
+
 	async loadProviders() {
 		_update((s) => ({ ...s, providersLoading: true, providersError: '' }));
 		try {
@@ -477,6 +499,7 @@ export const providers = {
 	/** Reset the whole store (test/teardown helper). */
 	clear() {
 		_state = { ...initialState };
+		_initialLoadStarted = false;
 		_notifySubscribers();
 	}
 };
