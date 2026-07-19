@@ -36,6 +36,18 @@ export interface ModelProvider {
 	context_window: number | null;
 	max_output_tokens: number | null;
 	enabled: boolean;
+	// ----- Codex / ChatGPT-subscription OAuth surface -----
+	// The secret access/refresh blobs are NEVER returned — only the boolean
+	// `codex_*_token_set` flags. The non-secret Codex fields (`auth_mode`,
+	// `codex_account_id`, `needs_reauth`) come through directly. See
+	// `app/api/model_providers.py::ModelProviderResponse` — `auth_mode` and
+	// `codex_account_id` are `Optional[str] = None`; the three booleans default
+	// to `false` in the response model, so they are always present on the wire.
+	auth_mode?: string | null;
+	codex_account_id?: string | null;
+	needs_reauth?: boolean;
+	codex_access_token_set?: boolean;
+	codex_refresh_token_set?: boolean;
 	created_at: string | null;
 	updated_at: string | null;
 }
@@ -102,4 +114,65 @@ export interface FetchModelsResult {
 
 export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {
 	return api.post(`/model-providers/${id}/fetch-models`);
+}
+
+// ============================================================================
+// Codex / ChatGPT-subscription device-code OAuth enrollment
+// ============================================================================
+//
+// Two-step, admin-driven device-code flow backed by the routes in
+// `app/api/model_providers.py` (`codex_device_start` / `codex_device_poll` /
+// `codex_clear_reauth`). The interfaces below are derived from the ACTUAL
+// backend response models (ruling PR7 — NOT the guessed shapes in plan §2.5),
+// verified against `app/api/model_providers.py` at implementation time:
+//
+//   • start → `CodexDeviceStartResponse` = { user_code, verification_uri }.
+//     Statuses: 200 on success; 400 (encryption locked), 404 (provider not
+//     found), 502 (upstream Codex device-code start failed).
+//   • poll  → `CodexDevicePollResponse` = { status, provider? }. `status` is
+//     one of "pending" | "slow_down" | "complete" (a 200 in every one of those
+//     cases); on `complete`, `provider` carries the fresh public row. There is
+//     NO "error" status value — a terminal failure surfaces as an HTTP 400
+//     (`detail: "Codex enrollment failed: <code>"`), and a poll with no pending
+//     enrollment is also a 400 (`detail: "No pending Codex enrollment …"`).
+//     Both are thrown as `ApiError` by the shared client — callers catch and,
+//     per PR7, restart at `codexDeviceStart` rather than re-polling.
+//   • clear-reauth → the fresh public `ModelProvider` row (200), 404 if the
+//     provider has no stored Codex tokens.
+
+/** Response of `POST /model-providers/{id}/codex/device/start`. */
+export interface CodexDeviceStart {
+	/** The code the admin types at `verification_uri` in their own browser. */
+	user_code: string;
+	/** The URL the admin opens to enter `user_code`. */
+	verification_uri: string;
+}
+
+/** Non-terminal poll statuses. Terminal failure is an HTTP 400, not a status. */
+export type CodexDevicePollStatus = 'pending' | 'slow_down' | 'complete';
+
+/** Response of `POST /model-providers/{id}/codex/device/poll`. */
+export interface CodexDevicePoll {
+	status: CodexDevicePollStatus;
+	/** Present only when `status === 'complete'` — the fresh, enrolled row. */
+	provider?: ModelProvider;
+}
+
+/** Start Codex device-code enrollment for a provider. Throws on 400/404/502. */
+export async function codexDeviceStart(id: string): Promise<CodexDeviceStart> {
+	return api.post(`/model-providers/${id}/codex/device/start`);
+}
+
+/**
+ * One poll step of the Codex enrollment. Returns `pending`/`slow_down` to keep
+ * polling or `complete` with the enrolled `provider`. A terminal upstream error
+ * (or an absent pending enrollment) is thrown as an `ApiError` (HTTP 400).
+ */
+export async function codexDevicePoll(id: string): Promise<CodexDevicePoll> {
+	return api.post(`/model-providers/${id}/codex/device/poll`);
+}
+
+/** Clear ONLY the `needs_reauth` flag on a Codex provider (token kept intact). */
+export async function codexClearReauth(id: string): Promise<ModelProvider> {
+	return api.post(`/model-providers/${id}/codex/clear-reauth`);
 }
