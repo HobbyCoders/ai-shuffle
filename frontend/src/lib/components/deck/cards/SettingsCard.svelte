@@ -30,13 +30,12 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe, Code2 } from 'lucide-svelte';
-	import AIToolsSettings from './settings/AIToolsSettings.svelte';
+	import { User, MessageSquare, KeyRound, Plug, SlidersHorizontal, ScrollText, Globe, Code2 } from 'lucide-svelte';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
 	import SecuritySection from './settings/SecuritySection.svelte';
-	import ConnectionsSection from './settings/ConnectionsSection.svelte';
+	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
@@ -54,7 +53,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'providers' | 'connectors' | 'browser' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -68,8 +67,7 @@
 	const settingsTabs: RailItem[] = $derived([
 		{ id: 'account', label: 'Account', icon: User },
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
-		{ id: 'connections', label: 'Connections', icon: KeyRound },
-		{ id: 'ai', label: 'AI Models', icon: Boxes },
+		{ id: 'providers', label: 'Providers', icon: KeyRound },
 		...($isAdmin
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
@@ -620,10 +618,10 @@
 					</div>
 				{/if}
 
-				<!-- CONNECTIONS -->
-				{#if activeTab === 'connections'}
+				<!-- PROVIDERS -->
+				{#if activeTab === 'providers'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<ConnectionsSection
+						<ProvidersSection
 							{claudeLoginLoading}
 							{claudeOAuthUrl}
 							{claudeAuthCode}
@@ -666,13 +664,6 @@
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}
-					</div>
-				{/if}
-
-				<!-- AI MODELS -->
-				{#if activeTab === 'ai'}
-					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<AIToolsSettings />
 					</div>
 				{/if}
 
