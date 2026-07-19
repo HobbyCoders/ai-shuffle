@@ -55,6 +55,10 @@ ISSUER = "https://auth.openai.com"
 DEVICE_USERCODE_URL = f"{ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{ISSUER}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URL = f"{ISSUER}/codex/device"
+# The device flow's implicit redirect target — /oauth/token REQUIRES it on the
+# authorization_code exchange ("same value used during authorization"); value
+# mirrors codex-rs device_code_auth.rs.
+DEVICE_CALLBACK_URL = f"{ISSUER}/deviceauth/callback"
 TOKEN_URL = f"{ISSUER}/oauth/token"
 REVOKE_URL = f"{ISSUER}/oauth/revoke"
 
@@ -372,6 +376,7 @@ async def _exchange_authorization_code(
             "grant_type": "authorization_code",
             "code": code,
             "code_verifier": code_verifier,
+            "redirect_uri": DEVICE_CALLBACK_URL,
         },
     )
     if resp.status_code >= 400:

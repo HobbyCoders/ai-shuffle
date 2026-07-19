@@ -228,6 +228,7 @@ class TestDevicePoll:
                 assert body["grant_type"] == "authorization_code"
                 assert body["code"] == "auth-code-1"
                 assert body["code_verifier"] == "the-verifier"
+                assert body["redirect_uri"] == codex_oauth.DEVICE_CALLBACK_URL
                 return httpx.Response(200, json={
                     "access_token": "at-x", "refresh_token": "rt-x",
                     "id_token": id_token,
