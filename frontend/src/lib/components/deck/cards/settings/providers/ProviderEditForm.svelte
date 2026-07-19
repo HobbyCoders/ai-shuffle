@@ -150,8 +150,11 @@
 	}
 
 	// Parse an optional positive integer field; '' or non-finite → null (omit).
-	function parseOptionalInt(value: string): number | null {
-		const trimmed = value.trim();
+	// bind:value on a type="number" input coerces to number|null in Svelte 5,
+	// so this receives the seeded string OR a coerced number/null after edits.
+	function parseOptionalInt(value: string | number | null): number | null {
+		if (value == null) return null;
+		const trimmed = String(value).trim();
 		if (!trimmed) return null;
 		const n = Number(trimmed);
 		return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;

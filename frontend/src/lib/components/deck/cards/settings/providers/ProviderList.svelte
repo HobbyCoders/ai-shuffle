@@ -30,6 +30,7 @@
 	import ClaudeAccountsPanel from './ClaudeAccountsPanel.svelte';
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
 	import ProviderEditForm from './ProviderEditForm.svelte';
+	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
 
 	const s = $derived(providers.current);
 
@@ -45,6 +46,8 @@
 	let editingId: string | null = $state(null);
 	// Which provider row is armed for delete (inline confirm), or null.
 	let confirmDeleteId: string | null = $state(null);
+	// Which gateway row's Manage-models drawer is open (its id), or null.
+	let manageModelsId = $state<string | null>(null);
 
 	// Token present but expired/invalid: the credential exists (so
 	// $claudeAuthenticated is true) yet the OAuth token can't be used. Mirrors
@@ -202,7 +205,7 @@
 						busy: s.togglingProviderId === p.id,
 						onToggle: () => providers.toggleProvider(p.id)
 					}}
-					onManageModels={noop}
+					onManageModels={() => (manageModelsId = p.id)}
 					onEdit={() => openEdit(p.id)}
 					onRemove={() => armDelete(p.id)}
 					confirmingDelete={confirmDeleteId === p.id}
@@ -213,6 +216,9 @@
 					<div class="prov-sub">
 						<ProviderEditForm provider={p} onClose={closeEdit} />
 					</div>
+				{/if}
+				{#if manageModelsId === p.id}
+					<ManageModelsDrawer provider={p} onClose={() => (manageModelsId = null)} />
 				{/if}
 			{/if}
 		</li>
