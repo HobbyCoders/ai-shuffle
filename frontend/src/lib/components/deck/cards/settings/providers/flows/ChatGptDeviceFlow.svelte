@@ -6,6 +6,13 @@
 	 * `AddProviderModal` for the `chatgpt-sub` step; it owns ONLY the device flow
 	 * and talks to a fixed props contract so the modal can drive it blindly.
 	 *
+	 * TWO modes, selected by the `existingProviderId` prop:
+	 *   • DRAFT (default, `existingProviderId` absent): CREATES a placeholder
+	 *     `chatgpt` row on mount and OWNS it — bail paths delete the row.
+	 *   • RECONNECT (`existingProviderId` set): reuses an existing row (e.g. the
+	 *     Providers-list "Reconnect" button); mount skips `createDraft` and starts
+	 *     device/start directly, and bail paths NEVER delete the row.
+	 *
 	 * State machine (internal `phase`):
 	 *   create    → create a placeholder `chatgpt` provider row, hold `providerId`.
 	 *   starting  → `codexDeviceStart(providerId)`; "Preparing sign-in…".
@@ -62,9 +69,19 @@
 		onCancel: () => void;
 		/** Report while any request/poll is in flight (guards the parent close). */
 		onBusyChange?: (busy: boolean) => void;
+		/**
+		 * RECONNECT mode: reuse this existing provider row instead of creating a
+		 * draft. When set, mount skips `createDraft` and bail paths never delete the
+		 * row. Absent/undefined = DRAFT mode (the original create-and-own behavior).
+		 */
+		existingProviderId?: string | null;
 	}
 
-	let { onDone, onCancel, onBusyChange }: Props = $props();
+	let { onDone, onCancel, onBusyChange, existingProviderId }: Props = $props();
+
+	// Draft mode owns (creates + deletes) the row; reconnect mode does not.
+	// A non-reactive const is fine — props don't change post-mount here.
+	const ownsRow = !existingProviderId;
 
 	type Phase = 'create' | 'starting' | 'awaiting' | 'finishing' | 'error';
 
@@ -206,11 +223,18 @@
 		}
 	}
 
-	/** Delete the placeholder row (best-effort) then hand control back to the
-	 *  parent's chooser. Serves both the awaiting "Cancel" and error "Remove
-	 *  draft" affordances — no orphan row is left behind. */
+	/** Hand control back to the parent. In DRAFT mode this deletes the placeholder
+	 *  row (best-effort) so no orphan is left behind — serving both the awaiting
+	 *  "Cancel" and error "Remove draft" affordances. In RECONNECT mode the row is
+	 *  a real, enrolled provider, so it is left untouched. */
 	async function removeDraft() {
 		clearPollTimer();
+		if (!ownsRow) {
+			// RECONNECT: never delete an existing provider row on cancel/close.
+			setBusy(false);
+			onCancel();
+			return;
+		}
 		phase = 'finishing';
 		setBusy(true);
 		const id = providerId;
@@ -243,7 +267,13 @@
 	}
 
 	onMount(() => {
-		createDraft();
+		if (existingProviderId) {
+			// RECONNECT: reuse the existing row, skip create, go straight to device/start.
+			providerId = existingProviderId;
+			startDevice();
+		} else {
+			createDraft();
+		}
 	});
 
 	onDestroy(() => {
@@ -327,7 +357,9 @@
 			<span>{errorMessage}</span>
 		</div>
 		<div class="flex flex-wrap justify-end gap-2">
-			<button type="button" onclick={removeDraft} class={secondaryBtn}>Remove draft</button>
+			<button type="button" onclick={removeDraft} class={secondaryBtn}>
+				{ownsRow ? 'Remove draft' : 'Close'}
+			</button>
 			<button type="button" onclick={tryAgain} class={primaryBtn}>Try again</button>
 		</div>
 	{/if}

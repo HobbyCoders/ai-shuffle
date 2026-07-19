@@ -12,8 +12,8 @@
 	 *      "overridden by API key".
 	 *   3. model_providers rows, ordered ChatGPT → OpenRouter → OpenAI → custom:
 	 *        - ChatGPT subscription (auth_mode='chatgpt'): native-auth, status pill,
-	 *          no toggle, "Sign in / Reconnect" (no-op this chunk — Chunk 6 wires
-	 *          the device flow), removable.
+	 *          no toggle, "Sign in / Reconnect" (opens the `ChatGptDeviceFlow` modal
+	 *          in reconnect mode against the existing row), removable.
 	 *        - gateway rows (OpenRouter / OpenAI / custom): enable toggle, "Manage
 	 *          models" (no-op this chunk — Chunk 7 wires the drawer), Edit (opens
 	 *          the real `ProviderEditForm`), and Remove.
@@ -23,6 +23,9 @@
 	 * only the row model + transient view state (which row is expanded / editing /
 	 * confirming delete).
 	 */
+	import { onMount } from 'svelte';
+	import { X } from 'lucide-svelte';
+	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
 	import type { ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -31,6 +34,7 @@
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
 	import ProviderEditForm from './ProviderEditForm.svelte';
 	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
+	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 
 	const s = $derived(providers.current);
 
@@ -48,6 +52,36 @@
 	let confirmDeleteId: string | null = $state(null);
 	// Which gateway row's Manage-models drawer is open (its id), or null.
 	let manageModelsId = $state<string | null>(null);
+	// Which ChatGPT row is mid-reconnect (its id, hosts the device-flow modal), or null.
+	let reconnectId = $state<string | null>(null);
+	// True while the reconnect device flow has an operation in flight — guards close.
+	let reconnectBusy = $state(false);
+
+	// Fullscreen at handheld widths for the reconnect modal (mirrors AddProviderModal).
+	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
+	let reconnectFullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
+
+	// Esc fires on keydown within the dialog container, which only receives events
+	// while focus is inside it — so focus it on open (AddProviderModal precedent).
+	let reconnectDialogEl = $state<HTMLDivElement | null>(null);
+
+	onMount(() => {
+		const onResize = () => (viewportWidth = window.innerWidth);
+		window.addEventListener('resize', onResize);
+		return () => window.removeEventListener('resize', onResize);
+	});
+
+	// Focus the dialog container once it mounts so Esc works before the first click.
+	$effect(() => {
+		if (reconnectId !== null) reconnectDialogEl?.focus();
+	});
+
+	function closeReconnect() {
+		if (!reconnectBusy) reconnectId = null;
+	}
+	function handleReconnectKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeReconnect();
+	}
 
 	// Token present but expired/invalid: the credential exists (so
 	// $claudeAuthenticated is true) yet the OAuth token can't be used. Mirrors
@@ -129,12 +163,6 @@
 		if (editingId === id) editingId = null;
 		await providers.deleteProvider(id);
 	}
-
-	// Sign in / Reconnect / Manage models are wired to no-op callbacks this chunk.
-	function noop() {
-		// Chunk 5/6/7 wires this (Add-provider modal / ChatGPT device flow /
-		// Manage-models drawer). Intentionally does nothing for now.
-	}
 </script>
 
 <ul class="prov-list">
@@ -184,7 +212,7 @@
 					status={chatgptStatus(p)}
 					highlight={!!p.codex_access_token_set && !p.needs_reauth}
 					meta={providerMeta(p, kind)}
-					onSignIn={noop}
+					onSignIn={() => (reconnectId = p.id)}
 					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
 					onRemove={() => armDelete(p.id)}
 					confirmingDelete={confirmDeleteId === p.id}
@@ -224,6 +252,59 @@
 		</li>
 	{/each}
 </ul>
+
+{#if reconnectId !== null}
+	<!-- Reconnect ChatGPT: hosts ChatGptDeviceFlow in reconnect mode against the
+	     existing row. Modal chrome copies AddProviderModal (theme-token classes,
+	     backdrop/Esc close both guarded while busy, fullscreen at handheld width). -->
+	<div
+		bind:this={reconnectDialogEl}
+		class="fixed inset-0 z-50 flex items-center justify-center {reconnectFullscreen ? 'p-0' : 'p-4'}"
+		role="dialog"
+		aria-modal="true"
+		aria-label="Reconnect ChatGPT"
+		onkeydown={handleReconnectKeydown}
+		tabindex="-1"
+	>
+		<!-- Backdrop -->
+		<button
+			class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+			onclick={closeReconnect}
+			aria-label="Close"
+		></button>
+
+		<!-- Modal card -->
+		<div
+			class="relative flex flex-col bg-card border border-border shadow-xl {reconnectFullscreen
+				? 'w-full h-full max-w-none rounded-none'
+				: 'w-full max-w-lg max-h-[90vh] rounded-xl'}"
+		>
+			<!-- Header -->
+			<div class="flex items-center gap-2 px-6 py-4 border-b border-border">
+				<h2 class="flex-1 text-lg font-semibold text-foreground">Reconnect ChatGPT</h2>
+				<button
+					type="button"
+					onclick={closeReconnect}
+					disabled={reconnectBusy}
+					class="p-2 -mr-2 hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
+					aria-label="Close"
+				>
+					<X class="w-5 h-5 text-muted-foreground" />
+				</button>
+			</div>
+
+			<!-- Content -->
+			<div class="flex-1 overflow-y-auto p-6">
+				<ChatGptDeviceFlow
+					existingProviderId={reconnectId}
+					onDone={() => (reconnectId = null)}
+					onCancel={() => (reconnectId = null)}
+					onBusyChange={(b) => (reconnectBusy = b)}
+				/>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.prov-list {
