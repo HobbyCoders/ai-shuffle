@@ -351,7 +351,7 @@ def translate_request(
         # effort lives in the new top-level output_config.effort.
         body["reasoning"] = {
             "effort": _normalize_effort(
-                anthropic_body.get("output_config", {}).get("effort")
+                (anthropic_body.get("output_config") or {}).get("effort")
             ),
             "summary": "auto",
         }
