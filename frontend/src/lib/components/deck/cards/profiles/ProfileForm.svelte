@@ -661,10 +661,15 @@
 		gap: 8px;
 		width: 100%;
 	}
-	.grp-row :global(.sel),
-	.grp-row :global(.mpk) {
+	.grp-row :global(.sel) {
 		flex: 1;
 		min-width: 0;
+	}
+	/* min-width: 0 here would beat the picker's own 220px floor on specificity
+	   and collapse the trigger to the current label's width. */
+	.grp-row :global(.mpk) {
+		flex: 1;
+		min-width: 220px;
 	}
 
 	/* Square icon button next to a select (new/delete group, remove var) */

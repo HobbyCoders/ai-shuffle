@@ -301,6 +301,9 @@
 	.mpk {
 		position: relative;
 		width: 100%;
+		/* The profile form's control column shrinks to content — without a floor
+		   the trigger collapses to the current label's width (~76px). */
+		min-width: 220px;
 	}
 
 	/* Trigger mirrors the app's `.sel` control so it drops into a `.grp-row`. */
@@ -341,8 +344,14 @@
 		position: absolute;
 		z-index: 40;
 		top: calc(100% + 4px);
-		left: 0;
+		/* Right-anchored: the picker sits near the clipped right edge of its
+		   `.set-group` (overflow: hidden), so extra width must grow LEFTWARD.
+		   Sized to content with a floor of the trigger width, capped so long
+		   model labels still ellipsize instead of spanning the card. */
 		right: 0;
+		min-width: 100%;
+		width: max-content;
+		max-width: min(340px, 85vw);
 		display: flex;
 		flex-direction: column;
 		max-height: 340px;
