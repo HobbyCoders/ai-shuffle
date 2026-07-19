@@ -101,3 +101,48 @@ python -m app.main
 ```
 
 The database migrations run automatically on startup.
+
+> **Always rebuild the frontend when you update the backend.** The backend
+> serves the SPA from `app/static`, so a `git pull` that changes API routes but
+> leaves a stale `app/static` in place will ship a frontend that calls endpoints
+> the new backend no longer exposes. Symptoms of a skipped rebuild include
+> repeated `404`s in the browser network tab and a stale service worker (`sw.js`)
+> that keeps requesting cached assets such as `/offline.html`. The `git pull`
+> block above already rebuilds and re-copies `app/static`; do not omit those
+> steps.
+
+## Multi-install rollout (shared database)
+
+AI Shuffle supports running more than one install (for example a desktop
+**primary** plus an always-on **worker**) against a **single shared PostgreSQL
+database**. The installs coordinate entirely through that database — durable
+session state, turn leases, and pending interactions all live in shared tables.
+
+**Upgrade every install that shares a database together.** Mixed-version
+clusters are **not supported**. The V2 re-architecture replaced the old
+peer-to-peer HTTP relay with shared-table coordination and **deleted** the
+legacy relay endpoints (the cross-install `message` / `live` / `intake` routes
+and the `/sessions/cloud/*` offload routes) in one phase. An install still
+running pre-upgrade code alongside an upgraded peer will:
+
+- get `404`s when it polls relay endpoints the upgraded peer has removed, and
+  classify that peer as **offline** (a "device offline" toast, with sends to it
+  blocked); and
+- serve a stale frontend if its `app/static` was not rebuilt — for example a
+  worker still shipping a pre-upgrade SPA produced repeated `404`s on the deleted
+  `/sessions/cloud/*` endpoints plus a stale service worker requesting
+  `/offline.html`.
+
+Recommended rollout for a shared-database cluster:
+
+1. Stop **all** installs sharing the database.
+2. On **each** install: `git pull`, reinstall backend deps, **rebuild the
+   frontend and re-copy `app/static`** (see [Updating](#updating) above).
+3. Bring the installs back up. Database migrations run automatically on the
+   first process to start; the schema is forward-only, so bringing every install
+   to the same commit avoids one install writing state a peer cannot read.
+
+Do not upgrade one install and leave a peer on an older commit "for now" — the
+two will not interoperate across a V2 phase boundary. For the engineering
+rationale and phase history, see the internal
+[V2 Core Re-architecture](../../V2_CORE_REARCHITECTURE.md) spec.
