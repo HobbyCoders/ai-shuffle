@@ -3,12 +3,13 @@ Tests for the deploy-time bundled-CLI interrupt patch
 (app/core/cli_interrupt_patch.py).
 
 The patch neutralizes ONE cancel-broadcast call site in the ~257MB bundled
-``claude`` binary — anchored by ``remote-cancel"));jVr(`` — with a SAME-LENGTH
-3-byte edit (``jVr`` → ``0&&``) so a user "Stop" no longer kills in-flight
+``claude`` binary — anchored by ``remote-cancel"));sYr(`` — with a SAME-LENGTH
+3-byte edit (``sYr`` → ``0&&``) so a user "Stop" no longer kills in-flight
 background sub-agents. It only edits when there is EXACTLY ONE unpatched anchor
-and ZERO patched ones; anything else is refused. Two unrelated bare ``jVr(``
-sites elsewhere in the binary must never be touched — the full anchor prefix is
-what makes the match unique.
+and ZERO patched ones; anything else is refused. The minified token rotates
+between CLI bundles (``jVr`` in CLI 2.1.205, ``sYr`` in CLI 2.1.214); unrelated
+bare ``sYr(`` sites elsewhere in the binary must never be touched — the full
+anchor prefix is what makes the match unique.
 
 These tests use SMALL synthetic tmp-file buffers, never the real binary.
 """
@@ -27,10 +28,10 @@ from app.core.cli_interrupt_patch import (
 )
 
 
-# A couple of bare ``jVr(`` occurrences that MUST NOT be treated as anchors
+# A couple of bare ``sYr(`` occurrences that MUST NOT be treated as anchors
 # (they lack the ``remote-cancel"));`` prefix). Sprinkled into buffers to prove
 # the guard keys on the full anchor, not the bare token.
-_DECOY = b"....jVr(x)....jVr(y)...."
+_DECOY = b"....sYr(x)....sYr(y)...."
 
 
 def _buffer(*, anchor: bytes = b"", count: int = 1) -> bytes:
@@ -71,8 +72,8 @@ def test_single_unpatched_anchor_is_patched(tmp_path):
     assert after.count(_PATCHED) == 1
     # The anchor now reads as the patched form.
     assert _PATCHED in after
-    # Decoy bare-jVr sites (2 per decoy blob, head + tail) are untouched.
-    assert after.count(b"jVr(") == 4
+    # Decoy bare-sYr sites (2 per decoy blob, head + tail) are untouched.
+    assert after.count(b"sYr(") == 4
     assert is_patch_active() is True
     # A marker recording sdk_version + size was written.
     marker = json.loads((tmp_path / _MARKER_NAME).read_text())
@@ -152,7 +153,7 @@ def test_reverted_bytes_are_repatched_not_trusted(tmp_path):
     # Revert the 3 patched bytes back to the original token, leaving the marker
     # (matching sdk version + size) in place.
     data = bytearray(binary.read_bytes())
-    data[token_offset : token_offset + 3] = b"jVr"
+    data[token_offset : token_offset + 3] = b"sYr"
     binary.write_bytes(bytes(data))
     assert binary.read_bytes().count(_UNPATCHED) == 1  # anchor restored
     patch_mod._PATCH_ACTIVE = False  # simulate a fresh boot

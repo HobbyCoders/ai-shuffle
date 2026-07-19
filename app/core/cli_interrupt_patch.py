@@ -12,8 +12,8 @@ kills any background sub-agents the user wanted to keep running. There is no
 task-filtered interrupt to call; the only real fix lives in the CLI itself.
 
 The one call site responsible is uniquely anchored by the byte sequence
-``remote-cancel"));jVr(``. Neutralizing it is a SAME-LENGTH, three-byte edit:
-replace the ``jVr`` token with ``0&&`` so the anchor becomes
+``remote-cancel"));sYr(``. Neutralizing it is a SAME-LENGTH, three-byte edit:
+replace the ``sYr`` token with ``0&&`` so the anchor becomes
 ``remote-cancel"));0&&(`` — turning the cancel-broadcast call into a dead
 ``0 && (...)`` short-circuit. Equal length means the edit is done in place (a
 single ``seek``+``write`` of three bytes), never a full-file rewrite, and Bun
@@ -21,13 +21,19 @@ does not integrity-check its embedded payload, so the patched binary runs clean.
 
 Safety
 ------
-TWO OTHER ``jVr(`` sites exist elsewhere in the binary and MUST NOT be touched —
-they are unrelated. This module only ever edits when there is EXACTLY ONE
-unpatched anchor (``remote-cancel"));jVr(``) and ZERO already-patched anchors;
-any other count means the CLI shifted between SDK versions and we refuse to edit
-(``"pattern-shifted"``, logged loudly). The full-anchor prefix (``remote-cancel``
-etc.) is what makes the match unique, so the bare ``jVr(`` occurrences are never
-in scope.
+The token is a MINIFIED identifier that rotates between CLI bundles (it was
+``jVr`` in CLI 2.1.205 / SDK 0.2.114 and is ``sYr`` in CLI 2.1.214 / SDK
+0.2.122). THREE OTHER bare ``sYr(`` sites exist elsewhere in the binary and MUST
+NOT be touched — they are unrelated. Worse, the bare prefix ``remote-cancel"));``
+itself now appears THREE times (the SIGINT/SIGTERM signal handler, this
+interrupt-request handler, and the SDK-control cancel path), so the prefix alone
+is NOT unique — only ONE of those is followed by the task-broadcast token. This
+module only ever edits when there is EXACTLY ONE unpatched anchor
+(``remote-cancel"));sYr(`` — prefix AND token together) and ZERO already-patched
+anchors; any other count means the CLI shifted between SDK versions and we refuse
+to edit (``"pattern-shifted"``, logged loudly). The FULL anchor (prefix + token)
+is what makes the match unique, so neither the repeated bare prefix nor the bare
+``sYr(`` occurrences are ever in scope.
 
 A sibling marker file (``.claude_interrupt_patch``) records the SDK version,
 binary size, and the absolute ``token_offset`` of the 3 patched bytes at patch
@@ -52,11 +58,11 @@ logger = logging.getLogger(__name__)
 
 # The unique cancel-broadcast call site. Same-length replacement neutralizes it
 # by turning the call into a dead ``0 && (...)`` short-circuit.
-_UNPATCHED = b'remote-cancel"));jVr('
+_UNPATCHED = b'remote-cancel"));sYr('
 _PATCHED = b'remote-cancel"));0&&('
 # Offset of the 3-byte token within the anchor (computed, not hardcoded — the
 # prefix ``remote-cancel"));`` is 17 bytes, so the token starts at index 17).
-_TOKEN_OFFSET = _UNPATCHED.index(b"jVr")
+_TOKEN_OFFSET = _UNPATCHED.index(b"sYr")
 _NEW_TOKEN = b"0&&"
 
 # Sibling of the binary; lets a warm boot skip the full-file scan.
@@ -273,7 +279,7 @@ def _patch_cli_preserve_background_impl(binary: Path) -> str:
         return "patched"
 
     # 5) Anything else: the anchor shifted between SDK versions. NEVER edit —
-    #    guessing could corrupt an unrelated ``jVr(`` site.
+    #    guessing could corrupt an unrelated ``sYr(`` site.
     logger.error(
         "[CLI patch] Anchor pattern shifted in %s (unpatched=%d, patched=%d, "
         "sdk %s) — refusing to edit. Interrupt will still kill background "
