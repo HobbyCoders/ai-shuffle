@@ -124,7 +124,8 @@ async def _post(client: httpx.AsyncClient, headers: Dict[str, str], body: Dict[s
 
 async def main() -> int:
     # Sanity: confirm settings resolved the intended DB (host only; no password).
-    dbhost = settings.database_url.split("@")[-1] if "@" in settings.database_url else "?"
+    dsn = settings.database_url or ""
+    dbhost = dsn.split("@")[-1] if "@" in dsn else "?"
     print(f"DB target (host/db only): {dbhost}")
     init_pool(min_conn=1, max_conn=4)
 
@@ -182,7 +183,7 @@ async def main() -> int:
                 print("  NO tool_use -> escalating model")
                 continue
 
-        if phase1_json is None:
+        if phase1_json is None or phase1_model is None:
             report["verdict"] = "FAIL — could not obtain a turn with BOTH thinking and tool_use"
             report["live_requests"] = _live_count
             report["phase1_last_status"] = p1_status
