@@ -220,14 +220,28 @@ class TestApplyProviderEnv:
     # ── Chunk F: cross-provider subagent leg (ruling A2/G2-r) ────────────────
 
     def test_subagent_leg_overrides_only_subagent_model_key(self, mock_db):
-        """A leg overrides CLAUDE_CODE_SUBAGENT_MODEL to the leg model, but
-        ANTHROPIC_SMALL_FAST_MODEL keeps the MAIN provider's chain (small/fast
-        probes stay on the main leg)."""
+        """An HONORED leg (servable main + servable subagent) overrides
+        CLAUDE_CODE_SUBAGENT_MODEL to the leg model, but ANTHROPIC_SMALL_FAST_MODEL
+        keeps the MAIN provider's chain (small/fast probes stay on the main leg)."""
+        from app.core.translator_gateway import routing
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        _mk_provider(db, provider_id="op", small_fast_model="op/small")
+        routing.get_registry().clear()
+        # Servable main (anthropic) + servable subagent (chatgpt) → leg honored.
+        db.create_model_provider(
+            provider_id="op", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant-real"),
+            small_fast_model="op/small",
+            models=[{"id": "op/main", "label": "Main"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "sub/model", "label": "Sub"}],
+        )
         env = apply_provider_env(
-            {}, "op", "op/main",
+            {}, "op", "op/main", session_id="sess-leg-override",
             subagent_provider_id="sub", subagent_model="sub/model",
         )
         assert env[SMALL_FAST_KEY] == "op/small"   # main chain unchanged
@@ -302,6 +316,151 @@ class TestApplyProviderEnv:
         # subagent key is overridden to the leg model.
         assert env[SMALL_FAST_KEY] == "gpt-5-codex"
         assert env[SUBAGENT_KEY] == "sub/model"
+
+    # ── Chunk F gap: anthropic-type MAIN + cross-provider subagent leg ───────
+    #
+    # A real-Anthropic-API MAIN with a foreign subagent leg is the flagship
+    # mixed case. Anthropic is gateway-servable (via anthropic_passthrough) but
+    # NOT ``is_translated``, so it must be pulled onto the gateway ONLY when a
+    # servable leg is present — and the REAL API key must NOT land in env then.
+
+    def test_anthropic_main_with_leg_routes_through_gateway(self, mock_db):
+        """anthropic-main + servable (Codex) leg → the session is routed through
+        the loopback gateway: base URL is the gateway, a routing token carrying
+        the leg is minted, and the REAL Anthropic API key is NOT placed in env
+        (the gateway reads it from the provider row at request time)."""
+        from app.core.config import settings
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant-real"),
+            models=[{"id": "claude-sonnet-4", "label": "Sonnet"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "Codex"}],
+        )
+        db.set_codex_token_bundle(
+            "sub", access_token=None, refresh_token=None, account_id="acct-sub"
+        )
+        env = apply_provider_env(
+            {}, "an", "claude-sonnet-4", session_id="sess-an",
+            subagent_provider_id="sub", subagent_model="gpt-5-codex",
+        )
+        assert env[BASE_URL_KEY] == f"http://127.0.0.1:{settings.translator_gateway_port}"
+        binding = routing.resolve(env[AUTH_TOKEN_KEY])
+        assert binding is not None
+        assert binding.provider_id == "an"
+        assert binding.subagent_provider_id == "sub"
+        assert binding.subagent_model == "gpt-5-codex"
+        assert binding.subagent_account_id == "acct-sub"
+        # The real Anthropic API key must NEVER be exposed in env in this mode.
+        assert "sk-ant-real" not in env.values()
+        assert env[API_KEY] == ""
+        assert env[SUBAGENT_KEY] == "gpt-5-codex"  # leg overrides only this key
+
+    def test_anthropic_main_no_leg_keeps_direct_env(self, mock_db):
+        """Regression: a bare anthropic-type main (no leg) keeps the DIRECT
+        base_url path byte-identical to today — real key in env, no gateway, no
+        routing token. Explicit-None leg kwargs must match omitting them."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant-real"),
+            models=[{"id": "claude-sonnet-4", "label": "Sonnet"}],
+        )
+        env = apply_provider_env({}, "an", "claude-sonnet-4", session_id="sess-an")
+        assert env[BASE_URL_KEY] == "https://api.anthropic.com"
+        assert env[AUTH_TOKEN_KEY] == "sk-ant-real"   # direct decrypted key
+        assert env[API_KEY] == ""
+        # No routing token minted on the direct path.
+        assert routing.resolve("sk-ant-real") is None
+        # Explicit None leg kwargs are inert → identical env.
+        env_none = apply_provider_env(
+            {}, "an", "claude-sonnet-4", session_id="sess-an",
+            subagent_provider_id=None, subagent_model=None,
+        )
+        assert env_none == env
+
+    def test_non_servable_main_with_leg_drops_leg_keeps_direct(self, mock_db, caplog):
+        """A NON-gateway-servable main (openrouter/custom) with a leg → the leg is
+        DROPPED with a logged error; the direct base_url path is kept and
+        CLAUDE_CODE_SUBAGENT_MODEL stays on the main small/fast chain (NOT the
+        leg model). No routing token is minted."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="op", name="OpenRouter", provider_type="openrouter",
+            base_url="https://openrouter.ai/api",
+            auth_token=encryption.encrypt_value("or-secret"),
+            small_fast_model="op/small",
+            models=[{"id": "op/main", "label": "Main"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "Codex"}],
+        )
+        with caplog.at_level(logging.ERROR):
+            env = apply_provider_env(
+                {}, "op", "op/main", session_id="sess-op",
+                subagent_provider_id="sub", subagent_model="gpt-5-codex",
+            )
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # direct kept
+        assert env[AUTH_TOKEN_KEY] == "or-secret"                # direct key kept
+        assert routing.resolve("or-secret") is None              # no token minted
+        assert env[SUBAGENT_KEY] == "op/small"                   # leg NOT applied
+        assert any(
+            "subagent" in r.getMessage().lower() and "leg" in r.getMessage().lower()
+            for r in caplog.records
+        )
+
+    def test_non_servable_leg_provider_drops_leg(self, mock_db, caplog):
+        """A servable anthropic main but a NON-servable subagent provider → the
+        leg is DROPPED (logged); the anthropic main stays on its DIRECT path and
+        the subagent key stays on the main chain."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant-real"),
+            small_fast_model="claude-haiku",
+            models=[{"id": "claude-sonnet-4", "label": "Sonnet"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="OpenRouter", provider_type="openrouter",
+            base_url="https://openrouter.ai/api",
+            auth_token=encryption.encrypt_value("or-secret"),
+            models=[{"id": "sub/model", "label": "Sub"}],
+        )
+        with caplog.at_level(logging.ERROR):
+            env = apply_provider_env(
+                {}, "an", "claude-sonnet-4", session_id="sess-an2",
+                subagent_provider_id="sub", subagent_model="sub/model",
+            )
+        assert env[BASE_URL_KEY] == "https://api.anthropic.com"  # direct kept
+        assert env[AUTH_TOKEN_KEY] == "sk-ant-real"
+        assert routing.resolve("sk-ant-real") is None
+        assert env[SUBAGENT_KEY] == "claude-haiku"               # leg NOT applied
+        assert any("subagent" in r.getMessage().lower() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -607,13 +607,17 @@ class TestSubagentLegValidation:
 
     @pytest.mark.asyncio
     async def test_create_leg_provider_must_exist(self):
-        """A subagent provider that does not exist → 400."""
+        """A subagent provider that does not exist → 400 (main is servable)."""
         from app.api.profiles import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
         with patch("app.api.profiles.database") as mock_db:
-            mock_db.get_model_provider.return_value = None  # subagent provider gone
+            # Main "op" is a servable anthropic provider; subagent "sub" is gone.
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
+                if pid == "op" else None
+            )
             request = ProfileCreate(
                 id="p", name="P",
                 config=ProfileConfig(
@@ -624,19 +628,22 @@ class TestSubagentLegValidation:
             with pytest.raises(HTTPException) as exc_info:
                 await create_profile(request, token="test-token")
             assert exc_info.value.status_code == 400
+            assert "subagent provider" in exc_info.value.detail.lower()
             assert "does not exist" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
     async def test_create_leg_provider_must_be_enabled(self):
-        """A disabled subagent provider → 400."""
+        """A disabled subagent provider → 400 (main is servable)."""
         from app.api.profiles import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
         with patch("app.api.profiles.database") as mock_db:
-            mock_db.get_model_provider.return_value = {
-                "id": "sub", "name": "Sub", "enabled": False,
-            }
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
+                if pid == "op"
+                else {"id": "sub", "name": "Sub", "enabled": False, "provider_type": "chatgpt"}
+            )
             request = ProfileCreate(
                 id="p", name="P",
                 config=ProfileConfig(
@@ -650,8 +657,64 @@ class TestSubagentLegValidation:
             assert "disabled" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
+    async def test_create_leg_main_provider_must_be_gateway_servable(self):
+        """A main provider that is not gateway-servable (e.g. openrouter/custom)
+        → 400 (the leg can only route through the translator gateway)."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            # Main "op" is a NON-servable custom provider; subagent is servable.
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Main", "enabled": True, "provider_type": "openrouter"}
+                if pid == "op"
+                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
+            )
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "main model" in exc_info.value.detail.lower()
+            mock_db.create_profile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_leg_subagent_provider_must_be_gateway_servable(self):
+        """A subagent provider that is not gateway-servable → 400."""
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            # Main servable (anthropic); subagent enabled but NON-servable.
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
+                if pid == "op"
+                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "openrouter"}
+            )
+            request = ProfileCreate(
+                id="p", name="P",
+                config=ProfileConfig(
+                    model="op/main", provider="op",
+                    subagent_provider="sub", subagent_model="sub/model",
+                ),
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_profile(request, token="test-token")
+            assert exc_info.value.status_code == 400
+            assert "subagent model" in exc_info.value.detail.lower()
+            mock_db.create_profile.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_create_leg_happy_path(self):
-        """A legal cross-provider leg creates the profile."""
+        """A legal cross-provider leg (anthropic-API main + Codex subagent)
+        creates the profile."""
         from app.api.profiles import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
@@ -665,9 +728,12 @@ class TestSubagentLegValidation:
             "is_builtin": False, "created_at": now, "updated_at": now,
         }
         with patch("app.api.profiles.database") as mock_db:
-            mock_db.get_model_provider.return_value = {
-                "id": "sub", "name": "Sub", "enabled": True,
-            }
+            # Main is an Anthropic-API provider; subagent is an enabled Codex.
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
+                if pid == "op"
+                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
+            )
             mock_db.get_profile.return_value = None  # id is free
             mock_db.create_profile.return_value = created
 
@@ -738,9 +804,11 @@ class TestSubagentLegValidation:
         }}
         with patch("app.api.profiles.database") as mock_db:
             mock_db.get_profile.return_value = profile
-            mock_db.get_model_provider.return_value = {
-                "id": "sub", "name": "Sub", "enabled": True,
-            }
+            mock_db.get_model_provider.side_effect = lambda pid: (
+                {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
+                if pid == "op"
+                else {"id": "sub", "name": "Sub", "enabled": True, "provider_type": "chatgpt"}
+            )
             mock_db.update_profile.return_value = updated
 
             request = ProfileUpdate(

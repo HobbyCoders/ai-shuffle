@@ -417,6 +417,25 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
     env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")
 
 
+def is_gateway_servable(provider: Optional[Dict[str, Any]]) -> bool:
+    """Whether the translator gateway can serve a provider row.
+
+    True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``anthropic``
+    (or ``auth_mode == "chatgpt"``). This MIRRORS
+    :func:`app.core.translator_gateway.upstream.provider_mode`'s accepted set —
+    kept in sync by hand (a ``provider_type`` outside this set raises there). Used
+    by the Chunk F cross-provider subagent leg: both the main and the subagent
+    provider must be gateway-servable for the leg to route, and an anthropic-type
+    main with a servable leg is pulled onto the gateway (anthropic_passthrough)
+    rather than the direct-base_url path.
+    """
+    if not provider:
+        return False
+    ptype = provider.get("provider_type")
+    auth_mode = provider.get("auth_mode")
+    return ptype in ("openai", "chatgpt", "anthropic") or auth_mode == "chatgpt"
+
+
 def apply_provider_env(
     env: Dict[str, str],
     provider_id: str,
@@ -471,14 +490,29 @@ def apply_provider_env(
     token is then the empty string.
 
     Chunk F (ruling A2/G2-r): an OPTIONAL cross-provider SUBAGENT leg. When
-    ``subagent_provider_id`` + ``subagent_model`` are both set, the gateway
-    routing token carries the leg (so a request for ``subagent_model`` routes to
-    that other provider) and ``CLAUDE_CODE_SUBAGENT_MODEL`` is set to
-    ``subagent_model`` — overriding the small-fast fallback for THAT variable
-    only. ``ANTHROPIC_SMALL_FAST_MODEL`` keeps its existing chain (small/fast
-    probes stay on the main provider). The caller (query_options) is responsible
-    for A2 legality (the main leg must be provider-routed) before threading the
-    leg here.
+    ``subagent_provider_id`` + ``subagent_model`` are both set AND both the main
+    and the subagent provider rows are gateway-servable (see
+    :func:`is_gateway_servable`), the leg is HONORED: the session is routed
+    through the gateway, the routing token carries the leg (so a request for
+    ``subagent_model`` routes to that other provider) and
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` is set to ``subagent_model`` — overriding the
+    small-fast fallback for THAT variable only. ``ANTHROPIC_SMALL_FAST_MODEL``
+    keeps its existing chain (small/fast probes stay on the main provider).
+
+    This is what makes the flagship mixed case work: an anthropic-type MAIN
+    (real Anthropic API key) with a foreign (e.g. Codex) subagent leg. A bare
+    anthropic main is servable but NOT ``is_translated``, so without a leg it
+    keeps the direct-base_url path (byte-identical to today); a servable leg
+    pulls it onto the gateway, where the main is served by anthropic_passthrough
+    at request time (reading the real key from the provider row — never env).
+
+    If EITHER side is not gateway-servable (a custom/unknown main type, or the
+    subagent row is missing / not servable), the leg is DROPPED with one logged
+    error (ids/types only, never tokens): the main keeps its own routing
+    (direct or, for a translated main, gateway-without-leg) and
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` is NOT set from the dropped leg. The caller
+    (query_options) still applies its own A2 pre-check (a native main cannot host
+    a leg) before threading the leg here.
     """
     provider = database.get_model_provider(provider_id, include_token=True)
     if not provider:
@@ -503,21 +537,66 @@ def apply_provider_env(
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
+    # A provider row is *gateway-servable* iff the translator gateway can serve
+    # it (openai/chatgpt/anthropic, or a chatgpt auth_mode) — mirrors
+    # upstream.provider_mode's accepted set. ``anthropic`` is servable (via
+    # anthropic_passthrough) but is NOT ``is_translated``: a bare anthropic
+    # session stays on the direct-base_url path below (byte-identical to today);
+    # ONLY a cross-provider subagent leg pulls it onto the gateway (see below).
+    main_servable = is_gateway_servable(provider)
 
     # Chunk F: a cross-provider subagent leg is active only when BOTH fields are
-    # present (mirrors the gateway's leg-resolution rule). Resolve the leg's
-    # account id (chatgpt-type leg → its codex account, like the main leg).
+    # present (mirrors the gateway's leg-resolution rule). The leg is HONORED
+    # only when BOTH the main and the subagent provider rows are gateway-servable
+    # — the gateway is the only thing that can route the second leg. When either
+    # side is not servable (custom/unknown main type, or the subagent row is
+    # missing / not servable), the leg is DROPPED: we log one error (ids/types
+    # only, never tokens) and keep the main provider's own routing (direct for a
+    # bare anthropic/custom main, gateway for a translated main) exactly as if no
+    # leg had been supplied — and CLAUDE_CODE_SUBAGENT_MODEL is NOT set from the
+    # dropped leg.
     has_subagent_leg = bool(subagent_provider_id and subagent_model)
     subagent_account_id: Optional[str] = None
+    leg_honored = False
     if has_subagent_leg:
         sub_row = database.get_model_provider(subagent_provider_id, include_token=False)
-        if sub_row and (
-            sub_row.get("provider_type") == "chatgpt"
-            or sub_row.get("auth_mode") == "chatgpt"
-        ):
-            subagent_account_id = sub_row.get("codex_account_id")
+        sub_servable = is_gateway_servable(sub_row)
+        if main_servable and sub_servable:
+            leg_honored = True
+            # Resolve the leg's account id (chatgpt-type leg → its codex account,
+            # like the main leg).
+            if (
+                sub_row.get("provider_type") == "chatgpt"
+                or sub_row.get("auth_mode") == "chatgpt"
+            ):
+                subagent_account_id = sub_row.get("codex_account_id")
+        else:
+            logger.error(
+                "Dropping cross-provider subagent leg: main provider %r "
+                "(type=%r, servable=%s) / subagent provider %r (type=%r, "
+                "servable=%s). A cross-provider subagent leg requires BOTH the "
+                "main and the subagent model on a gateway-servable provider "
+                "(OpenAI-, ChatGPT-, or Anthropic-API-type). Continuing without "
+                "the leg.",
+                provider_id,
+                provider_type,
+                main_servable,
+                subagent_provider_id,
+                (sub_row or {}).get("provider_type"),
+                sub_servable,
+            )
 
-    if is_translated:
+    # Route through the loopback translator gateway when the main provider is
+    # itself translated (openai/chatgpt) OR an honored subagent leg needs the
+    # gateway to serve its second leg. The latter is the flagship anthropic-main
+    # + foreign-subagent case: the main leg is served via anthropic_passthrough at
+    # request time, which reads the REAL Anthropic API key straight from the
+    # provider row — so we deliberately do NOT put that key in env in this mode.
+    # A bare anthropic/custom main with no honored leg keeps the direct path
+    # below, byte-identical to pre-Chunk-F behavior.
+    route_through_gateway = is_translated or leg_honored
+
+    if route_through_gateway:
         from app.core.translator_gateway import routing
 
         gateway_port = settings.translator_gateway_port
@@ -526,9 +605,9 @@ def apply_provider_env(
             session_id,
             provider_id,
             provider.get("codex_account_id"),
-            subagent_provider_id=subagent_provider_id if has_subagent_leg else None,
+            subagent_provider_id=subagent_provider_id if leg_honored else None,
             subagent_account_id=subagent_account_id,
-            subagent_model=subagent_model if has_subagent_leg else None,
+            subagent_model=subagent_model if leg_honored else None,
         )
     else:
         base_url = provider.get("base_url")
@@ -606,11 +685,12 @@ def apply_provider_env(
         env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = small_fast
 
-    # Chunk F: a cross-provider subagent leg overrides ONLY the subagent model
-    # var (so subagents run on the other provider); ANTHROPIC_SMALL_FAST_MODEL
+    # Chunk F: an HONORED cross-provider subagent leg overrides ONLY the subagent
+    # model var (so subagents run on the other provider); ANTHROPIC_SMALL_FAST_MODEL
     # keeps the main-provider chain above (small/fast probes stay on the main
-    # leg). Applied last so it wins over the small_fast fallback for this key.
-    if has_subagent_leg:
+    # leg). Applied last so it wins over the small_fast fallback for this key. A
+    # DROPPED leg (main or subagent not gateway-servable) never touches this key.
+    if leg_honored:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
 
     return env

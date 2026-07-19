@@ -640,6 +640,72 @@ class TestLegDispatch:
         # for the main model loaded the main provider.
         assert loaded == ["sub-prov", "main-prov"]
 
+    async def test_anthropic_main_and_codex_leg_dispatch(self, monkeypatch):
+        """Flagship mixed binding: an anthropic-type MAIN + a Codex subagent leg.
+        A request for the MAIN model goes down anthropic_passthrough against the
+        MAIN provider row; a request for the SUBAGENT model goes down the codex
+        (translate) path against the LEG provider row."""
+        passthrough_calls: List[str] = []
+        codex_calls: List[str] = []
+
+        async def _fake_provider(provider_id):
+            if provider_id == "sub-prov":
+                return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
+            return {"id": provider_id, "provider_type": "anthropic"}
+
+        async def _fake_passthrough_json(*, provider_id, anthropic_body, client=None):
+            passthrough_calls.append(provider_id)
+            return {
+                "id": "msg_1", "type": "message", "role": "assistant",
+                "model": anthropic_body.get("model"),
+                "content": [{"type": "text", "text": "hi from anthropic"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+
+        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+            assert mode == "codex"
+            codex_calls.append(provider_id)
+            return _async_source(_canned_text_turn())
+
+        monkeypatch.setattr(
+            "app.core.translator_gateway.router._load_provider", _fake_provider
+        )
+        monkeypatch.setattr(upstream, "anthropic_passthrough_json", _fake_passthrough_json)
+        monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)
+
+        token = routing.mint_session_token(
+            "sess", "main-prov",
+            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+        )
+        async with await _client() as c:
+            # MAIN model → anthropic_passthrough against the MAIN provider row.
+            main_resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "claude-sonnet-4",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+            # SUBAGENT model → codex (translate) path against the LEG provider row.
+            sub_resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "gpt-5-codex",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+        assert main_resp.status_code == 200
+        assert main_resp.json()["content"][0]["text"] == "hi from anthropic"
+        assert sub_resp.status_code == 200
+        assert sub_resp.json()["content"][0]["text"] == "Hello world"
+        assert passthrough_calls == ["main-prov"]  # main leg → anthropic passthrough
+        assert codex_calls == ["sub-prov"]         # subagent leg → codex translate
+
 
 # ─── live integration (gated; real Codex backend; ruling R3 combined resend) ─
 
