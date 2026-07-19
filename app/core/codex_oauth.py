@@ -139,7 +139,7 @@ class CodexAuthError(Exception):
 
     @property
     def is_permanent(self) -> bool:
-        return self.code in PERMANENT_FAILURE_CODES
+        return isinstance(self.code, str) and self.code in PERMANENT_FAILURE_CODES
 
 
 # ---------------------------------------------------------------------------
@@ -383,8 +383,8 @@ async def _exchange_authorization_code(
     )
     if resp.status_code >= 400:
         body = _safe_json(resp)
-        raise CodexAuthError(body.get("error", f"http_{resp.status_code}"),
-                             body.get("error_description"))
+        code, message = _error_code(body)
+        raise CodexAuthError(code or f"http_{resp.status_code}", message)
     return _bundle_from_token_response(_safe_json(resp))
 
 
@@ -445,8 +445,8 @@ async def refresh_tokens(
     )
     if resp.status_code >= 400:
         body = _safe_json(resp)
-        raise CodexAuthError(body.get("error", f"http_{resp.status_code}"),
-                             body.get("error_description"))
+        code, message = _error_code(body)
+        raise CodexAuthError(code or f"http_{resp.status_code}", message)
     # When the response id_token is omitted the account id cannot be re-derived
     # here; the caller preserves the previously stored account id in that case.
     return _bundle_from_token_response(_safe_json(resp),

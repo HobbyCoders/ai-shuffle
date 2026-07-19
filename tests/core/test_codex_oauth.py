@@ -314,6 +314,54 @@ class TestRefresh:
                 await codex_oauth.refresh_tokens("old-rt", client=c)
         assert ei.value.is_permanent is False
 
+    async def test_nested_error_object_permanent(self):
+        # Real /oauth/token contract observed live: a 400 with a NESTED error
+        # object. The code must be unwrapped (not left as a dict), so
+        # is_permanent flips correctly instead of raising TypeError downstream.
+        def handler(request):
+            return httpx.Response(400, json={"error": {
+                "message": "Your session has ended. Please log in again.",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "refresh_token_invalidated",
+            }})
+
+        async with _client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.refresh_tokens("old-rt", client=c)
+        assert ei.value.code == "refresh_token_invalidated"
+        assert ei.value.is_permanent is True
+
+    async def test_flat_error_string_preserved(self):
+        def handler(request):
+            return httpx.Response(400, json={
+                "error": "invalid_grant",
+                "error_description": "refresh token is not valid",
+            })
+
+        async with _client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.refresh_tokens("old-rt", client=c)
+        assert ei.value.code == "invalid_grant"
+        assert ei.value.is_permanent is False
+
+
+# ---------------------------------------------------------------------------
+# CodexAuthError.is_permanent hardening
+# ---------------------------------------------------------------------------
+
+class TestCodexAuthErrorIsPermanent:
+    def test_non_string_code_is_not_permanent_and_does_not_raise(self):
+        # Belt-and-suspenders: a non-string code (e.g. a dict slipping through
+        # from any other raise site) must not raise "unhashable type" — it is
+        # simply not permanent.
+        err = codex_oauth.CodexAuthError(code={"some": "dict"})
+        assert err.is_permanent is False
+
+    def test_string_permanent_code(self):
+        err = codex_oauth.CodexAuthError("refresh_token_expired")
+        assert err.is_permanent is True
+
 
 # ---------------------------------------------------------------------------
 # Revoke
