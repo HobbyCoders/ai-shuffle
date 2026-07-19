@@ -16,10 +16,12 @@
 	} from '$lib/api/auth';
 	import type { WorkspaceConfig } from '$lib/api/client';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
-	import { Check, ChevronRight, Terminal, Github, FolderOpen, UserPlus, Copy, ExternalLink, Loader2, Eye, EyeOff } from 'lucide-svelte';
+	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
+	import { providers } from '$lib/stores/providers.svelte';
+	import { Check, ChevronRight, Terminal, Github, FolderOpen, UserPlus, Copy, ExternalLink, Loader2, Eye, EyeOff, Plus } from 'lucide-svelte';
 
 	// ── Step management ──────────────────────────────────────────────────
-	type SetupStep = 'admin' | 'workspace' | 'cli-auth';
+	type SetupStep = 'admin' | 'workspace' | 'cli-auth' | 'providers';
 
 	let currentStep = $state<SetupStep>('admin');
 	let completedSteps = $state(new Set<SetupStep>());
@@ -33,10 +35,14 @@
 		const s: { id: SetupStep; label: string }[] = [{ id: 'admin', label: 'Account' }];
 		if (isLocalMode) s.push({ id: 'workspace', label: 'Workspace' });
 		s.push({ id: 'cli-auth', label: 'Connect' });
+		s.push({ id: 'providers', label: 'Providers' });
 		return s;
 	});
 
 	let currentStepIndex = $derived(steps.findIndex(s => s.id === currentStep));
+
+	// ── Providers step state ─────────────────────────────────────────────
+	let addProviderOpen = $state(false);
 
 	// ── Admin form state ─────────────────────────────────────────────────
 	let username = $state('');
@@ -302,6 +308,9 @@
 			if (nextStep === 'cli-auth') {
 				loadCliAuthStatus();
 			}
+			if (nextStep === 'providers') {
+				providers.ensureLoaded();
+			}
 		}
 	}
 
@@ -329,7 +338,7 @@
 </svelte:head>
 
 <div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' ? 'max-w-xl' : currentStep === 'cli-auth' ? 'max-w-lg' : 'max-w-md'}">
+	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' ? 'max-w-xl' : currentStep === 'cli-auth' || currentStep === 'providers' ? 'max-w-lg' : 'max-w-md'}">
 		{#if loadingConfig}
 			<div class="text-center py-8">
 				<Loader2 size={32} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
@@ -344,8 +353,10 @@
 						Create your admin account to get started
 					{:else if currentStep === 'workspace'}
 						Choose where project checkouts will be created on this machine
-					{:else}
+					{:else if currentStep === 'cli-auth'}
 						Connect your development tools
+					{:else}
+						Optional — connect OpenAI, OpenRouter, or more Claude accounts. You can always do this later in Settings → Providers.
 					{/if}
 				</p>
 			</div>
@@ -769,11 +780,11 @@
 							</button>
 							<button
 								type="button"
-								onclick={finishSetup}
+								onclick={() => { completedSteps.add('cli-auth'); advanceStep(); }}
 								class="btn btn-primary flex-1 py-3"
 								disabled={!claudeIsAuthenticated}
 							>
-								{claudeIsAuthenticated ? 'Finish Setup' : 'Connect Claude to Continue'}
+								{claudeIsAuthenticated ? 'Continue' : 'Connect Claude to Continue'}
 							</button>
 						</div>
 						{#if !claudeIsAuthenticated}
@@ -783,6 +794,63 @@
 						{/if}
 					</div>
 				</div>
+
+			<!-- ═══════════════════════════════════════════════════════════ -->
+			<!-- Step 4: Providers (optional) -->
+			<!-- ═══════════════════════════════════════════════════════════ -->
+			{:else if currentStep === 'providers'}
+				<div class="space-y-6">
+
+					<!-- ── Add providers Section ────────────────────────── -->
+					<div class="space-y-3">
+						<div class="flex items-center gap-2">
+							<Plus size={16} strokeWidth={1.5} class="text-foreground" />
+							<span class="text-sm font-semibold text-foreground">Add AI providers</span>
+							<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border font-medium">Optional</span>
+						</div>
+
+						<!-- Configured-providers summary -->
+						{#if providers.current.providers.length === 0}
+							<p class="text-sm text-muted-foreground">
+								No extra providers yet — your Claude connection from the previous step is ready to use.
+							</p>
+						{:else}
+							<div class="space-y-2">
+								{#each providers.current.providers as provider (provider.id)}
+									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
+										<span class="text-sm text-foreground truncate">{provider.name}</span>
+										<span class="text-xs text-muted-foreground flex-shrink-0">{provider.provider_type}</span>
+									</div>
+								{/each}
+							</div>
+						{/if}
+
+						<button
+							type="button"
+							onclick={() => (addProviderOpen = true)}
+							class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"
+						>
+							<Plus size={16} strokeWidth={1.5} />
+							Add provider
+						</button>
+					</div>
+
+					<!-- ── Navigation ──────────────────────────────────── -->
+					<div class="border-t border-border pt-4">
+						<div class="flex gap-3">
+							<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">
+								Back
+							</button>
+							<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3">
+								Finish Setup
+							</button>
+						</div>
+					</div>
+				</div>
+
+				{#if addProviderOpen}
+					<AddProviderModal onClose={() => (addProviderOpen = false)} />
+				{/if}
 			{/if}
 		{/if}
 	</div>
