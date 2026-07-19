@@ -22,6 +22,7 @@
 	import { providers } from '$lib/stores/providers.svelte';
 	import ConnectionsSection from '../ConnectionsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
+	import AddProviderModal from './AddProviderModal.svelte';
 
 	interface Props {
 		// ----- GitHub (forwarded to the residual ConnectionsSection) -----
@@ -43,9 +44,11 @@
 
 	const s = $derived(providers.current);
 
-	// Add provider is a no-op this chunk — Chunk 5 wires the Add-provider modal.
+	// Add-provider modal open flag. The modal owns its own step machine + flows;
+	// on completion or dismissal it calls back to close.
+	let addProviderOpen = $state(false);
 	function onAddProvider() {
-		// Chunk 5 wires this (Add-provider modal / flow).
+		addProviderOpen = true;
 	}
 
 	onMount(() => {
@@ -92,6 +95,10 @@
 	{onConnectGithub}
 	{onDisconnectGithub}
 />
+
+{#if addProviderOpen}
+	<AddProviderModal onClose={() => (addProviderOpen = false)} />
+{/if}
 
 <style>
 	.prov-groupbody {
