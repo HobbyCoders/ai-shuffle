@@ -1,12 +1,23 @@
 <script lang="ts">
+	/**
+	 * MediaToolsSection — the "Media & tools" settings group (Chunk 8, plan §1.5).
+	 *
+	 * Folds the two residual Connections groups (Media & tools / fal.ai and
+	 * Integrations / GitHub) into a single group, and adds a "Manage media models"
+	 * keycard row that opens `ManageMediaModelsDrawer` — the new home for the old
+	 * AI-models tab (ruling D5). Replaces the residual `ConnectionsSection`.
+	 *
+	 * The fal.ai keycard mechanics are lifted verbatim from ConnectionsSection
+	 * (self-contained local state + raw fetch to /settings/integrations/fal-ai).
+	 * The GitHub keycard is driven by the same six props ProvidersSection forwards.
+	 *
+	 * Rendered inside `.ed-content` like ProvidersSection's other groups, so the
+	 * shell `.set-group` / `.ed-note` frame classes still apply; the keycard CSS is
+	 * copied here so the component is self-contained.
+	 */
 	import { onMount } from 'svelte';
-	import { Plug, Image } from 'lucide-svelte';
-
-	// Chunk 4 lifted the Claude login, saved-accounts, Anthropic-key and AI-Providers
-	// groups out of this component into the store-driven `providers/` surface
-	// (ProvidersSection → ProviderList / ClaudeAccountsPanel / ClaudeApiKeyRow /
-	// ProviderEditForm). What remains here are the two credential groups not yet
-	// restructured: Media & tools (fal.ai) and Integrations (GitHub).
+	import { Image } from 'lucide-svelte';
+	import ManageMediaModelsDrawer from './ManageMediaModelsDrawer.svelte';
 
 	interface Props {
 		githubUser: string | null;
@@ -26,9 +37,7 @@
 		onDisconnectGithub,
 	}: Props = $props();
 
-	// ----- fal.ai key (self-contained) -----
-	// Lives here so every credential has a single home; media model selection
-	// moves behind "Manage media models" in Chunk 8.
+	// ----- fal.ai key (self-contained, lifted verbatim from ConnectionsSection) -----
 	let falKeySet = $state(false);
 	let falKeyMasked = $state('');
 	let falKeyInput = $state('');
@@ -109,13 +118,16 @@
 	onMount(() => {
 		loadKeyStatus();
 	});
+
+	// ----- Manage media models drawer (fold of the old AI-models tab, ruling D5) -----
+	let manageMediaOpen = $state(false);
 </script>
 
 <!-- Media & tools -->
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Image />Media &amp; tools</h3>
-		<p>Keys for the image, video, audio and 3D generation tools.</p>
+		<p>Keys and models for the image, video, audio and 3D generation tools.</p>
 	</div>
 
 	<!-- fal.ai key -->
@@ -158,16 +170,27 @@
 
 	{#if falError}<div class="kc-foot err" role="alert">{falError}</div>{/if}
 	{#if falSuccess}<div class="kc-foot ok">{falSuccess}</div>{/if}
-</div>
 
-<!-- Integrations -->
-<div class="set-group">
-	<div class="set-grouphead">
-		<h3><Plug />Integrations</h3>
-		<p>Connect external services used by sessions and projects.</p>
+	<!-- AI media models (opens the manage-media-models drawer) -->
+	<div class="keycard">
+		<div class="kc-ic">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="3" width="7" height="7" rx="1"/>
+				<rect x="14" y="3" width="7" height="7" rx="1"/>
+				<rect x="3" y="14" width="7" height="7" rx="1"/>
+				<rect x="14" y="14" width="7" height="7" rx="1"/>
+			</svg>
+		</div>
+		<div class="kc-body">
+			<h4>AI media models</h4>
+			<p>Image, video, audio and 3D generation models</p>
+		</div>
+		<div class="kc-acts">
+			<button type="button" class="ed-btn" onclick={() => (manageMediaOpen = true)}>Manage</button>
+		</div>
 	</div>
 
-	<!-- GitHub -->
+	<!-- GitHub (verbatim; driven by the six forwarded props) -->
 	<div class="keycard">
 		<div class="kc-ic">
 			<svg viewBox="0 0 24 24" fill="currentColor">
@@ -199,6 +222,10 @@
 		</div>
 	</div>
 </div>
+
+{#if manageMediaOpen}
+	<ManageMediaModelsDrawer onClose={() => (manageMediaOpen = false)} />
+{/if}
 
 <style>
 	.keycard {

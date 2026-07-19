@@ -8,9 +8,11 @@
 	 * and the unified `ProviderList` (Claude subscription, Claude API key, then the
 	 * model_providers rows).
 	 *
-	 * The remaining Connections groups (Media & tools / fal, Integrations / GitHub)
-	 * still live in `ConnectionsSection`, rendered below with only their own props.
-	 * Chunks 5–8 lift those out too.
+	 * The remaining credential groups (Media & tools / fal, Integrations / GitHub)
+	 * now live in the store-adjacent `MediaToolsSection`, rendered below with only
+	 * their own GitHub props (Chunk 8 lifted them out of ConnectionsSection, which
+	 * is now removed, and folded the old AI-models tab into a "Manage media models"
+	 * drawer there).
 	 *
 	 * Data is loaded once per session via `providers.ensureLoaded()` (landmine L1 /
 	 * ruling PR6): the settings sections remount on every tab switch, so the store
@@ -20,12 +22,12 @@
 	import { onMount } from 'svelte';
 	import { Info, Server, Plus } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import ConnectionsSection from '../ConnectionsSection.svelte';
+	import MediaToolsSection from './MediaToolsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
 	import AddProviderModal from './AddProviderModal.svelte';
 
 	interface Props {
-		// ----- GitHub (forwarded to the residual ConnectionsSection) -----
+		// ----- GitHub (forwarded to MediaToolsSection) -----
 		githubUser: string | null;
 		githubToken: string;
 		onGithubTokenChange: (value: string) => void;
@@ -86,8 +88,8 @@
 	</div>
 </div>
 
-<!-- Remaining groups (Media & tools, Integrations) still served by ConnectionsSection. -->
-<ConnectionsSection
+<!-- Media & tools (fal.ai, GitHub, AI media models) — served by MediaToolsSection. -->
+<MediaToolsSection
 	{githubUser}
 	{githubToken}
 	{onGithubTokenChange}
