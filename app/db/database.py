@@ -138,7 +138,12 @@ def _safe_json(value):
 #     Claude (gateway bypass, F1) — existing pre-migration sessions stay native.
 #     One nullable column only (one account per provider, amendment A1 — no
 #     provider_account_id). Additive/nullable, no index.
-SCHEMA_VERSION = 66
+# 67 (2026-07-19): add provider_usage_snapshots table — single row per
+#     non-Claude provider (Codex header capture / OpenRouter key-endpoint poll,
+#     PROVIDER_USAGE_CONTEXT_PLAN.md U1) holding plan-usage windows, credits and
+#     an allowlisted raw payload. Distinct from usage_snapshots (per-install/
+#     per-account Claude path). Purely additive.
+SCHEMA_VERSION = 67
 
 
 def _run_column_migrations(cursor):
@@ -779,6 +784,28 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("usage_snapshots")
+
+    # provider_usage_snapshots (v67). Single row per non-Claude provider
+    # (ChatGPT/Codex via the loopback gateway, OpenRouter on the direct base-URL
+    # path) capturing plan-usage/limit windows, credits and the allowlisted raw
+    # source payload. Distinct from usage_snapshots (per-install/per-account for
+    # the Claude path). Idempotent so upgrades from any older version land the
+    # table without needing the SCHEMA_VERSION bump to fire the bootstrap path
+    # (same defensive pattern as the usage_snapshots block above).
+    if not table_exists(cursor, "provider_usage_snapshots"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS provider_usage_snapshots (
+                provider_id TEXT PRIMARY KEY,
+                provider_type TEXT,
+                plan_type TEXT,
+                windows JSONB NOT NULL DEFAULT '[]',
+                credits JSONB,
+                raw JSONB,
+                fetched_at BIGINT,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("provider_usage_snapshots")
 
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here
@@ -1694,6 +1721,12 @@ from app.db.usage_snapshots import (  # noqa: F401
     upsert_usage_snapshot,
     get_all_usage_snapshots,
     delete_usage_snapshot,
+)
+
+from app.db.provider_usage_snapshots import (  # noqa: F401
+    upsert_provider_usage_snapshot,
+    get_all_provider_usage_snapshots,
+    delete_provider_usage_snapshot,
 )
 
 from app.db.rate_limits import (  # noqa: F401

@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 66
+SCHEMA_VERSION = 67
 
 
 def create_postgres_schema(cursor) -> None:
@@ -769,6 +769,28 @@ def create_postgres_schema(cursor) -> None:
             account_id TEXT,
             account_email TEXT,
             account_name TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36c-bis. Per-provider usage snapshots (v67). Single row per non-Claude
+    #      provider (ChatGPT/Codex via the loopback gateway, OpenRouter on the
+    #      direct base-URL path) capturing plan-usage/limit windows, credits and
+    #      the allowlisted raw source payload. Distinct from usage_snapshots
+    #      (which is per-install/per-account for the Claude path); readers land
+    #      in later chunks. ``raw`` holds only allowlisted header/JSON keys —
+    #      never an auth token.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS provider_usage_snapshots (
+            provider_id TEXT PRIMARY KEY,
+            provider_type TEXT,
+            plan_type TEXT,
+            windows JSONB NOT NULL DEFAULT '[]',
+            credits JSONB,
+            raw JSONB,
+            fetched_at BIGINT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
