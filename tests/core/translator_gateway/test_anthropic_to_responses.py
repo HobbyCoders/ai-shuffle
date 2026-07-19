@@ -1,0 +1,174 @@
+"""Anthropic Messages request → Responses request translation tests (§D2).
+
+Covers: (3) multi-turn history with tool_use/tool_result joined by call_id,
+(7) native-Claude thinking block dropped, plus system/tools/tool_choice/thinking
+mapping and the store/stream/include/max_output_tokens invariants.
+"""
+
+from __future__ import annotations
+
+import json
+
+from app.core.translator_gateway.anthropic_to_responses import translate_request
+from app.core.translator_gateway.events import encode_reasoning_signature
+
+
+def test_request_invariants_store_stream_include():
+    body = translate_request({"model": "claude-x", "messages": []})
+    assert body["store"] is False
+    assert body["stream"] is True
+    assert body["include"] == ["reasoning.encrypted_content"]
+
+
+def test_system_becomes_instructions():
+    body = translate_request({"model": "m", "system": "You are helpful.", "messages": []})
+    assert body["instructions"] == "You are helpful."
+
+    body2 = translate_request({"model": "m", "system": [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}], "messages": []})
+    assert body2["instructions"] == "AB"
+
+
+def test_target_model_overrides_alias():
+    body = translate_request({"model": "claude-alias", "messages": []}, target_model="gpt-5.6-sol")
+    assert body["model"] == "gpt-5.6-sol"
+    # without override, the request model passes through
+    body2 = translate_request({"model": "claude-alias", "messages": []})
+    assert body2["model"] == "claude-alias"
+
+
+def test_max_output_tokens_omitted_for_codex_included_for_openai():
+    req = {"model": "m", "messages": [], "max_tokens": 512}
+    codex = translate_request(req, upstream_mode="codex")
+    assert "max_output_tokens" not in codex  # surprise #7
+    openai = translate_request(req, upstream_mode="openai")
+    assert openai["max_output_tokens"] == 512
+
+
+def test_tools_and_tool_choice_mapping():
+    req = {
+        "model": "m",
+        "messages": [],
+        "tools": [
+            {"name": "get_weather", "description": "Weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+        ],
+        "tool_choice": {"type": "tool", "name": "get_weather"},
+    }
+    body = translate_request(req)
+    assert body["tools"][0] == {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    }
+    assert body["tool_choice"] == {"type": "function", "name": "get_weather"}
+
+
+def test_tool_choice_auto_any_none():
+    assert translate_request({"model": "m", "messages": [], "tools": [{"name": "t", "input_schema": {}}], "tool_choice": {"type": "auto"}})["tool_choice"] == "auto"
+    assert translate_request({"model": "m", "messages": [], "tools": [{"name": "t", "input_schema": {}}], "tool_choice": {"type": "any"}})["tool_choice"] == "required"
+    assert translate_request({"model": "m", "messages": [], "tools": [{"name": "t", "input_schema": {}}], "tool_choice": {"type": "none"}})["tool_choice"] == "none"
+
+
+def test_parallel_tool_calls_false_without_tools_and_respects_disable():
+    assert translate_request({"model": "m", "messages": []})["parallel_tool_calls"] is False
+    # tools present, not disabled → allowed
+    body = translate_request({"model": "m", "messages": [], "tools": [{"name": "t", "input_schema": {}}], "tool_choice": {"type": "auto"}})
+    assert body["parallel_tool_calls"] is True
+    # explicit disable
+    body2 = translate_request({"model": "m", "messages": [], "tools": [{"name": "t", "input_schema": {}}], "tool_choice": {"type": "auto", "disable_parallel_tool_use": True}})
+    assert body2["parallel_tool_calls"] is False
+
+
+def test_thinking_budget_maps_to_effort():
+    def effort(budget):
+        return translate_request({"model": "m", "messages": [], "thinking": {"type": "enabled", "budget_tokens": budget}})["reasoning"]["effort"]
+
+    assert effort(1000) == "low"
+    assert effort(8000) == "medium"
+    assert effort(32000) == "high"
+    body = translate_request({"model": "m", "messages": [], "thinking": {"type": "enabled", "budget_tokens": 8000}})
+    assert body["reasoning"]["summary"] == "auto"
+    # thinking absent → no reasoning key
+    assert "reasoning" not in translate_request({"model": "m", "messages": []})
+
+
+# ── (3) multi-turn history: tool_use / tool_result joined by call_id ─────────
+
+def test_multi_turn_tool_use_and_result_join_by_call_id():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Let me check."},
+                {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris", "unit": "celsius"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "18C sunny"},
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    items = body["input"]
+
+    # user text, assistant text, function_call, function_call_output
+    types = [it["type"] for it in items]
+    assert types == ["message", "message", "function_call", "function_call_output"]
+
+    # no id / status leaked onto any reconstructed item (surprise #6)
+    for it in items:
+        assert "id" not in it
+        assert "status" not in it
+
+    fc = items[2]
+    assert fc["call_id"] == "call_1"
+    assert fc["name"] == "get_weather"
+    # arguments is a JSON *string* and parses to the original input
+    assert json.loads(fc["arguments"]) == {"city": "Paris", "unit": "celsius"}
+
+    fco = items[3]
+    assert fco["call_id"] == "call_1"  # join key preserved
+    assert fco["output"] == "18C sunny"
+
+    # user content type is input_text, assistant is output_text
+    assert items[0]["content"][0]["type"] == "input_text"
+    assert items[1]["content"][0]["type"] == "output_text"
+
+
+# ── (7) native-Claude thinking (foreign signature) dropped ───────────────────
+
+def test_native_claude_thinking_block_dropped():
+    # a signature that is NOT our envelope (opaque base64 blob)
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hmm", "signature": "bm90LW91ci1lbnZlbG9wZS1 qust-garbage=="},
+                {"type": "text", "text": "answer"},
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    types = [it["type"] for it in body["input"]]
+    # thinking dropped, only the text message survives — no reasoning fabricated
+    assert "reasoning" not in types
+    assert types == ["message"]
+
+
+def test_our_envelope_thinking_becomes_reasoning_item():
+    sig = encode_reasoning_signature("ENC_BLOB", [{"type": "summary_text", "text": "s"}], [])
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "s", "signature": sig},
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    assert len(body["input"]) == 1
+    item = body["input"][0]
+    assert item["type"] == "reasoning"
+    assert item["encrypted_content"] == "ENC_BLOB"
+    assert item["summary"] == [{"type": "summary_text", "text": "s"}]
+    assert "id" not in item and "status" not in item
