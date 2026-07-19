@@ -95,7 +95,7 @@ class TestDevicePoll:
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
-        async def _fake_poll(device_code, code_verifier, *, client=None):
+        async def _fake_poll(device_code, code_verifier, user_code, *, client=None):
             raise codex_oauth.CodexAuthPending(slow_down=False)
 
         monkeypatch.setattr(codex_oauth, "poll_device_code", _fake_poll)
@@ -110,7 +110,7 @@ class TestDevicePoll:
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
-        async def _fake_poll(device_code, code_verifier, *, client=None):
+        async def _fake_poll(device_code, code_verifier, user_code, *, client=None):
             raise codex_oauth.CodexAuthPending(slow_down=True)
 
         monkeypatch.setattr(codex_oauth, "poll_device_code", _fake_poll)
@@ -137,7 +137,7 @@ class TestDevicePoll:
         SECRET_ACCESS = "super-secret-access-token"
         SECRET_REFRESH = "super-secret-refresh-token"
 
-        async def _fake_poll(device_code, code_verifier, *, client=None):
+        async def _fake_poll(device_code, code_verifier, user_code, *, client=None):
             return codex_oauth.TokenBundle(
                 access_token=SECRET_ACCESS, refresh_token=SECRET_REFRESH,
                 id_token=None, account_id="acct-xyz",
@@ -174,7 +174,7 @@ class TestDevicePoll:
         _make_provider()
         self._start(authenticated_client, monkeypatch)
 
-        async def _fake_poll(device_code, code_verifier, *, client=None):
+        async def _fake_poll(device_code, code_verifier, user_code, *, client=None):
             raise codex_oauth.CodexAuthError("access_denied")
 
         monkeypatch.setattr(codex_oauth, "poll_device_code", _fake_poll)

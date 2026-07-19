@@ -92,23 +92,26 @@ class TestDeviceStart:
         seen = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
+            # Real contract: JSON body, ``device_auth_id`` + string ``interval``
+            # + ISO ``expires_at`` in the response (NOT RFC-8628 field names).
             assert request.url.path.endswith("/api/accounts/deviceauth/usercode")
-            body = dict(httpx.QueryParams(request.content.decode()))
-            seen.update(body)
+            assert request.headers["content-type"].startswith("application/json")
+            seen.update(json.loads(request.content.decode()))
             return httpx.Response(200, json={
-                "device_code": "dev-123",
+                "device_auth_id": "deviceauth_abc123",
                 "user_code": "WXYZ-1234",
-                "verification_uri": "https://auth.openai.com/codex/device",
-                "interval": 5,
-                "expires_in": 900,
+                "interval": "5",
+                "expires_at": "2099-01-01T00:00:00Z",
             })
 
         async with _client(handler) as c:
             start = await codex_oauth.start_device_code(client=c)
 
         assert start.user_code == "WXYZ-1234"
-        assert start.device_code == "dev-123"
-        assert start.verification_uri == "https://auth.openai.com/codex/device"
+        assert start.device_code == "deviceauth_abc123"
+        assert start.verification_uri == codex_oauth.DEVICE_VERIFICATION_URL
+        assert start.interval == 5
+        assert start.expires_in > 0
         assert start.code_verifier  # PKCE verifier minted
         # The S256 challenge sent matches the verifier we got back.
         expected = base64.urlsafe_b64encode(
@@ -118,7 +121,19 @@ class TestDeviceStart:
         assert seen["code_challenge_method"] == "S256"
         assert seen["client_id"] == codex_oauth.client_id()
 
-    async def test_http_error_raises(self):
+    async def test_http_error_raises_nested_error_object(self):
+        def handler(request):
+            return httpx.Response(400, json={"error": {
+                "message": "bad client", "type": "invalid_request_error",
+                "code": "invalid_client",
+            }})
+
+        async with _client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.start_device_code(client=c)
+        assert ei.value.code == "invalid_client"
+
+    async def test_http_error_raises_flat_error_string(self):
         def handler(request):
             return httpx.Response(400, json={"error": "invalid_client"})
 
@@ -135,30 +150,56 @@ class TestDeviceStart:
 class TestDevicePoll:
     async def test_pending_raises_pending(self):
         def handler(request):
-            return httpx.Response(200, json={"error": "authorization_pending"})
+            # Real contract: the pending signal is a nested error object.
+            return httpx.Response(400, json={"error": {
+                "message": "Device authorization is pending. Please try again.",
+                "type": "invalid_request_error",
+                "code": "deviceauth_authorization_pending",
+            }})
 
         async with _client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthPending) as ei:
-                await codex_oauth.poll_device_code("dev", "verifier", client=c)
+                await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.slow_down is False
 
     async def test_slow_down_raises_pending_slowdown(self):
         def handler(request):
-            return httpx.Response(200, json={"error": "slow_down"})
+            return httpx.Response(400, json={"error": {"code": "deviceauth_slow_down"}})
 
         async with _client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthPending) as ei:
-                await codex_oauth.poll_device_code("dev", "verifier", client=c)
+                await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.slow_down is True
 
     async def test_denied_raises_error(self):
         def handler(request):
-            return httpx.Response(200, json={"error": "access_denied"})
+            return httpx.Response(400, json={"error": {"code": "access_denied"}})
 
         async with _client(handler) as c:
             with pytest.raises(codex_oauth.CodexAuthError) as ei:
-                await codex_oauth.poll_device_code("dev", "verifier", client=c)
+                await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert ei.value.code == "access_denied"
+
+    async def test_poll_sends_json_device_auth_id_and_user_code(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.endswith("/api/accounts/deviceauth/token")
+            assert request.headers["content-type"].startswith("application/json")
+            seen.update(json.loads(request.content.decode()))
+            return httpx.Response(400, json={"error": {
+                "code": "deviceauth_authorization_pending"}})
+
+        async with _client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthPending):
+                await codex_oauth.poll_device_code(
+                    "deviceauth_abc123", "verifier", "WXYZ-1234", client=c
+                )
+        assert seen == {
+            "client_id": codex_oauth.client_id(),
+            "device_auth_id": "deviceauth_abc123",
+            "user_code": "WXYZ-1234",
+        }
 
     async def test_direct_token_response(self):
         id_token = _make_id_token({"chatgpt_account_id": "acct-direct"})
@@ -169,7 +210,7 @@ class TestDevicePoll:
             })
 
         async with _client(handler) as c:
-            bundle = await codex_oauth.poll_device_code("dev", "verifier", client=c)
+            bundle = await codex_oauth.poll_device_code("dev", "verifier", "AAAA-BBBBB", client=c)
         assert bundle.access_token == "at-1"
         assert bundle.refresh_token == "rt-1"
         assert bundle.account_id == "acct-direct"
@@ -181,7 +222,7 @@ class TestDevicePoll:
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request.url.path)
             if request.url.path.endswith("/deviceauth/token"):
-                return httpx.Response(200, json={"code": "auth-code-1"})
+                return httpx.Response(200, json={"authorization_code": "auth-code-1"})
             if request.url.path.endswith("/oauth/token"):
                 body = dict(httpx.QueryParams(request.content.decode()))
                 assert body["grant_type"] == "authorization_code"
@@ -195,7 +236,7 @@ class TestDevicePoll:
 
         async with _client(handler) as c:
             bundle = await codex_oauth.poll_device_code(
-                "dev", "the-verifier", client=c
+                "dev", "the-verifier", "AAAA-BBBBB", client=c
             )
         assert bundle.access_token == "at-x"
         assert bundle.account_id == "acct-exch"

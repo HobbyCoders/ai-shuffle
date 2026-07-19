@@ -564,8 +564,8 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
 # primary/worker split), so process-local state is sufficient; a lost map (e.g.
 # restart mid-enrollment) just means the admin restarts the flow.
 
-# provider_id -> (device_code, code_verifier, created_at_monotonic)
-_pending_enrollments: Dict[str, Tuple[str, str, float]] = {}
+# provider_id -> (device_code, code_verifier, user_code, created_at_monotonic)
+_pending_enrollments: Dict[str, Tuple[str, str, str, float]] = {}
 # Drop pending enrollments older than this (device codes expire upstream anyway).
 _PENDING_TTL_SECONDS = 900
 
@@ -573,7 +573,7 @@ _PENDING_TTL_SECONDS = 900
 def _prune_pending() -> None:
     now = time.monotonic()
     stale = [
-        pid for pid, (_, _, ts) in _pending_enrollments.items()
+        pid for pid, (*_, ts) in _pending_enrollments.items()
         if now - ts > _PENDING_TTL_SECONDS
     ]
     for pid in stale:
@@ -607,7 +607,7 @@ async def codex_device_start(provider_id: str, token: str = Depends(require_admi
 
     _prune_pending()
     _pending_enrollments[provider_id] = (
-        start.device_code, start.code_verifier, time.monotonic()
+        start.device_code, start.code_verifier, start.user_code, time.monotonic()
     )
     return CodexDeviceStartResponse(
         user_code=start.user_code,
@@ -632,10 +632,10 @@ async def codex_device_poll(provider_id: str, token: str = Depends(require_admin
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No pending Codex enrollment for this provider — start one first.",
         )
-    device_code, code_verifier, _ = pending
+    device_code, code_verifier, user_code, _ = pending
 
     try:
-        bundle = await codex_oauth.poll_device_code(device_code, code_verifier)
+        bundle = await codex_oauth.poll_device_code(device_code, code_verifier, user_code)
     except codex_oauth.CodexAuthPending as pend:
         return CodexDevicePollResponse(
             status="slow_down" if pend.slow_down else "pending"

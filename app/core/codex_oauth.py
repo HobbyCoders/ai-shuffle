@@ -42,6 +42,7 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 # undocumented backend shifts.
 ISSUER = "https://auth.openai.com"
 DEVICE_USERCODE_URL = f"{ISSUER}/api/accounts/deviceauth/usercode"
-DEVICE_TOKEN_URL = f"{ISSUER}/deviceauth/token"
+DEVICE_TOKEN_URL = f"{ISSUER}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URL = f"{ISSUER}/codex/device"
 TOKEN_URL = f"{ISSUER}/oauth/token"
 REVOKE_URL = f"{ISSUER}/oauth/revoke"
@@ -233,6 +234,22 @@ def _safe_json(resp: httpx.Response) -> dict:
         return {}
 
 
+def _error_code(body: dict) -> tuple[Optional[str], Optional[str]]:
+    """Extract ``(code, message)`` from an upstream error body.
+
+    The deviceauth endpoints return a NESTED error object
+    (``{"error": {"code": "deviceauth_authorization_pending", "message": ...}}``)
+    while ``/oauth/token`` uses flat RFC-6749 strings — both shapes are handled.
+    """
+    err = body.get("error")
+    if isinstance(err, dict):
+        code = err.get("code") or err.get("type")
+        return (code if isinstance(code, str) and code else None), err.get("message")
+    if isinstance(err, str) and err:
+        return err, body.get("error_description")
+    return None, None
+
+
 # ---------------------------------------------------------------------------
 # Device-code enrollment
 # ---------------------------------------------------------------------------
@@ -242,75 +259,89 @@ async def start_device_code(
 ) -> DeviceCodeStart:
     """Begin the device-code flow: mint PKCE, request a user-code.
 
-    POSTs the client id + PKCE S256 challenge + scope to the usercode endpoint;
-    returns the ``user_code`` (admin types it at the verification URL) plus the
-    ``device_code`` + ``code_verifier`` the caller carries into the poll step.
+    POSTs the client id + PKCE S256 challenge + scope as JSON (the endpoint
+    rejects form encoding) and returns the ``user_code`` (admin types it at the
+    verification URL) plus the ``device_auth_id`` handle — stored in
+    ``device_code`` — and ``code_verifier`` the caller carries into the poll
+    step. The endpoint answers ``device_auth_id`` / string ``interval`` /
+    ISO ``expires_at`` rather than the RFC-8628 field names.
     """
     verifier, challenge = generate_pkce()
     resp = await _post(
         client,
         DEVICE_USERCODE_URL,
-        data={
+        json_body={
             "client_id": client_id(),
             "scope": SCOPE,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         },
     )
-    if resp.status_code >= 400:
-        body = _safe_json(resp)
-        raise CodexAuthError(
-            body.get("error", f"http_{resp.status_code}"),
-            body.get("error_description"),
-        )
     body = _safe_json(resp)
-    device_code = body.get("device_code")
+    if resp.status_code >= 400:
+        code, message = _error_code(body)
+        raise CodexAuthError(code or f"http_{resp.status_code}", message)
+    device_code = body.get("device_auth_id") or body.get("device_code")
     user_code = body.get("user_code")
     if not device_code or not user_code:
         raise CodexAuthError("invalid_usercode_response",
-                             "usercode response missing device_code/user_code")
+                             "usercode response missing device_auth_id/user_code")
+    expires_in = 900
+    if body.get("expires_in"):
+        expires_in = int(body["expires_in"])
+    elif body.get("expires_at"):
+        try:
+            exp = datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            expires_in = max(0, int((exp - datetime.now(timezone.utc)).total_seconds()))
+        except ValueError:
+            pass
     return DeviceCodeStart(
         device_code=device_code,
         user_code=user_code,
         verification_uri=body.get("verification_uri") or DEVICE_VERIFICATION_URL,
         code_verifier=verifier,
-        interval=int(body.get("interval", 5) or 5),
-        expires_in=int(body.get("expires_in", 900) or 900),
+        interval=int(body.get("interval") or 5),
+        expires_in=expires_in,
     )
 
 
 async def poll_device_code(
     device_code: str,
     code_verifier: str,
+    user_code: str,
     *,
     client: Optional[httpx.AsyncClient] = None,
 ) -> TokenBundle:
     """One poll step. Raises :class:`CodexAuthPending` until authorized.
 
-    Posts the ``device_code`` to the poll endpoint. RFC-8628 style:
-    ``authorization_pending`` / ``slow_down`` → pending; ``access_denied`` /
-    ``expired_token`` → terminal. On authorization the poll returns either the
-    tokens directly, or an authorization ``code`` we exchange at ``/oauth/token``
-    (per F3). Either way a full :class:`TokenBundle` (with ``account_id`` decoded
-    from the id_token) comes back.
+    Posts JSON ``{client_id, device_auth_id, user_code}`` to the poll endpoint
+    (``device_code`` holds the ``device_auth_id`` from the start step). Errors
+    come back as a nested object whose ``code`` is e.g.
+    ``deviceauth_authorization_pending`` → pending; anything else → terminal.
+    On authorization the poll returns either the tokens directly, or an
+    authorization code we exchange at ``/oauth/token`` with the PKCE verifier
+    (per F3). Either way a full :class:`TokenBundle` (with ``account_id``
+    decoded from the id_token) comes back.
     """
     resp = await _post(
         client,
         DEVICE_TOKEN_URL,
-        data={
+        json_body={
             "client_id": client_id(),
-            "device_code": device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_auth_id": device_code,
+            "user_code": user_code,
         },
     )
     body = _safe_json(resp)
-    error = body.get("error")
-    if error:
-        if error == "authorization_pending":
+    err_code, err_message = _error_code(body)
+    if err_code:
+        if "pending" in err_code:
             raise CodexAuthPending(slow_down=False)
-        if error == "slow_down":
+        if "slow_down" in err_code:
             raise CodexAuthPending(slow_down=True)
-        raise CodexAuthError(error, body.get("error_description"))
+        raise CodexAuthError(err_code, err_message)
     if resp.status_code >= 400:
         raise CodexAuthError(f"http_{resp.status_code}")
 
@@ -319,7 +350,7 @@ async def poll_device_code(
     if body.get("access_token"):
         return _bundle_from_token_response(body)
 
-    code = body.get("code") or body.get("authorization_code")
+    code = body.get("authorization_code") or body.get("code")
     if not code:
         raise CodexAuthError("invalid_poll_response",
                              "authorized poll returned neither tokens nor a code")
