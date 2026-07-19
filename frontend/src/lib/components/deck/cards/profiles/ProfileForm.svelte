@@ -86,6 +86,10 @@
 		model: string;
 		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
 		provider: string | null;
+		/** Optional cross-provider subagent leg: `model_providers.id`, or `null` to inherit. */
+		subagent_provider: string | null;
+		/** Subagent model id paired with `subagent_provider`, or `null` to inherit. */
+		subagent_model: string | null;
 		permission_mode: string;
 		max_turns: number | null;
 		allowed_tools: string[];
@@ -317,6 +321,10 @@
 								if (v === CUSTOM_VALUE) {
 									onCustomModelModeChange(true, '');
 									onFormChange('provider', null);
+									// Leaving a provider clears any subagent leg — a hidden
+									// stale cross-provider leg must never be saved.
+									onFormChange('subagent_provider', null);
+									onFormChange('subagent_model', null);
 								} else if (v.startsWith('prov:')) {
 									// Composite value: `prov:<providerId>:<modelId>`. Split on the
 									// first colon only — provider model ids (e.g. OpenRouter's
@@ -330,6 +338,9 @@
 								} else {
 									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model)));
 									onFormChange('provider', null);
+									// Native model → no provider → clear the subagent leg.
+									onFormChange('subagent_provider', null);
+									onFormChange('subagent_model', null);
 								}
 							}}
 						/>
@@ -345,6 +356,36 @@
 					{/if}
 				</div>
 			</div>
+			{#if profileForm.provider}
+				<!-- A2 UI gate: the cross-provider subagent leg is offered ONLY when
+				     the profile itself runs on a provider model. Native-Claude
+				     profiles never see this row. -->
+				<div class="set-row">
+					<div class="lab"><h4>Subagent model</h4><p>Optional. Runs this profile's subagents on a different provider's model. Inherit uses the provider default.</p></div>
+					<div class="ctl ctl-col">
+						<ModelPicker
+							allowInherit
+							providerModelsOnly
+							value={profileForm.subagent_provider ? `prov:${profileForm.subagent_provider}:${profileForm.subagent_model}` : ''}
+							onSelect={(v) => {
+								if (v.startsWith('prov:')) {
+									// Same first-colon decode as the main picker.
+									const rest = v.slice('prov:'.length);
+									const sep = rest.indexOf(':');
+									onFormChange('subagent_provider', rest.slice(0, sep));
+									onFormChange('subagent_model', rest.slice(sep + 1));
+								} else {
+									// Inherit ('') clears both. Native/custom entries are
+									// suppressed via providerModelsOnly, so any non-composite
+									// value here means "inherit".
+									onFormChange('subagent_provider', null);
+									onFormChange('subagent_model', null);
+								}
+							}}
+						/>
+					</div>
+				</div>
+			{/if}
 			<div class="set-row">
 				<div class="lab"><h4>Permission mode</h4><p>How the agent asks before taking actions.</p></div>
 				<div class="ctl">

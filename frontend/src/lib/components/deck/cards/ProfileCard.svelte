@@ -165,6 +165,8 @@
 		description: '',
 		model: getDefaultModel(),
 		provider: null as string | null,
+		subagent_provider: null as string | null,
+		subagent_model: null as string | null,
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
@@ -317,6 +319,8 @@
 			description: '',
 			model: getDefaultModel(),
 			provider: null,
+			subagent_provider: null,
+			subagent_model: null,
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
@@ -400,6 +404,8 @@
 			description: profile.description || '',
 			model: normalizeModel(config.model) || getDefaultModel(),
 			provider: config.provider ?? null,
+			subagent_provider: (config as any).subagent_provider ?? null,
+			subagent_model: (config as any).subagent_model ?? null,
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
@@ -593,6 +599,15 @@
 			permission_mode: profileForm.permission_mode,
 			// model_providers.id, or omitted (→ native Anthropic) when unset.
 			...(profileForm.provider ? { provider: profileForm.provider } : {}),
+			// Optional cross-provider subagent leg — persisted as a pair, and only
+			// when a provider model is chosen for it (null = inherit). The main
+			// picker clears these whenever the profile drops back to native.
+			...(profileForm.provider && profileForm.subagent_provider
+				? {
+						subagent_provider: profileForm.subagent_provider,
+						subagent_model: profileForm.subagent_model
+					}
+				: {}),
 			include_partial_messages: profileForm.include_partial_messages,
 			enable_file_checkpointing: profileForm.enable_file_checkpointing,
 			app_config_tools: profileForm.app_config_tools,
@@ -796,6 +811,8 @@
 			// AI-generated/imported profiles are always native Anthropic today —
 			// the export format doesn't carry a provider id.
 			provider: null,
+			subagent_provider: null,
+			subagent_model: null,
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,

@@ -282,6 +282,8 @@ export interface AuthStatus {
 export interface ProfileConfig {
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
+	subagent_provider?: string | null;  // optional cross-provider subagent leg: model_providers.id; unset/null = inherit
+	subagent_model?: string | null;  // subagent model id paired with subagent_provider; unset/null = inherit
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
