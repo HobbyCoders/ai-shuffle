@@ -261,25 +261,22 @@ def _error_code(body: dict) -> tuple[Optional[str], Optional[str]]:
 async def start_device_code(
     *, client: Optional[httpx.AsyncClient] = None
 ) -> DeviceCodeStart:
-    """Begin the device-code flow: mint PKCE, request a user-code.
+    """Begin the device-code flow: request a user-code.
 
-    POSTs the client id + PKCE S256 challenge + scope as JSON (the endpoint
-    rejects form encoding) and returns the ``user_code`` (admin types it at the
-    verification URL) plus the ``device_auth_id`` handle — stored in
-    ``device_code`` — and ``code_verifier`` the caller carries into the poll
-    step. The endpoint answers ``device_auth_id`` / string ``interval`` /
+    POSTs the client id as JSON (the endpoint rejects form encoding; the
+    reference codex-rs client sends ONLY ``client_id`` — the SERVER mints the
+    PKCE pair and hands the verifier back in the success poll). Returns the
+    ``user_code`` (admin types it at the verification URL) plus the
+    ``device_auth_id`` handle — stored in ``device_code``. The locally-minted
+    ``code_verifier`` is only a fallback for deployments whose poll response
+    omits one. The endpoint answers ``device_auth_id`` / string ``interval`` /
     ISO ``expires_at`` rather than the RFC-8628 field names.
     """
-    verifier, challenge = generate_pkce()
+    verifier, _challenge = generate_pkce()
     resp = await _post(
         client,
         DEVICE_USERCODE_URL,
-        json_body={
-            "client_id": client_id(),
-            "scope": SCOPE,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        },
+        json_body={"client_id": client_id()},
     )
     body = _safe_json(resp)
     if resp.status_code >= 400:
@@ -358,7 +355,12 @@ async def poll_device_code(
     if not code:
         raise CodexAuthError("invalid_poll_response",
                              "authorized poll returned neither tokens nor a code")
-    return await _exchange_authorization_code(code, code_verifier, client=client)
+    # The device flow's PKCE pair is SERVER-minted: the success poll returns the
+    # ``code_verifier`` bound to the authorization code (codex-rs
+    # CodeSuccessResp). Exchanging with our own verifier fails with
+    # ``token_exchange_user_error`` — ours is only the fallback.
+    verifier = body.get("code_verifier") or code_verifier
+    return await _exchange_authorization_code(code, verifier, client=client)
 
 
 async def _exchange_authorization_code(

@@ -112,14 +112,10 @@ class TestDeviceStart:
         assert start.verification_uri == codex_oauth.DEVICE_VERIFICATION_URL
         assert start.interval == 5
         assert start.expires_in > 0
-        assert start.code_verifier  # PKCE verifier minted
-        # The S256 challenge sent matches the verifier we got back.
-        expected = base64.urlsafe_b64encode(
-            hashlib.sha256(start.code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
-        assert seen["code_challenge"] == expected
-        assert seen["code_challenge_method"] == "S256"
-        assert seen["client_id"] == codex_oauth.client_id()
+        assert start.code_verifier  # fallback PKCE verifier minted
+        # Reference client sends ONLY client_id — the server mints the PKCE
+        # pair and returns the verifier in the success poll.
+        assert seen == {"client_id": codex_oauth.client_id()}
 
     async def test_http_error_raises_nested_error_object(self):
         def handler(request):
@@ -215,19 +211,25 @@ class TestDevicePoll:
         assert bundle.refresh_token == "rt-1"
         assert bundle.account_id == "acct-direct"
 
-    async def test_code_exchange_path(self):
+    async def test_code_exchange_uses_server_minted_verifier(self):
+        # Real contract: the success poll carries the SERVER-minted PKCE pair;
+        # the exchange must use THAT verifier, not our local fallback.
         id_token = _make_id_token({"chatgpt_account_id": "acct-exch"})
         calls = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request.url.path)
             if request.url.path.endswith("/deviceauth/token"):
-                return httpx.Response(200, json={"authorization_code": "auth-code-1"})
+                return httpx.Response(200, json={
+                    "authorization_code": "auth-code-1",
+                    "code_challenge": "server-challenge",
+                    "code_verifier": "server-verifier",
+                })
             if request.url.path.endswith("/oauth/token"):
                 body = dict(httpx.QueryParams(request.content.decode()))
                 assert body["grant_type"] == "authorization_code"
                 assert body["code"] == "auth-code-1"
-                assert body["code_verifier"] == "the-verifier"
+                assert body["code_verifier"] == "server-verifier"
                 assert body["redirect_uri"] == codex_oauth.DEVICE_CALLBACK_URL
                 return httpx.Response(200, json={
                     "access_token": "at-x", "refresh_token": "rt-x",
@@ -237,11 +239,29 @@ class TestDevicePoll:
 
         async with _client(handler) as c:
             bundle = await codex_oauth.poll_device_code(
-                "dev", "the-verifier", "AAAA-BBBBB", client=c
+                "dev", "local-fallback-verifier", "AAAA-BBBBB", client=c
             )
         assert bundle.access_token == "at-x"
         assert bundle.account_id == "acct-exch"
         assert any(p.endswith("/oauth/token") for p in calls)
+
+    async def test_code_exchange_falls_back_to_local_verifier(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/deviceauth/token"):
+                return httpx.Response(200, json={"authorization_code": "auth-code-2"})
+            if request.url.path.endswith("/oauth/token"):
+                body = dict(httpx.QueryParams(request.content.decode()))
+                assert body["code_verifier"] == "the-verifier"
+                return httpx.Response(200, json={
+                    "access_token": "at-y", "refresh_token": "rt-y",
+                })
+            return httpx.Response(404)
+
+        async with _client(handler) as c:
+            bundle = await codex_oauth.poll_device_code(
+                "dev", "the-verifier", "AAAA-BBBBB", client=c
+            )
+        assert bundle.access_token == "at-y"
 
 
 # ---------------------------------------------------------------------------
