@@ -18,7 +18,7 @@
 	 * schema change) — a per-install convenience across the pinned models.
 	 */
 	import { Search, Star, Check, ChevronDown } from 'lucide-svelte';
-	import { getModels, getProviders, CUSTOM_VALUE } from '$lib/constants/models';
+	import { getModels, getProviders, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
 
 	interface Props {
 		/** Current composite selection value (see module comment). */
@@ -27,9 +27,21 @@
 		onSelect: (value: string) => void;
 		/** Optional id for the trigger button (a11y labelling). */
 		id?: string;
+		/**
+		 * When true, render an extra "Inherit (default)" option at the very top
+		 * with value `''` (INHERIT_VALUE), selected when `value` is `''`. Used by
+		 * the optional subagent-model leg. Default false; existing call sites keep
+		 * their current behavior.
+		 */
+		allowInherit?: boolean;
+		/**
+		 * When true, list only provider-curated models — suppress the native
+		 * Claude group and the `Custom…` entry. Additive, default false.
+		 */
+		providerModelsOnly?: boolean;
 	}
 
-	let { value, onSelect, id }: Props = $props();
+	let { value, onSelect, id, allowInherit = false, providerModelsOnly = false }: Props = $props();
 
 	const PIN_STORAGE_KEY = 'aihub.pinnedModels';
 	const NATIVE_GROUP = 'Claude';
@@ -75,8 +87,10 @@
 	// ---- option set (native Claude first, then each provider) ----------------
 	const options = $derived.by<PickerOption[]>(() => {
 		const out: PickerOption[] = [];
-		for (const m of getModels()) {
-			out.push({ value: m.value, modelId: m.value, label: m.label, group: NATIVE_GROUP });
+		if (!providerModelsOnly) {
+			for (const m of getModels()) {
+				out.push({ value: m.value, modelId: m.value, label: m.label, group: NATIVE_GROUP });
+			}
 		}
 		for (const p of getProviders()) {
 			for (const pm of p.models) {
@@ -127,6 +141,7 @@
 
 	// Label shown on the collapsed trigger.
 	const currentLabel = $derived.by(() => {
+		if (allowInherit && value === INHERIT_VALUE) return 'Inherit (default)';
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		const match = options.find((o) => o.value === value);
 		return match ? match.label : value || 'Select a model';
@@ -198,6 +213,22 @@
 			</div>
 
 			<div class="mpk-list">
+				{#if allowInherit}
+					<div class="mpk-group">
+						<button
+							type="button"
+							class="mpk-row"
+							class:selected={value === INHERIT_VALUE}
+							role="option"
+							aria-selected={value === INHERIT_VALUE}
+							onclick={() => selectOption(INHERIT_VALUE)}
+						>
+							<span class="mpk-check">{#if value === INHERIT_VALUE}<Check size={14} />{/if}</span>
+							<span class="mpk-label">Inherit (default)</span>
+						</button>
+					</div>
+				{/if}
+
 				{#if pinnedOptions.length > 0}
 					<div class="mpk-group">
 						<div class="mpk-grouphead">Pinned</div>
@@ -220,19 +251,21 @@
 					<div class="mpk-empty">No models match “{query}”.</div>
 				{/if}
 
-				<div class="mpk-group mpk-customgroup">
-					<button
-						type="button"
-						class="mpk-row"
-						class:selected={value === CUSTOM_VALUE}
-						role="option"
-						aria-selected={value === CUSTOM_VALUE}
-						onclick={() => selectOption(CUSTOM_VALUE)}
-					>
-						<span class="mpk-check">{#if value === CUSTOM_VALUE}<Check size={14} />{/if}</span>
-						<span class="mpk-label">Custom…</span>
-					</button>
-				</div>
+				{#if !providerModelsOnly}
+					<div class="mpk-group mpk-customgroup">
+						<button
+							type="button"
+							class="mpk-row"
+							class:selected={value === CUSTOM_VALUE}
+							role="option"
+							aria-selected={value === CUSTOM_VALUE}
+							onclick={() => selectOption(CUSTOM_VALUE)}
+						>
+							<span class="mpk-check">{#if value === CUSTOM_VALUE}<Check size={14} />{/if}</span>
+							<span class="mpk-label">Custom…</span>
+						</button>
+					</div>
+				{/if}
 			</div>
 		</div>
 	{/if}
