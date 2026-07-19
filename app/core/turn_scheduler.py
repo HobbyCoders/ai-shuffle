@@ -16,9 +16,14 @@ in this order on every settlement:
    session message — user-visible message rows exist only for
    ``source in (user, queue)`` turns (enforced where messages are recorded),
    so the seed dedup stays deterministic.
-2. **QUEUE DRAIN** — a settled-``completed`` turn with queued rows behind it
-   kicks the front of the queue. A user stop settles ``aborted``, so queued
-   rows REMAIN untouched (F4).
+2. **QUEUE DRAIN** — a settled turn with queued rows behind it kicks the front
+   of the queue. This fires on EVERY settle outcome (``completed``, ``parked``,
+   ``aborted``, error) — a queued user message starts the next turn the moment
+   the current one comes to rest, matching Claude Code's own semantics. On a
+   ``parked`` settlement the queued turn runs CONCURRENTLY with the session's
+   still-running background work (park releases the run lease and the live-turn
+   slot). A user stop settles ``aborted`` and now drains too — this supersedes
+   the old preserve-on-stop rule (F4, retired).
 3. **AUTO-CONTINUE (#557)** — a settled-``completed`` turn cut at the CLI's
    lazy-compaction boundary (``stop_reason == "tool_use"`` + live context over
    the autocompact threshold) enqueues ONE ``source=auto_continue``
@@ -270,26 +275,35 @@ async def on_turn_settled(session_id: str, turn_id: str, outcome: str) -> None:
 
 
 async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> None:
-    if outcome != "completed":
-        # aborted — a user stop (or crash/drain) settles aborted: queued rows
-        #   REMAIN untouched (F4) and nothing auto-starts; the user's next
-        #   action (or the reap sweep) resumes the queue.
-        # parked — background work still running; the successor turn arrives
-        #   via on_task_terminal when that work comes to rest.
-        return
-
+    # QUEUE DRAIN runs on EVERY settle outcome (completed, parked, aborted,
+    # error). A queued user message must start the next turn the moment the
+    # current one comes to rest — matching Claude Code's own semantics, including
+    # when the agent PARKS with background work still running: park releases both
+    # the run lease and the live-turn slot, so the queued turn runs CONCURRENTLY
+    # with that background work (a message queued AFTER park already starts
+    # immediately; this makes queued-BEFORE-park consistent). A user STOP settles
+    # aborted and now drains too — this deliberately supersedes the old
+    # preserve-on-stop rule (F4). Each drain consumes one queued row, so an error
+    # settlement carries no retry-loop risk. The park→unpark machinery
+    # (on_task_terminal) is untouched: a queued message naturally orders ahead of
+    # a later source=unpark wake by queue position, no special ordering needed.
     settled = await asyncio.to_thread(turns_db.get_turn, turn_id)
     if settled is None:
         return
     # ONE terminal-payload read feeds both the failover (api_error_status) and
-    # auto-continue (stop_reason) derivations.
+    # auto-continue (stop_reason) derivations. Both are naturally inert on a
+    # non-completed settlement — a parked/aborted turn has no terminal
+    # ``turn.completed`` payload to trip them.
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
-    # (1) FAILOVER
+    # (1) FAILOVER — stays FIRST: if it enqueued a retry the drain must NOT also
+    # fire (structural precedence guard; with OC-1 retired failover never fires
+    # on a non-completed outcome, but the order is preserved).
     if await _maybe_failover(session_id, settled, terminal):
         return
 
-    # (2) QUEUE DRAIN — completed + not stopped → pop_ready → start.
+    # (2) QUEUE DRAIN — pop_ready (non-mutating peek) → kick starts the front
+    # queued row. Fires on ALL outcomes, ahead of auto-continue.
     front = await asyncio.to_thread(turns_db.pop_ready, session_id)
     if front is not None:
         kick(session_id)
@@ -308,8 +322,10 @@ async def _maybe_failover(
     """Policy (1): usage-limit fail + not user-stopped → enqueue a
     ``source=failover`` retry. Returns True when a retry was enqueued.
 
-    "Not user-stopped" holds by construction: a user stop settles ``aborted``
-    and this runs only for ``completed`` settlements. The attempted-account
+    "Not user-stopped" holds by construction: the usage-limit signal lives in a
+    settled turn's terminal ``turn.completed`` payload, which a user stop
+    (``aborted``) / park never carries — so ``is_usage_limit_error`` is False on
+    every non-completed settlement and this returns early. The attempted-account
     set rides ``payload.failover_attempted`` across the retry chain, so
     rotation terminates once every account has 429'd (``retry=False`` → fall
     through to the remaining policies). No message append here — retries are

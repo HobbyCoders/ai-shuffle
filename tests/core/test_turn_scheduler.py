@@ -2,7 +2,8 @@
 (v2 core, Phase 2 A5).
 
 Plan §5 coverage: policy ORDER (failover before queue drain before
-auto-continue), F4 (a stop/abort settlement leaves queued rows untouched),
+auto-continue), the queue drain firing on EVERY settle outcome
+(completed/parked/aborted/error — the old F4 preserve-on-stop rule is retired),
 failover cap + no message re-append, the durable #557 auto-continue
 derivation, unpark prompt synthesis, and the shutdown kick guard.
 
@@ -139,8 +140,9 @@ async def test_completed_settlement_drains_front_queued_turn(mock_db):
     assert execute.await_args.args[0]["id"] == queued["id"]
 
 
-async def test_f4_abort_settlement_leaves_queue_untouched(mock_db):
-    # A user stop settles aborted → queued rows REMAIN and nothing auto-starts.
+async def test_aborted_settlement_drains_front_queued_turn(mock_db):
+    # (b) A user stop settles aborted → the queued row DRAINS (supersedes the old
+    # F4 preserve-on-stop rule: a queued message sends after the turn stops).
     settled = _settled_turn("s2", outcome="aborted", terminal_event=False)
     queued = turns_db.enqueue_turn("s2", "queue", prompt="second")
 
@@ -148,21 +150,41 @@ async def test_f4_abort_settlement_leaves_queue_untouched(mock_db):
         await turn_scheduler.on_turn_settled("s2", settled["id"], "aborted")
         await _drain_kicks()
 
-    execute.assert_not_awaited()
-    assert [t["id"] for t in turns_db.get_queued_turns("s2")] == [queued["id"]]
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
 
-async def test_parked_settlement_is_a_no_op(mock_db):
+async def test_parked_settlement_drains_front_queued_turn(mock_db):
+    # (a) A parked settlement (background work still running) DRAINS the queued
+    # row: it runs concurrently with that background work (park released the
+    # live-turn slot). A message queued BEFORE park is now consistent with one
+    # queued AFTER park.
     turn = turns_db.enqueue_turn("s3", "user", prompt="bg work")
     turns_db.start_turn(turn["id"], None, "runner")
     turns_db.park_turn(turn["id"], ["task-1"])
-    turns_db.enqueue_turn("s3", "queue", prompt="second")
+    queued = turns_db.enqueue_turn("s3", "queue", prompt="second")
 
     with _patch_execute() as execute:
         await turn_scheduler.on_turn_settled("s3", turn["id"], "parked")
         await _drain_kicks()
 
-    execute.assert_not_awaited()
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
+
+
+async def test_error_settlement_drains_front_queued_turn(mock_db):
+    # (c) An error settlement (the runtime settles error paths as aborted; a bare
+    # "error" outcome is exercised here directly) DRAINS the queued row — each
+    # drain consumes exactly one queued row, so there is no retry-loop risk.
+    settled = _settled_turn("s2e", outcome="aborted", terminal_event=False)
+    queued = turns_db.enqueue_turn("s2e", "queue", prompt="second")
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s2e", settled["id"], "error")
+        await _drain_kicks()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
 
 async def test_completed_empty_queue_natural_end_does_nothing(mock_db):
@@ -174,6 +196,33 @@ async def test_completed_empty_queue_natural_end_does_nothing(mock_db):
 
     execute.assert_not_awaited()
     assert turns_db.get_queued_turns("s4") == []
+
+
+async def test_parked_empty_queue_no_spurious_turn(mock_db):
+    # (d) parked + nothing queued → the drain finds no front row and starts
+    # nothing (the wake still arrives later via on_task_terminal).
+    turn = turns_db.enqueue_turn("s5", "user", prompt="bg work")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.park_turn(turn["id"], ["task-1"])
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s5", turn["id"], "parked")
+        await _drain_kicks()
+
+    execute.assert_not_awaited()
+    assert turns_db.get_queued_turns("s5") == []
+
+
+async def test_aborted_empty_queue_no_spurious_turn(mock_db):
+    # (d) aborted + nothing queued → nothing auto-starts.
+    settled = _settled_turn("s6", outcome="aborted", terminal_event=False)
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s6", settled["id"], "aborted")
+        await _drain_kicks()
+
+    execute.assert_not_awaited()
+    assert turns_db.get_queued_turns("s6") == []
 
 
 # ---------------------------------------------------------------------------
