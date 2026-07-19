@@ -225,6 +225,89 @@ async def test_stray_cli_sweep_suppressed_under_testing(mock_db, monkeypatch):
 
 
 # =============================================================================
+# Stale background_tasks rows: flip + emit terminal task.updated frames
+#
+# Flipping the durable row is not enough for the UI — the frontend replays
+# ``session_events`` and only settles a background-task chip when a terminal
+# ``task.updated`` frame arrives. Boot reconcile must emit one per flipped row.
+# =============================================================================
+
+def _seed_bg_task(session_id, task_id, status, *, tool_use_id=None):
+    from app.db.background_tasks import upsert_background_task
+    upsert_background_task({
+        "task_id": task_id,
+        "session_id": session_id,
+        "kind": "agent",
+        "tool_use_id": tool_use_id,
+        "title": task_id,
+        "status": status,
+    })
+
+
+async def test_stale_background_rows_emit_terminal_frames(
+    mock_db, test_db, monkeypatch
+):
+    import app.core.turn_recorder as tr
+
+    sid = _make_session(test_db)
+    _seed_bg_task(sid, "t-a", "running", tool_use_id="toolu_a")
+    _seed_bg_task(sid, "t-b", "running", tool_use_id=None)
+    _seed_bg_task(sid, "t-done", "completed", tool_use_id="toolu_done")
+
+    calls = []
+
+    async def _capture(session_id, event):
+        calls.append((session_id, event))
+
+    monkeypatch.setattr(tr, "record_drained_event", _capture)
+
+    counts = await reconcile_from_durable_truth()
+
+    assert counts["background_task_rows_killed"] == 2
+    assert len(calls) == 2
+
+    by_task = {ev["data"]["task_id"]: (sid_arg, ev) for sid_arg, ev in calls}
+    assert set(by_task) == {"t-a", "t-b"}
+    for task_id, (sid_arg, ev) in by_task.items():
+        assert sid_arg == sid
+        assert ev["type"] == "system"
+        assert ev["subtype"] == "task_updated"
+        assert ev["content"] == "Background task lost in a server restart"
+        assert ev["data"]["status"] == "killed"
+        assert ev["data"]["patch"] == {"status": "killed"}
+        assert ev["data"]["reason"] == "server_restart"
+    # tool_use_id present only when the row carried one.
+    assert by_task["t-a"][1]["data"]["tool_use_id"] == "toolu_a"
+    assert "tool_use_id" not in by_task["t-b"][1]["data"]
+
+
+async def test_stale_background_emit_failure_does_not_block_others(
+    mock_db, test_db, monkeypatch
+):
+    import app.core.turn_recorder as tr
+
+    sid = _make_session(test_db)
+    _seed_bg_task(sid, "t-a", "running")
+    _seed_bg_task(sid, "t-b", "running")
+
+    attempted = []
+
+    async def _flaky(session_id, event):
+        task_id = event["data"]["task_id"]
+        attempted.append(task_id)
+        if task_id == "t-a":
+            raise RuntimeError("emit boom")
+
+    monkeypatch.setattr(tr, "record_drained_event", _flaky)
+
+    counts = await reconcile_from_durable_truth()
+
+    # One row's emission raising must not prevent the other, nor the count.
+    assert counts["background_task_rows_killed"] == 2
+    assert set(attempted) == {"t-a", "t-b"}
+
+
+# =============================================================================
 # V2 turns — boot reap-and-kick sweep (D3)
 # =============================================================================
 

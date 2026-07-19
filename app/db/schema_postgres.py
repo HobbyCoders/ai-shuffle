@@ -774,12 +774,14 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 36d. Background tasks (v55). Durable per-task lifecycle snapshots —
-    #      WRITE-ONLY in Phase 1 of the lifecycle unification: task_registry
-    #      mirrors start/update/complete/unpark transitions here through
-    #      app.core.task_persistence (coalescing async writer, kill switch
-    #      settings.durable_task_state). No reader depends on these rows yet;
-    #      boot reconcile marks this install's stale non-terminal rows killed.
+    # 36d. Background tasks (v55). Durable per-task lifecycle snapshots.
+    #      task_registry mirrors start/update/complete/unpark transitions here
+    #      through app.core.task_persistence (coalescing async writer, kill
+    #      switch settings.durable_task_state). Two recovery readers depend on
+    #      these rows now (both keyed off the post-restart empty registry): boot
+    #      reconcile marks stale non-terminal rows killed, and the stop-task
+    #      durable force-settle fallback reads a single row to settle a task the
+    #      UI still shows "running". General hot-path read cutover is later.
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS background_tasks (

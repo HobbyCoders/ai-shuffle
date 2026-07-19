@@ -16,9 +16,14 @@ in this order on every settlement:
    session message — user-visible message rows exist only for
    ``source in (user, queue)`` turns (enforced where messages are recorded),
    so the seed dedup stays deterministic.
-2. **QUEUE DRAIN** — a settled-``completed`` turn with queued rows behind it
-   kicks the front of the queue. A user stop settles ``aborted``, so queued
-   rows REMAIN untouched (F4).
+2. **QUEUE DRAIN** — a settled turn with queued rows behind it kicks the front
+   of the queue. This fires on EVERY settle outcome (``completed``, ``parked``,
+   ``aborted``, error) — a queued user message starts the next turn the moment
+   the current one comes to rest, matching Claude Code's own semantics. On a
+   ``parked`` settlement the queued turn runs CONCURRENTLY with the session's
+   still-running background work (park releases the run lease and the live-turn
+   slot). A user stop settles ``aborted`` and now drains too — this supersedes
+   the old preserve-on-stop rule (F4, retired).
 3. **AUTO-CONTINUE (#557)** — a settled-``completed`` turn cut at the CLI's
    lazy-compaction boundary (``stop_reason == "tool_use"`` + live context over
    the autocompact threshold) enqueues ONE ``source=auto_continue``
@@ -80,6 +85,25 @@ _USER_SOURCES = ("user", "queue")
 # Live references to in-flight kick tasks so they are not garbage-collected
 # mid-flight (asyncio keeps only weak refs to tasks).
 _kick_tasks: Set[asyncio.Task] = set()
+
+# Content-empty guard (#690): the fields that carry a terminal task frame's
+# renderable content. A frame with NONE of them populated has nothing to render
+# in a ``<task-notification>`` and must never be enqueued as a parent-visible
+# wake (the reference harness never emits empty notifications). ``task_id`` /
+# ``tool_use_id`` are identity — a bare TaskUpdated frame carrying only those
+# still identifies WHICH background unit came to rest (and is later upgraded by
+# its rich frame, #688 A-2), so it counts as renderable; a frame with not even
+# an id is dropped at the single ``on_task_terminal`` choke point.
+_FRAME_CONTENT_FIELDS = ("task_id", "tool_use_id", "summary", "output_file")
+
+
+def _frame_has_renderable_content(frame: Dict[str, Any]) -> bool:
+    """True iff ``frame`` carries any renderable content (identity or result).
+
+    False only for a wholly-empty frame (no ``task_id``/``tool_use_id``/
+    ``summary``/``output_file``) — the caller drops those with a DEBUG log
+    instead of enqueueing a contentless notification turn."""
+    return any(frame.get(f) for f in _FRAME_CONTENT_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -251,26 +275,35 @@ async def on_turn_settled(session_id: str, turn_id: str, outcome: str) -> None:
 
 
 async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> None:
-    if outcome != "completed":
-        # aborted — a user stop (or crash/drain) settles aborted: queued rows
-        #   REMAIN untouched (F4) and nothing auto-starts; the user's next
-        #   action (or the reap sweep) resumes the queue.
-        # parked — background work still running; the successor turn arrives
-        #   via on_task_terminal when that work comes to rest.
-        return
-
+    # QUEUE DRAIN runs on EVERY settle outcome (completed, parked, aborted,
+    # error). A queued user message must start the next turn the moment the
+    # current one comes to rest — matching Claude Code's own semantics, including
+    # when the agent PARKS with background work still running: park releases both
+    # the run lease and the live-turn slot, so the queued turn runs CONCURRENTLY
+    # with that background work (a message queued AFTER park already starts
+    # immediately; this makes queued-BEFORE-park consistent). A user STOP settles
+    # aborted and now drains too — this deliberately supersedes the old
+    # preserve-on-stop rule (F4). Each drain consumes one queued row, so an error
+    # settlement carries no retry-loop risk. The park→unpark machinery
+    # (on_task_terminal) is untouched: a queued message naturally orders ahead of
+    # a later source=unpark wake by queue position, no special ordering needed.
     settled = await asyncio.to_thread(turns_db.get_turn, turn_id)
     if settled is None:
         return
     # ONE terminal-payload read feeds both the failover (api_error_status) and
-    # auto-continue (stop_reason) derivations.
+    # auto-continue (stop_reason) derivations. Both are naturally inert on a
+    # non-completed settlement — a parked/aborted turn has no terminal
+    # ``turn.completed`` payload to trip them.
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
-    # (1) FAILOVER
+    # (1) FAILOVER — stays FIRST: if it enqueued a retry the drain must NOT also
+    # fire (structural precedence guard; with OC-1 retired failover never fires
+    # on a non-completed outcome, but the order is preserved).
     if await _maybe_failover(session_id, settled, terminal):
         return
 
-    # (2) QUEUE DRAIN — completed + not stopped → pop_ready → start.
+    # (2) QUEUE DRAIN — pop_ready (non-mutating peek) → kick starts the front
+    # queued row. Fires on ALL outcomes, ahead of auto-continue.
     front = await asyncio.to_thread(turns_db.pop_ready, session_id)
     if front is not None:
         kick(session_id)
@@ -289,8 +322,10 @@ async def _maybe_failover(
     """Policy (1): usage-limit fail + not user-stopped → enqueue a
     ``source=failover`` retry. Returns True when a retry was enqueued.
 
-    "Not user-stopped" holds by construction: a user stop settles ``aborted``
-    and this runs only for ``completed`` settlements. The attempted-account
+    "Not user-stopped" holds by construction: the usage-limit signal lives in a
+    settled turn's terminal ``turn.completed`` payload, which a user stop
+    (``aborted``) / park never carries — so ``is_usage_limit_error`` is False on
+    every non-completed settlement and this returns early. The attempted-account
     set rides ``payload.failover_attempted`` across the retry chain, so
     rotation terminates once every account has 429'd (``retry=False`` → fall
     through to the remaining policies). No message append here — retries are
@@ -403,11 +438,106 @@ def _enqueue(session_id: str, source: str, **kwargs: Any) -> Dict[str, Any]:
 def _queued_unpark_turn(session_id: str) -> Optional[Dict[str, Any]]:
     """The session's front-most still-``queued`` ``source=unpark`` wake, if any
     (there is at most one by construction — near-simultaneous completions batch
-    into it)."""
+    into it). PUMP wakes (``source=unpark_pump``) are deliberately excluded — the
+    own lane never merges into a pump turn and vice-versa."""
     for turn in turns_db.get_queued_turns(session_id):
         if turn.get("source") == "unpark":
             return turn
     return None
+
+
+def _session_has_parked_turn(session_id: str) -> bool:
+    """True iff the session currently has a ``parked`` turn.
+
+    A background sub-agent/shell only outlives its turn by PARKING it, so a
+    parked turn is the observable "the parent is at rest waiting on background
+    work" signal the CLI keys its own at-rest wake on (see
+    :func:`_cli_owns_at_rest_wake`)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM turns WHERE session_id=%s AND state='parked' LIMIT 1",
+            (session_id,),
+        )
+        return cursor.fetchone() is not None
+
+
+# A-1 (bug 1): the CLI-native duplicate. When a TOP-LEVEL backgrounded Task/Agent
+# comes to rest while the parent turn is PARKED, the CLI itself starts a follow-up
+# turn injecting the rich ``[SYSTEM NOTIFICATION] … <task-notification>`` string
+# (query_engine ``_cli_turn_events_from_message``). The app's own consolidated
+# ``source=unpark`` wake, built from the content-poor bare TaskUpdated frame, is a
+# SECOND (empty) delivery of the same completion. When the CLI owns the at-rest
+# wake we suppress the app's enqueue entirely so the model sees ONE (rich) wake.
+#
+# Scope (conservative — a wrong suppression strands a real completion, R1):
+#   * status == "completed" ONLY. failed/killed/stopped keep the app wake — the
+#     CLI has no at-rest resume for a kill (chat_ws_handler), so its notification
+#     is the ONLY delivery.
+#   * registry record ``kind == "agent"`` ONLY. Backgrounded SHELLS (kind
+#     "shell", incl. SDK-backgrounded local_bash) keep the app wake — the CLI does
+#     not own a shell's at-rest resume the way it owns a sub-agent's.
+#   * parent PARKED ONLY. The CLI's rich follow-up turn exists only in the parked
+#     state; with no parked turn the app wake is the sole delivery and must fire
+#     (keeps the non-parked own-lane regression guards green).
+# NOTE: a top-level backgrounded agent is ALSO tagged ``is_sdk_background_task``
+# (query_engine marks agents whose launch was a background launch), so that flag
+# does NOT distinguish agent-from-shell — the ``kind == "agent"`` record field is
+# the reliable discriminator.
+def _cli_owns_at_rest_wake(session_id: str, frame: Dict[str, Any]) -> bool:
+    """True iff the CLI owns this completion's at-rest wake (so the app must NOT
+    also enqueue one). Caller is already inside the OWN (top-level) branch."""
+    if frame.get("status") != "completed":
+        return False
+    from app.core.task_registry import task_registry
+
+    record = task_registry.get_task(session_id, frame.get("task_id"))
+    if not record or record.get("kind") != "agent":
+        return False
+    return _session_has_parked_turn(session_id)
+
+
+# A-2: a frame is "richer" than a stored one when it POPULATES any content field
+# the stored frame left falsy. Purely additive — it never demotes a populated
+# field to empty. Used to upgrade a bare TaskUpdated-built wake (task_id/status/
+# tool_use_id only) in place when the rich TaskNotification frame arrives after.
+_RICHNESS_FIELDS = ("output_file", "summary", "usage")
+
+
+def _frame_is_richer(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
+    """True iff ``incoming`` fills any of ``{output_file, summary, usage}`` that
+    ``stored`` leaves falsy."""
+    return any(
+        incoming.get(f) and not stored.get(f) for f in _RICHNESS_FIELDS
+    )
+
+
+async def _enqueue_context_wake(
+    session_id: str,
+    source: str,
+    frames: List[Dict[str, Any]],
+    task_ids: List[str],
+    prompt: str,
+) -> Dict[str, Any]:
+    """Enqueue a fresh context-carrying wake turn for the OWN lane's fall-through
+    enqueue. Reads the session's latest context turn for
+    profile/project/worktree/parent linkage, attaches the ``frames`` and their
+    ``task_ids`` to the payload, and returns the enqueued turn."""
+    context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
+    payload = _context_payload(context)
+    payload["pending_frames"] = list(frames)
+    payload["task_ids"] = list(task_ids)
+    return await asyncio.to_thread(
+        _enqueue,
+        session_id,
+        source,
+        prompt=prompt,
+        profile_id=context.get("profile_id"),
+        project_id=context.get("project_id"),
+        worktree_id=context.get("worktree_id"),
+        payload=payload,
+        parent_turn_id=context.get("id"),
+    )
 
 
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
@@ -427,92 +557,173 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     * (c) otherwise enqueue a new unpark wake carrying ``pending_frames`` +
       ``task_ids`` (context inherited from the parked turn).
 
-    Kicks after a merge/enqueue (never after the (a) no-op)."""
+    Kicks after a merge/enqueue (never after the (a) no-op).
+
+    Two lanes, by ownership (#690 retired the PUMP lane — see below):
+
+    * OWN — ``is_own_background_task`` true: the parent's own background work came
+      to rest. Rich ``source=unpark`` wake, with the #688 merge + idempotency
+      branches below.
+    * else — NOT the parent's own background work (a child/grandchild step of a
+      still-running sub-agent, an orphan, or a synchronous sub-agent at rest):
+      SUPPRESS. #690 deleted the per-child immediate/deferred PUMP lane that used
+      to enqueue a ``source=unpark_pump`` turn here: a child completion while its
+      owner is alive produced one parent-visible wake per child (the "3 shells →
+      3 wakes" storm) and, for shells with no tool_use_id, fired blindly. The
+      parent now hears about delegated work ONLY via its owner task's OWN-lane
+      terminal (the reference-harness contract: a background child notifies only
+      its owning agent; the CLI resumes a parked owner natively). A silent turn
+      is valid.
+
+    A wholly-contentless frame (no ``task_id``/``tool_use_id``/``summary``/
+    ``output_file``) is dropped at the choke point below with a DEBUG log — an
+    empty notification is never enqueued (#690)."""
     try:
         task_id = frame.get("task_id")
-        # OWNERSHIP GATE (subagent task-notification leak): the reader hands off
-        # EVERY terminal background frame — including tasks launched INSIDE a
-        # sub-agent (grandchildren), which the main session never launched.
-        # Policy: the parent's OWN background work always wakes it; and ANY
-        # still-running background agent admits the wake, because the
-        # main-session pump is the ONLY resume path for a parked sub-agent
-        # (2026-07-10 strand repair) and a grandchild task is by construction
-        # launched WHILE its sub-agent is running — so no ownership-lane arming
-        # is required for the strand-repair case. Suppression happens only when
-        # the session is fully at rest with NO owner: an orphan grandchild or a
-        # synchronous sub-agent coming to rest (the "nothing to act on" leak).
-        from app.core.task_registry import task_registry
-        should_wake = (
-            task_registry.is_own_background_task(session_id, task_id)
-            or task_registry.has_active_background_agent(session_id)
-        )
-        if not should_wake:
-            logger.info(
-                "turn_scheduler: unpark-decision suppressed for %s — task %s "
-                "not the parent's background work and no active background agent",
-                session_id, task_id,
+        # Content-empty guard (#690): the single enqueue choke point. A frame that
+        # carries nothing renderable can only produce an empty <task-notification>
+        # turn — drop it (DEBUG) before any lane decides to enqueue.
+        if not _frame_has_renderable_content(frame):
+            logger.debug(
+                "turn_scheduler: dropping contentless task frame for %s (frame=%r)",
+                session_id, frame,
             )
             return
+        from app.core.task_registry import task_registry
 
-        existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
-        if existing is not None:
-            existing_payload = dict(existing.get("payload") or {})
-            existing_task_ids = list(existing_payload.get("task_ids") or [])
-            if task_id and task_id in existing_task_ids:
-                # (a) idempotent: this task is already folded into the wake.
+        if task_registry.is_own_background_task(session_id, task_id):
+            # ── OWN lane — rich consolidated source=unpark wake ──
+            # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a
+            # top-level backgrounded agent resting while the parent is parked),
+            # the CLI already injects the rich <task-notification> follow-up turn;
+            # the app's own wake would be a SECOND, content-poor delivery. Suppress
+            # it. Shells and non-completed terminals (failed/killed/stopped) keep
+            # the app wake — the CLI does not own their at-rest resume.
+            if await asyncio.to_thread(_cli_owns_at_rest_wake, session_id, frame):
+                # A-1 latch: the CLI emits a rest-notification each time the agent
+                # rests; latching the woken mark here lets the A-3 late-frame guard
+                # drop post-unpark duplicate frames instead of enqueueing an empty
+                # wake. (Return value ignored — this is a suppression path.)
+                if task_id:
+                    task_registry.mark_woken(session_id, task_id)
                 logger.info(
-                    "turn_scheduler: unpark for %s — task %s already in wake "
-                    "turn %s, no-op", session_id, task_id, existing.get("id"),
+                    "turn_scheduler: unpark for %s — task %s completed; CLI owns "
+                    "the at-rest wake (parent parked), suppressing app enqueue",
+                    session_id, task_id,
                 )
                 return
-            # (b) merge this frame into the pending wake and rebuild its prompt.
-            pending = list(existing_payload.get("pending_frames") or [])
-            pending.append(frame)
-            merged_payload = dict(existing_payload)
-            merged_payload["pending_frames"] = pending
-            merged_payload["task_ids"] = existing_task_ids + (
-                [task_id] if task_id else []
-            )
-            prompt = await asyncio.to_thread(
-                _build_task_notification_prompt, pending
-            )
-            updated = await asyncio.to_thread(
-                turns_db.update_queued_turn_prompt,
-                existing["id"], prompt, merged_payload,
-            )
-            if updated is not None:
-                logger.info(
-                    "turn_scheduler: unpark for %s — task %s terminal (%s) "
-                    "merged into wake turn %s (%d pending)",
-                    session_id, task_id, frame.get("status"),
-                    updated["id"], len(pending),
-                )
-                kick(session_id)
-                return
-            # The guarded UPDATE lost (the wake left the queue) — enqueue fresh.
+            existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
+            if existing is not None:
+                existing_payload = dict(existing.get("payload") or {})
+                existing_task_ids = list(existing_payload.get("task_ids") or [])
+                existing_pending = list(existing_payload.get("pending_frames") or [])
+                if task_id and task_id in existing_task_ids:
+                    # (a) this task is already folded into the wake. A-2: if the
+                    # incoming frame is RICHER than the one already stored for it
+                    # (e.g. the rich TaskNotification arriving after the bare
+                    # TaskUpdated built the wake), upgrade the stored frame in place
+                    # and rebuild the prompt; otherwise it is a plain idempotent
+                    # no-op.
+                    stored_idx = next(
+                        (i for i, f in enumerate(existing_pending)
+                         if f.get("task_id") == task_id),
+                        None,
+                    )
+                    if stored_idx is not None and _frame_is_richer(
+                        frame, existing_pending[stored_idx]
+                    ):
+                        existing_pending[stored_idx] = frame
+                        upgraded_payload = dict(existing_payload)
+                        upgraded_payload["pending_frames"] = existing_pending
+                        prompt = await asyncio.to_thread(
+                            _build_task_notification_prompt, existing_pending
+                        )
+                        updated = await asyncio.to_thread(
+                            turns_db.update_queued_turn_prompt,
+                            existing["id"], prompt, upgraded_payload,
+                        )
+                        if updated is not None:
+                            logger.info(
+                                "turn_scheduler: unpark for %s — task %s rich frame "
+                                "upgraded wake turn %s in place",
+                                session_id, task_id, updated["id"],
+                            )
+                            kick(session_id)
+                            return
+                        # The guarded UPDATE lost (the wake left the queue) — the
+                        # task already woke, so fall through to the A-3 latch below.
+                    else:
+                        logger.info(
+                            "turn_scheduler: unpark for %s — task %s already in "
+                            "wake turn %s, no-op",
+                            session_id, task_id, existing.get("id"),
+                        )
+                        return
+                else:
+                    # (b) merge this frame into the pending wake and rebuild its
+                    # prompt.
+                    pending = existing_pending + [frame]
+                    merged_payload = dict(existing_payload)
+                    merged_payload["pending_frames"] = pending
+                    merged_payload["task_ids"] = existing_task_ids + (
+                        [task_id] if task_id else []
+                    )
+                    prompt = await asyncio.to_thread(
+                        _build_task_notification_prompt, pending
+                    )
+                    updated = await asyncio.to_thread(
+                        turns_db.update_queued_turn_prompt,
+                        existing["id"], prompt, merged_payload,
+                    )
+                    if updated is not None:
+                        # A-3: record the merged task woke so a later late frame
+                        # for it can't re-enqueue.
+                        task_registry.mark_woken(session_id, task_id)
+                        logger.info(
+                            "turn_scheduler: unpark for %s — task %s terminal (%s) "
+                            "merged into wake turn %s (%d pending)",
+                            session_id, task_id, frame.get("status"),
+                            updated["id"], len(pending),
+                        )
+                        kick(session_id)
+                        return
+                    # The guarded UPDATE lost (the wake left the queue) — enqueue
+                    # fresh (guarded by the A-3 latch below).
 
-        # (c) enqueue a new consolidated unpark wake.
-        prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
-        context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
-        payload = _context_payload(context)
-        payload["pending_frames"] = [frame]
-        payload["task_ids"] = [task_id] if task_id else []
-        turn = await asyncio.to_thread(
-            _enqueue,
-            session_id,
-            "unpark",
-            prompt=prompt,
-            profile_id=context.get("profile_id"),
-            project_id=context.get("project_id"),
-            worktree_id=context.get("worktree_id"),
-            payload=payload,
-            parent_turn_id=context.get("id"),
-        )
+            # (c) enqueue a new consolidated unpark wake. A-3: the late-frame latch
+            # (mark_woken returns False) means this task ALREADY produced a wake
+            # that has since left the queue — a late/duplicate frame that must not
+            # spawn a second wake. Guarded on a truthy task_id: a task_id-less frame
+            # never latches (it also can't be deduped), so it enqueues as before.
+            if task_id and not task_registry.mark_woken(session_id, task_id):
+                logger.info(
+                    "turn_scheduler: unpark for %s — task %s late frame; wake "
+                    "already produced, no re-enqueue",
+                    session_id, task_id,
+                )
+                return
+            prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
+            turn = await _enqueue_context_wake(
+                session_id, "unpark", [frame], [task_id] if task_id else [], prompt
+            )
+            logger.info(
+                "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
+                session_id, task_id, frame.get("status"), turn["id"],
+            )
+            kick(session_id)
+            return
+
+        # ── else — NOT the parent's own background work → suppress (#690) ──
+        # A child/grandchild step of a still-running sub-agent, an orphan, or a
+        # synchronous sub-agent at rest. The retired PUMP lane used to enqueue a
+        # source=unpark_pump turn here; that produced the parent-visible
+        # notification storm and, for tool_use_id-less shells, fired blindly. The
+        # parent hears about this work only via its owner task's OWN-lane terminal.
         logger.info(
-            "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
-            session_id, task_id, frame.get("status"), turn["id"],
+            "turn_scheduler: unpark-decision suppressed for %s — task %s "
+            "not the parent's background work (pump lane retired, #690)",
+            session_id, task_id,
         )
-        kick(session_id)
     except Exception:  # noqa: BLE001 — a wake failure must never kill the reader.
         logger.warning(
             "turn_scheduler: on_task_terminal failed for %s", session_id,
@@ -551,6 +762,22 @@ _TASK_NOTIFICATION_NOTE = (
     "the outcome is already reflected in your earlier work, or needs no follow-up, "
     "stop after a brief acknowledgement; do not invent next steps or re-explain "
     "what already finished."
+)
+
+
+# Guidance for a PUMP wake (source="unpark_pump"): a single internal step of a
+# background agent that is STILL RUNNING, surfaced so the model can react if the
+# step's result demands it. The user is not waiting; when nothing needs doing the
+# model should end the turn SILENTLY (no text) rather than emit a bare "ok" — the
+# FE "ok"-ack suppression is kept only as a fallback for models that reply anyway.
+_TASK_NOTIFICATION_PUMP_NOTE = (
+    "This is an internal step of a background agent that is STILL RUNNING; it is "
+    "surfaced to you only so you can react if the step's result requires it. No "
+    "user-facing narration is expected and the user is not waiting on you. If no "
+    "action is needed, do NOT respond at all — end the turn with no text; do not "
+    "acknowledge, do not summarize. Respond ONLY if this result reveals a problem, "
+    "a decision you must make, or an opportunity that requires you to act — in that "
+    "case take the action directly."
 )
 
 
@@ -606,7 +833,7 @@ def _extract_final_assistant_text(output_file: str) -> Optional[str]:
     return joined or None
 
 
-def _build_task_notification_prompt(pending: list) -> str:
+def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
     """Build ONE synthesized user prompt consolidating all pending notifications.
 
     Mirrors Claude Code's reference ``<task-notification>`` contract so the parent
@@ -619,12 +846,26 @@ def _build_task_notification_prompt(pending: list) -> str:
     to no assistant entries), then the short ``summary``. The returned string
     always contains the literal ``<task-notification>`` substring, so the existing
     user-message filters keep it from rendering as a chat bubble.
+
+    ``kind`` selects the contract variant:
+
+    * ``"own"`` (default) — the parent's own background work came to rest. Byte-
+      identical to the historical output: full ``<note>`` + trailing ``<usage>``
+      block, no ``<kind>`` element.
+    * ``"pump"`` — one internal step of a still-running background agent. Nests a
+      ``<kind>pump</kind>`` element right after the opening tag, uses the terse
+      pump note, and OMITS ``<usage>`` (the step is not a completed unit of work).
+      The full result fallback chain is KEPT — reactivity requires the model see
+      the step result.
     """
     from app.core.query_engine import _read_task_output_file
     from app.core.query_streaming import truncate_large_payload
 
     def _esc(value: Any) -> str:
         return "" if value is None else str(value)
+
+    is_pump = kind == "pump"
+    note_text = _TASK_NOTIFICATION_PUMP_NOTE if is_pump else _TASK_NOTIFICATION_NOTE
 
     blocks: List[str] = []
     for note in pending:
@@ -640,24 +881,31 @@ def _build_task_notification_prompt(pending: list) -> str:
             # truncate via the shared helper (matches query_engine's own use)
             # instead of a naive head-slice.
             result_text = truncate_large_payload(result_text, _MAX_TASK_RESULT_CHARS)
-        usage = note.get("usage") or {}
-        usage_xml = (
-            "  <usage>\n"
-            f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
-            f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
-            f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
-            "  </usage>"
-        )
+        # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
+        # OWN: no <kind> element; trailing <usage> block (byte-identical to before).
+        kind_xml = "  <kind>pump</kind>\n" if is_pump else ""
+        if is_pump:
+            usage_xml = ""
+        else:
+            usage = note.get("usage") or {}
+            usage_xml = (
+                "  <usage>\n"
+                f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
+                f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
+                f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
+                "  </usage>\n"
+            )
         blocks.append(
             "<task-notification>\n"
+            f"{kind_xml}"
             f"  <task-id>{_esc(note.get('task_id'))}</task-id>\n"
             f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
             f"  <output-file>{_esc(output_file)}</output-file>\n"
             f"  <status>{_esc(note.get('status'))}</status>\n"
             f"  <summary>{_esc(note.get('summary'))}</summary>\n"
-            f"  <note>{_TASK_NOTIFICATION_NOTE}</note>\n"
+            f"  <note>{note_text}</note>\n"
             f"  <result>{result_text}</result>\n"
-            f"{usage_xml}\n"
+            f"{usage_xml}"
             "</task-notification>"
         )
     return "\n".join(blocks)

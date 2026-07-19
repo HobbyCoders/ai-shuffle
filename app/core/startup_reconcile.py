@@ -110,27 +110,62 @@ def _clear_stale_parked_markers() -> int:
     return len(rows)
 
 
-def _mark_stale_background_task_rows() -> int:
+async def _mark_stale_background_task_rows() -> int:
     """Mark this install's non-terminal durable task rows killed (v55).
 
-    ``background_tasks`` mirrors the in-memory registry (WRITE-ONLY in Phase
-    1 — no reader depends on it), so any own-instance row still non-terminal
-    at boot was stranded by the previous process: background work never
-    survives a restart. Mirrors ``_clear_stale_parked_markers``'s scoping.
-    Returns the number of rows marked.
+    ``background_tasks`` mirrors the in-memory registry, so any own-instance row
+    still non-terminal at boot was stranded by the previous process: background
+    work never survives a restart. Mirrors ``_clear_stale_parked_markers``'s
+    scoping.
+
+    Flipping the row is not enough for the UI: the frontend rebuilds a
+    background-task chip by replaying ``session_events`` and only settles it when
+    a terminal ``task.updated`` frame arrives. So for each flipped row we append
+    that terminal frame (unfenced, legal between turns/at boot — see
+    ``record_drained_event``) with status ``killed`` and reason
+    ``server_restart``. Each emission is guarded independently: one bad row must
+    never block boot or the other rows. Returns the number of rows marked.
     """
     from app.db.background_tasks import mark_stale_background_tasks_killed
+    from app.core.turn_recorder import record_task_settle_frame
 
-    count = mark_stale_background_tasks_killed()
-    if count:
-        record_error(
-            "backend",
-            f"Boot reconcile: {count} durable background-task row(s) were "
-            "still non-terminal when the server stopped; marked them killed "
-            "— background work does not survive a restart.",
-            level="WARNING",
-            context={"reconcile": "background_tasks", "rows": count},
-        )
+    rows = await asyncio.to_thread(mark_stale_background_tasks_killed)
+    if not rows:
+        return 0
+
+    summary = "Background task lost in a server restart"
+    for row in rows:
+        session_id = _row_value(row, "session_id", 1)
+        task_id = _row_value(row, "task_id", 0)
+        tool_use_id = _row_value(row, "tool_use_id", 2)
+        try:
+            await record_task_settle_frame(
+                session_id, task_id, "killed", summary,
+                reason="server_restart", tool_use_id=tool_use_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad row must not block the rest
+            logger.exception(
+                "Boot reconcile: emitting terminal frame for stale background "
+                "task %s/%s failed", session_id, task_id,
+            )
+            record_error(
+                "backend",
+                f"Boot reconcile: failed to emit terminal frame for stale "
+                f"background task {task_id} (session {session_id}): {exc}",
+                level="WARNING",
+                session_id=session_id,
+                context={"reconcile": "background_tasks", "task_id": task_id},
+            )
+
+    count = len(rows)
+    record_error(
+        "backend",
+        f"Boot reconcile: {count} durable background-task row(s) were "
+        "still non-terminal when the server stopped; marked them killed "
+        "— background work does not survive a restart.",
+        level="WARNING",
+        context={"reconcile": "background_tasks", "rows": count},
+    )
     return count
 
 
@@ -334,9 +369,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         )
 
     try:
-        counts["background_task_rows_killed"] = await asyncio.to_thread(
-            _mark_stale_background_task_rows
-        )
+        counts["background_task_rows_killed"] = await _mark_stale_background_task_rows()
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: marking stale background-task rows failed")
         record_error(

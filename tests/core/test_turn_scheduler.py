@@ -2,7 +2,8 @@
 (v2 core, Phase 2 A5).
 
 Plan §5 coverage: policy ORDER (failover before queue drain before
-auto-continue), F4 (a stop/abort settlement leaves queued rows untouched),
+auto-continue), the queue drain firing on EVERY settle outcome
+(completed/parked/aborted/error — the old F4 preserve-on-stop rule is retired),
 failover cap + no message re-append, the durable #557 auto-continue
 derivation, unpark prompt synthesis, and the shutdown kick guard.
 
@@ -139,8 +140,9 @@ async def test_completed_settlement_drains_front_queued_turn(mock_db):
     assert execute.await_args.args[0]["id"] == queued["id"]
 
 
-async def test_f4_abort_settlement_leaves_queue_untouched(mock_db):
-    # A user stop settles aborted → queued rows REMAIN and nothing auto-starts.
+async def test_aborted_settlement_drains_front_queued_turn(mock_db):
+    # (b) A user stop settles aborted → the queued row DRAINS (supersedes the old
+    # F4 preserve-on-stop rule: a queued message sends after the turn stops).
     settled = _settled_turn("s2", outcome="aborted", terminal_event=False)
     queued = turns_db.enqueue_turn("s2", "queue", prompt="second")
 
@@ -148,21 +150,41 @@ async def test_f4_abort_settlement_leaves_queue_untouched(mock_db):
         await turn_scheduler.on_turn_settled("s2", settled["id"], "aborted")
         await _drain_kicks()
 
-    execute.assert_not_awaited()
-    assert [t["id"] for t in turns_db.get_queued_turns("s2")] == [queued["id"]]
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
 
-async def test_parked_settlement_is_a_no_op(mock_db):
+async def test_parked_settlement_drains_front_queued_turn(mock_db):
+    # (a) A parked settlement (background work still running) DRAINS the queued
+    # row: it runs concurrently with that background work (park released the
+    # live-turn slot). A message queued BEFORE park is now consistent with one
+    # queued AFTER park.
     turn = turns_db.enqueue_turn("s3", "user", prompt="bg work")
     turns_db.start_turn(turn["id"], None, "runner")
     turns_db.park_turn(turn["id"], ["task-1"])
-    turns_db.enqueue_turn("s3", "queue", prompt="second")
+    queued = turns_db.enqueue_turn("s3", "queue", prompt="second")
 
     with _patch_execute() as execute:
         await turn_scheduler.on_turn_settled("s3", turn["id"], "parked")
         await _drain_kicks()
 
-    execute.assert_not_awaited()
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
+
+
+async def test_error_settlement_drains_front_queued_turn(mock_db):
+    # (c) An error settlement (the runtime settles error paths as aborted; a bare
+    # "error" outcome is exercised here directly) DRAINS the queued row — each
+    # drain consumes exactly one queued row, so there is no retry-loop risk.
+    settled = _settled_turn("s2e", outcome="aborted", terminal_event=False)
+    queued = turns_db.enqueue_turn("s2e", "queue", prompt="second")
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s2e", settled["id"], "error")
+        await _drain_kicks()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == queued["id"]
 
 
 async def test_completed_empty_queue_natural_end_does_nothing(mock_db):
@@ -174,6 +196,33 @@ async def test_completed_empty_queue_natural_end_does_nothing(mock_db):
 
     execute.assert_not_awaited()
     assert turns_db.get_queued_turns("s4") == []
+
+
+async def test_parked_empty_queue_no_spurious_turn(mock_db):
+    # (d) parked + nothing queued → the drain finds no front row and starts
+    # nothing (the wake still arrives later via on_task_terminal).
+    turn = turns_db.enqueue_turn("s5", "user", prompt="bg work")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.park_turn(turn["id"], ["task-1"])
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s5", turn["id"], "parked")
+        await _drain_kicks()
+
+    execute.assert_not_awaited()
+    assert turns_db.get_queued_turns("s5") == []
+
+
+async def test_aborted_empty_queue_no_spurious_turn(mock_db):
+    # (d) aborted + nothing queued → nothing auto-starts.
+    settled = _settled_turn("s6", outcome="aborted", terminal_event=False)
+
+    with _patch_execute() as execute:
+        await turn_scheduler.on_turn_settled("s6", settled["id"], "aborted")
+        await _drain_kicks()
+
+    execute.assert_not_awaited()
+    assert turns_db.get_queued_turns("s6") == []
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +473,17 @@ async def test_unpark_synthesizes_notification_turn(mock_db):
     )
     turns_db.start_turn(parked["id"], None, "runner")
     turns_db.park_turn(parked["id"], ["task-7"])
-    # task-7 is the parent's OWN background work (ownership gate admits it).
+    # task-7 is the parent's OWN background work (ownership gate admits it). It
+    # terminates KILLED: the app still owns a kill wake (there is no CLI at-rest
+    # resume for a kill, so the app enqueue is the sole delivery), whereas a
+    # *completed* top-level agent while parked is CLI-owned and suppressed
+    # (A-1). This test is the sole coverage of the wake PAYLOAD shape, so it is
+    # repointed to the terminal the app still owns.
     task_registry.start_task("u1", "task-7", "agent", "bg", tool_use_id="tu-7")
     task_registry.mark_background_launch("u1", "tu-7")
 
     frame = {
-        "task_id": "task-7", "status": "completed", "tool_use_id": "tu-7",
+        "task_id": "task-7", "status": "killed", "tool_use_id": "tu-7",
         "summary": "crawl finished", "output_file": "",
         "usage": {"total_tokens": 123, "tool_uses": 4, "duration_ms": 5000},
     }
@@ -582,10 +636,12 @@ async def test_subagent_owned_terminal_without_parked_agent_no_unpark(mock_db):
     execute.assert_not_awaited()
 
 
-async def test_subagent_owned_terminal_with_parked_agent_fires_unpark(mock_db):
-    # 2026-07-10 regression: while a background sub-agent is still running, its
-    # grandchild's terminal notification MUST wake the parent — the main-session
-    # pump is the ONLY resume path for the parked sub-agent.
+async def test_subagent_owned_terminal_with_active_agent_suppressed(mock_db):
+    # #690: a grandchild STEP of a still-running background sub-agent (NOT the
+    # parent's own work) no longer produces a parent-visible turn. The retired
+    # PUMP lane used to enqueue a source="unpark_pump" wake here — the storm
+    # source. The parent hears about this work only via the owner sub-agent's
+    # OWN-lane terminal (or the CLI resumes the owner natively).
     task_registry.start_task("sg2", "subagent-1", "agent", "spawning sub-agent")
     frame = _terminal_frame("gc-2", "grandchild done")
     task_registry.mark_subagent_background_launch("sg2", frame["tool_use_id"])
@@ -598,11 +654,9 @@ async def test_subagent_owned_terminal_with_parked_agent_fires_unpark(mock_db):
         await turn_scheduler.on_task_terminal("sg2", frame)
         await _drain_kicks()
 
-    (wake,) = _by_source("sg2", "unpark")
-    assert "<task-notification>" in wake["prompt"]
-    assert "<task-id>gc-2</task-id>" in wake["prompt"]
-    execute.assert_awaited_once()
-    assert execute.await_args.args[0]["id"] == wake["id"]
+    assert _by_source("sg2", "unpark") == []
+    assert _by_source("sg2", "unpark_pump") == []
+    execute.assert_not_awaited()
 
 
 async def test_synchronous_subagent_at_rest_no_unpark(mock_db):
@@ -646,11 +700,11 @@ async def test_parent_owned_terminal_still_fires_unpark(mock_db):
     assert execute.await_args.args[0]["id"] == wake["id"]
 
 
-async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
-    # Under the simplified gate the ownership lane no longer drives the wake: an
-    # UNKNOWN terminal task (no lane armed) still wakes the parent as long as a
-    # background sub-agent is running — the arming-miss strand guard, since a
-    # grandchild is by construction launched while its sub-agent runs.
+async def test_unknown_task_with_active_agent_suppressed(mock_db):
+    # #690: an UNKNOWN terminal task (no ownership lane armed) is NOT the parent's
+    # own background work, so with the PUMP lane retired it produces no parent-
+    # visible turn — whether or not a background sub-agent is still running. This
+    # is exactly the tool_use_id-less shell case that used to fire blindly.
     task_registry.start_task("sg5a", "subagent-a", "agent", "spawning")
     frame_a = _terminal_frame("gc-5", "grandchild done")
 
@@ -662,9 +716,10 @@ async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
         await turn_scheduler.on_task_terminal("sg5a", frame_a)
         await _drain_kicks()
 
-    assert len(_by_source("sg5a", "unpark")) == 1
+    assert _by_source("sg5a", "unpark") == []
+    assert _by_source("sg5a", "unpark_pump") == []
 
-    # (b) same unknown task, NO running agent → suppressed.
+    # (b) same unknown task, NO running agent → equally suppressed.
     frame_b = _terminal_frame("gc-6", "grandchild done")
 
     with ExitStack() as stack:
@@ -676,6 +731,418 @@ async def test_unknown_task_with_active_agent_fires_unpark(mock_db):
         await _drain_kicks()
 
     assert _by_source("sg5b", "unpark") == []
+    assert _by_source("sg5b", "unpark_pump") == []
+
+
+# ---------------------------------------------------------------------------
+# (4) #690 — PUMP lane retired: child/grandchild steps produce NO parent turn
+# ---------------------------------------------------------------------------
+# The per-child PUMP lane (immediate + deferred) is DELETED. A child/grandchild
+# completion while its owner sub-agent is still alive no longer enqueues any
+# parent-visible turn (source="unpark" or the retired source="unpark_pump").
+# The parent hears about delegated work ONLY via the owner task's OWN-lane
+# terminal; a silent turn is valid. Reference-harness contract: a background
+# child notifies only its owning agent.
+
+
+def _child_of_running_owner(
+    session, *, owner_task="owner-A", owner_tuid="tu-A",
+    child_task="child-B", child_tuid="tu-B",
+):
+    """Owner = the parent's OWN background sub-agent (running); child = a
+    grandchild it launched, linked owner<-child. Returns the child terminal
+    frame. The linkage that used to route the child into the (deferred) PUMP
+    lane must now route it to the else-suppress branch."""
+    task_registry.start_task(session, owner_task, "agent", "sub",
+                             tool_use_id=owner_tuid)
+    task_registry.mark_background_launch(session, owner_tuid)
+    task_registry.start_task(session, child_task, "agent", "gc",
+                             tool_use_id=child_tuid)
+    task_registry.link_child_to_owner(session, child_tuid, owner_tuid)
+    return {
+        "task_id": child_task, "status": "completed", "tool_use_id": child_tuid,
+        "summary": "step done", "output_file": "", "usage": {},
+    }
+
+
+async def test_child_step_while_owner_alive_no_pump(mock_db):
+    # #690 core: a RESOLVABLE child of a still-running owner completes -> NO turn
+    # is enqueued at all (neither unpark nor the retired unpark_pump). Replaces
+    # the deleted deferred-pump quiescence dance.
+    child_frame = _child_of_running_owner("cq1")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("cq1", child_frame)
+        await _drain_kicks()
+
+    assert _by_source("cq1", "unpark") == []
+    assert _by_source("cq1", "unpark_pump") == []
+    execute.assert_not_awaited()
+
+
+async def test_three_shells_from_subagent_no_pump_storm(mock_db):
+    # #690 regression ("3 shells -> 3 wakes"): a sub-agent launches three
+    # background shells that lack a resolvable parent tool_use_id (the exact
+    # storm trigger). All three going terminal while the sub-agent runs produce
+    # ZERO parent-visible turns.
+    task_registry.start_task("st1", "subagent-1", "agent", "spawning shells")
+    shells = [
+        {"task_id": f"shell-{n}", "status": "completed",
+         "tool_use_id": f"tu-shell-{n}", "summary": f"done-{n}",
+         "output_file": "", "usage": {}}
+        for n in range(3)
+    ]
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        for f in shells:
+            await turn_scheduler.on_task_terminal("st1", f)
+            await _drain_kicks()
+
+    assert _by_source("st1", "unpark") == []
+    assert _by_source("st1", "unpark_pump") == []
+    execute.assert_not_awaited()
+
+
+async def test_owner_own_lane_completion_one_notification(mock_db):
+    # #690: the parent's OWN background sub-agent (the owner) coming to rest is
+    # the ONLY path that wakes the parent -- exactly ONE unpark. A grandchild
+    # step that completed earlier under this owner adds nothing (suppressed).
+    live = turns_db.enqueue_turn("ow1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    task_registry.start_task("ow1", "owner-A", "agent", "sub", tool_use_id="tu-A")
+    task_registry.mark_background_launch("ow1", "tu-A")
+    task_registry.start_task("ow1", "child-B", "agent", "gc", tool_use_id="tu-B")
+    task_registry.link_child_to_owner("ow1", "tu-B", "tu-A")
+    child = {"task_id": "child-B", "status": "completed", "tool_use_id": "tu-B",
+             "summary": "child step", "output_file": "", "usage": {}}
+    owner = {"task_id": "owner-A", "status": "completed", "tool_use_id": "tu-A",
+             "summary": "owner done", "output_file": "",
+             "usage": {"total_tokens": 42, "tool_uses": 3, "duration_ms": 900}}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("ow1", child)
+        await _drain_kicks()
+        assert _by_source("ow1", "unpark") == []
+        assert _by_source("ow1", "unpark_pump") == []
+        await turn_scheduler.on_task_terminal("ow1", owner)
+        await _drain_kicks()
+
+    wakes = _by_source("ow1", "unpark")
+    assert len(wakes) == 1
+    assert "<task-id>owner-A</task-id>" in wakes[0]["prompt"]
+    assert wakes[0]["payload"]["task_ids"] == ["owner-A"]
+    assert _by_source("ow1", "unpark_pump") == []
+
+
+async def test_own_lane_unaffected_by_active_agent(mock_db):
+    # #690 does NOT touch the OWN lane: the parent's own background work still
+    # fires its rich unpark even while a background sub-agent is running.
+    task_registry.start_task("oa1", "subagent-1", "agent", "spawning")
+    frame = _terminal_frame("own-1", "parent bg done")
+    task_registry.start_task(
+        "oa1", "own-1", "agent", "bg", tool_use_id=frame["tool_use_id"]
+    )
+    task_registry.mark_background_launch("oa1", frame["tool_use_id"])
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("oa1", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("oa1", "unpark")
+    assert "<task-id>own-1</task-id>" in wake["prompt"]
+    assert _by_source("oa1", "unpark_pump") == []
+
+
+# ---------------------------------------------------------------------------
+# (4) #690 — content-empty guard at the single enqueue choke point
+# ---------------------------------------------------------------------------
+
+def test_frame_has_renderable_content_predicate():
+    # Identity (task_id / tool_use_id) or result (summary / output_file) counts
+    # as renderable; a frame with none of them is contentless.
+    assert turn_scheduler._frame_has_renderable_content({"task_id": "t"})
+    assert turn_scheduler._frame_has_renderable_content({"tool_use_id": "u"})
+    assert turn_scheduler._frame_has_renderable_content({"summary": "s"})
+    assert turn_scheduler._frame_has_renderable_content({"output_file": "/f"})
+    assert not turn_scheduler._frame_has_renderable_content({})
+    assert not turn_scheduler._frame_has_renderable_content({"status": "completed"})
+    assert not turn_scheduler._frame_has_renderable_content(
+        {"task_id": "", "tool_use_id": None, "summary": "", "output_file": ""}
+    )
+
+
+async def test_empty_frame_dropped_at_choke_point(mock_db):
+    # A wholly-contentless frame (only a status) is dropped at the choke point:
+    # no turn is enqueued AND the guard short-circuits BEFORE any lane consults
+    # the registry (proving it is the guard, not the else-suppress branch).
+    from unittest.mock import MagicMock
+
+    empty = {"status": "completed"}
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        spy = MagicMock(return_value=False)
+        stack.enter_context(patch.object(
+            task_registry, "is_own_background_task", spy
+        ))
+        await turn_scheduler.on_task_terminal("ef1", empty)
+        await _drain_kicks()
+
+    assert _by_source("ef1", "unpark") == []
+    assert _by_source("ef1", "unpark_pump") == []
+    execute.assert_not_awaited()
+    spy.assert_not_called()  # guard returned before lane resolution
+
+
+async def test_content_bearing_frame_not_dropped_by_guard(mock_db):
+    # The guard must NOT drop a bare TaskUpdated frame (task_id + tool_use_id,
+    # no summary/result) -- that is a legitimate OWN-lane wake (later upgraded by
+    # its rich frame, #688 A-2). Here it is the parent's own work -> one unpark.
+    task_registry.start_task("cb1", "agent-1", "agent", "bg", tool_use_id="tu-cb1")
+    task_registry.mark_background_launch("cb1", "tu-cb1")
+    bare = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-cb1"}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("cb1", bare)
+        await _drain_kicks()
+
+    (wake,) = _by_source("cb1", "unpark")
+    assert "<task-id>agent-1</task-id>" in wake["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# (4) UNPARK — A-1 CLI-owned at-rest suppression (bug 1: duplicate/empty wakes)
+# ---------------------------------------------------------------------------
+
+async def test_completed_top_level_agent_no_app_unpark_cli_owns(mock_db):
+    # A top-level backgrounded AGENT completes while its parent turn is PARKED:
+    # the CLI itself injects the rich <task-notification> follow-up turn, so the
+    # app's own content-poor wake would be a SECOND, empty delivery. A-1 suppresses
+    # the app enqueue entirely. (Fails before A-1: one empty unpark row.)
+    parked = turns_db.enqueue_turn("ca1", "user", prompt="kick off bg")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["agent-1"])
+    task_registry.start_task("ca1", "agent-1", "agent", "bg", tool_use_id="tu-ca1")
+    task_registry.mark_background_launch("ca1", "tu-ca1")
+    # The bare TaskUpdated-built frame (content-poor: no summary/output_file/usage).
+    bare = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-ca1"}
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("ca1", bare)
+        await _drain_kicks()
+
+    assert _by_source("ca1", "unpark") == []  # CLI owns the wake; app adds nothing
+    execute.assert_not_awaited()
+
+
+async def test_own_shell_completion_still_enqueues_unpark(mock_db):
+    # A-1 conservatism: a backgrounded SHELL (kind "shell") completing while parked
+    # is NOT a CLI-owned agent at-rest wake — the CLI does not own a shell's resume,
+    # so the app MUST still deliver its completion.
+    parked = turns_db.enqueue_turn("sh1", "user", prompt="run bg shell")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["shell-1"])
+    task_registry.start_task("sh1", "shell-1", "shell", "ls", tool_use_id="tu-sh1")
+    task_registry.mark_background_launch("sh1", "tu-sh1")  # own background work
+    frame = {"task_id": "shell-1", "status": "completed", "tool_use_id": "tu-sh1",
+             "summary": "exit 0", "output_file": "", "usage": {}}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("sh1", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("sh1", "unpark")
+    assert "<task-id>shell-1</task-id>" in wake["prompt"]
+
+
+async def test_completed_agent_not_parked_still_enqueues_unpark(mock_db):
+    # A-1 fires ONLY when the parent is parked (the CLI's rich follow-up exists
+    # only in the parked state). A completed own agent with NO parked turn keeps
+    # the app wake — otherwise the completion is lost.
+    live = turns_db.enqueue_turn("np1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")  # live, NOT parked
+    task_registry.start_task("np1", "agent-1", "agent", "bg", tool_use_id="tu-np1")
+    task_registry.mark_background_launch("np1", "tu-np1")
+    frame = _terminal_frame("agent-1", "done")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("np1", frame)
+        await _drain_kicks()
+
+    (wake,) = _by_source("np1", "unpark")
+    assert "<task-id>agent-1</task-id>" in wake["prompt"]
+
+
+async def test_late_frame_after_cli_owned_suppression_does_not_wake(mock_db):
+    # F1: a completed top-level agent frame while PARKED is CLI-owned → the app
+    # suppresses its enqueue AND latches the woken mark (the CLI emits a rest-
+    # notification each rest; latching lets the A-3 guard drop later duplicate
+    # frames instead of enqueueing an empty wake). A SECOND frame for the same
+    # task, now with NO parked turn (A-1 no longer fires), must find the latch set
+    # and NOT enqueue a fresh wake.
+    parked = turns_db.enqueue_turn("clf1", "user", prompt="kick off bg")
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["agent-1"])
+    task_registry.start_task("clf1", "agent-1", "agent", "bg", tool_use_id="tu-clf1")
+    task_registry.mark_background_launch("clf1", "tu-clf1")
+    frame = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-clf1"}
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("clf1", frame)
+        await _drain_kicks()
+        assert _by_source("clf1", "unpark") == []  # CLI owns the wake; app suppressed
+        assert task_registry.is_woken("clf1", "agent-1")  # F1: latched on suppression
+
+        # The parent unparks (the CLI's follow-up ran); the SECOND late frame for
+        # the same task no longer sees a parked turn, so A-1 stays dormant — the
+        # F1 latch is what blocks the (c) fresh enqueue.
+        turns_db.settle_turn(parked["id"], "completed")
+        await turn_scheduler.on_task_terminal("clf1", frame)
+        await _drain_kicks()
+
+    assert _by_source("clf1", "unpark") == []
+    execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# (4) UNPARK — A-2 frame upgrading (bare TaskUpdated then rich TaskNotification)
+# ---------------------------------------------------------------------------
+
+async def test_bare_then_rich_frame_upgrades_prompt(mock_db):
+    # NOT parked (A-1 dormant) so the app owns the wake. A bare TaskUpdated frame
+    # enqueues the wake first; the rich TaskNotification frame for the SAME task
+    # then upgrades the stored frame + prompt in place (no second row, no dup task).
+    live = turns_db.enqueue_turn("bt1", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    task_registry.start_task("bt1", "agent-1", "agent", "bg", tool_use_id="tu-bt1")
+    task_registry.mark_background_launch("bt1", "tu-bt1")
+    bare = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-bt1"}
+    rich = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-bt1",
+            "summary": "crawl done", "output_file": "",
+            "usage": {"total_tokens": 99, "tool_uses": 3, "duration_ms": 2000}}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("bt1", bare)
+        await _drain_kicks()
+        (before,) = _by_source("bt1", "unpark")
+        assert "<summary></summary>" in before["prompt"]              # bare: empty
+        assert "<subagent_tokens></subagent_tokens>" in before["prompt"]
+
+        await turn_scheduler.on_task_terminal("bt1", rich)
+        await _drain_kicks()
+
+    (after,) = _by_source("bt1", "unpark")
+    assert "<summary>crawl done</summary>" in after["prompt"]         # upgraded
+    assert "<subagent_tokens>99</subagent_tokens>" in after["prompt"]
+    assert after["payload"]["pending_frames"] == [rich]              # replaced in place
+    assert after["payload"]["task_ids"] == ["agent-1"]              # not duplicated
+
+
+# ---------------------------------------------------------------------------
+# (4) UNPARK — A-3 late-frame latch (mark_woken)
+# ---------------------------------------------------------------------------
+
+async def test_late_rich_frame_after_wake_ran_does_not_reenqueue(mock_db):
+    # The bare frame enqueues + latches the wake; the wake then STARTS (leaves the
+    # queue). A late frame for the same task finds the latch set → it must NOT
+    # enqueue a fresh duplicate wake.
+    task_registry.start_task("lf1", "agent-1", "agent", "bg", tool_use_id="tu-lf1")
+    task_registry.mark_background_launch("lf1", "tu-lf1")
+    bare = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-lf1"}
+    rich = {"task_id": "agent-1", "status": "completed", "tool_use_id": "tu-lf1",
+            "summary": "late", "output_file": "", "usage": {}}
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("lf1", bare)
+        await _drain_kicks()
+        (wake,) = _by_source("lf1", "unpark")
+        # The wake starts — it leaves the queue.
+        turns_db.start_turn(wake["id"], None, "runner")
+
+        await turn_scheduler.on_task_terminal("lf1", rich)  # late frame
+        await _drain_kicks()
+
+    assert _by_source("lf1", "unpark") == []  # no fresh duplicate wake
+
+
+async def test_resumed_agent_can_wake_again(mock_db):
+    # A-3 clear-on-revival: once a task has woken, the latch blocks re-wakes — until
+    # a genuine RESUME (completed→running revival) clears it, after which the
+    # re-run agent may drive a fresh wake.
+    task_registry.start_task("ra1", "agent-1", "agent", "bg", tool_use_id="tu-ra1")
+    task_registry.mark_background_launch("ra1", "tu-ra1")
+    frame = _terminal_frame("agent-1", "first rest")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        await turn_scheduler.on_task_terminal("ra1", frame)
+        await _drain_kicks()
+        (wake1,) = _by_source("ra1", "unpark")
+        turns_db.start_turn(wake1["id"], None, "runner")  # wake1 leaves the queue
+
+        # Latched: a repeat rest produces no new wake.
+        await turn_scheduler.on_task_terminal("ra1", frame)
+        await _drain_kicks()
+        assert _by_source("ra1", "unpark") == []
+
+        # Genuine resume: the completed→running revival clears the wake latch.
+        task_registry.complete_task("ra1", "agent-1", "completed")
+        task_registry.start_task("ra1", "agent-1", "agent", "bg", tool_use_id="tu-ra1")
+
+        await turn_scheduler.on_task_terminal("ra1", frame)  # rests again
+        await _drain_kicks()
+
+    (wake2,) = _by_source("ra1", "unpark")
+    assert wake2["id"] != wake1["id"]  # a fresh wake after the resume
 
 
 # ---------------------------------------------------------------------------

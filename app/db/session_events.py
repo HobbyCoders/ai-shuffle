@@ -232,6 +232,29 @@ def get_events(
     return rows
 
 
+def has_subagent_started(session_id: str, task_id: str) -> bool:
+    """True if a ``subagent.started`` event for ``task_id`` exists in the log.
+
+    Used by the ``stop_session_task`` durable force-settle fallback: post-restart
+    the registry AND the ``background_tasks`` table may hold nothing for an
+    orphaned sub-agent, but its launch event is still in the append-only log and
+    the UI card is still rendering it "running". The card joins on
+    ``tool_use_id == started task_id`` (see ``SubagentStarted.task_id``). The
+    ``task_id`` filter runs SQL-side via the ``payload->>'task_id'`` JSON text
+    extractor — supported by both Postgres (JSONB) and the SQLite test shim
+    (native ``->>`` on JSON stored as TEXT, sqlite3 ≥ 3.46).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM session_events "
+            "WHERE session_id = %s AND event_type = 'subagent.started' "
+            "AND payload->>'task_id' = %s LIMIT 1",
+            (session_id, task_id),
+        )
+        return cursor.fetchone() is not None
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:

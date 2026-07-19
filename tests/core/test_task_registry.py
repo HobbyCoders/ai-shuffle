@@ -504,41 +504,171 @@ class TestToWire:
 # clear_session / reset_all / unknown no-ops
 # =============================================================================
 
-class TestMarkNotified:
-    def test_true_once_then_false_for_same_signature(self, reg):
-        # First time a (task_id, uuid) is seen -> True; duplicate -> False.
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
-        assert reg.mark_notified("s1", "t1", "uuid-1") is False
-        assert reg.mark_notified("s1", "t1", "uuid-1") is False
+class TestMarkWoken:
+    """A-3 late-frame latch: a task drives AT MOST ONE unpark/pump wake per
+    lifetime, re-armed only by a genuine resume (completed→running revival)."""
 
-    def test_new_uuid_rearms_for_same_task(self, reg):
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
-        assert reg.mark_notified("s1", "t1", "uuid-1") is False
-        # A NEW uuid (the task was resumed and notified again) re-arms -> True.
-        assert reg.mark_notified("s1", "t1", "uuid-2") is True
-        assert reg.mark_notified("s1", "t1", "uuid-2") is False
+    def test_true_once_then_false_for_task(self, reg):
+        # First time a task is woken -> True; a later (late) frame -> False.
+        assert reg.mark_woken("s1", "t1") is True
+        assert reg.mark_woken("s1", "t1") is False
+        assert reg.is_woken("s1", "t1") is True
 
-    def test_independent_per_session(self, reg):
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
-        # Same task_id + signature in a DIFFERENT session is independent.
-        assert reg.mark_notified("s2", "t1", "uuid-1") is True
+    def test_independent_per_task_and_session(self, reg):
+        assert reg.mark_woken("s1", "t1") is True
+        assert reg.mark_woken("s1", "t2") is True  # a different task is independent
+        assert reg.mark_woken("s2", "t1") is True  # a different session is independent
 
     def test_blank_ids_never_latch(self, reg):
-        assert reg.mark_notified("", "t1", "sig") is False
-        assert reg.mark_notified("s1", "", "sig") is False
+        assert reg.mark_woken("", "t1") is False
+        assert reg.mark_woken("s1", "") is False
+        assert reg.is_woken("", "t1") is False
         # No state stranded -> a real (session, task) still latches True.
-        assert reg.mark_notified("s1", "t1", "sig") is True
+        assert reg.mark_woken("s1", "t1") is True
 
     def test_cleared_by_clear_session(self, reg):
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.mark_woken("s1", "t1") is True
         reg.clear_session("s1")
-        # After clearing, the same signature re-arms (fresh session state).
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.is_woken("s1", "t1") is False
+        # After clearing, the task re-arms (fresh session state).
+        assert reg.mark_woken("s1", "t1") is True
 
     def test_cleared_by_reset_all(self, reg):
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.mark_woken("s1", "t1") is True
         reg.reset_all()
-        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.mark_woken("s1", "t1") is True
+
+    def test_cleared_on_resume_revival(self, reg):
+        # A completed->running revival (SendMessage resume under the same task_id)
+        # re-arms the wake latch so the resumed run can drive a fresh wake.
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.mark_woken("s1", "t1") is True
+        assert reg.mark_woken("s1", "t1") is False
+        reg.complete_task("s1", "t1", "completed")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")  # revival
+        assert reg.is_woken("s1", "t1") is False
+        assert reg.mark_woken("s1", "t1") is True
+
+    def test_failure_terminal_not_revived_keeps_latch(self, reg):
+        # A killed task is NOT revived by a re-emitted start (stale leak) — so its
+        # wake latch must NOT clear.
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.mark_woken("s1", "t1") is True
+        reg.complete_task("s1", "t1", "killed")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")  # stale re-start
+        assert reg.is_woken("s1", "t1") is True
+        assert reg.mark_woken("s1", "t1") is False
+
+
+class TestChildOwnerLinkage:
+    """B-1: resolve a terminal grandchild task to its running owner sub-agent."""
+
+    def _wire(self, reg):
+        # Owner sub-agent A (its own launch tuid = tu-A) and a grandchild B it
+        # launched (child launch tuid = tu-B), linked child⇐owner.
+        reg.start_task("s1", "owner-A", "agent", "sub", tool_use_id="tu-A")
+        reg.start_task("s1", "child-B", "agent", "gc", tool_use_id="tu-B")
+        reg.link_child_to_owner("s1", "tu-B", "tu-A")
+
+    def test_resolves_owner_task(self, reg):
+        self._wire(reg)
+        assert reg.owner_task_for_child("s1", "child-B") == "owner-A"
+
+    def test_missing_linkage_returns_none(self, reg):
+        # child record exists but no linkage armed → unresolvable.
+        reg.start_task("s1", "child-B", "agent", "gc", tool_use_id="tu-B")
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+    def test_missing_child_record_returns_none(self, reg):
+        reg.link_child_to_owner("s1", "tu-B", "tu-A")
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+    def test_missing_owner_record_returns_none(self, reg):
+        # Linkage present + child record present, but no task carries tu-A.
+        reg.start_task("s1", "child-B", "agent", "gc", tool_use_id="tu-B")
+        reg.link_child_to_owner("s1", "tu-B", "tu-A")
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+    def test_blank_and_self_link_ignored(self, reg):
+        reg.link_child_to_owner("", "tu-B", "tu-A")
+        reg.link_child_to_owner("s1", "tu-B", "tu-B")  # self-link ignored
+        reg.start_task("s1", "child-B", "agent", "gc", tool_use_id="tu-B")
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+    def test_isolated_per_session(self, reg):
+        self._wire(reg)
+        assert reg.owner_task_for_child("s2", "child-B") is None
+
+    def test_cleared_by_clear_session(self, reg):
+        self._wire(reg)
+        reg.clear_session("s1")
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+    def test_cleared_by_reset_all(self, reg):
+        self._wire(reg)
+        reg.reset_all()
+        assert reg.owner_task_for_child("s1", "child-B") is None
+
+
+class TestOwnerActivity:
+    """B-prime item b: monotonic activity stamp used by the deferred-pump
+    quiescence discriminator."""
+
+    def test_unseen_owner_is_none(self, reg):
+        assert reg.owner_activity_ts("s1", "tu-A") is None
+
+    def test_note_then_read_is_monotonic(self, reg):
+        reg.note_owner_activity("s1", "tu-A")
+        first = reg.owner_activity_ts("s1", "tu-A")
+        assert first is not None
+        reg.note_owner_activity("s1", "tu-A")
+        assert reg.owner_activity_ts("s1", "tu-A") >= first
+
+    def test_blank_ids_never_record(self, reg):
+        reg.note_owner_activity("", "tu-A")
+        reg.note_owner_activity("s1", "")
+        assert reg.owner_activity_ts("s1", "tu-A") is None
+
+    def test_isolated_per_session_and_owner(self, reg):
+        reg.note_owner_activity("s1", "tu-A")
+        assert reg.owner_activity_ts("s2", "tu-A") is None
+        assert reg.owner_activity_ts("s1", "tu-B") is None
+
+    def test_cleared_by_clear_session(self, reg):
+        reg.note_owner_activity("s1", "tu-A")
+        reg.clear_session("s1")
+        assert reg.owner_activity_ts("s1", "tu-A") is None
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.note_owner_activity("s1", "tu-A")
+        reg.reset_all()
+        assert reg.owner_activity_ts("s1", "tu-A") is None
+
+
+class TestPumpCleanupCallback:
+    """B-prime item f: the registry fires the scheduler's deferred-pump cleanup
+    on clear_session (with the id) and reset_all (with None)."""
+
+    def test_clear_session_fires_with_id(self, reg):
+        seen = []
+        reg.set_pump_cleanup_callback(lambda sid: seen.append(sid))
+        reg.clear_session("s1")
+        assert seen == ["s1"]
+
+    def test_reset_all_fires_with_none_then_deregisters(self, reg):
+        seen = []
+        reg.set_pump_cleanup_callback(lambda sid: seen.append(sid))
+        reg.reset_all()
+        assert seen == [None]
+        # Deregistered — a later clear does not re-invoke it.
+        reg.clear_session("s1")
+        assert seen == [None]
+
+    def test_raising_callback_is_swallowed(self, reg):
+        def _boom(_sid):
+            raise RuntimeError("nope")
+        reg.set_pump_cleanup_callback(_boom)
+        reg.clear_session("s1")  # must not raise
 
 
 class TestStartedThisTurn:

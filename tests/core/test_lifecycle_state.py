@@ -170,6 +170,21 @@ async def test_waking_state_via_queued_unpark_turn(mock_db):
     assert snap.unpark_pending is True
 
 
+async def test_waking_state_via_queued_unpark_pump_turn(mock_db):
+    """A queued ``source=unpark_pump`` turn (a quiet subagent-step wake is
+    imminent) reads as waking and folds into ``unpark_pending`` — identical
+    treatment to a plain ``unpark`` wake."""
+    from app.db import turns as turns_db
+
+    sid = "lstate-waking-unpark-pump-turn"
+    turns_db.enqueue_turn(sid, "unpark_pump", prompt="<task-notification>...")
+
+    snap = await compute(sid)
+
+    assert snap.state == STATE_WAKING
+    assert snap.unpark_pending is True
+
+
 async def test_queued_user_turn_is_not_waking(mock_db):
     """Only unpark queued turns trigger waking; a queued user turn does not."""
     from app.db import turns as turns_db

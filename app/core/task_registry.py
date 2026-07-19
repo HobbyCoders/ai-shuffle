@@ -127,10 +127,6 @@ class TaskRegistry:
     def __init__(self) -> None:
         # session_id -> {task_id -> record}
         self._tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # session_id -> set of (task_id, signature) already delivered to the
-        # parent as an "unpark" notification. Guards the post-loop follow-up turn
-        # against re-triggering on a duplicate TaskNotificationMessage.
-        self._notified: Dict[str, set] = {}
         # session_id -> set of task_ids whose TaskStartedMessage arrived during
         # the CURRENT turn. Reset at the start of every turn (see
         # ``reset_started_this_turn``). This scopes the in-stream "unpark" stash
@@ -215,17 +211,6 @@ class TaskRegistry:
         # pinning (the launching sub-agent's own kind=="agent" running record
         # already pins) or chip eligibility. Cleared with the session.
         self._subagent_background_tasks: Dict[str, set] = {}
-        # session_id -> set of task_ids that have ALREADY driven an unpark
-        # follow-up turn. Unlike ``_notified`` (keyed on (task_id, signature) and
-        # therefore RE-ARMED by a fresh per-rest uuid), this is keyed on the
-        # ``task_id`` ALONE: a given background task drives AT MOST ONE unpark for
-        # its whole life. The newer Claude CLI emits a TaskNotificationMessage
-        # EACH TIME an agent comes to rest with no live background children — a
-        # repeatable resumable rest-signal with a fresh uuid every time, NOT a
-        # one-shot completion — so the old signature latch let the same task
-        # re-notify on every rest and storm the session with "nothing to act on"
-        # follow-ups. Cleared only with the session.
-        self._unparked: Dict[str, set] = {}
         # session_id -> {task_id -> {"task": <wire dict>, "recorded_at": <epoch>}}
         # for tasks that reached a FAILURE terminal status ("error"/"killed").
         # This is the retention store that fixes the "background task vanished
@@ -246,6 +231,40 @@ class TaskRegistry:
         # pump's per-run local set — so the cap holds across pump restarts
         # (each run used to reset its dedup and re-chip the same task).
         self._chipped: Dict[str, Dict[str, set]] = {}
+        # session_id -> set of task_ids that have ALREADY produced an unpark/pump
+        # wake turn (the late-frame latch, ``mark_woken``). Keyed on task_id ALONE:
+        # a given background task drives AT MOST ONE wake for its whole life, so a
+        # frame that arrives AFTER its wake already left the queue (the guarded
+        # UPDATE merge lost the race, or the wake already ran) must not spawn a
+        # fresh duplicate. Set at every OWN/PUMP wake enqueue/merge; checked on the
+        # own-lane fresh-enqueue fall-through. Cleared with the session AND flipped
+        # OFF on a resume (``start_task`` revival) so a re-run agent can wake again.
+        self._woken: Dict[str, set] = {}
+        # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
+        # child background task's launch tool_use_id mapped to the launch
+        # tool_use_id of the SUB-AGENT that spawned it (its owner). Recorded when
+        # a subagent-lane run_in_background launch is seen (query_engine, both the
+        # in-stream ToolUseBlock branch and the between-turns drain). Lets the
+        # PUMP lane resolve which running sub-agent a terminal child belongs to,
+        # so a child step can be deferred against ITS owner's quiescence rather
+        # than pumped blindly. Cleared with the session.
+        self._child_owner: Dict[str, Dict[str, str]] = {}
+        # session_id -> {owner_launch_tuid -> monotonic ts} (B-prime item b). The
+        # last time a running sub-agent (an owner) emitted inner activity on the
+        # main session's between-turns drained stream (idle_reader inner-message
+        # dispatch calls ``note_owner_activity``). A parked/at-rest sub-agent is
+        # SILENT there; a still-running one continuously emits. The deferred-pump
+        # discriminator compares this against a child terminal's timestamp:
+        # activity AFTER the child terminal ⇒ owner still running (the CLI steered
+        # the child result to it for free) ⇒ suppress; silence ⇒ at rest ⇒ pump.
+        # Cleared with the session.
+        self._owner_activity_ts: Dict[str, Dict[str, float]] = {}
+        # Deferred-pump cleanup callback (B-prime item f). The scheduler registers
+        # ONE sync callback at install(); ``clear_session`` fires it with the
+        # session id and ``reset_all`` with ``None`` (clear-all) so the scheduler's
+        # per-owner deferred timers are cancelled with the session/registry rather
+        # than leaking. Fully defensive — a raising callback is swallowed.
+        self._pump_cleanup_callback: Optional[Any] = None
         # Guaranteed terminal notification (lifecycle batch, item 4b): a
         # callback the chat layer registers ONCE at startup. ``complete_task``
         # fires it exactly once per task (see ``mark_terminal_notified``) when
@@ -419,26 +438,122 @@ class TaskRegistry:
         seen.add(task_id)
         return True
 
-    def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
-        """Idempotency latch for the parent "unpark" follow-up turn.
+    def mark_woken(self, session_id: str, task_id: str) -> bool:
+        """One-shot late-frame latch: a background task drives AT MOST ONE
+        unpark/pump wake for its whole life.
 
-        Returns ``True`` only the FIRST time a given ``(task_id, signature)`` is
-        seen for ``session_id``; every subsequent call with the same pair returns
-        ``False``. Callers pass ``signature = uuid or f"{output_file}:{status}"``,
-        so a NEW completion of the same task (fresh uuid — the agent can be
-        resumed and may notify again) RE-ARMS the latch and yields ``True`` again.
-
-        Defensive: a missing ``session_id``/``task_id`` never latches (returns
-        ``False``) so a stray notification can't strand state.
+        Returns ``True`` only the FIRST time ``task_id`` is latched for
+        ``session_id`` (and records it); every later call returns ``False``.
+        The scheduler sets it at each OWN/PUMP wake enqueue/merge and reads it on
+        the own-lane fresh-enqueue fall-through: a frame arriving AFTER the wake
+        already left the queue (a lost merge race, or the wake already ran) finds
+        the latch set and is dropped instead of spawning a duplicate wake. Keyed
+        on ``task_id`` ALONE (mirrors the retired ``_unparked`` intent) — cleared
+        only with the session, and flipped OFF on a genuine resume (``start_task``
+        revival) so a re-run agent can wake again. Defensive: missing ids never
+        latch (return ``False``).
         """
         if not session_id or not task_id:
             return False
-        key = (task_id, signature)
-        seen = self._notified.setdefault(session_id, set())
-        if key in seen:
+        seen = self._woken.setdefault(session_id, set())
+        if task_id in seen:
             return False
-        seen.add(key)
+        seen.add(task_id)
         return True
+
+    def is_woken(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id`` has already produced a wake (``mark_woken``)."""
+        if not session_id or not task_id:
+            return False
+        return task_id in self._woken.get(session_id, set())
+
+    def link_child_to_owner(
+        self, session_id: str, child_launch_tuid: str, owner_launch_tuid: str
+    ) -> None:
+        """Record that a grandchild task launched by ``child_launch_tuid`` belongs
+        to the sub-agent whose launch is ``owner_launch_tuid`` (B-1).
+
+        Wired at every subagent-lane run_in_background launch site — a sub-agent's
+        inner ToolUseBlock carries the launched task's id (the child) while
+        ``parent_tool_use_id`` (in-stream ``tool_entry["parent_tool_id"]``) is the
+        sub-agent's OWN launch id (the owner). Defensive: missing ids are a no-op,
+        and self-links (child == owner) are ignored.
+        """
+        if not session_id or not child_launch_tuid or not owner_launch_tuid:
+            return
+        if child_launch_tuid == owner_launch_tuid:
+            return
+        self._child_owner.setdefault(session_id, {})[
+            child_launch_tuid
+        ] = owner_launch_tuid
+
+    def owner_task_for_child(
+        self, session_id: str, child_task_id: str
+    ) -> Optional[str]:
+        """Resolve a terminal child task to its OWNER's task_id, or ``None``.
+
+        child task → its registry record's launch ``tool_use_id`` → ``_child_owner``
+        → the owner's launch ``tool_use_id`` → reverse-lookup the owner's registry
+        record by that launch id → its task_id. Any missing hop (no child record,
+        no linkage, no owner record) yields ``None`` — the PUMP lane treats an
+        unresolvable child as "fire immediately" (never suppress blind). Read-only
+        and exception-free.
+        """
+        if not session_id or not child_task_id:
+            return None
+        try:
+            bucket = self._tasks.get(session_id, {})
+            child = bucket.get(child_task_id)
+            child_tuid = child.get("tool_use_id") if child else None
+            if not child_tuid:
+                return None
+            owner_tuid = self._child_owner.get(session_id, {}).get(child_tuid)
+            if not owner_tuid:
+                return None
+            for tid, rec in bucket.items():
+                if rec.get("tool_use_id") == owner_tuid:
+                    return tid
+        except Exception:  # noqa: BLE001 — a stray shape must never raise.
+            return None
+        return None
+
+    def note_owner_activity(self, session_id: str, owner_launch_tuid: str) -> None:
+        """Stamp the monotonic time a running sub-agent (owner) emitted inner
+        activity on the drained stream (B-prime item b). Called from the idle
+        reader's inner-message dispatch for every drained message whose
+        ``parent_tool_use_id`` is one of the parent's own background launches.
+        Defensive: missing ids are a no-op."""
+        if not session_id or not owner_launch_tuid:
+            return
+        self._owner_activity_ts.setdefault(session_id, {})[
+            owner_launch_tuid
+        ] = time.monotonic()
+
+    def owner_activity_ts(
+        self, session_id: str, owner_launch_tuid: str
+    ) -> Optional[float]:
+        """The monotonic ts of the owner's last inner activity, or ``None`` if the
+        owner has never been seen active. Defensive: missing ids return ``None``."""
+        if not session_id or not owner_launch_tuid:
+            return None
+        return self._owner_activity_ts.get(session_id, {}).get(owner_launch_tuid)
+
+    def set_pump_cleanup_callback(self, callback: Optional[Any]) -> None:
+        """Register the deferred-pump cleanup callback (scheduler, once at
+        install()). ``callback(session_id_or_None)`` — SYNC, fired from
+        ``clear_session`` (with the session id) and ``reset_all`` (with ``None``)
+        so the scheduler cancels the session's/all deferred-pump timers. ``None``
+        deregisters."""
+        self._pump_cleanup_callback = callback
+
+    def _fire_pump_cleanup(self, session_id: Optional[str]) -> None:
+        """Invoke the pump-cleanup callback defensively (never raises)."""
+        if self._pump_cleanup_callback is None:
+            return
+        try:
+            self._pump_cleanup_callback(session_id)
+        except Exception:  # noqa: BLE001 — cleanup must never break teardown.
+            logger.debug("pump cleanup callback failed", exc_info=True)
 
     def reset_started_this_turn(self, session_id: str) -> None:
         """Clear the "started this turn" set for a session.
@@ -576,6 +691,10 @@ class TaskRegistry:
                     retained.pop(task_id, None)
                     if not retained:
                         self._recent_terminal.pop(session_id, None)
+                # A genuine resume re-arms the late-frame wake latch: the revived
+                # run may come to rest again and must be able to drive a fresh
+                # unpark/pump wake (A-3 clear-on-revival).
+                self._woken.get(session_id, set()).discard(task_id)
             existing["updated_at"] = now
             self._persist_task_state(session_id, task_id)
             return
@@ -709,7 +828,6 @@ class TaskRegistry:
                     "tool_use_id": record.get("tool_use_id"),
                     "title": record.get("title"),
                     "status": record.get("status"),
-                    "unparked": task_id in self._unparked.get(session_id, set()),
                     "terminal_notified": task_id
                     in self._terminal_notified.get(session_id, set()),
                     "started_at": record.get("started_at"),
@@ -927,7 +1045,6 @@ class TaskRegistry:
         already-expired entries don't linger).
         """
         self._tasks.pop(session_id, None)
-        self._notified.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
         self._unpark_pending.discard(session_id)
@@ -935,15 +1052,18 @@ class TaskRegistry:
         self._sdk_background_tasks.pop(session_id, None)
         self._subagent_background_launches.pop(session_id, None)
         self._subagent_background_tasks.pop(session_id, None)
-        self._unparked.pop(session_id, None)
         self._chipped.pop(session_id, None)
+        self._woken.pop(session_id, None)
+        self._child_owner.pop(session_id, None)
+        self._owner_activity_ts.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
+        # Cancel the scheduler's deferred-pump timers for this session (item f).
+        self._fire_pump_cleanup(session_id)
         self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
         self._tasks.clear()
-        self._notified.clear()
         self._started_this_turn.clear()
         self._background_launches.clear()
         self._unpark_pending.clear()
@@ -951,10 +1071,15 @@ class TaskRegistry:
         self._sdk_background_tasks.clear()
         self._subagent_background_launches.clear()
         self._subagent_background_tasks.clear()
-        self._unparked.clear()
         self._chipped.clear()
+        self._woken.clear()
+        self._child_owner.clear()
+        self._owner_activity_ts.clear()
         self._terminal_notified.clear()
         self._terminal_notification_callback = None
+        # Cancel ALL deferred-pump timers, then deregister (item f).
+        self._fire_pump_cleanup(None)
+        self._pump_cleanup_callback = None
         self._recent_terminal.clear()
 
 

@@ -245,7 +245,7 @@ describe('SessionsBoard action rail', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('a', true);
 	});
 
-	it('hoists an active row\'s Complete into the always-visible persistent slot, but leaves an inactive row\'s Move to Active in the tray', () => {
+	it('hoists the state-based Active toggle into the always-visible persistent slot on both active and inactive rows, out of the tray', () => {
 		mocks.sessions.set([
 			makeSession({ id: 'a', title: 'Active one', is_active: true }),
 			makeSession({ id: 'b', title: 'Inactive one', is_active: false })
@@ -259,24 +259,43 @@ describe('SessionsBoard action rail', () => {
 		expect(complete.closest('.ram-persistent')).toBeTruthy();
 		expect(complete.closest('.ram-tray')).toBeNull();
 
-		// Move to Active (inactive row) stays in the tray (behind the ⋮ on mobile).
+		// Move to Active (inactive row) is likewise hoisted into .ram-persistent,
+		// NOT the tray — it's the same state-based toggle, always visible on mobile.
 		const move = rowFor('Inactive one').querySelector('[title="Move to Active"]') as HTMLElement;
 		expect(move).toBeTruthy();
-		expect(move.closest('.ram-tray')).toBeTruthy();
-		expect(move.closest('.ram-persistent')).toBeNull();
+		expect(move.closest('.ram-persistent')).toBeTruthy();
+		expect(move.closest('.ram-tray')).toBeNull();
+
 		// The active row carries no Move to Active, and vice-versa.
 		expect(rowFor('Active one').querySelector('[title="Move to Active"]')).toBeNull();
 		expect(rowFor('Inactive one').querySelector('[title="Complete"]')).toBeNull();
+
+		// The inactive row's tray holds only Rename/Fork/Delete — no Active toggle.
+		const inactiveTray = rowFor('Inactive one').querySelector('.ram-tray') as HTMLElement;
+		expect(inactiveTray.querySelector('[title="Rename session"]')).toBeTruthy();
+		expect(inactiveTray.querySelector('[title="Fork session"]')).toBeTruthy();
+		expect(inactiveTray.querySelector('[title="Delete session"]')).toBeTruthy();
+		expect(inactiveTray.querySelector('[title="Move to Active"]')).toBeNull();
 	});
 
-	it('freezes the persistent Complete button while an armed delete is confirming', async () => {
-		mocks.sessions.set([makeSession({ id: 'a', title: 'Active one', is_active: true })]);
+	it('freezes the persistent Active toggle while an armed delete is confirming, on both active and inactive rows', async () => {
+		mocks.sessions.set([
+			makeSession({ id: 'a', title: 'Active one', is_active: true }),
+			makeSession({ id: 'b', title: 'Inactive one', is_active: false })
+		]);
 		renderBoard();
+
 		// Arm the delete confirm on the active row.
 		await fireEvent.click(rowFor('Active one').querySelector('[title="Delete session"]') as HTMLElement);
 		const complete = rowFor('Active one').querySelector('[title="Complete"]') as HTMLButtonElement;
 		expect(complete.closest('.ram-persistent')).toBeTruthy();
 		expect(complete.disabled).toBe(true);
+
+		// Arm the delete confirm on the inactive row.
+		await fireEvent.click(rowFor('Inactive one').querySelector('[title="Delete session"]') as HTMLElement);
+		const move = rowFor('Inactive one').querySelector('[title="Move to Active"]') as HTMLButtonElement;
+		expect(move.closest('.ram-persistent')).toBeTruthy();
+		expect(move.disabled).toBe(true);
 	});
 
 	it('no longer renders a star favorite button anywhere', () => {
