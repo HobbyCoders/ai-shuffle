@@ -191,7 +191,9 @@ class TestCaptureCodexHeaders:
     async def test_persist_failure_never_raises(self):
         """A failing DB write inside _persist_codex_capture must not propagate."""
         with patch(
-            "app.db.async_database.run_sync",
+            # run_sync is a module-top from-import in provider_usage — patch
+            # the consumer binding, not app.db.async_database.
+            "app.core.provider_usage.run_sync",
             side_effect=RuntimeError("db exploded"),
         ):
             # Should not raise.
@@ -207,7 +209,7 @@ class TestCaptureCodexHeaders:
             captured["args"] = args
             return None
 
-        with patch("app.db.async_database.run_sync", side_effect=_fake_run_sync):
+        with patch("app.core.provider_usage.run_sync", side_effect=_fake_run_sync):
             await provider_usage._persist_codex_capture(
                 "prov-4",
                 {
