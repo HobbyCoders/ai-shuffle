@@ -69,10 +69,31 @@ export interface UsageBucket {
 	generation?: number | null;
 }
 
+/**
+ * One non-Claude provider's usage snapshot (Codex/ChatGPT, OpenRouter, …).
+ * Provider-scoped (not install-scoped), so none of the per-install
+ * generation/merge logic applies — the endpoint returns the authoritative
+ * current set and we full-replace on each poll.
+ */
+export interface ProviderUsageBucket {
+	providerId: string;
+	providerName: string | null;
+	providerType: string | null;
+	planType: string | null;
+	/** Keyed by window type (reuses the Claude `UsageWindow` shape). */
+	windows: Record<string, UsageWindow>;
+	/** Verbatim provider credits blob (unknown shape — guard all reads). */
+	credits: Record<string, unknown> | null;
+	/** Epoch ms the backend last fetched this provider's usage (staleness). */
+	fetchedAt: number | null;
+}
+
 interface RateLimitState {
 	/** Keyed by install `instance_id` (or `'__self__'` for a legacy/local-only
 	 *  payload that carries no instance id). */
 	buckets: Record<string, UsageBucket>;
+	/** Keyed by `provider_id`. Provider-scoped (see `ProviderUsageBucket`). */
+	providerBuckets: Record<string, ProviderUsageBucket>;
 	/** The local install's instance id, when the backend reports it. null in the
 	 *  legacy path — the self bucket is then keyed `'__self__'`. */
 	selfInstanceId: string | null;
@@ -121,6 +142,21 @@ export interface SnapshotInstance {
 	generation?: number | null;
 }
 
+/**
+ * One non-Claude provider's entry in a polled snapshot's `providers` array
+ * (U4 wire shape — the `raw` debug blob is never sent). `windows` reuses the
+ * Claude `SnapshotWindow` shape (`type` / `utilization` 0–100 / `resets_at`).
+ */
+export interface ProviderUsageEntry {
+	provider_id: string;
+	provider_name?: string | null;
+	provider_type?: string | null;
+	plan_type?: string | null;
+	windows?: SnapshotWindow[];
+	credits?: Record<string, unknown> | null;
+	fetched_at?: number | null;
+}
+
 export interface UsageSnapshot {
 	/** Legacy top-level fields — the LOCAL install's data. Always present for
 	 *  backwards compatibility; folded into the self bucket when `snapshots` is
@@ -141,6 +177,11 @@ export interface UsageSnapshot {
 	snapshots?: SnapshotInstance[];
 	/** The local install's instance id (which entry in `snapshots` is "us"). */
 	self_instance_id?: string | null;
+	/** Non-Claude provider usage. Full-replaces `providerBuckets` when present;
+	 *  when the key is ABSENT the store leaves the existing map untouched (so a
+	 *  WS-only payload without providers can't wipe it). Additive; empty for old
+	 *  or provider-less installs. */
+	providers?: ProviderUsageEntry[];
 }
 
 const STORAGE_KEY_V2 = 'usage-limit-buckets-v2';
@@ -154,6 +195,10 @@ export const WINDOW_LABELS: Record<string, string> = {
 	seven_day_sonnet: 'Weekly Sonnet',
 	seven_day_overage_included: 'Fable 5 limit',
 	overage: 'Overage',
+	// Non-Claude provider windows.
+	day: 'Daily',
+	month: 'Monthly',
+	credit_limit: 'Credit limit',
 };
 
 // Display order for the popover / headline selection tie-breaks.
@@ -164,10 +209,18 @@ export const WINDOW_ORDER = [
 	'seven_day_sonnet',
 	'seven_day_overage_included',
 	'overage',
+	// Non-Claude provider windows.
+	'day',
+	'month',
+	'credit_limit',
 ];
 
 export function windowLabel(type: string): string {
-	return WINDOW_LABELS[type] ?? type.replace(/_/g, ' ');
+	if (WINDOW_LABELS[type]) return WINDOW_LABELS[type];
+	// Provider rolling windows come through as `window_<minutes>m`.
+	const m = /^window_(\d+)m$/.exec(type);
+	if (m) return `${m[1]}m window`;
+	return type.replace(/_/g, ' ');
 }
 
 /** Clamp an already-percent (0–100) value into range. */
@@ -297,17 +350,28 @@ export function isBucketStale(bucket: UsageBucket, now: number): boolean {
 interface PersistedShape {
 	buckets: Record<string, UsageBucket>;
 	selfInstanceId: string | null;
+	providerBuckets?: Record<string, ProviderUsageBucket>;
 }
 
-function _load(): { buckets: Record<string, UsageBucket>; selfInstanceId: string | null } {
+interface LoadedShape {
+	buckets: Record<string, UsageBucket>;
+	selfInstanceId: string | null;
+	providerBuckets: Record<string, ProviderUsageBucket>;
+}
+
+function _load(): LoadedShape {
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY_V2);
 		if (raw) {
 			const parsed = JSON.parse(raw) as PersistedShape;
 			if (parsed && typeof parsed === 'object' && parsed.buckets && typeof parsed.buckets === 'object') {
-				return { buckets: parsed.buckets, selfInstanceId: parsed.selfInstanceId ?? null };
+				return {
+					buckets: parsed.buckets,
+					selfInstanceId: parsed.selfInstanceId ?? null,
+					providerBuckets: parsed.providerBuckets ?? {},
+				};
 			}
-			return { buckets: {}, selfInstanceId: null };
+			return { buckets: {}, selfInstanceId: null, providerBuckets: {} };
 		}
 		// v2 absent — migrate the legacy single-window map into a self bucket.
 		const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
@@ -320,18 +384,22 @@ function _load(): { buckets: Record<string, UsageBucket>; selfInstanceId: string
 					fetchedAt: null,
 					available: true,
 				};
-				return { buckets: { [SELF_BUCKET_KEY]: bucket }, selfInstanceId: null };
+				return { buckets: { [SELF_BUCKET_KEY]: bucket }, selfInstanceId: null, providerBuckets: {} };
 			}
 		}
-		return { buckets: {}, selfInstanceId: null };
+		return { buckets: {}, selfInstanceId: null, providerBuckets: {} };
 	} catch {
-		return { buckets: {}, selfInstanceId: null }; // localStorage unavailable / malformed.
+		return { buckets: {}, selfInstanceId: null, providerBuckets: {} }; // localStorage unavailable / malformed.
 	}
 }
 
 function _save(state: RateLimitState) {
 	try {
-		const payload: PersistedShape = { buckets: state.buckets, selfInstanceId: state.selfInstanceId };
+		const payload: PersistedShape = {
+			buckets: state.buckets,
+			selfInstanceId: state.selfInstanceId,
+			providerBuckets: state.providerBuckets,
+		};
 		localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload));
 	} catch {
 		// best-effort persistence
@@ -342,6 +410,7 @@ const _loaded = _load();
 const _store = createStore<RateLimitState>({
 	buckets: _loaded.buckets,
 	selfInstanceId: _loaded.selfInstanceId,
+	providerBuckets: _loaded.providerBuckets,
 	staleByInstance: {},
 });
 
@@ -435,6 +504,35 @@ export const rateLimit = {
 	applySnapshot(snapshot: UsageSnapshot): void {
 		const now = Date.now();
 
+		// ── Provider usage (non-Claude) — full replace when present ─────────────
+		// Providers are provider-scoped, not install-scoped, so none of the
+		// per-install generation/merge logic applies: the endpoint returns the
+		// authoritative current set. Fold FIRST (as its own update) — the Claude
+		// paths below early-return, so an "after" placement would be unreachable
+		// for a modern payload. When the `providers` key is ABSENT we leave the
+		// existing map untouched, so a WS-only payload can't wipe it. The Claude
+		// updates below carry `providerBuckets` forward unchanged.
+		if (Array.isArray(snapshot.providers)) {
+			_store.update((s) => {
+				const providerBuckets: Record<string, ProviderUsageBucket> = {};
+				for (const p of snapshot.providers!) {
+					if (!p?.provider_id) continue;
+					providerBuckets[p.provider_id] = {
+						providerId: p.provider_id,
+						providerName: p.provider_name ?? null,
+						providerType: p.provider_type ?? null,
+						planType: p.plan_type ?? null,
+						windows: _windowsFromSnapshot(p.windows, now),
+						credits: p.credits ?? null,
+						fetchedAt: p.fetched_at ?? null,
+					};
+				}
+				const next = { ...s, providerBuckets };
+				_save(next);
+				return next;
+			});
+		}
+
 		// ── Modern path: per-install snapshots MERGE into the buckets map ───────
 		// Require a non-empty array: an empty `snapshots: []` is not authoritative
 		// (e.g. a transient backend DB read failure), so we fall through to the
@@ -510,6 +608,7 @@ export const rateLimit = {
 
 				const next: RateLimitState = {
 					buckets,
+					providerBuckets: s.providerBuckets,
 					selfInstanceId: snapshot.self_instance_id ?? null,
 					staleByInstance,
 				};
@@ -566,6 +665,7 @@ export const rateLimit = {
 			}
 			const next: RateLimitState = {
 				buckets: { ...s.buckets, [key]: bucket },
+				providerBuckets: s.providerBuckets,
 				selfInstanceId: s.selfInstanceId,
 				staleByInstance,
 			};
@@ -583,7 +683,7 @@ export const rateLimit = {
 	 */
 	__resetForTests(): void {
 		for (const k of Object.keys(_lastGenByInstance)) delete _lastGenByInstance[k];
-		_store.set({ buckets: {}, selfInstanceId: null, staleByInstance: {} });
+		_store.set({ buckets: {}, providerBuckets: {}, selfInstanceId: null, staleByInstance: {} });
 		_save(_store.current);
 	},
 };

@@ -13,6 +13,7 @@ import type {
 	SnapshotWindow,
 	SnapshotInstance,
 	UsageSnapshot,
+	ProviderUsageEntry,
 } from '$lib/stores/rate-limit';
 
 const API_BASE = '/api/v1';
@@ -523,7 +524,12 @@ export async function importAgent(data: AgentImportRequest): Promise<Profile> {
 export type UsageLimitsWindow = SnapshotWindow;
 /** One install's usage bucket within a snapshot (clustered deployment). */
 export type UsageLimitsInstanceSnapshot = SnapshotInstance;
-/** Latest Claude usage snapshot (top-level = LOCAL install; `snapshots` = per-install). */
+/** One non-Claude provider's usage entry within a snapshot (U4 wire shape:
+ *  provider_id, provider_name, provider_type, plan_type, windows, credits,
+ *  fetched_at). Surfaced on {@link UsageLimitsSnapshot} as `providers?`. */
+export type { ProviderUsageEntry };
+/** Latest usage snapshot. Top-level = LOCAL install; `snapshots` = per-install
+ *  Claude; `providers?: ProviderUsageEntry[]` = non-Claude provider usage. */
 export type UsageLimitsSnapshot = UsageSnapshot;
 
 /**

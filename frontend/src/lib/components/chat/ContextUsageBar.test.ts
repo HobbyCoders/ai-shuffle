@@ -624,3 +624,111 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('50%');
 	});
 });
+
+describe('ContextUsageBar — provider usage (non-Claude)', () => {
+	it('renders a provider section header + one row per window with the right label/percent', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'codex-1',
+					provider_name: 'Codex',
+					provider_type: 'codex',
+					plan_type: 'Plus',
+					windows: [
+						{ type: 'five_hour', utilization: 30, resets_at: future() },
+						{ type: 'seven_day', utilization: 12, resets_at: future() },
+					],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// No Claude bucket resolves → the only section header is the provider's.
+		expect(container.querySelectorAll('.popover-section').length).toBe(1);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Codex');
+		expect(container.querySelector('.section-account')?.textContent).toBe('Plus');
+
+		// One row per provider window (the empty Claude section shows a
+		// non-.popover-row "No usage data yet" line, not counted here).
+		const rows = container.querySelectorAll('.popover-row');
+		expect(rows.length).toBe(2);
+		expect(rows[0].querySelector('.row-label')?.textContent).toBe('5-hour limit');
+		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('30%');
+		expect(rows[1].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
+		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('12%');
+		// Each window row draws a bar fill sized to its percent.
+		expect(rows[0].querySelector('.row-fill')).not.toBeNull();
+	});
+
+	it('falls back to the provider type, then "Provider", for the section header', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'p-typed',
+					provider_type: 'openrouter',
+					windows: [{ type: 'day', utilization: 5, resets_at: future() }],
+					credits: null,
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')?.textContent).toBe('openrouter');
+		// No planType → no .section-account in the provider header.
+		expect(container.querySelector('.popover-section .section-account')).toBeNull();
+		expect(container.textContent).toContain('Daily');
+	});
+
+	it('renders a muted credits line and NO bar for a null-limit provider (OpenRouter-style)', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-1',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits: { usage: 3.1, limit_remaining: 6.9, unlimited: false },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		expect(container.querySelector('.section-device')?.textContent).toBe('OpenRouter');
+		// Empty windows → no provider window rows and no bars anywhere (Claude
+		// section is also empty).
+		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+		expect(container.querySelectorAll('.row-bar').length).toBe(0);
+		expect(container.querySelectorAll('.row-fill').length).toBe(0);
+		// The credits line renders from usage / limit_remaining.
+		expect(container.textContent).toContain('$3.10 used · $6.90 left');
+	});
+
+	it('renders "Credits: unlimited" when the provider reports unlimited credits', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'codex-unl',
+					provider_name: 'Codex',
+					windows: [{ type: 'five_hour', utilization: 40, resets_at: future() }],
+					credits: { unlimited: true },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		// A window row (with bar) AND the credits line coexist.
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.textContent).toContain('Credits: unlimited');
+	});
+});

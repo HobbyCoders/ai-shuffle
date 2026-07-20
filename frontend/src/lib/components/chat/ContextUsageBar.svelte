@@ -259,6 +259,23 @@
 		}));
 	}
 
+	// Provider credits (non-Claude): render a single muted line from the opaque
+	// credits blob when there's no window denominator to draw a bar, or when the
+	// provider reports meaningful credit balances. All reads are shape-guarded.
+	function creditsSummary(credits: Record<string, unknown> | null): string | null {
+		if (!credits || typeof credits !== 'object') return null;
+		if (credits.unlimited === true) return 'Credits: unlimited';
+		const used = typeof credits.usage === 'number' ? credits.usage : null;
+		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
+		if (used != null && left != null) return `$${used.toFixed(2)} used · $${left.toFixed(2)} left`;
+		if (used != null) return `$${used.toFixed(2)} used`;
+		if (left != null) return `$${left.toFixed(2)} left`;
+		// Codex credits shape carries a plain balance instead of usage/limit.
+		const balance = typeof credits.balance === 'number' ? credits.balance : null;
+		if (balance != null) return `Credits: $${balance.toFixed(2)}`;
+		return null;
+	}
+
 	const target = $derived($usageTargetInstance);
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
 	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
@@ -468,6 +485,47 @@
 			{:else}
 				<div class="row-reset no-data">No usage data yet</div>
 			{/if}
+
+			<!-- ═══ Provider usage (non-Claude) ═══ -->
+			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
+				<div class="popover-section">
+					<div class="section-head">
+						<span class="section-device">{pb.providerName ?? pb.providerType ?? 'Provider'}</span>
+						{#if pb.planType}
+							<span class="section-account">{pb.planType}</span>
+						{/if}
+					</div>
+				</div>
+				{#each orderedWindows(pb.windows) as w (w.type)}
+					{@const pct = effectivePct(w, now)}
+					{@const sev = usageSeverity(pct)}
+					{@const countdown = formatCountdown(w.resets_at, now)}
+					<div class="popover-row">
+						<div class="row-line">
+							<span class="row-label">{windowLabel(w.type)}</span>
+							<span class="row-value">
+								<span class="row-reset-inline">
+									{#if countdown}
+										resets in {countdown}
+									{:else if w.resets_at != null}
+										resets soon
+									{:else}
+										no reset window
+									{/if}
+								</span>
+								<span class="row-pct {sev}">{pct}%</span>
+							</span>
+						</div>
+						<div class="row-bar">
+							<div class="row-fill {sev}" style="width: {pct}%"></div>
+						</div>
+					</div>
+				{/each}
+				{@const credits = creditsSummary(pb.credits)}
+				{#if credits}
+					<div class="row-reset">{credits}</div>
+				{/if}
+			{/each}
 		</div>
 	{/if}
 </div>

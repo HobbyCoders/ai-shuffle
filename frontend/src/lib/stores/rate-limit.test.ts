@@ -25,6 +25,7 @@ import {
 	resolveBucket,
 	resolveBucketKey,
 	selfBucketKey,
+	windowLabel,
 	SELF_BUCKET_KEY,
 } from './rate-limit';
 
@@ -504,5 +505,139 @@ describe('localStorage v1→v2 migration', () => {
 		const fresh = await import('./rate-limit');
 		expect(localStorage.getItem('usage-limit-windows')).toBeNull();
 		expect(fresh.resolveBucket(fresh.rateLimit.current, null)!.windows.five_hour.utilization).toBe(63);
+	});
+});
+
+describe('rateLimit.applySnapshot — provider buckets', () => {
+	it('folds providers[] into providerBuckets keyed by provider_id', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'codex-1',
+					provider_name: 'Codex',
+					provider_type: 'codex',
+					plan_type: 'Plus',
+					windows: [
+						{ type: 'five_hour', utilization: 30, resets_at: future() },
+						{ type: 'seven_day', utilization: 12, resets_at: future() },
+					],
+					credits: null,
+					fetched_at: 1_700_000_000_000,
+				},
+			],
+		});
+		const pb = rateLimit.current.providerBuckets['codex-1'];
+		expect(pb).toBeDefined();
+		expect(pb.providerName).toBe('Codex');
+		expect(pb.providerType).toBe('codex');
+		expect(pb.planType).toBe('Plus');
+		expect(pb.fetchedAt).toBe(1_700_000_000_000);
+		expect(Object.keys(pb.windows).sort()).toEqual(['five_hour', 'seven_day']);
+		expect(pb.windows.five_hour.utilization).toBe(30);
+	});
+
+	it('full-replaces the provider set when providers[] is present', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [{ provider_id: 'a', windows: [], credits: null }],
+		});
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['a']);
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [{ provider_id: 'b', windows: [], credits: null }],
+		});
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['b']);
+	});
+
+	it('leaves providerBuckets UNTOUCHED when the providers key is absent (WS-only payload)', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [{ provider_id: 'codex-1', windows: [], credits: null }],
+		});
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+		// A snapshot with no `providers` key (e.g. a WS-only rate_limit fold) must
+		// not wipe the existing provider map.
+		rateLimit.applySnapshot({
+			available: true,
+			generation: 1,
+			windows: [{ type: 'five_hour', utilization: 5, resets_at: future() }],
+		});
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+	});
+
+	it('empty providers[] clears the map (authoritative empty set)', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [{ provider_id: 'codex-1', windows: [], credits: null }],
+		});
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+		rateLimit.applySnapshot({ available: true, windows: [], providers: [] });
+		expect(rateLimit.current.providerBuckets).toEqual({});
+	});
+
+	it('stores the credits blob verbatim', () => {
+		const credits = { usage: 3.1, limit_remaining: 6.9, unlimited: false };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'openrouter-1',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits,
+					fetched_at: null,
+				},
+			],
+		});
+		const pb = rateLimit.current.providerBuckets['openrouter-1'];
+		expect(pb.credits).toEqual(credits);
+		expect(pb.fetchedAt).toBeNull();
+	});
+
+	it('a combined snapshots+providers payload keeps BOTH Claude and provider buckets', () => {
+		// The real poll payload carries per-install Claude `snapshots` AND
+		// non-Claude `providers` together — the Claude path must not drop the
+		// folded providerBuckets and vice-versa.
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{
+					instance_id: 'primary',
+					available: true,
+					windows: [{ type: 'five_hour', utilization: 20, resets_at: future() }],
+				},
+			],
+			providers: [{ provider_id: 'codex-1', windows: [], credits: null }],
+		});
+		expect(resolveBucket(rateLimit.current, 'primary')?.windows.five_hour.utilization).toBe(20);
+		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+	});
+});
+
+describe('windowLabel — provider window types', () => {
+	it('maps known Claude and provider types', () => {
+		expect(windowLabel('five_hour')).toBe('5-hour limit');
+		expect(windowLabel('day')).toBe('Daily');
+		expect(windowLabel('month')).toBe('Monthly');
+		expect(windowLabel('credit_limit')).toBe('Credit limit');
+	});
+
+	it('humanizes a window_XXm rolling window before the generic fallback', () => {
+		expect(windowLabel('window_600m')).toBe('600m window');
+		expect(windowLabel('window_5m')).toBe('5m window');
+	});
+
+	it('falls back to a humanized label for unknown types', () => {
+		expect(windowLabel('some_other_thing')).toBe('some other thing');
 	});
 });
