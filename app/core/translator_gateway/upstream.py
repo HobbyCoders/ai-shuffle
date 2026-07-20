@@ -335,6 +335,13 @@ async def stream_responses_events(
             if resp.status_code >= 400:
                 body = await resp.aread()
                 raise UpstreamError(resp.status_code, _summarize_error_body(body))
+            if mode == "codex":
+                try:
+                    from app.core import provider_usage
+
+                    provider_usage.capture_codex_headers(provider_id, resp.headers)
+                except Exception:  # noqa: BLE001 — capture must never break a turn
+                    pass
             async for event in iter_sse_events(resp.aiter_lines()):
                 yield event
             return
