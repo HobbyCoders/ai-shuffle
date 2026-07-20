@@ -12,7 +12,8 @@ fresh ``create_postgres_schema`` CREATE TABLE carries it.
 
 Follows the trap recipe from the plan's test plan: stamp a DB at the prior
 version WITHOUT the column, run the REAL ``init_database()``, assert the column +
-version 66 land without raising — on the EXISTING-DB path AND a fresh-DB test.
+the current schema version land without raising — on the EXISTING-DB path AND a
+fresh-DB test.
 Mirrors tests/db/test_model_providers_migration.py.
 """
 
@@ -29,16 +30,16 @@ def _schema_version(conn):
 
 def test_fresh_db_has_provider_id_column_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries sessions.provider_id
-    and schema version 66."""
+    and the current schema version."""
     conn = mock_db
     assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v66_db(mock_db):
     """EXISTING-DB path: a v65-shaped sessions table (no provider_id) is upgraded
     in place — the guarded ADD COLUMN lands provider_id and the version bumps to
-    66, with the existing row preserved and no exception."""
+    the current schema version, with the existing row preserved and no exception."""
     conn = mock_db
     # Simulate a pre-v66 database: drop the column and stamp the version back.
     conn.execute("ALTER TABLE sessions DROP COLUMN provider_id")
@@ -53,11 +54,11 @@ def test_init_upgrades_pre_v66_db(mock_db):
 
     assert "provider_id" not in _column_names(conn, "sessions")
 
-    # Real init path (65 < 66) — must add the column without raising.
+    # Real init path (65 < SCHEMA_VERSION) — must add the column without raising.
     database.init_database()
 
     assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION
     # Existing pre-migration row survived and its binding is NULL → native.
     row = conn.execute(
         "SELECT provider_id FROM sessions WHERE id = 's-legacy'"
@@ -75,4 +76,4 @@ def test_column_migration_is_idempotent(mock_db):
     # Second boot — still a no-op.
     database.init_database()
     assert "provider_id" in _column_names(conn, "sessions")
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION

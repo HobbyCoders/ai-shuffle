@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 from fastapi import FastAPI
@@ -109,6 +110,16 @@ async def start_gateway() -> Optional[GatewayServer]:
     global _gateway
     if _gateway is not None:
         return _gateway
+    # Under pytest the main app lifespan runs for every TestClient-based fixture
+    # (thousands of tests). Binding the real loopback socket each time is both
+    # needless — no CI test connects to it; the gateway's logic is covered
+    # in-process (resolve_leg_model / mint) and its env wiring by string assert —
+    # and race-prone: a prior test's socket lingering in its release window makes
+    # the next bind fail with EADDRINUSE, which cascades into a dead anyio portal
+    # at TestClient teardown. Skip the bind in the test environment (same TESTING
+    # guard file_logging / startup use). Production (TESTING unset) is unaffected.
+    if os.environ.get("TESTING") == "1":
+        return None
     server = GatewayServer()
     try:
         await server.start()

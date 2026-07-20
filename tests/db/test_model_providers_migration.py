@@ -61,20 +61,20 @@ def _schema_version(conn):
 
 def test_fresh_db_has_model_providers_table_index_and_version(mock_db):
     """A freshly built DB (create_postgres_schema) carries the table, its index,
-    the v65 Codex columns, and the current schema version (66)."""
+    the v65 Codex columns, and the current schema version."""
     conn = mock_db
     assert _table_exists(conn, "model_providers")
     assert _index_exists(conn, "idx_model_providers_enabled")
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_upgrades_pre_v64_db(mock_db):
     """EXISTING-DB path: stamp v63 and drop the table, then run the real
     init_database() and assert the upgrade lands the table + index + Codex
-    columns + the current version (66) without raising."""
+    columns + the current version without raising."""
     conn = mock_db
     # Simulate a pre-v64 database: the base schema builds the current shape, so
     # drop the model_providers table + index and stamp the version back to 63.
@@ -86,7 +86,7 @@ def test_init_upgrades_pre_v64_db(mock_db):
 
     assert not _table_exists(conn, "model_providers")
 
-    # Real init path (version gate fires because 63 < 66) — must not raise.
+    # Real init path (version gate fires because 63 < SCHEMA_VERSION) — must not raise.
     database.init_database()
 
     assert _table_exists(conn, "model_providers")
@@ -94,14 +94,14 @@ def test_init_upgrades_pre_v64_db(mock_db):
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
 def test_init_adds_codex_columns_to_existing_v64_table(mock_db):
     """EXISTING-DB path for v65: a v64-shaped model_providers table (phase-1
     columns only, no Codex columns) is upgraded in place — the guarded ADD
     COLUMNs in _run_column_migrations land all seven Codex columns and the
-    version bumps to the current schema version (66), with the existing row
+    version bumps to the current schema version, with the existing row
     preserved and no exception."""
     conn = mock_db
     # Rebuild the table with ONLY the phase-1 (v64) columns, then stamp v64.
@@ -147,7 +147,7 @@ def test_init_adds_codex_columns_to_existing_v64_table(mock_db):
     cols = _column_names(conn, "model_providers")
     for col in _CODEX_COLUMNS:
         assert col in cols, col
-    assert _schema_version(conn) == 66
+    assert _schema_version(conn) == database.SCHEMA_VERSION
     # Existing row survived the ALTERs (new columns default NULL/FALSE).
     row = conn.execute(
         "SELECT name, codex_access_token, needs_reauth "
