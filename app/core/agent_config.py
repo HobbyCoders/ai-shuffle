@@ -8,13 +8,88 @@ and resolving note references in prompts.
 import logging
 import re
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Collection
 
 from claude_agent_sdk import AgentDefinition
 
 from app.db import database
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_subagent_frontmatter_model(
+    raw: Optional[str],
+    *,
+    gateway_routed: bool,
+    honored_leg_models: Collection[str],
+    session_default: Optional[str],
+    main_serves_claude_ids: bool,
+) -> Optional[str]:
+    """Resolve the gateway-routable frontmatter ``model:`` value for a subagent.
+
+    Returns the value to stamp into the agent's ``.claude/agents/<id>.md``
+    frontmatter, or ``None`` to omit the ``model:`` line entirely (the agent then
+    inherits the main model). The returned value is always a bare model id that
+    the translator gateway can route by exact match — never a ``prov:...``
+    composite.
+
+    See ``docs/SUBAGENT_MODEL_CONFIG_PLAN.md`` — "DECISION POINT 3 — RESOLVED
+    2026-07-20: FRONTMATTER-STAMPING" and the "Per-agent frontmatter resolver"
+    table. On a not-honored gateway leg (or unpinned / foreign-Claude) this
+    stamps ``session_default`` rather than omitting, so every enabled subagent on
+    a gateway session ends up with an explicit, gateway-routable ``model:``.
+
+    ``raw`` is the stored subagent model: a Claude alias/id (e.g. ``sonnet``,
+    ``claude-opus-4-8``), a provider composite ``prov:<providerId>:<modelId>``
+    (split on the FIRST colon after the ``prov:`` prefix — model ids may contain
+    colons/slashes), or ``None`` (unpinned).
+
+    Native sessions (``gateway_routed is False``) preserve today's behavior and
+    ignore the gateway-only parameters: composites are omitted (inherit main),
+    Claude pins are kept, unpinned inherits main.
+
+    Called at subagent assembly; the spawn-side wiring that computes
+    ``session_default`` / ``honored_leg_models`` / ``main_serves_claude_ids``
+    lands in S3 — this function is added now and consumed next chunk.
+    """
+    # Parse `raw` into (is_composite, provider_id, model_id).
+    is_composite = bool(raw) and raw.startswith("prov:")
+    model_id: Optional[str] = None
+    malformed_composite = False
+    if is_composite and raw is not None:  # `raw is not None` narrows for the type checker
+        remainder = raw[len("prov:"):]
+        # Only the model id matters here; the provider id is parsed by the S3
+        # leg-map assembly, a separate spawn-side path.
+        _provider_id, sep, model_id = remainder.partition(":")
+        # Malformed if there is no second colon (no model id) or model id empty.
+        if not sep or not model_id:
+            malformed_composite = True
+
+    if not gateway_routed:
+        # Native session: preserve today's verbatim behavior.
+        if is_composite:
+            # Composite (well-formed or malformed) → omit → inherit main.
+            return None
+        # Claude alias/id → keep as-is; None (unpinned) → None.
+        return raw
+
+    # Gateway session.
+    if is_composite:
+        if malformed_composite:
+            # Cannot route a composite with no model id.
+            return session_default
+        if model_id in honored_leg_models:
+            return model_id
+        return session_default
+
+    if raw:
+        # Claude alias/id.
+        if main_serves_claude_ids:
+            return raw
+        return session_default
+
+    # None (unpinned).
+    return session_default
 
 
 def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str) -> Optional[Path]:
