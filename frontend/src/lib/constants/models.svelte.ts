@@ -80,6 +80,13 @@ export const CUSTOM_VALUE = '__custom__';
 export interface ProviderModel {
 	id: string;
 	label: string;
+	/**
+	 * Provider-declared context window (tokens) for this model, carried through
+	 * from the registry payload (`app/core/model_registry.py`). One value shared
+	 * by all of a provider's models. Absent/null when the provider row declares
+	 * none — consumers fall back to the heuristic denominator.
+	 */
+	context_window?: number | null;
 }
 
 /**
@@ -247,6 +254,25 @@ export function inferModelFamily(value: string | null | undefined): ModelFamily 
 export function getProviderModels(providerId: string | null | undefined): readonly ProviderModel[] {
 	if (!providerId) return [];
 	return _registry.providers.find((p) => p.id === providerId)?.models ?? [];
+}
+
+/**
+ * Provider-declared context window for a bare model id, across all hydrated
+ * providers (optionally scoped to one provider). null when unknown/unhydrated.
+ */
+export function getProviderContextWindow(
+	modelId: string | null | undefined,
+	providerId?: string | null
+): number | null {
+	if (!modelId) return null;
+	const providers = providerId
+		? _registry.providers.filter((p) => p.id === providerId)
+		: _registry.providers;
+	for (const p of providers) {
+		const m = p.models.find((mm) => mm.id === modelId);
+		if (m?.context_window) return m.context_window;
+	}
+	return null;
 }
 
 /**

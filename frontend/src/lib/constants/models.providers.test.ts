@@ -51,6 +51,27 @@ describe('getProviders — hydration from GET /models', () => {
 		]);
 	});
 
+	it('carries per-model context_window through hydration onto getProviders()', async () => {
+		mocks.get.mockResolvedValueOnce({
+			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],
+			default: 'sonnet',
+			legacy_map: {},
+			providers: [
+				{
+					id: 'prov-1',
+					name: 'OpenRouter',
+					provider_type: 'openrouter',
+					models: [{ id: 'openai/gpt-5.6', label: 'GPT-5.6', context_window: 400000 }],
+					default_model: 'openai/gpt-5.6'
+				}
+			]
+		});
+
+		await hydrateModelRegistry();
+
+		expect(getProviders()[0].models[0].context_window).toBe(400000);
+	});
+
 	it('falls back to an empty provider list when the payload omits providers', async () => {
 		mocks.get.mockResolvedValueOnce({
 			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }],

@@ -74,7 +74,13 @@
 		return profile?.config?.model || getDefaultModel();
 	});
 	const effectiveModelLabel = $derived(getModelLabel(effectiveModel));
-	const contextMax = $derived(getContextMaxForModel(effectiveModel));
+	// Provider id off the active session's profile config — lets a provider's
+	// declared context_window win over the /1m/ heuristic (null = native Claude).
+	const effectiveProviderId = $derived.by(() => {
+		const profile = $profiles.find((p) => p.id === $activeSession.profile);
+		return profile?.config?.provider ?? null;
+	});
+	const contextMax = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
 
 	// Context usage from activeSession — set by onPollApplied after each poll.
 	const rawContextUsed = $derived($activeSession.contextUsed ?? 0);
