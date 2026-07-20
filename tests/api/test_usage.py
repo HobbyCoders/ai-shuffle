@@ -120,7 +120,7 @@ class TestUsageLimitsEndpoint:
         body = resp.json()
         assert body == {
             "windows": [], "fetched_at": None, "available": False, "generation": None,
-            "snapshots": [], "self_instance_id": None,
+            "snapshots": [], "self_instance_id": None, "providers": [],
         }
 
     def test_cluster_join_and_unknown_install_excluded(self):
@@ -202,3 +202,141 @@ class TestUsageLimitsEndpoint:
         # No dependency override → real require_auth runs and rejects.
         resp = _client(authed=False).get("/api/v1/usage/limits")
         assert resp.status_code == 401
+
+
+# A minimal Claude cluster snapshot used to isolate the provider-array behaviour
+# from the (patched-away) Claude monitor.
+_CLAUDE_SNAPSHOT = {
+    "windows": [
+        {"type": "five_hour", "utilization": 12.0, "resets_at": "2026-07-09T05:00:00+00:00"},
+    ],
+    "fetched_at": 1234567890.0,
+    "available": True,
+    "generation": 42,
+    "snapshots": [],
+    "self_instance_id": "local-1",
+}
+
+
+def _assert_claude_fields_unchanged(body):
+    """Every legacy Claude top-level field is byte-identical to the source."""
+    assert body["available"] is True
+    assert body["fetched_at"] == 1234567890.0
+    assert body["generation"] == 42
+    assert body["snapshots"] == []
+    assert body["self_instance_id"] == "local-1"
+    assert body["windows"][0]["type"] == "five_hour"
+    assert body["windows"][0]["utilization"] == 12.0
+    assert body["windows"][0]["resets_at"] == "2026-07-09T05:00:00+00:00"
+
+
+class TestUsageLimitsProviders:
+    def test_seeded_rows_returned_with_joined_name(self):
+        from app.db import database as db
+
+        db.create_model_provider(
+            provider_id="prov-chatgpt", name="My ChatGPT", provider_type="chatgpt",
+            base_url="https://chatgpt.com",
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-chatgpt", provider_type="chatgpt", plan_type="plus",
+            windows=[
+                {"type": "five_hour", "utilization": 42.0, "resets_at": 1783739400},
+                {"type": "seven_day", "utilization": 7.0, "resets_at": None},
+            ],
+            credits={"has_credits": True, "balance": 5.0},
+            raw={"x-codex-plan-type": "plus"},
+            fetched_at=1783739400000,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        _assert_claude_fields_unchanged(body)
+
+        providers = body["providers"]
+        assert len(providers) == 1
+        entry = providers[0]
+        assert entry["provider_id"] == "prov-chatgpt"
+        assert entry["provider_name"] == "My ChatGPT"
+        assert entry["provider_type"] == "chatgpt"
+        assert entry["plan_type"] == "plus"
+        assert entry["credits"] == {"has_credits": True, "balance": 5.0}
+        assert entry["fetched_at"] == 1783739400000
+        # Window int-epoch resets_at coerced to decimal string; None preserved.
+        assert entry["windows"][0]["type"] == "five_hour"
+        assert entry["windows"][0]["utilization"] == 42.0
+        assert entry["windows"][0]["resets_at"] == str(1783739400)
+        assert entry["windows"][1]["resets_at"] is None
+
+    def test_empty_table_yields_empty_providers(self):
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        _assert_claude_fields_unchanged(body)
+        assert body["providers"] == []
+
+    def test_deleted_provider_returns_with_null_name(self):
+        """A snapshot whose provider registry row is gone still surfaces, with
+        ``provider_name`` = None (the join simply misses)."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-orphan", provider_type="openrouter", plan_type=None,
+            windows=[], credits=None, raw=None, fetched_at=1,
+        )
+        # No matching model_providers row exists for prov-orphan.
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert len(providers) == 1
+        assert providers[0]["provider_id"] == "prov-orphan"
+        assert providers[0]["provider_name"] is None
+
+    def test_raw_never_in_response(self):
+        """The debug ``raw`` blob must never appear in any providers[] entry."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-raw", provider_type="chatgpt", plan_type="pro",
+            windows=[{"type": "five_hour", "utilization": 1.0, "resets_at": None}],
+            credits={"balance": 1.0},
+            raw={"x-codex-plan-type": "pro", "x-codex-secret-lookalike": "should-not-leak"},
+            fetched_at=9,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        for entry in body["providers"]:
+            assert "raw" not in entry
+        # The raw blob's contents must not appear anywhere in the response body.
+        assert "should-not-leak" not in resp.text
+
+    def test_provider_load_exception_yields_empty_providers_with_200(self):
+        """A DB hiccup inside _load_provider_usage degrades to providers: [] and
+        must NOT turn the endpoint into an error or drop Claude fields."""
+        with patch("app.api.usage.usage_limits_monitor") as mon, patch(
+            "app.db.database.get_all_provider_usage_snapshots",
+            side_effect=RuntimeError("db down"),
+        ):
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        _assert_claude_fields_unchanged(body)
+        assert body["providers"] == []
