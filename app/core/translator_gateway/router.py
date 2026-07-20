@@ -87,16 +87,21 @@ def resolve_leg_model(
 ) -> LegRoute:
     """Decide which leg serves this request (Chunk F, ruling A2).
 
-    Rule: if the binding names a subagent leg (``subagent_model`` +
-    ``subagent_provider_id``) AND the requested model is EXACTLY that subagent
-    model, the SUBAGENT leg serves it — the request routes to
-    ``subagent_provider_id`` with ``subagent_model`` as the upstream id.
-    Otherwise the MAIN leg serves it: the binding's ``provider_id`` with the
-    requested model passed through unchanged (byte-identical to pre-Chunk-F
-    behavior for every non-leg session).
+    Resolution order: the N-leg ``legs`` map is checked FIRST (exact match on
+    the requested model → its provider + upstream id); then the deprecated
+    singular subagent leg (``subagent_model`` + ``subagent_provider_id``) as an
+    S1→S3 fallback; then the MAIN leg (the binding's ``provider_id`` with the
+    requested model passed through unchanged — byte-identical to pre-Chunk-F
+    behavior for every non-leg session). The gateway matches byte-for-byte with
+    no alias normalization; unknown models fall through to MAIN.
 
     Never logs a token; leg-resolution debug logs name provider/model ids only.
     """
+    if requested_model:
+        for upstream_model, provider_id, _account in binding.legs:
+            if requested_model == upstream_model:
+                logger.debug("gateway leg: model %s -> provider %s", upstream_model, provider_id)
+                return LegRoute(provider_id=provider_id, upstream_model=upstream_model)
     if (
         binding.subagent_model
         and binding.subagent_provider_id

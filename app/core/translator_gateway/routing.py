@@ -21,7 +21,13 @@ from __future__ import annotations
 import secrets
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+
+
+# (upstream_model, provider_id, account_id). account_id is stored for parity/
+# future use only — the gateway re-loads authoritative creds by provider_id at
+# request time and does NOT consume this account (same as provider_account_id).
+LegEntry = Tuple[str, str, Optional[str]]
 
 
 @dataclass(frozen=True)
@@ -39,11 +45,18 @@ class RouteBinding:
     ``subagent_model`` + ``subagent_provider_id`` are set, a gateway request for
     that exact model routes to ``subagent_provider_id``; every other request
     stays on the main ``provider_id``.
+
+    ``legs`` is the N-leg successor to those singular ``subagent_*`` fields: an
+    ordered tuple of ``LegEntry`` mapping upstream model ids to serving
+    providers. The singular ``subagent_*`` fields are deprecated and kept only
+    during the S1→S3 migration window (both representations coexist; only one is
+    ever populated by a given caller).
     """
 
     session_id: Optional[str]
     provider_id: str
     provider_account_id: Optional[str] = None
+    legs: Tuple[LegEntry, ...] = ()   # N-leg map (S3 successor to the singular subagent_* fields). Empty = no legs.
     subagent_provider_id: Optional[str] = None
     subagent_account_id: Optional[str] = None
     subagent_model: Optional[str] = None
@@ -68,6 +81,7 @@ class SessionTokenRegistry:
         provider_id: str,
         provider_account_id: Optional[str] = None,
         *,
+        legs: Tuple[LegEntry, ...] = (),
         subagent_provider_id: Optional[str] = None,
         subagent_account_id: Optional[str] = None,
         subagent_model: Optional[str] = None,
@@ -83,6 +97,7 @@ class SessionTokenRegistry:
             session_id=session_id or None,
             provider_id=provider_id,
             provider_account_id=provider_account_id,
+            legs=legs,
             subagent_provider_id=subagent_provider_id,
             subagent_account_id=subagent_account_id,
             subagent_model=subagent_model,
@@ -148,6 +163,7 @@ def mint_session_token(
     provider_id: str,
     provider_account_id: Optional[str] = None,
     *,
+    legs: Tuple[LegEntry, ...] = (),
     subagent_provider_id: Optional[str] = None,
     subagent_account_id: Optional[str] = None,
     subagent_model: Optional[str] = None,
@@ -156,6 +172,7 @@ def mint_session_token(
         session_id,
         provider_id,
         provider_account_id,
+        legs=legs,
         subagent_provider_id=subagent_provider_id,
         subagent_account_id=subagent_account_id,
         subagent_model=subagent_model,

@@ -227,12 +227,45 @@ class TestRouting:
         )
         assert a == b
 
+    # ── S1: the N-leg map on the binding (successor to the singular fields) ───
+
+    def test_mint_carries_legs(self):
+        legs = (("m1", "provA", None), ("m2", "provB", None))
+        token = routing.mint_session_token("sess", "main-prov", "acct", legs=legs)
+        b = routing.resolve(token)
+        assert b.provider_id == "main-prov"
+        assert b.legs == legs
+
+    def test_mint_without_legs_leaves_legs_empty(self):
+        token = routing.mint_session_token("sess", "main-prov")
+        b = routing.resolve(token)
+        assert b.legs == ()
+
+    def test_remint_same_main_different_legs_keeps_token_refreshes(self):
+        """Re-minting the SAME session whose main route (provider + account) is
+        unchanged but whose leg MAP differs keeps the token and refreshes the
+        map in place (same dedup branch the singular leg fields use)."""
+        l1 = (("m1", "provA", None),)
+        l2 = (("m2", "provB", None),)
+        a = routing.mint_session_token("sess", "main-prov", "acct", legs=l1)
+        b = routing.mint_session_token("sess", "main-prov", "acct", legs=l2)
+        assert a == b  # same token
+        assert routing.resolve(b).legs == l2
+
+    def test_remint_identical_legs_reuses_token(self):
+        legs = (("m1", "provA", None),)
+        a = routing.mint_session_token("sess", "main-prov", "acct", legs=legs)
+        b = routing.mint_session_token("sess", "main-prov", "acct", legs=legs)
+        assert a == b
+
 
 # ─── Chunk F: leg resolution (requested model → served leg) ──────────────────
 
 class TestResolveLegModel:
-    def _binding(self, **kw):
-        return routing.RouteBinding(session_id="s", provider_id="main-prov", **kw)
+    def _binding(self, *, legs=(), **kw):
+        return routing.RouteBinding(
+            session_id="s", provider_id="main-prov", legs=legs, **kw
+        )
 
     def test_subagent_model_match_routes_to_subagent_leg(self):
         binding = self._binding(
@@ -271,6 +304,52 @@ class TestResolveLegModel:
         leg = resolve_leg_model(binding, None)
         assert leg.provider_id == "main-prov"
         assert leg.upstream_model is None
+
+    # ── S1: the N-leg map path (checked before the singular fallback) ─────────
+
+    def test_legs_map_single_entry_routes(self):
+        binding = self._binding(legs=(("m1", "provA", None),))
+        leg = resolve_leg_model(binding, "m1")
+        assert leg == LegRoute(provider_id="provA", upstream_model="m1")
+
+    def test_legs_map_two_entries_route_independently(self):
+        binding = self._binding(legs=(("m1", "provA", None), ("m2", "provB", None)))
+        assert resolve_leg_model(binding, "m1") == LegRoute(
+            provider_id="provA", upstream_model="m1"
+        )
+        assert resolve_leg_model(binding, "m2") == LegRoute(
+            provider_id="provB", upstream_model="m2"
+        )
+
+    def test_legs_map_no_match_stays_main(self):
+        binding = self._binding(legs=(("m1", "provA", None), ("m2", "provB", None)))
+        leg = resolve_leg_model(binding, "other")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="other")
+
+    def test_legs_empty_map_stays_main(self):
+        binding = self._binding(legs=())
+        leg = resolve_leg_model(binding, "m1")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="m1")
+
+    def test_legs_map_first_wins_over_singular(self):
+        """The N-leg map is checked BEFORE the deprecated singular leg. A binding
+        carrying both, for the same model id, routes via the map — locking map
+        precedence for the S1→S3 migration window."""
+        binding = self._binding(
+            legs=(("m", "provMAP", None),),
+            subagent_provider_id="provSINGULAR",
+            subagent_model="m",
+        )
+        leg = resolve_leg_model(binding, "m")
+        assert leg == LegRoute(provider_id="provMAP", upstream_model="m")
+
+    def test_legs_collision_first_entry_wins(self):
+        """Two entries with the SAME model id but different providers: the FIRST
+        tuple entry wins deterministically. This documents the gateway's
+        order-scan guarantee that S5 collision-resolution relies on."""
+        binding = self._binding(legs=(("m", "provFIRST", None), ("m", "provSECOND", None)))
+        leg = resolve_leg_model(binding, "m")
+        assert leg == LegRoute(provider_id="provFIRST", upstream_model="m")
 
 
 # ─── spawn-env branch (S3) ───────────────────────────────────────────────────
