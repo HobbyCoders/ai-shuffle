@@ -206,7 +206,11 @@ async def create_connector(
     config = normalize_config(config, connector_type)
     encrypted_config = encrypt_config(config, connector_type)
 
-    # 5. Persist the connector
+    # 5. Persist the connector, pinned to this install so that — when two
+    # installs share one Postgres — only the install that created it starts the
+    # live client (see ConnectorManager.start_all).
+    from app.core.config import settings
+
     connector = database.create_connector(
         connector_id=connector_id,
         connector_type=connector_type,
@@ -214,6 +218,7 @@ async def create_connector(
         config=encrypted_config,
         events=events,
         api_user_id=api_user_id,
+        runner_id=settings.effective_instance_id,
     )
 
     if not connector:
@@ -276,8 +281,16 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
     if not updated:
         return None
 
-    # Restart if the connector is active and config was changed
-    if config_changed and updated.get("is_active"):
+    # Restart if the connector is active and config was changed — but only when
+    # this install owns (or claims) the connector, otherwise a config edit on a
+    # non-owning install would connect a duplicate live client here.
+    from app.core.config import settings
+    me = settings.effective_instance_id
+    runner_id = updated.get("runner_id")
+    owns_locally = runner_id == me or (
+        runner_id is None and database.claim_connector_runner(connector_id, me)
+    )
+    if config_changed and updated.get("is_active") and owns_locally:
         try:
             # Lazy import to avoid circular dependency
             from app.core.connectors.manager import connector_manager

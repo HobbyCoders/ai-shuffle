@@ -35,6 +35,7 @@
 	} from '$lib/api/connectors';
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
+	import { listInstalls } from '$lib/api/installs';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
 	import { toast } from '$lib/stores/toast';
 
@@ -45,6 +46,26 @@
 	let apiUsers: ApiUser[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+
+	// Multi-install affinity: which install runs each connector. `selfInstallId`
+	// is this install's id (from the cluster registry); `installNames` maps an
+	// install id to its friendly device name. Best-effort — a connector card
+	// only shows a "runs on <install>" badge when its runner_id is known AND
+	// differs from this install.
+	let selfInstallId = $state<string | null>(null);
+	let installNames: Record<string, string> = $state({});
+
+	function runnerBadgeLabel(connector: Connector): string | null {
+		const rid = connector.runner_id;
+		if (!rid) return null;
+		// Only surface the badge for connectors owned by a DIFFERENT install.
+		// If we can't resolve our own id, stay silent rather than mislabel a
+		// local connector as remote.
+		if (!selfInstallId || rid === selfInstallId) return null;
+		const name = installNames[rid];
+		const short = rid.length > 8 ? rid.slice(0, 8) : rid;
+		return `runs on ${name || short}`;
+	}
 
 	// UI state
 	let view: 'list' | 'add' | 'setup' | 'edit' = $state('list');
@@ -301,6 +322,19 @@
 			error = e.detail || 'Failed to load connectors';
 		} finally {
 			loading = false;
+		}
+
+		// Best-effort: resolve this install's id + peer device names so the card
+		// can label connectors that run on another install. A failure here must
+		// not affect the connectors list.
+		try {
+			const res = await listInstalls();
+			selfInstallId = res.self_instance_id;
+			const names: Record<string, string> = {};
+			for (const inst of res.installs) names[inst.id] = inst.device_name || inst.id;
+			installNames = names;
+		} catch {
+			// Leave selfInstallId null — badges stay hidden.
 		}
 	}
 
@@ -664,6 +698,15 @@
 												<span class={getStatusBadgeClass(connector.status)}>
 													{connector.status}
 												</span>
+												<!-- Runner affinity: only shown when this connector runs on a DIFFERENT install -->
+												{#if runnerBadgeLabel(connector)}
+													<span
+														class="connector-runner-badge"
+														title="This connector's live client runs on another install. Changes here apply on that install's next restart."
+													>
+														{runnerBadgeLabel(connector)}
+													</span>
+												{/if}
 											</div>
 
 											<!-- Event tags -->
@@ -1560,6 +1603,21 @@
 	.connector-item--deleting {
 		background: color-mix(in oklch, var(--destructive) 8%, transparent);
 		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
+	}
+
+	/* Muted "runs on <install>" badge — surfaced only for connectors whose live
+	   client is owned by another install (multi-install affinity). */
+	.connector-runner-badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 1px 6px;
+		font-size: 0.6875rem;
+		line-height: 1.4;
+		color: var(--muted-foreground);
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 9999px;
+		white-space: nowrap;
 	}
 
 	.connector-action-btn {

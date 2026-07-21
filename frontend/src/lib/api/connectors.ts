@@ -42,6 +42,12 @@ export interface Connector {
 	last_connected_at: string | null;
 	last_event_at: string | null;
 	failure_count: number;
+	// Install that owns/runs this connector's live client (multi-install
+	// affinity). null = unowned until claim-on-start assigns it.
+	runner_id?: string | null;
+	// Set only on start/stop/toggle responses when the calling install is NOT
+	// the runner: the install that will apply the change on its next restart.
+	applies_on?: string | null;
 	created_at: string;
 	updated_at: string;
 }

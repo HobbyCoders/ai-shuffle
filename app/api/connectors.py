@@ -186,6 +186,26 @@ async def delete_connector_endpoint(connector_id: str, token: str = Depends(requ
 
 # ---- Actions ----
 
+def _owns_local_runner(connector: Dict[str, Any]) -> bool:
+    """Whether THIS install may operate *connector*'s live client instance.
+
+    Multi-install affinity: two installs can share one Postgres, so only the
+    owning install may start/stop the live connector. Returns True when the
+    connector is already pinned to us, or when it is unowned (runner_id NULL)
+    and we win the atomic claim. Returns False when it is pinned to a different
+    install — the caller must then persist the is_active change but NOT touch a
+    local instance.
+    """
+    from app.core.config import settings
+    me = settings.effective_instance_id
+    runner_id = connector.get("runner_id")
+    if runner_id == me:
+        return True
+    if runner_id is None:
+        return database.claim_connector_runner(connector["id"], me)
+    return False
+
+
 @router.post("/{connector_id}/test", response_model=ConnectorTestResponse)
 async def test_connector_endpoint(connector_id: str, token: str = Depends(require_admin)):
     """Test a connector's connection."""
@@ -204,7 +224,18 @@ async def activate_connector(connector_id: str, token: str = Depends(require_adm
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
+    # Persist the enabled flag regardless of which install runs the live client.
     database.update_connector(connector_id, is_active=True)
+
+    # Only start the live client here if this install owns the connector (or
+    # claims an unowned one). If it is pinned to a DIFFERENT install, the flag is
+    # still persisted above; the owning install starts it on its next restart
+    # (KNOWN LIMITATION: no cross-install watcher yet).
+    if not _owns_local_runner(connector):
+        updated = database.get_connector(connector_id)
+        updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+        updated["applies_on"] = updated.get("runner_id")
+        return updated
 
     from app.core.connectors.manager import connector_manager
     success = await connector_manager.start_connector(connector_id)
@@ -229,12 +260,20 @@ async def deactivate_connector(connector_id: str, token: str = Depends(require_a
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-    from app.core.connectors.manager import connector_manager
-    await connector_manager.stop_connector(connector_id)
+    # Only stop the live client here if this install owns the connector. If it is
+    # pinned to a DIFFERENT install we still persist is_active=False below; the
+    # owning install stops it on its next restart (KNOWN LIMITATION: no
+    # cross-install watcher yet).
+    owns_locally = _owns_local_runner(connector)
+    if owns_locally:
+        from app.core.connectors.manager import connector_manager
+        await connector_manager.stop_connector(connector_id)
     database.update_connector(connector_id, is_active=False)
 
     updated = database.get_connector(connector_id)
     updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+    if not owns_locally:
+        updated["applies_on"] = updated.get("runner_id")
     return updated
 
 
@@ -246,11 +285,18 @@ async def restart_connector(connector_id: str, token: str = Depends(require_admi
     if not connector:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-    from app.core.connectors.manager import connector_manager
-    await connector_manager.restart_connector(connector_id)
+    # Only restart the live client here if this install owns the connector. If it
+    # is pinned to a DIFFERENT install, do nothing locally (KNOWN LIMITATION: no
+    # cross-install watcher yet — the owning install controls its own client).
+    owns_locally = _owns_local_runner(connector)
+    if owns_locally:
+        from app.core.connectors.manager import connector_manager
+        await connector_manager.restart_connector(connector_id)
 
     updated = database.get_connector(connector_id)
     updated["config"] = mask_config(updated.get("config", {}), updated.get("type", ""))
+    if not owns_locally:
+        updated["applies_on"] = updated.get("runner_id")
     return updated
 
 

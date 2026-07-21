@@ -29,6 +29,7 @@ class ConnectorRow(TypedDict):
     last_error: Optional[str]
     last_event_at: Optional[str]
     failure_count: int
+    runner_id: Optional[str]
     created_at: str
     updated_at: str
 
@@ -83,18 +84,43 @@ def create_connector(
     events: List[str],
     api_user_id: Optional[str] = None,
     is_active: bool = False,
+    runner_id: Optional[str] = None,
 ) -> Optional[ConnectorRow]:
-    """Create a new connector."""
+    """Create a new connector.
+
+    *runner_id* pins the connector to the install that created it, so that when
+    two installs share one Postgres only the owning install starts the live
+    client (see ConnectorManager.start_all). NULL means unowned — claim-on-start
+    will assign the first install that starts it.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, runner_id, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (connector_id, connector_type, name, api_user_id,
-             json.dumps(config), json.dumps(events), is_active, now, now)
+             json.dumps(config), json.dumps(events), is_active, runner_id, now, now)
         )
     return get_connector(connector_id)
+
+
+def claim_connector_runner(connector_id: str, runner_id: str) -> bool:
+    """Atomically claim an unowned connector for *runner_id*.
+
+    Sets ``runner_id`` only when it is currently NULL, in a single UPDATE so
+    that two installs racing to start the same connector cannot both win. Returns
+    True if this call claimed the connector (rowcount == 1), False if it was
+    already owned (by us or another install) and nothing was updated.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE connectors SET runner_id = %s, updated_at = %s WHERE id = %s AND runner_id IS NULL",
+            (runner_id, now, connector_id),
+        )
+        return cursor.rowcount > 0
 
 
 def get_connector(connector_id: str) -> Optional[ConnectorRow]:

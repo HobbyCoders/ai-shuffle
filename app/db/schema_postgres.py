@@ -896,6 +896,7 @@ def create_postgres_schema(cursor) -> None:
             last_error TEXT,
             last_event_at TIMESTAMP WITH TIME ZONE,
             failure_count INTEGER DEFAULT 0,
+            runner_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL

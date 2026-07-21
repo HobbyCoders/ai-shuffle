@@ -1362,6 +1362,13 @@ class Connector(ConnectorBase):
     last_connected_at: Optional[datetime] = None
     last_event_at: Optional[datetime] = None
     failure_count: int = 0
+    # Install that owns/runs this connector's live client (multi-install
+    # affinity). NULL = unowned until claim-on-start assigns it.
+    runner_id: Optional[str] = None
+    # Set only on start/stop/toggle responses when this install is NOT the
+    # runner: the id of the install that will apply the change on its next
+    # restart. KNOWN LIMITATION: there is no cross-install watcher yet.
+    applies_on: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

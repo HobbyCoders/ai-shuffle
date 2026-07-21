@@ -33,15 +33,48 @@ class ConnectorManager:
     # ------------------------------------------------------------------
 
     async def start_all(self) -> None:
-        """Load all active connectors from the database and start them."""
+        """Start the active connectors this install owns.
+
+        Two installs can share one Postgres, so we must not both connect the
+        same connector (that would duplicate every inbound reply). Each active
+        connector row carries a ``runner_id``:
+
+        * owned by us            → start it here.
+        * unowned (runner NULL)  → attempt an atomic claim; start only if we win
+                                   the race (self-heals pre-affinity NULL rows).
+        * owned by another install → skip; the owner starts it on its own boot.
+        """
+        from app.core.config import settings
+
+        me = settings.effective_instance_id
         connectors = database.get_active_connectors()
-        logger.info(f"Starting {len(connectors)} active connector(s)")
+        logger.info(
+            f"Evaluating {len(connectors)} active connector(s) for runner {me}"
+        )
 
         for conn_row in connectors:
+            cid = conn_row["id"]
+            runner_id = conn_row.get("runner_id")
             try:
-                await self.start_connector(conn_row["id"])
+                if runner_id == me:
+                    await self.start_connector(cid)
+                elif runner_id is None:
+                    # Race-safe claim: only the install whose UPDATE flips the
+                    # NULL owner starts it; losers skip.
+                    if database.claim_connector_runner(cid, me):
+                        logger.info(f"Claimed unowned connector {cid} for runner {me}")
+                        await self.start_connector(cid)
+                    else:
+                        logger.info(
+                            f"Connector {cid} claimed by another runner — skipping start"
+                        )
+                else:
+                    logger.info(
+                        f"Connector {cid} is pinned to runner {runner_id} "
+                        f"(this install is {me}) — skipping start"
+                    )
             except Exception as e:
-                logger.error(f"Failed to start connector {conn_row['id']}: {e}")
+                logger.error(f"Failed to start connector {cid}: {e}")
 
     async def shutdown_all(self) -> None:
         """Stop every running connector."""

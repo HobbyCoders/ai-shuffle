@@ -1258,6 +1258,15 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS runner_id TEXT")
         migrations_applied.append("artifacts.runner_id")
 
+    # Connector install affinity: which install owns/runs each connector so two
+    # installs sharing one Postgres don't both connect the same bot token and
+    # double-handle inbound messages. Additive/nullable TEXT, guarded so the
+    # ALTER never re-runs. Existing rows stay NULL — claim-on-start (see
+    # ConnectorManager.start_all) heals them by atomically claiming NULL owners.
+    if table_exists(cursor, "connectors") and not column_exists(cursor, "connectors", "runner_id"):
+        cursor.execute("ALTER TABLE connectors ADD COLUMN IF NOT EXISTS runner_id TEXT")
+        migrations_applied.append("connectors.runner_id")
+
     # Step B: placement backfill (hazard 1; A9 ruling, 07-14). Single
     # deterministic arm — idempotent via WHERE placement IS NULL:
     #   * Every session with a non-empty `instance_id` (this install's own
@@ -1675,6 +1684,7 @@ from app.db.webhooks import (  # noqa: F401
 
 from app.db.connectors import (  # noqa: F401
     create_connector,
+    claim_connector_runner,
     get_connector,
     get_all_connectors,
     get_active_connectors,
