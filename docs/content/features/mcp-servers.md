@@ -16,7 +16,7 @@ Key concepts:
 
 - **Three server types:** stdio (subprocess), SSE (Server-Sent Events), HTTP
 - **Multiple scopes:** USER (global), LOCAL (project root config), PROJECT (project-scoped config), and INSTALLED (per-project entries in `~/.claude.json`)
-- **Built-in servers:** AI Shuffle ships managed integrations (e.g. `claude-in-chrome`) that appear alongside configured servers
+- **Built-in servers:** AI Shuffle ships managed integrations (e.g. `browser`) that appear alongside configured servers
 - **Tool discovery:** MCP tools are automatically discovered and namespaced
 - **Admin-only management:** Creating, updating, deleting, and toggling servers requires admin privileges
 
@@ -92,7 +92,7 @@ Use for: servers installed for a project outside AI Shuffle's project config fil
 
 ### Built-in servers
 
-AI Shuffle also ships managed built-in integrations (currently `claude-in-chrome`) that are surfaced through the same API. These are not user-configured and cannot be created or deleted; they are enabled or disabled via the toggle endpoints and the global `settings.json` disable list.
+AI Shuffle also ships managed built-in integrations (currently `browser`, a login-less browser-automation server exposing `mcp__browser__*` tools) that are surfaced through the same API. These are not user-configured and cannot be created or deleted; they are enabled or disabled via the toggle endpoints and the global `settings.json` disable list.
 
 When listing MCP servers for a project, every scope is returned grouped by scope, plus a `total_count` that sums all of them:
 
