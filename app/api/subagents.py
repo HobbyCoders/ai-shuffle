@@ -2,6 +2,7 @@
 Global Subagent management API routes
 """
 
+import json
 from typing import List, Optional
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.db import database
 from app.api.auth import require_auth, require_admin
+from app.core.environment import is_gateway_servable
 
 router = APIRouter(prefix="/api/v1/subagents", tags=["Subagents"])
 
@@ -92,6 +94,91 @@ def _build_subagent_response(s: dict) -> SubagentResponse:
 # Subagent CRUD Endpoints
 # ============================================================================
 
+def _validate_subagent_model(model: Optional[str]) -> None:
+    """Validate a subagent's stored ``model`` value at create/update time.
+
+    A subagent ``model`` may take three shapes:
+      * ``None`` / empty — inherit the profile/session model (no-op here),
+      * a Claude alias or id (e.g. ``"sonnet"``, ``"claude-opus-4-8"``) — passed
+        through untouched; this shape is never validated here,
+      * a provider composite ``prov:<provider-id>:<model-id>`` — the only shape
+        validated: the provider must exist, be enabled, be gateway-servable
+        (OpenAI-, ChatGPT-, or Anthropic-API-type — the model routes through the
+        translator gateway), and ``<model-id>`` must be in the provider's curated
+        model list.
+
+    The MAIN provider's servability is deliberately NOT checked here — it is
+    profile-dependent and unknowable at subagent-edit time; that gate lives at
+    spawn as a silent leg-drop (see docs/SUBAGENT_MODEL_CONFIG_PLAN.md §S4).
+
+    Raises HTTP 400 on an invalid composite. No-op for inherit/Claude shapes.
+    """
+    if model is None or not model.strip():
+        return
+    if not model.startswith("prov:"):
+        return
+    remainder = model[len("prov:"):]
+    pid, sep, mid = remainder.partition(":")
+    if not pid or not sep or not mid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid provider model reference '{model}': expected the form "
+                f"'prov:<provider-id>:<model-id>'."
+            ),
+        )
+    row = database.get_model_provider(pid, include_token=False)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"The provider '{pid}' does not exist.",
+        )
+    if not row.get("enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"The provider '{row.get('name') or pid}' is disabled; enable it "
+                f"or pick a different provider."
+            ),
+        )
+    if not is_gateway_servable(row):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"A provider-pinned subagent model requires an OpenAI-, ChatGPT-, "
+                f"or Anthropic-API-type provider (the model routes through the "
+                f"translator gateway); provider '{row.get('name') or pid}' cannot "
+                f"serve subagent models."
+            ),
+        )
+    # Curated model ids — parsed the same defensive way as
+    # app.core.environment._first_curated_model_id (``models_json`` may be a
+    # parsed list of {id, label} dicts, a raw JSON string, or absent), but
+    # collecting ALL ids. An absent/empty/unparseable list means no composite
+    # can validate.
+    models = row.get("models_json")
+    if isinstance(models, str):
+        try:
+            models = json.loads(models)
+        except Exception:
+            models = None
+    curated_ids = set()
+    if isinstance(models, list):
+        for entry in models:
+            if isinstance(entry, dict):
+                entry_id = entry.get("id")
+                if isinstance(entry_id, str) and entry_id:
+                    curated_ids.add(entry_id)
+    if mid not in curated_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Model '{mid}' is not in provider "
+                f"'{row.get('name') or pid}''s curated model list."
+            ),
+        )
+
+
 @router.get("", response_model=List[SubagentResponse])
 async def list_subagents(token: str = Depends(require_auth)):
     """List all global subagents"""
@@ -122,6 +209,8 @@ async def create_subagent(request: SubagentCreateRequest, token: str = Depends(r
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Subagent already exists: {request.id}"
         )
+
+    _validate_subagent_model(request.model)
 
     subagent = database.create_subagent(
         subagent_id=request.id,
@@ -156,6 +245,8 @@ async def update_subagent(
     # Only pass fields that were explicitly provided in the request
     # This allows distinguishing between "not provided" and "set to null"
     fields = request.model_fields_set
+    if 'model' in fields:
+        _validate_subagent_model(request.model)
     subagent = database.update_subagent(
         subagent_id=subagent_id,
         name=request.name if 'name' in fields else ...,

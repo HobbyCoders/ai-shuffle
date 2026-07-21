@@ -1231,3 +1231,236 @@ class TestBuiltinSubagentSeeding:
 
             assert results.get("chat-history-summarizer") == "updated"
             mock_update.assert_called_once()
+
+
+# =============================================================================
+# Subagent Provider-Model Validation Tests (Chunk S4)
+# =============================================================================
+
+def _provider_row(
+    provider_id="prov-openai",
+    name="My OpenAI",
+    provider_type="openai",
+    enabled=True,
+    model_ids=("gpt-4o", "gpt-4o-mini"),
+):
+    """Build a model_providers row dict, mirroring the DB shape.
+
+    ``models_json`` is the parsed list of ``{id, label}`` dicts the DB layer
+    returns after JSON-column parsing.
+    """
+    return {
+        "id": provider_id,
+        "name": name,
+        "provider_type": provider_type,
+        "enabled": enabled,
+        "models_json": [{"id": mid, "label": mid} for mid in model_ids],
+    }
+
+
+def _created(subagent_id, model):
+    """Minimal created/updated subagent record for response building."""
+    return {
+        "id": subagent_id,
+        "name": "Sub",
+        "description": "Desc",
+        "prompt": "Prompt",
+        "tools": None,
+        "model": model,
+        "is_builtin": False,
+        "created_at": datetime(2024, 1, 1, 0, 0, 0),
+        "updated_at": datetime(2024, 1, 1, 0, 0, 0),
+    }
+
+
+class TestSubagentModelValidation:
+    """Test provider-pinned subagent model validation at create/update (S4)."""
+
+    def test_create_with_valid_composite(self, subagents_test_client):
+        """Composite pointing at an enabled+servable provider with a curated mid -> 201."""
+        composite = "prov:prov-openai:gpt-4o"
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.get_model_provider.return_value = _provider_row()
+            mock_db.create_subagent.return_value = _created("sub-a", composite)
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": composite,
+                },
+            )
+            assert response.status_code == 201
+            assert response.json()["model"] == composite
+            mock_db.get_model_provider.assert_called_once_with(
+                "prov-openai", include_token=False
+            )
+
+    def test_update_with_valid_composite(self, subagents_test_client):
+        """PUT with a valid composite -> 200."""
+        composite = "prov:prov-openai:gpt-4o"
+        existing = _created("sub-a", None)
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = existing
+            mock_db.get_model_provider.return_value = _provider_row()
+            mock_db.update_subagent.return_value = _created("sub-a", composite)
+            response = subagents_test_client.put(
+                "/api/v1/subagents/sub-a",
+                json={"model": composite},
+            )
+            assert response.status_code == 200
+            assert response.json()["model"] == composite
+
+    def test_create_composite_disabled_provider(self, subagents_test_client):
+        """Composite pointing at a disabled provider -> 400 mentioning disabled."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.get_model_provider.return_value = _provider_row(enabled=False)
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": "prov:prov-openai:gpt-4o",
+                },
+            )
+            assert response.status_code == 400
+            assert "disabled" in response.json()["detail"].lower()
+            mock_db.create_subagent.assert_not_called()
+
+    def test_create_composite_non_servable_provider(self, subagents_test_client):
+        """Composite pointing at a non-servable (openrouter) provider -> 400."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.get_model_provider.return_value = _provider_row(
+                provider_type="openrouter"
+            )
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": "prov:prov-openai:gpt-4o",
+                },
+            )
+            assert response.status_code == 400
+            assert "gateway" in response.json()["detail"].lower()
+            mock_db.create_subagent.assert_not_called()
+
+    def test_create_composite_model_not_curated(self, subagents_test_client):
+        """Composite whose mid is not in the curated list -> 400."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.get_model_provider.return_value = _provider_row(
+                model_ids=("gpt-4o",)
+            )
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": "prov:prov-openai:gpt-nonexistent",
+                },
+            )
+            assert response.status_code == 400
+            assert "curated" in response.json()["detail"].lower()
+            mock_db.create_subagent.assert_not_called()
+
+    def test_create_composite_missing_provider(self, subagents_test_client):
+        """Composite pointing at a provider that does not exist -> 400."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.get_model_provider.return_value = None
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": "prov:ghost:gpt-4o",
+                },
+            )
+            assert response.status_code == 400
+            assert "does not exist" in response.json()["detail"].lower()
+            mock_db.create_subagent.assert_not_called()
+
+    def test_create_plain_claude_alias_accepted(self, subagents_test_client):
+        """A plain Claude alias is never validated -> 201, provider lookup untouched."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            mock_db.create_subagent.return_value = _created("sub-a", "sonnet")
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": "sonnet",
+                },
+            )
+            assert response.status_code == 201
+            assert response.json()["model"] == "sonnet"
+            mock_db.get_model_provider.assert_not_called()
+
+    def test_update_plain_claude_alias_accepted(self, subagents_test_client):
+        """A plain Claude alias on update is never validated -> 200."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = _created("sub-a", None)
+            mock_db.update_subagent.return_value = _created("sub-a", "sonnet")
+            response = subagents_test_client.put(
+                "/api/v1/subagents/sub-a",
+                json={"model": "sonnet"},
+            )
+            assert response.status_code == 200
+            assert response.json()["model"] == "sonnet"
+            mock_db.get_model_provider.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "bad_composite",
+        ["prov:", "prov:onlypid", "prov::mid", "prov:pid:"],
+    )
+    def test_create_malformed_composite(self, subagents_test_client, bad_composite):
+        """Malformed composites -> 400 on create with the shape hint."""
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = None
+            response = subagents_test_client.post(
+                "/api/v1/subagents",
+                json={
+                    "id": "sub-a",
+                    "name": "Sub",
+                    "description": "Desc",
+                    "prompt": "Prompt",
+                    "model": bad_composite,
+                },
+            )
+            assert response.status_code == 400
+            assert "prov:<provider-id>:<model-id>" in response.json()["detail"]
+            mock_db.create_subagent.assert_not_called()
+
+    def test_update_omitting_model_skips_validation(self, subagents_test_client):
+        """PUT that omits model must not validate, even if stored model is now invalid."""
+        # Stored model is a composite that would fail validation, but the update
+        # touches only 'name' -> validation is not triggered.
+        existing = _created("sub-a", "prov:disabled-prov:gpt-4o")
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_subagent.return_value = existing
+            mock_db.update_subagent.return_value = _created(
+                "sub-a", "prov:disabled-prov:gpt-4o"
+            )
+            response = subagents_test_client.put(
+                "/api/v1/subagents/sub-a",
+                json={"name": "Renamed"},
+            )
+            assert response.status_code == 200
+            mock_db.get_model_provider.assert_not_called()
