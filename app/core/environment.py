@@ -736,6 +736,11 @@ def apply_provider_env(
             session_id,
             provider_id,
             provider.get("codex_account_id"),
+            # Only pass the main model for remap when the MAIN provider is itself
+            # translated; on an anthropic-passthrough main (anthropic main + foreign
+            # subagent legs), claude-* ids ARE servable by the main leg and must NOT
+            # be remapped.
+            main_upstream_model=(model if is_translated else None),
             legs=tuple(subagent_legs),
         )
     else:

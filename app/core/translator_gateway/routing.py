@@ -56,6 +56,12 @@ class RouteBinding:
     session_id: Optional[str]
     provider_id: str
     provider_account_id: Optional[str] = None
+    # The main provider's real upstream model id, set ONLY when the main provider
+    # is itself TRANSLATED (codex/openai). Used to remap a stray ``claude-*`` id
+    # (which a translated upstream cannot serve) onto the main leg's real model at
+    # leg resolution. ``None`` for an anthropic-passthrough main (claude-* ids ARE
+    # servable there and must pass through verbatim).
+    main_upstream_model: Optional[str] = None
     legs: Tuple[LegEntry, ...] = ()   # N-leg map (upstream_model -> serving provider). Empty = no legs.
 
 
@@ -78,6 +84,7 @@ class SessionTokenRegistry:
         provider_id: str,
         provider_account_id: Optional[str] = None,
         *,
+        main_upstream_model: Optional[str] = None,
         legs: Tuple[LegEntry, ...] = (),
     ) -> str:
         """Mint (or reuse) an opaque routing token bound to ``provider_id``.
@@ -91,6 +98,7 @@ class SessionTokenRegistry:
             session_id=session_id or None,
             provider_id=provider_id,
             provider_account_id=provider_account_id,
+            main_upstream_model=main_upstream_model,
             legs=legs,
         )
         with self._lock:
@@ -154,12 +162,14 @@ def mint_session_token(
     provider_id: str,
     provider_account_id: Optional[str] = None,
     *,
+    main_upstream_model: Optional[str] = None,
     legs: Tuple[LegEntry, ...] = (),
 ) -> str:
     return _REGISTRY.mint_session_token(
         session_id,
         provider_id,
         provider_account_id,
+        main_upstream_model=main_upstream_model,
         legs=legs,
     )
 

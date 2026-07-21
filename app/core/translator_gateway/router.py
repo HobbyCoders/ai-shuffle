@@ -88,11 +88,16 @@ def resolve_leg_model(
     """Decide which leg serves this request (Chunk F/S3, ruling A2).
 
     Resolution order: the N-leg ``legs`` map is checked FIRST (exact match on
-    the requested model → its provider + upstream id); then the MAIN leg (the
-    binding's ``provider_id`` with the requested model passed through unchanged
-    — byte-identical to pre-Chunk-F behavior for every non-leg session). The
-    gateway matches byte-for-byte with no alias normalization; unknown models
-    fall through to MAIN.
+    the requested model → its provider + upstream id); then, when the MAIN
+    provider is TRANSLATED, a stray ``claude-*`` / bare-alias id that matched no
+    leg is REMAPPED onto the main leg's real upstream model (a translated
+    upstream cannot serve a ``claude-*`` id — this is defense-in-depth alongside
+    the S8-R1 PreToolUse hook for paths a hook can't cover, e.g. nested
+    subagents); then the MAIN leg (the binding's ``provider_id`` with the
+    requested model passed through unchanged — byte-identical to pre-Chunk-F
+    behavior for every non-leg, non-translated session). The gateway matches
+    byte-for-byte with no alias normalization; unknown models fall through to
+    MAIN.
 
     Never logs a token; leg-resolution debug logs name provider/model ids only.
     """
@@ -101,6 +106,29 @@ def resolve_leg_model(
             if requested_model == upstream_model:
                 logger.debug("gateway leg: model %s -> provider %s", upstream_model, provider_id)
                 return LegRoute(provider_id=provider_id, upstream_model=upstream_model)
+        # Remap a stray claude-*/bare-alias id (matched no leg) onto the main
+        # leg's real model when the MAIN provider is translated and can't serve
+        # it. main_upstream_model is set only for a translated main (see
+        # environment.apply_provider_env), so an anthropic-passthrough main is
+        # untouched and claude-* ids pass through verbatim.
+        if (
+            binding.main_upstream_model
+            and requested_model != binding.main_upstream_model
+            and (
+                requested_model.startswith("claude-")
+                or requested_model in {"haiku", "sonnet", "opus", "fable"}
+            )
+        ):
+            logger.debug(
+                "gateway remap: unsupported model %s -> main model %s on provider %s",
+                requested_model,
+                binding.main_upstream_model,
+                binding.provider_id,
+            )
+            return LegRoute(
+                provider_id=binding.provider_id,
+                upstream_model=binding.main_upstream_model,
+            )
     return LegRoute(provider_id=binding.provider_id, upstream_model=requested_model)
 
 
@@ -256,8 +284,28 @@ async def create_message(request: Request):
         return _anthropic_error(exc.status_code, _err_type(exc.status_code), exc.message)
 
     # ── Anthropic passthrough (A.7 / G3 / F1): forward VERBATIM, no translation.
+    # Deliberately NOT oversize-guarded below: the real Anthropic API enforces its
+    # own context limits and returns a good actionable error, so we do not
+    # second-guess it here.
     if mode == "anthropic_passthrough":
         return await _handle_passthrough(leg.provider_id, body, stream)
+
+    # ── Oversize guard (translated modes only): a translated upstream rejects an
+    # over-window request with an opaque error. When the provider row declares a
+    # context_window, estimate the request locally and fail early with an
+    # actionable Anthropic-shaped 400 so the CLI can surface it. No window set →
+    # skip the guard entirely (no guessing).
+    window = provider.get("context_window")
+    if window:
+        est = count_tokens(body)
+        if est > int(window):
+            return _anthropic_error(
+                400,
+                "invalid_request_error",
+                f"This request is too large for the selected model: the gateway "
+                f"estimates ~{est} tokens, but the model's context window is "
+                f"{int(window)} tokens. Compact or shorten the conversation and retry.",
+            )
 
     # ── Codex / OpenAI: translate Anthropic Messages → Responses and back.
     responses_body = translate_request(

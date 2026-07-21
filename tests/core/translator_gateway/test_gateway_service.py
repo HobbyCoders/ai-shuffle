@@ -197,6 +197,32 @@ class TestRouting:
         b = routing.mint_session_token("sess", "main-prov", "acct", legs=legs)
         assert a == b
 
+    # ── S8-R remap: the binding carries the main provider's real model ─────────
+
+    def test_mint_carries_main_upstream_model(self):
+        token = routing.mint_session_token(
+            "sess", "main-prov", "acct", main_upstream_model="gpt-5.5",
+        )
+        b = routing.resolve(token)
+        assert b.main_upstream_model == "gpt-5.5"
+
+    def test_mint_without_main_upstream_model_is_none(self):
+        token = routing.mint_session_token("sess", "main-prov")
+        assert routing.resolve(token).main_upstream_model is None
+
+    def test_remint_same_main_different_main_upstream_model_keeps_token_refreshes(self):
+        """Re-minting the SAME session whose main route (provider + account) is
+        unchanged but whose ``main_upstream_model`` differs keeps the token and
+        refreshes the binding in place (a within-provider composer model switch)."""
+        a = routing.mint_session_token(
+            "sess", "main-prov", "acct", main_upstream_model="gpt-5.5",
+        )
+        b = routing.mint_session_token(
+            "sess", "main-prov", "acct", main_upstream_model="gpt-6",
+        )
+        assert a == b  # same token
+        assert routing.resolve(b).main_upstream_model == "gpt-6"
+
 
 # ─── Chunk F: leg resolution (requested model → served leg) ──────────────────
 
@@ -255,6 +281,49 @@ class TestResolveLegModel:
         binding = self._binding(legs=(("m", "provFIRST", None), ("m", "provSECOND", None)))
         leg = resolve_leg_model(binding, "m")
         assert leg == LegRoute(provider_id="provFIRST", upstream_model="m")
+
+    # ── S8-R remap: stray claude-*/alias id on a translated main → main model ──
+
+    def test_claude_id_remaps_to_main_model_on_translated_main(self):
+        binding = self._binding(main_upstream_model="gpt-5.5")
+        leg = resolve_leg_model(binding, "claude-3-5-haiku-20241022")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="gpt-5.5")
+
+    def test_bare_alias_remaps_to_main_model(self):
+        binding = self._binding(main_upstream_model="gpt-5.5")
+        leg = resolve_leg_model(binding, "haiku")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="gpt-5.5")
+
+    def test_claude_id_matching_a_leg_wins_no_remap(self):
+        """A claude-* id that EXACTLY matches a leg routes to that leg — the leg
+        scan runs before the remap, so the leg wins."""
+        binding = self._binding(
+            legs=(("claude-sonnet-4", "sub-prov", None),),
+            main_upstream_model="gpt-5.5",
+        )
+        leg = resolve_leg_model(binding, "claude-sonnet-4")
+        assert leg == LegRoute(provider_id="sub-prov", upstream_model="claude-sonnet-4")
+
+    def test_claude_id_no_main_upstream_model_passes_through(self):
+        """No ``main_upstream_model`` (anthropic-passthrough main) → old behavior:
+        the claude-* id passes through verbatim to the main leg."""
+        binding = self._binding()
+        leg = resolve_leg_model(binding, "claude-sonnet-4")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="claude-sonnet-4")
+
+    def test_non_claude_unknown_id_not_remapped(self):
+        """A non-claude, non-alias unknown id (e.g. a stray OpenAI id) is NOT
+        remapped even on a translated main — it passes through verbatim."""
+        binding = self._binding(main_upstream_model="gpt-5.5")
+        leg = resolve_leg_model(binding, "gpt-4o")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="gpt-4o")
+
+    def test_requested_equals_main_model_no_remap(self):
+        """When the requested id already IS the main upstream model, no remap
+        (the guard excludes it) — passes through verbatim."""
+        binding = self._binding(main_upstream_model="gpt-5.5")
+        leg = resolve_leg_model(binding, "gpt-5.5")
+        assert leg == LegRoute(provider_id="main-prov", upstream_model="gpt-5.5")
 
 
 # ─── spawn-env branch (S3) ───────────────────────────────────────────────────
@@ -529,6 +598,93 @@ class TestEndpoints:
         assert body["content"][0]["type"] == "text"
         assert body["content"][0]["text"] == "Hello world"
         assert body["usage"]["input_tokens"] == 10
+
+    # ── oversize guard (translated modes only) ────────────────────────────────
+
+    async def test_oversize_request_rejected_400(self, monkeypatch):
+        """A body estimated above the provider's context_window → 400 in the
+        Anthropic error shape, before any upstream call (finite → ASGI-safe)."""
+        token = routing.mint_session_token("sess", "prov")
+        streamed: List[str] = []
+
+        async def _fake_provider(provider_id):
+            return {
+                "id": provider_id, "provider_type": "chatgpt",
+                "auth_mode": "chatgpt", "context_window": 5,
+            }
+
+        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+            streamed.append(provider_id)
+            return _async_source(_canned_text_turn())
+
+        monkeypatch.setattr("app.core.translator_gateway.router._load_provider", _fake_provider)
+        monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)
+
+        big = "hello there this is a long message " * 50
+        async with await _client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "gpt-5-codex",
+                      "messages": [{"role": "user", "content": big}], "stream": False},
+            )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert not streamed  # rejected before any upstream dispatch
+
+    async def test_under_window_proceeds(self, monkeypatch):
+        """A body under the provider's context_window proceeds to translation and
+        the (stubbed) upstream as before."""
+        token = routing.mint_session_token("sess", "prov")
+
+        async def _fake_provider(provider_id):
+            return {
+                "id": provider_id, "provider_type": "chatgpt",
+                "auth_mode": "chatgpt", "context_window": 200000,
+            }
+
+        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+            return _async_source(_canned_text_turn())
+
+        monkeypatch.setattr("app.core.translator_gateway.router._load_provider", _fake_provider)
+        monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)
+
+        async with await _client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "gpt-5-codex",
+                      "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["content"][0]["text"] == "Hello world"
+
+    async def test_no_context_window_skips_guard(self, monkeypatch):
+        """No context_window on the provider row → guard skipped; even a large
+        body proceeds to the (stubbed) upstream (no guessing)."""
+        token = routing.mint_session_token("sess", "prov")
+
+        async def _fake_provider(provider_id):
+            return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
+
+        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+            return _async_source(_canned_text_turn())
+
+        monkeypatch.setattr("app.core.translator_gateway.router._load_provider", _fake_provider)
+        monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)
+
+        big = "hello there this is a long message " * 50
+        async with await _client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "gpt-5-codex",
+                      "messages": [{"role": "user", "content": big}], "stream": False},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["content"][0]["text"] == "Hello world"
 
 
 # ─── Chunk F: leg dispatch through the endpoint (stubbed provider + upstream) ─
