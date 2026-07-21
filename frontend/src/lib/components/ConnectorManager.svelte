@@ -612,7 +612,8 @@
 				<div class="space-y-2">
 					{#each connectors as connector (connector.id)}
 						<div
-							class="connector-item bg-card/30 rounded-lg border border-border transition-all"
+							class="connector-item"
+							class:connector-item--active={connector.is_active && deletingId !== connector.id}
 							class:connector-item--deleting={deletingId === connector.id}
 						>
 							<div class="p-3">
@@ -666,13 +667,9 @@
 											</div>
 
 											<!-- Event tags -->
-											<div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+											<div class="connector-event-chips">
 												{#each connector.events as event}
-													<span
-														class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded"
-													>
-														{event}
-													</span>
+													<span class="event-chip">{event}</span>
 												{/each}
 											</div>
 
@@ -717,14 +714,18 @@
 
 										<!-- Actions -->
 										<div class="flex items-center gap-1 flex-shrink-0">
-											<!-- Toggle Switch -->
+											<!-- Toggle Switch (canonical .switch pattern) -->
 											<button
-												class="toggle small"
-												class:active={connector.is_active}
+												type="button"
+												class="switch"
+												class:on={connector.is_active}
+												role="switch"
+												aria-checked={connector.is_active}
+												aria-label={connector.is_active ? 'Deactivate connector' : 'Activate connector'}
 												onclick={() => handleToggle(connector)}
 												title={connector.is_active ? 'Deactivate' : 'Activate'}
 											>
-												<span class="toggle-knob"></span>
+												<i></i>
 											</button>
 
 											<!-- Test -->
@@ -1538,12 +1539,22 @@
 	/* ========================================
 	   Connector List Items
 	   ======================================== */
+	/* Card matches the providers row system (.acct-row): muted surface,
+	   tokenized border/radius, green highlight when enabled. */
 	.connector-item {
-		transition: all 150ms ease;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		transition: border-color 150ms ease, background 150ms ease;
 	}
 
 	.connector-item:hover {
 		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+	}
+
+	.connector-item--active {
+		border-color: color-mix(in oklch, var(--success) 45%, var(--border));
+		background: color-mix(in oklch, var(--success) 7%, var(--muted));
 	}
 
 	.connector-item--deleting {
@@ -1564,64 +1575,9 @@
 		outline-offset: 2px;
 	}
 
-	/* ========================================
-	   Toggle Switch (matching SettingsCard)
-	   ======================================== */
-	.toggle {
-		position: relative;
-		width: 44px;
-		height: 24px;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		cursor: pointer;
-		transition: all 200ms ease;
-		flex-shrink: 0;
-	}
-
-	.toggle:hover {
-		border-color: var(--ring);
-	}
-
-	.toggle:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.toggle.active {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.toggle.small {
-		width: 36px;
-		height: 20px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-	}
-
-	.toggle-knob {
-		position: absolute;
-		top: 2px;
-		left: 2px;
-		width: 18px;
-		height: 18px;
-		background: var(--primary-foreground);
-		border-radius: 50%;
-		transition: transform 200ms ease;
-	}
-
-	.toggle.active .toggle-knob {
-		transform: translateX(20px);
-	}
-
-	.toggle.small .toggle-knob {
-		width: 14px;
-		height: 14px;
-	}
-
-	.toggle.small.active .toggle-knob {
-		transform: translateX(16px);
-	}
+	/* The enable/disable toggle reuses the app's canonical `.switch`
+	   pattern (button.switch > <i>), themed globally by StudioEditorShell's
+	   `.ed-content :global(.switch)` rules — no bespoke toggle CSS here. */
 
 	/* ========================================
 	   Type Badges
@@ -1835,6 +1791,30 @@
 	/* ========================================
 	   Variant Badges (Triggers, Actions, Tools)
 	   ======================================== */
+	/* Event names as small themed chips (was a bare Tailwind text row). */
+	.connector-event-chips {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		margin-top: 6px;
+	}
+
+	.event-chip {
+		display: inline-flex;
+		align-items: center;
+		font-family: var(--font-mono, monospace);
+		font-size: 10.5px;
+		font-weight: 500;
+		letter-spacing: 0.01em;
+		line-height: 1.4;
+		padding: 2px 7px;
+		border-radius: 6px;
+		color: var(--muted-foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+	}
+
 	.connector-variant-badges {
 		display: flex;
 		gap: 6px;
