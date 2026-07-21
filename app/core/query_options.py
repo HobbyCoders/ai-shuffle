@@ -33,6 +33,7 @@ from app.core.mcp_config import (  # noqa: F401
 )
 from app.core.agent_config import (  # noqa: F401
     resolve_note_references,
+    resolve_subagent_frontmatter_model,
 )
 from app.core.environment import (  # noqa: F401
     DEFAULT_SECURITY_INSTRUCTIONS,
@@ -46,6 +47,7 @@ from app.core.environment import (  # noqa: F401
     _build_env_with_ai_tools,
     apply_context_window_env,
     apply_provider_env,
+    assemble_subagent_legs,
     generate_environment_details,
 )
 
@@ -480,6 +482,10 @@ def build_options_from_profile(
     # All enabled agents are always sent — our definitions supersede CLI built-ins
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
+    # Raw subagent rows keyed by id, for the S3 leg-map assembler + frontmatter
+    # stamping below. Declared unconditionally (the stamping block reads it even
+    # when no agents are enabled).
+    enabled_subagents: Dict[str, Any] = {}
     logger.debug(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
     if enabled_agent_ids:
         agents_dict = {}
@@ -504,6 +510,7 @@ def build_options_from_profile(
                     agent_kwargs["initialPrompt"] = subagent["initial_prompt"]
                 agent_def = AgentDefinition(**agent_kwargs)
                 agents_dict[agent_id] = agent_def
+                enabled_subagents[agent_id] = subagent
                 logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
             else:
                 logger.warning(f"Subagent not found in database: {agent_id}")
@@ -598,6 +605,34 @@ def build_options_from_profile(
             # inherit (skip minting a redundant leg).
             subagent_provider = None
             subagent_model = None
+
+    # S3: on a PROVIDER (non-native) session, build the subagent leg-map from the
+    # profile-default leg + each enabled subagent's composite, and STAMP each
+    # enabled subagent's frontmatter model via the S2 resolver. The native branch
+    # below (``if not provider_id``) is untouched — a native session keeps each
+    # subagent's raw stored model exactly as today. ``honored_legs`` defaults to
+    # ``()`` so ``apply_provider_env`` gets an empty map on the native path.
+    honored_legs = ()
+    if provider_id:
+        main_provider_row = database.get_model_provider(
+            provider_id, include_token=False
+        )
+        plan = assemble_subagent_legs(
+            main_provider_row=main_provider_row,
+            default_leg_provider=subagent_provider,
+            default_leg_model=subagent_model,
+            enabled_subagents=enabled_subagents,
+        )
+        honored_legs = plan.honored_legs
+        honored_leg_models = {mid for mid, _pid, _acct in plan.honored_legs}
+        for agent_id, agent_def in (agents_dict or {}).items():
+            agent_def.model = resolve_subagent_frontmatter_model(
+                enabled_subagents.get(agent_id, {}).get("model"),
+                gateway_routed=True,
+                honored_leg_models=honored_leg_models,
+                session_default=plan.session_default,
+                main_serves_claude_ids=plan.main_serves_claude_ids,
+            )
 
     betas_to_use = []
 
@@ -708,17 +743,17 @@ def build_options_from_profile(
         apply_context_window_env(full_env, model_to_use)
     else:
         # Overlay the model-provider gateway env (base URL, bearer token,
-        # mitigation flags, small-fast/subagent model, optional window/output
-        # caps). Raises ProviderConfigError (a ValueError) for a missing/disabled
-        # provider or an undecryptable token — the query engines convert it into
-        # a user-visible error rather than silently running native Anthropic.
+        # mitigation flags, small-fast model, optional window/output caps) and
+        # thread the pre-honored subagent leg map into the routing token. Raises
+        # ProviderConfigError (a ValueError) for a missing/disabled provider or an
+        # undecryptable token — the query engines convert it into a user-visible
+        # error rather than silently running native Anthropic.
         apply_provider_env(
             full_env,
             provider_id,
             model_to_use,
             session_id=session_id,
-            subagent_provider_id=subagent_provider,
-            subagent_model=subagent_model,
+            subagent_legs=honored_legs,
         )
 
     ai_tool_env = full_env if full_env else None

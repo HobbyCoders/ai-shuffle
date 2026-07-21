@@ -151,81 +151,20 @@ class TestRouting:
         routing.get_registry().revoke_session("sess")
         assert routing.resolve(token) is None
 
-    # ── Chunk F: optional cross-provider subagent leg on the binding ──────────
-
-    def test_mint_carries_subagent_leg(self):
-        token = routing.mint_session_token(
-            "sess", "main-prov", "main-acct",
-            subagent_provider_id="sub-prov",
-            subagent_account_id="sub-acct",
-            subagent_model="gpt-5-codex",
-        )
-        b = routing.resolve(token)
-        assert b.provider_id == "main-prov"
-        assert b.subagent_provider_id == "sub-prov"
-        assert b.subagent_account_id == "sub-acct"
-        assert b.subagent_model == "gpt-5-codex"
-
-    def test_mint_without_leg_leaves_leg_fields_none(self):
-        token = routing.mint_session_token("sess", "main-prov")
-        b = routing.resolve(token)
-        assert b.subagent_provider_id is None
-        assert b.subagent_account_id is None
-        assert b.subagent_model is None
-
-    def test_remint_same_main_updates_leg_keeps_token(self):
-        """Re-minting the SAME session whose main route is unchanged but whose
-        subagent leg differs keeps the token and refreshes the leg in place."""
-        a = routing.mint_session_token(
-            "sess", "main-prov", "acct",
-            subagent_provider_id="sub-a", subagent_model="model-a",
-        )
-        b = routing.mint_session_token(
-            "sess", "main-prov", "acct",
-            subagent_provider_id="sub-b", subagent_model="model-b",
-        )
-        assert a == b  # same token
-        binding = routing.resolve(b)
-        assert binding.subagent_provider_id == "sub-b"
-        assert binding.subagent_model == "model-b"
-
-    def test_remint_dropping_leg_keeps_token(self):
-        """Removing the leg (same main route) also keeps the token, clearing it."""
-        a = routing.mint_session_token(
-            "sess", "main-prov", "acct",
-            subagent_provider_id="sub-a", subagent_model="model-a",
-        )
-        b = routing.mint_session_token("sess", "main-prov", "acct")
-        assert a == b
-        binding = routing.resolve(b)
-        assert binding.subagent_provider_id is None
-        assert binding.subagent_model is None
+    # ── Chunk F/S1: re-mint drops the stale token on a MAIN provider change ───
 
     def test_remint_main_provider_change_drops_stale_even_with_leg(self):
         """A change to the MAIN provider still drops the stale token (regression:
         the leg-update path must not swallow a genuine main-route change)."""
         a = routing.mint_session_token(
-            "sess", "prov1", "acct",
-            subagent_provider_id="sub", subagent_model="m",
+            "sess", "prov1", "acct", legs=(("m", "sub", None),),
         )
         b = routing.mint_session_token(
-            "sess", "prov2", "acct",
-            subagent_provider_id="sub", subagent_model="m",
+            "sess", "prov2", "acct", legs=(("m", "sub", None),),
         )
         assert a != b
         assert routing.resolve(a) is None
         assert routing.resolve(b).provider_id == "prov2"
-
-    def test_remint_identical_leg_reuses_token(self):
-        a = routing.mint_session_token(
-            "sess", "main-prov", "acct",
-            subagent_provider_id="sub", subagent_model="m",
-        )
-        b = routing.mint_session_token(
-            "sess", "main-prov", "acct",
-            subagent_provider_id="sub", subagent_model="m",
-        )
-        assert a == b
 
     # ── S1: the N-leg map on the binding (successor to the singular fields) ───
 
@@ -267,45 +206,23 @@ class TestResolveLegModel:
             session_id="s", provider_id="main-prov", legs=legs, **kw
         )
 
-    def test_subagent_model_match_routes_to_subagent_leg(self):
-        binding = self._binding(
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
-        )
-        leg = resolve_leg_model(binding, "gpt-5-codex")
-        assert leg == LegRoute(provider_id="sub-prov", upstream_model="gpt-5-codex")
-
     def test_other_model_stays_on_main_leg(self):
-        binding = self._binding(
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
-        )
+        binding = self._binding(legs=(("gpt-5-codex", "sub-prov", None),))
         leg = resolve_leg_model(binding, "claude-sonnet-4")
         assert leg == LegRoute(provider_id="main-prov", upstream_model="claude-sonnet-4")
 
-    def test_no_subagent_fields_passthrough(self):
+    def test_no_legs_passthrough(self):
         binding = self._binding()
         leg = resolve_leg_model(binding, "any-model")
         assert leg == LegRoute(provider_id="main-prov", upstream_model="any-model")
 
-    def test_subagent_model_set_but_provider_missing_stays_main(self):
-        """A leg needs BOTH fields; subagent_model alone must not reroute."""
-        binding = self._binding(subagent_model="gpt-5-codex")
-        leg = resolve_leg_model(binding, "gpt-5-codex")
-        assert leg.provider_id == "main-prov"
-
-    def test_subagent_provider_set_but_model_missing_stays_main(self):
-        binding = self._binding(subagent_provider_id="sub-prov")
-        leg = resolve_leg_model(binding, "gpt-5-codex")
-        assert leg.provider_id == "main-prov"
-
     def test_none_requested_model_stays_main(self):
-        binding = self._binding(
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex"
-        )
+        binding = self._binding(legs=(("gpt-5-codex", "sub-prov", None),))
         leg = resolve_leg_model(binding, None)
         assert leg.provider_id == "main-prov"
         assert leg.upstream_model is None
 
-    # ── S1: the N-leg map path (checked before the singular fallback) ─────────
+    # ── S1: the N-leg map path ────────────────────────────────────────────────
 
     def test_legs_map_single_entry_routes(self):
         binding = self._binding(legs=(("m1", "provA", None),))
@@ -330,18 +247,6 @@ class TestResolveLegModel:
         binding = self._binding(legs=())
         leg = resolve_leg_model(binding, "m1")
         assert leg == LegRoute(provider_id="main-prov", upstream_model="m1")
-
-    def test_legs_map_first_wins_over_singular(self):
-        """The N-leg map is checked BEFORE the deprecated singular leg. A binding
-        carrying both, for the same model id, routes via the map — locking map
-        precedence for the S1→S3 migration window."""
-        binding = self._binding(
-            legs=(("m", "provMAP", None),),
-            subagent_provider_id="provSINGULAR",
-            subagent_model="m",
-        )
-        leg = resolve_leg_model(binding, "m")
-        assert leg == LegRoute(provider_id="provMAP", upstream_model="m")
 
     def test_legs_collision_first_entry_wins(self):
         """Two entries with the SAME model id but different providers: the FIRST
@@ -391,9 +296,10 @@ class TestSpawnEnvBranch:
         assert env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
         assert env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] == "1"
-        # R4 small/fast + subagent still set from the curated model.
+        # R4 small/fast still set from the curated model; S3 no longer emits
+        # CLAUDE_CODE_SUBAGENT_MODEL (unstamped Task subagents inherit MAIN).
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "gpt-5-codex"
-        assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "gpt-5-codex"
+        assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
 
     def test_openai_routes_to_loopback_gateway(self, mock_db):
         from app.core.config import settings
@@ -658,7 +564,7 @@ class TestLegDispatch:
         loaded, streamed = self._stub(monkeypatch)
         token = routing.mint_session_token(
             "sess", "main-prov",
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+            legs=(("gpt-5-codex", "sub-prov", None),),
         )
         async with await _client() as c:
             resp = await c.post(
@@ -678,7 +584,7 @@ class TestLegDispatch:
         loaded, streamed = self._stub(monkeypatch)
         token = routing.mint_session_token(
             "sess", "main-prov",
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+            legs=(("gpt-5-codex", "sub-prov", None),),
         )
         async with await _client() as c:
             resp = await c.post(
@@ -698,7 +604,7 @@ class TestLegDispatch:
         loaded, _ = self._stub(monkeypatch)
         token = routing.mint_session_token(
             "sess", "main-prov",
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+            legs=(("gpt-5-codex", "sub-prov", None),),
         )
         async with await _client() as c:
             sub = await c.post(
@@ -755,7 +661,7 @@ class TestLegDispatch:
 
         token = routing.mint_session_token(
             "sess", "main-prov",
-            subagent_provider_id="sub-prov", subagent_model="gpt-5-codex",
+            legs=(("gpt-5-codex", "sub-prov", None),),
         )
         async with await _client() as c:
             # MAIN model → anthropic_passthrough against the MAIN provider row.

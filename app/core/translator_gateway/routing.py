@@ -38,28 +38,19 @@ class RouteBinding:
     when known at mint time); the gateway re-reads authoritative credentials from
     the provider row at request time regardless.
 
-    Chunk F (ruling A2/G2-r): a session may optionally name a cross-provider
-    SUBAGENT leg — a *second* provider that serves requests for one specific
-    upstream model (``subagent_model``). The leg is derived from profile config
-    at spawn time and lives ONLY here (never persisted on the session row). When
-    ``subagent_model`` + ``subagent_provider_id`` are set, a gateway request for
-    that exact model routes to ``subagent_provider_id``; every other request
-    stays on the main ``provider_id``.
-
-    ``legs`` is the N-leg successor to those singular ``subagent_*`` fields: an
-    ordered tuple of ``LegEntry`` mapping upstream model ids to serving
-    providers. The singular ``subagent_*`` fields are deprecated and kept only
-    during the S1→S3 migration window (both representations coexist; only one is
-    ever populated by a given caller).
+    Chunk F/S3 (ruling A2/G2-r): a session may optionally carry a cross-provider
+    SUBAGENT leg map — additional providers that each serve requests for one
+    specific upstream model. ``legs`` is an ordered tuple of ``LegEntry`` mapping
+    upstream model ids to serving providers; it is derived from profile config at
+    spawn time and lives ONLY here (never persisted on the session row). A gateway
+    request for a model named by some leg routes to that leg's provider; every
+    other request stays on the main ``provider_id``.
     """
 
     session_id: Optional[str]
     provider_id: str
     provider_account_id: Optional[str] = None
-    legs: Tuple[LegEntry, ...] = ()   # N-leg map (S3 successor to the singular subagent_* fields). Empty = no legs.
-    subagent_provider_id: Optional[str] = None
-    subagent_account_id: Optional[str] = None
-    subagent_model: Optional[str] = None
+    legs: Tuple[LegEntry, ...] = ()   # N-leg map (upstream_model -> serving provider). Empty = no legs.
 
 
 class SessionTokenRegistry:
@@ -82,25 +73,19 @@ class SessionTokenRegistry:
         provider_account_id: Optional[str] = None,
         *,
         legs: Tuple[LegEntry, ...] = (),
-        subagent_provider_id: Optional[str] = None,
-        subagent_account_id: Optional[str] = None,
-        subagent_model: Optional[str] = None,
     ) -> str:
         """Mint (or reuse) an opaque routing token bound to ``provider_id``.
 
-        Chunk F: re-minting for the SAME session whose MAIN route (provider +
-        account) is unchanged but whose subagent leg differs keeps the same
-        token and refreshes the stored binding's leg fields in place. A change
-        to the main provider/account still drops the stale token (as before).
+        Chunk F/S3: re-minting for the SAME session whose MAIN route (provider +
+        account) is unchanged but whose subagent leg map differs keeps the same
+        token and refreshes the stored binding's ``legs`` in place. A change to
+        the main provider/account still drops the stale token (as before).
         """
         binding = RouteBinding(
             session_id=session_id or None,
             provider_id=provider_id,
             provider_account_id=provider_account_id,
             legs=legs,
-            subagent_provider_id=subagent_provider_id,
-            subagent_account_id=subagent_account_id,
-            subagent_model=subagent_model,
         )
         with self._lock:
             if binding.session_id is not None:
@@ -114,8 +99,8 @@ class SessionTokenRegistry:
                         and prior.provider_id == binding.provider_id
                         and prior.provider_account_id == binding.provider_account_id
                     ):
-                        # Same main route; only the subagent leg changed (Chunk
-                        # F). Keep the token, refresh the leg fields in place.
+                        # Same main route; only the subagent leg map changed
+                        # (Chunk F/S3). Keep the token, refresh ``legs`` in place.
                         self._by_token[existing] = binding
                         return existing
                     # Main provider/account for this session changed — drop the
@@ -164,18 +149,12 @@ def mint_session_token(
     provider_account_id: Optional[str] = None,
     *,
     legs: Tuple[LegEntry, ...] = (),
-    subagent_provider_id: Optional[str] = None,
-    subagent_account_id: Optional[str] = None,
-    subagent_model: Optional[str] = None,
 ) -> str:
     return _REGISTRY.mint_session_token(
         session_id,
         provider_id,
         provider_account_id,
         legs=legs,
-        subagent_provider_id=subagent_provider_id,
-        subagent_account_id=subagent_account_id,
-        subagent_model=subagent_model,
     )
 
 

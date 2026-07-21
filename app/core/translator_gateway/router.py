@@ -85,15 +85,14 @@ def resolve_leg_model(
     binding: routing.RouteBinding,
     requested_model: Optional[str],
 ) -> LegRoute:
-    """Decide which leg serves this request (Chunk F, ruling A2).
+    """Decide which leg serves this request (Chunk F/S3, ruling A2).
 
     Resolution order: the N-leg ``legs`` map is checked FIRST (exact match on
-    the requested model → its provider + upstream id); then the deprecated
-    singular subagent leg (``subagent_model`` + ``subagent_provider_id``) as an
-    S1→S3 fallback; then the MAIN leg (the binding's ``provider_id`` with the
-    requested model passed through unchanged — byte-identical to pre-Chunk-F
-    behavior for every non-leg session). The gateway matches byte-for-byte with
-    no alias normalization; unknown models fall through to MAIN.
+    the requested model → its provider + upstream id); then the MAIN leg (the
+    binding's ``provider_id`` with the requested model passed through unchanged
+    — byte-identical to pre-Chunk-F behavior for every non-leg session). The
+    gateway matches byte-for-byte with no alias normalization; unknown models
+    fall through to MAIN.
 
     Never logs a token; leg-resolution debug logs name provider/model ids only.
     """
@@ -102,20 +101,6 @@ def resolve_leg_model(
             if requested_model == upstream_model:
                 logger.debug("gateway leg: model %s -> provider %s", upstream_model, provider_id)
                 return LegRoute(provider_id=provider_id, upstream_model=upstream_model)
-    if (
-        binding.subagent_model
-        and binding.subagent_provider_id
-        and requested_model == binding.subagent_model
-    ):
-        logger.debug(
-            "gateway leg: subagent model %s → provider %s",
-            binding.subagent_model,
-            binding.subagent_provider_id,
-        )
-        return LegRoute(
-            provider_id=binding.subagent_provider_id,
-            upstream_model=binding.subagent_model,
-        )
     return LegRoute(provider_id=binding.provider_id, upstream_model=requested_model)
 
 

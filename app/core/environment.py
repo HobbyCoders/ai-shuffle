@@ -11,13 +11,19 @@ import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, NamedTuple, Sequence, List, Tuple, TYPE_CHECKING
 
 from app.db import database
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
 from app.core.model_registry import has_1m_context
+
+if TYPE_CHECKING:
+    # Type-only import (no runtime coupling): the leg-map assembler and the
+    # apply_provider_env signature annotate with LegEntry, but the routing module
+    # is imported lazily at call time to match the existing lazy pattern.
+    from app.core.translator_gateway.routing import LegEntry
 
 logger = logging.getLogger(__name__)
 
@@ -436,14 +442,153 @@ def is_gateway_servable(provider: Optional[Dict[str, Any]]) -> bool:
     return ptype in ("openai", "chatgpt", "anthropic") or auth_mode == "chatgpt"
 
 
+def _small_fast_model(provider: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The STABLE provider-scoped small/fast model id, or None.
+
+    Resolution chain (never the per-turn ``model``): the provider's
+    ``small_fast_model`` → ``default_model`` → first curated model id. Shared by
+    the ``ANTHROPIC_SMALL_FAST_MODEL`` overlay and the S3 leg assembler's
+    session-default fallback so both agree on one value. Forward-references
+    ``_first_curated_model_id`` (defined below) — resolved at call time, matching
+    the module's existing helper-ordering convention.
+    """
+    if not provider:
+        return None
+    return (
+        provider.get("small_fast_model")
+        or provider.get("default_model")
+        or _first_curated_model_id(provider)
+    )
+
+
+class SubagentLegPlan(NamedTuple):
+    """The result of assembling a gateway session's subagent leg-map (S3).
+
+    ``honored_legs`` is the ordered N-leg map handed to ``apply_provider_env`` /
+    the routing token — the profile-default leg FIRST, then per-enabled-subagent
+    composite legs, deduped on the exact ``(mid, pid, acct)`` tuple. ``dropped``
+    records non-servable/disabled candidates for a single aggregate log (ids
+    only). ``session_default`` is the frontmatter fallback stamped on any
+    unpinned / not-honored subagent (the honored default-leg model if present,
+    else the main provider's small/fast id). ``main_serves_claude_ids`` is True
+    only for an anthropic-type main (its gateway can route bare Claude ids).
+    """
+
+    honored_legs: List["LegEntry"]      # default leg FIRST, then enabled-subagent legs
+    dropped: List[Tuple[str, str]]      # (subagent_id | "<profile-default-leg>", provider_id)
+    session_default: Optional[str]      # honored default-leg mid if honored, else main small_fast
+    main_serves_claude_ids: bool        # main provider_type == "anthropic"
+
+
+def assemble_subagent_legs(
+    *,
+    main_provider_row: Optional[Dict[str, Any]],
+    default_leg_provider: Optional[str],
+    default_leg_model: Optional[str],
+    enabled_subagents: Dict[str, Dict[str, Any]],
+) -> SubagentLegPlan:
+    """Build the gateway leg-map for a provider session from the profile-default
+    subagent leg + each enabled subagent's ``prov:<pid>:<mid>`` composite.
+
+    The default leg is emitted FIRST (so its provider wins a same-model collision
+    on the gateway's first-match scan — S5 will formalize collision handling), then
+    each enabled subagent whose stored model is a servable+enabled ``prov:``
+    composite. Legs are pre-honored here (servable + enabled, accounts resolved) so
+    ``apply_provider_env`` trusts them without re-gating. If the MAIN provider is
+    not gateway-servable, the WHOLE map is dropped (A2). Non-servable/disabled
+    candidates are collected and logged ONCE (ids only, never tokens).
+    """
+    from app.core.translator_gateway.routing import LegEntry
+
+    main_servable = is_gateway_servable(main_provider_row)
+    small_fast = _small_fast_model(main_provider_row)
+    main_serves_claude_ids = (main_provider_row or {}).get("provider_type") == "anthropic"
+
+    honored_legs: List[LegEntry] = []
+    dropped: List[Tuple[str, str]] = []
+    default_leg_mid: Optional[str] = None
+
+    if not main_servable:
+        # A2: a non-servable main cannot host ANY gateway leg — drop the whole map.
+        if default_leg_provider:
+            dropped.append(("<profile-default-leg>", default_leg_provider))
+        for agent_id, subagent in enabled_subagents.items():
+            raw = subagent.get("model")
+            if raw and raw.startswith("prov:"):
+                remainder = raw[len("prov:"):]
+                pid, sep, mid = remainder.partition(":")
+                if sep and mid:
+                    dropped.append((agent_id, pid))
+        if dropped:
+            logger.error(
+                "Dropping %d non-servable/disabled subagent leg(s): %s",
+                len(dropped),
+                dropped,
+            )
+        return SubagentLegPlan([], dropped, small_fast, main_serves_claude_ids)
+
+    # Main is servable: build the DEFAULT leg first, then per-subagent composites.
+    if default_leg_provider and default_leg_model:
+        dl_row = database.get_model_provider(default_leg_provider, include_token=False)
+        if dl_row and is_gateway_servable(dl_row) and dl_row.get("enabled"):
+            acct = (
+                dl_row.get("codex_account_id")
+                if (dl_row.get("provider_type") == "chatgpt" or dl_row.get("auth_mode") == "chatgpt")
+                else None
+            )
+            honored_legs.append((default_leg_model, default_leg_provider, acct))
+            default_leg_mid = default_leg_model
+        else:
+            dropped.append(("<profile-default-leg>", default_leg_provider))
+
+    for agent_id, subagent in enabled_subagents.items():
+        raw = subagent.get("model")
+        if not raw or not raw.startswith("prov:"):
+            continue
+        remainder = raw[len("prov:"):]
+        pid, sep, mid = remainder.partition(":")
+        if not sep or not mid:
+            continue
+        pid_row = database.get_model_provider(pid, include_token=False)
+        if pid_row and is_gateway_servable(pid_row) and pid_row.get("enabled"):
+            acct = (
+                pid_row.get("codex_account_id")
+                if (pid_row.get("provider_type") == "chatgpt" or pid_row.get("auth_mode") == "chatgpt")
+                else None
+            )
+            honored_legs.append((mid, pid, acct))
+        else:
+            dropped.append((agent_id, pid))
+
+    session_default = default_leg_mid if default_leg_mid is not None else small_fast
+
+    # Dedup EXACT-duplicate (mid, pid, acct) tuples, preserving first occurrence.
+    # (Same-mid/different-pid collision handling is S5's job — not collapsed here.)
+    deduped: List[LegEntry] = []
+    seen: set = set()
+    for leg in honored_legs:
+        if leg not in seen:
+            seen.add(leg)
+            deduped.append(leg)
+    honored_legs = deduped
+
+    if dropped:
+        logger.error(
+            "Dropping %d non-servable/disabled subagent leg(s): %s",
+            len(dropped),
+            dropped,
+        )
+
+    return SubagentLegPlan(honored_legs, dropped, session_default, main_serves_claude_ids)
+
+
 def apply_provider_env(
     env: Dict[str, str],
     provider_id: str,
     model: Optional[str],
     session_id: Optional[str] = None,
     *,
-    subagent_provider_id: Optional[str] = None,
-    subagent_model: Optional[str] = None,
+    subagent_legs: "Sequence[LegEntry]" = (),
 ) -> Dict[str, str]:
     """Overlay a non-Anthropic model-provider's gateway env vars onto ``env``
     (in place) so the bundled Claude Code CLI talks to that gateway instead of
@@ -462,12 +607,14 @@ def apply_provider_env(
       ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
     - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` / ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
       (clamped ≥100k)
-    - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` + ``CLAUDE_CODE_SUBAGENT_MODEL`` set to
-      ``small_fast_model or default_model or first curated model id`` (a STABLE
-      provider-scoped value, NEVER the per-turn ``model``) so background probes /
-      title-gen / subagents never send an unknown Claude alias to the gateway,
-      and a within-provider composer switch doesn't churn these keys into a
-      subagent-killing respawn. Left unset if no curated models either.
+    - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` set to ``small_fast_model or
+      default_model or first curated model id`` (a STABLE provider-scoped value,
+      NEVER the per-turn ``model``) so background probes / title-gen never send an
+      unknown Claude alias to the gateway, and a within-provider composer switch
+      doesn't churn the key into a subagent-killing respawn. Left unset if no
+      curated models either. ``CLAUDE_CODE_SUBAGENT_MODEL`` is NO LONGER emitted
+      (S3): subagent model selection moved to per-agent frontmatter stamping, so
+      an unstamped CLI built-in Task subagent inherits the MAIN model.
 
     The provider's ``extra_env_json`` entries are applied FIRST, then the forced
     values LAST, so extra_env can never clobber the ``ANTHROPIC_API_KEY=""``
@@ -489,30 +636,26 @@ def apply_provider_env(
     ``base_url`` is set (some self-hosted gateways are unauthenticated); the
     token is then the empty string.
 
-    Chunk F (ruling A2/G2-r): an OPTIONAL cross-provider SUBAGENT leg. When
-    ``subagent_provider_id`` + ``subagent_model`` are both set AND both the main
-    and the subagent provider rows are gateway-servable (see
-    :func:`is_gateway_servable`), the leg is HONORED: the session is routed
-    through the gateway, the routing token carries the leg (so a request for
-    ``subagent_model`` routes to that other provider) and
-    ``CLAUDE_CODE_SUBAGENT_MODEL`` is set to ``subagent_model`` — overriding the
-    small-fast fallback for THAT variable only. ``ANTHROPIC_SMALL_FAST_MODEL``
-    keeps its existing chain (small/fast probes stay on the main provider).
+    S3 (ruling A2/G2-r): an OPTIONAL N-leg subagent map, ``subagent_legs`` — an
+    ordered sequence of ``LegEntry`` = ``(upstream_model, provider_id,
+    account_id)``. The caller (query_options) assembles and PRE-HONORS these legs
+    via :func:`assemble_subagent_legs` (servable + enabled, accounts resolved,
+    whole-map dropped for a non-servable main), so this function trusts them and
+    does not re-gate. When ``subagent_legs`` is non-empty the session is routed
+    through the gateway and the routing token carries the whole map (so a request
+    for any leg's ``upstream_model`` routes to that leg's provider); every other
+    request stays on the main ``provider_id``. ``ANTHROPIC_SMALL_FAST_MODEL``
+    keeps its existing main-provider chain (small/fast probes stay on the main).
 
     This is what makes the flagship mixed case work: an anthropic-type MAIN
-    (real Anthropic API key) with a foreign (e.g. Codex) subagent leg. A bare
-    anthropic main is servable but NOT ``is_translated``, so without a leg it
-    keeps the direct-base_url path (byte-identical to today); a servable leg
-    pulls it onto the gateway, where the main is served by anthropic_passthrough
-    at request time (reading the real key from the provider row — never env).
-
-    If EITHER side is not gateway-servable (a custom/unknown main type, or the
-    subagent row is missing / not servable), the leg is DROPPED with one logged
-    error (ids/types only, never tokens): the main keeps its own routing
-    (direct or, for a translated main, gateway-without-leg) and
-    ``CLAUDE_CODE_SUBAGENT_MODEL`` is NOT set from the dropped leg. The caller
-    (query_options) still applies its own A2 pre-check (a native main cannot host
-    a leg) before threading the leg here.
+    (real Anthropic API key) with one or more foreign (e.g. Codex) subagent legs.
+    A bare anthropic main is servable but NOT ``is_translated``, so without a leg
+    it keeps the direct-base_url path (byte-identical to today); a non-empty leg
+    map pulls it onto the gateway, where the main is served by
+    anthropic_passthrough at request time (reading the real key from the provider
+    row — never env). Per-agent frontmatter (stamped by the caller via the S2
+    resolver) is what points each subagent at its leg's model; this function only
+    threads the leg map into the routing token.
     """
     provider = database.get_model_provider(provider_id, include_token=True)
     if not provider:
@@ -537,64 +680,18 @@ def apply_provider_env(
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
-    # A provider row is *gateway-servable* iff the translator gateway can serve
-    # it (openai/chatgpt/anthropic, or a chatgpt auth_mode) — mirrors
-    # upstream.provider_mode's accepted set. ``anthropic`` is servable (via
-    # anthropic_passthrough) but is NOT ``is_translated``: a bare anthropic
-    # session stays on the direct-base_url path below (byte-identical to today);
-    # ONLY a cross-provider subagent leg pulls it onto the gateway (see below).
-    main_servable = is_gateway_servable(provider)
-
-    # Chunk F: a cross-provider subagent leg is active only when BOTH fields are
-    # present (mirrors the gateway's leg-resolution rule). The leg is HONORED
-    # only when BOTH the main and the subagent provider rows are gateway-servable
-    # — the gateway is the only thing that can route the second leg. When either
-    # side is not servable (custom/unknown main type, or the subagent row is
-    # missing / not servable), the leg is DROPPED: we log one error (ids/types
-    # only, never tokens) and keep the main provider's own routing (direct for a
-    # bare anthropic/custom main, gateway for a translated main) exactly as if no
-    # leg had been supplied — and CLAUDE_CODE_SUBAGENT_MODEL is NOT set from the
-    # dropped leg.
-    has_subagent_leg = bool(subagent_provider_id and subagent_model)
-    subagent_account_id: Optional[str] = None
-    leg_honored = False
-    if has_subagent_leg:
-        sub_row = database.get_model_provider(subagent_provider_id, include_token=False)
-        sub_servable = is_gateway_servable(sub_row)
-        if main_servable and sub_servable:
-            leg_honored = True
-            # Resolve the leg's account id (chatgpt-type leg → its codex account,
-            # like the main leg).
-            if (
-                sub_row.get("provider_type") == "chatgpt"
-                or sub_row.get("auth_mode") == "chatgpt"
-            ):
-                subagent_account_id = sub_row.get("codex_account_id")
-        else:
-            logger.error(
-                "Dropping cross-provider subagent leg: main provider %r "
-                "(type=%r, servable=%s) / subagent provider %r (type=%r, "
-                "servable=%s). A cross-provider subagent leg requires BOTH the "
-                "main and the subagent model on a gateway-servable provider "
-                "(OpenAI-, ChatGPT-, or Anthropic-API-type). Continuing without "
-                "the leg.",
-                provider_id,
-                provider_type,
-                main_servable,
-                subagent_provider_id,
-                (sub_row or {}).get("provider_type"),
-                sub_servable,
-            )
 
     # Route through the loopback translator gateway when the main provider is
-    # itself translated (openai/chatgpt) OR an honored subagent leg needs the
-    # gateway to serve its second leg. The latter is the flagship anthropic-main
-    # + foreign-subagent case: the main leg is served via anthropic_passthrough at
-    # request time, which reads the REAL Anthropic API key straight from the
-    # provider row — so we deliberately do NOT put that key in env in this mode.
-    # A bare anthropic/custom main with no honored leg keeps the direct path
-    # below, byte-identical to pre-Chunk-F behavior.
-    route_through_gateway = is_translated or leg_honored
+    # itself translated (openai/chatgpt) OR the caller supplied a non-empty
+    # subagent leg map that needs the gateway to serve its extra legs. The latter
+    # is the flagship anthropic-main + foreign-subagent case: the main leg is
+    # served via anthropic_passthrough at request time, which reads the REAL
+    # Anthropic API key straight from the provider row — so we deliberately do NOT
+    # put that key in env in this mode. A bare anthropic/custom main with no legs
+    # keeps the direct path below, byte-identical to pre-Chunk-F behavior. The
+    # legs are already pre-honored (servable + enabled) by the caller's
+    # assemble_subagent_legs, so we do not re-gate them here.
+    route_through_gateway = is_translated or bool(subagent_legs)
 
     if route_through_gateway:
         from app.core.translator_gateway import routing
@@ -605,9 +702,7 @@ def apply_provider_env(
             session_id,
             provider_id,
             provider.get("codex_account_id"),
-            subagent_provider_id=subagent_provider_id if leg_honored else None,
-            subagent_account_id=subagent_account_id,
-            subagent_model=subagent_model if leg_honored else None,
+            legs=tuple(subagent_legs),
         )
     else:
         base_url = provider.get("base_url")
@@ -672,26 +767,20 @@ def apply_provider_env(
             str(max(int(context_window), 100000)),
         )
 
-    # R4: point the small/fast + subagent models at something the gateway knows.
-    # Fall back to a STABLE provider-scoped value (never the per-turn `model`): a
-    # within-provider composer model switch must not change these overlay keys,
-    # or requires_reconnect() forces a respawn that kills background subagents.
-    small_fast = (
-        provider.get("small_fast_model")
-        or provider.get("default_model")
-        or _first_curated_model_id(provider)
-    )
+    # R4: point the small/fast model at something the gateway knows. Fall back to
+    # a STABLE provider-scoped value (never the per-turn `model`): a within-provider
+    # composer model switch must not change this overlay key, or
+    # requires_reconnect() forces a respawn that kills background subagents.
+    small_fast = _small_fast_model(provider)
     if small_fast:
         env["ANTHROPIC_SMALL_FAST_MODEL"] = small_fast
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = small_fast
 
-    # Chunk F: an HONORED cross-provider subagent leg overrides ONLY the subagent
-    # model var (so subagents run on the other provider); ANTHROPIC_SMALL_FAST_MODEL
-    # keeps the main-provider chain above (small/fast probes stay on the main
-    # leg). Applied last so it wins over the small_fast fallback for this key. A
-    # DROPPED leg (main or subagent not gateway-servable) never touches this key.
-    if leg_honored:
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
+    # S3: CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT emitted here. Subagent
+    # model selection moved to per-agent frontmatter stamping (the caller stamps
+    # each enabled subagent's `model:` via the S2 resolver, and threads the
+    # honored leg map into the routing token above). An unstamped CLI built-in
+    # Task subagent therefore inherits the MAIN model rather than a provider-wide
+    # small/fast override.
 
     return env
 
