@@ -292,6 +292,70 @@ class TestUpdate:
         assert resp.status_code in (400, 422), resp.text
 
 
+class TestBaseUrlNormalization:
+    """OpenRouter's canonical base is https://openrouter.ai/api (the CLI appends
+    ``/v1/messages``). Stale UI bundles seeded ``.../api/v1`` — the write path
+    strips a trailing ``/v1`` on openrouter rows so enrollments self-heal. Other
+    provider types are stored verbatim."""
+
+    def test_create_openrouter_strips_trailing_v1(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "OpenRouter",
+            "provider_type": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["base_url"] == "https://openrouter.ai/api"
+
+    def test_create_openrouter_strips_trailing_v1_with_slash(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "OpenRouter",
+            "provider_type": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1/",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["base_url"] == "https://openrouter.ai/api"
+
+    def test_patch_openrouter_strips_trailing_v1(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "OpenRouter",
+            "provider_type": "openrouter",
+            "base_url": "https://openrouter.ai/api",
+        })
+        provider_id = resp.json()["id"]
+        resp = authenticated_client.patch(
+            f"{ROOT}/{provider_id}", json={"base_url": "https://openrouter.ai/api/v1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["base_url"] == "https://openrouter.ai/api"
+
+    def test_custom_type_base_url_not_normalized(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "Custom",
+            "provider_type": "custom",
+            "base_url": "https://gw.example/api/v1",
+        })
+        assert resp.status_code == 200, resp.text
+        # A non-openrouter row keeps its /v1 suffix verbatim.
+        assert resp.json()["base_url"] == "https://gw.example/api/v1"
+
+    def test_patch_without_base_url_leaves_it_untouched(self, authenticated_client, mock_db):
+        _unlock_encryption(mock_db)
+        resp = authenticated_client.post(ROOT, json={
+            "name": "OpenRouter",
+            "provider_type": "openrouter",
+            "base_url": "https://openrouter.ai/api",
+        })
+        provider_id = resp.json()["id"]
+        resp = authenticated_client.patch(f"{ROOT}/{provider_id}", json={"name": "Renamed"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["base_url"] == "https://openrouter.ai/api"
+
+
 class TestDelete:
     def test_delete_happy_path(self, authenticated_client, mock_db):
         _unlock_encryption(mock_db)

@@ -105,7 +105,7 @@ class FetchModelsResponse(BaseModel):
     """Result of a catalog fetch for a provider.
 
     ``source`` is ``"preset"`` for a ChatGPT/Codex provider (built-in roster, no
-    network) or ``"upstream"`` for a live ``GET {base_url}/models`` fetch. The UI
+    network) or ``"upstream"`` for a live ``GET {base_url}/v1/models`` fetch. The UI
     check-selects from ``models`` and PATCHes the curated subset via the normal
     update route — this endpoint never persists anything.
     """
@@ -179,6 +179,18 @@ def _validate_extra_env(extra_env: Optional[Dict[str, str]]) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="extra_env must be an object of string to string",
             )
+
+
+def _normalize_base_url(provider_type: Optional[str], base_url: Optional[str]) -> Optional[str]:
+    """OpenRouter's canonical base is https://openrouter.ai/api (the CLI appends
+    /v1/messages). Older UI bundles seeded .../api/v1 — strip a trailing /v1 on
+    openrouter rows so stale enrollments self-heal. Other types stay verbatim."""
+    if provider_type != "openrouter" or not isinstance(base_url, str) or not base_url:
+        return base_url
+    trimmed = base_url.rstrip("/")
+    if trimmed.endswith("/v1"):
+        trimmed = trimmed[: -len("/v1")]
+    return trimmed
 
 
 def _encrypt_token_or_400(token: str) -> str:
@@ -298,7 +310,13 @@ async def fetch_upstream_models(
     *,
     client: Optional[httpx.AsyncClient] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch + normalize a provider's ``GET {base_url}/models`` catalog.
+    """Fetch + normalize a provider's ``GET {base_url}/v1/models`` catalog.
+
+    Every provider that reaches this function (openrouter / custom /
+    anthropic-with-base — chatgpt/openai types get presets, see
+    ``app/core/model_catalog_presets.py``) is anthropic-compatible with the
+    convention ``{base_url}/v1/messages``, so the catalog lives at
+    ``{base_url}/v1/models``.
 
     Injectable ``client`` (an ``httpx.AsyncClient`` over a ``MockTransport`` in
     tests) mirrors the ``app.core.codex_oauth`` convention; production passes the
@@ -306,7 +324,7 @@ async def fetch_upstream_models(
     ``Authorization: Bearer``. Raises :class:`UpstreamModelsError` on any non-2xx
     or transport failure.
     """
-    url = base_url.rstrip("/") + "/models"
+    url = base_url.rstrip("/") + "/v1/models"
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     owns_client = client is None
@@ -369,11 +387,13 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
 
     provider_id = str(uuid.uuid4())
 
+    base_url = _normalize_base_url(body.provider_type, body.base_url)
+
     row = db.create_model_provider(
         provider_id=provider_id,
         name=body.name,
         provider_type=body.provider_type,
-        base_url=body.base_url,
+        base_url=base_url,
         auth_token=encrypted_token,
         models=body.models,
         default_model=body.default_model,
@@ -412,7 +432,12 @@ async def update_provider(
     if body.provider_type is not None:
         updates["provider_type"] = body.provider_type
     if body.base_url is not None:
-        updates["base_url"] = body.base_url
+        effective_type = (
+            body.provider_type
+            if body.provider_type is not None
+            else existing.get("provider_type")
+        )
+        updates["base_url"] = _normalize_base_url(effective_type, body.base_url)
     if body.models is not None:
         updates["models_json"] = body.models
     if body.default_model is not None:
@@ -504,7 +529,7 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
     Two sources, one endpoint:
       * ChatGPT/Codex provider (``auth_mode == "chatgpt"``) → the built-in preset
         roster, no network call (the roster is server-enforced upstream, F3).
-      * Any other provider → live ``GET {base_url}/models`` with the provider's
+      * Any other provider → live ``GET {base_url}/v1/models`` with the provider's
         decrypted auth token as ``Authorization: Bearer``.
 
     This route RETURNS the list only — the admin check-selects and persists the

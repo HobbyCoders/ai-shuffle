@@ -217,7 +217,7 @@ class TestUpstreamPath:
         assert resp.status_code == 200, resp.text
         # The DECRYPTED plaintext token must ride the request, not the enc: blob.
         assert captured["auth"] == f"Bearer {RAW_TOKEN}"
-        assert captured["url"] == "https://openrouter.ai/api/models"
+        assert captured["url"] == "https://openrouter.ai/api/v1/models"
 
     def test_encryption_locked_returns_400(self, authenticated_client, mock_db, monkeypatch):
         # Provider carries a token blob, but encryption is NOT unlocked → cannot

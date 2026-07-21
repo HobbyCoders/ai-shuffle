@@ -63,7 +63,7 @@
 			const created = await createModelProvider({
 				name: 'OpenRouter',
 				provider_type: 'openrouter',
-				base_url: 'https://openrouter.ai/api/v1',
+				base_url: 'https://openrouter.ai/api',
 				auth_token: token
 			});
 			createdId = created.id;
