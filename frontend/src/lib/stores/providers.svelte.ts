@@ -351,6 +351,21 @@ export const providers = {
 				addAccountMakeActive: false
 			}));
 			await providers.loadClaudeAccounts();
+			// Multiple Claude accounts are no longer allowed: a new sign-in replaces the
+			// session, so prune every non-active sibling left behind by the add. The
+			// active account is always kept; each delete is best-effort (a failure just
+			// leaves that stale row, which the UI's single-account model tolerates).
+			let pruned = false;
+			for (const acc of _state.claudeAccounts) {
+				if (acc.is_active) continue;
+				try {
+					await deleteClaudeAccount(acc.id);
+					pruned = true;
+				} catch {
+					// Swallow — best-effort prune; a leftover sibling is non-fatal.
+				}
+			}
+			if (pruned) await providers.loadClaudeAccounts();
 			// If the new account became active, the app's live credentials changed —
 			// refresh the token-valid stores.
 			if (wasMadeActive) await auth.checkAuth();
@@ -408,6 +423,31 @@ export const providers = {
 			if (wasActive) await auth.checkAuth();
 		} catch (e) {
 			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to delete account') }));
+		}
+	},
+
+	/**
+	 * Fully disconnect the Claude subscription: delete EVERY saved account. The
+	 * backend refuses to delete the active account while inactive siblings remain
+	 * (409 "switch first"), so every inactive account is deleted first and the
+	 * active one last — deleting the sole active account logs the Claude auth out.
+	 * Afterwards refresh the account list and re-check auth (the live credentials
+	 * are gone). A failure surfaces via `accountsError`.
+	 */
+	async disconnectClaude() {
+		_update((s) => ({ ...s, accountsError: '' }));
+		try {
+			const accounts = _state.claudeAccounts;
+			const inactive = accounts.filter((a) => !a.is_active);
+			const active = accounts.filter((a) => a.is_active);
+			// Inactive first, active last (delete-order contract above).
+			for (const acc of [...inactive, ...active]) {
+				await deleteClaudeAccount(acc.id);
+			}
+			await providers.loadClaudeAccounts();
+			await auth.checkAuth();
+		} catch (e) {
+			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to disconnect Claude') }));
 		}
 	},
 

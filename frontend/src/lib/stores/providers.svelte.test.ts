@@ -21,7 +21,11 @@ const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	toggleModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
-	listClaudeAccounts: vi.fn()
+	listClaudeAccounts: vi.fn(),
+	deleteClaudeAccount: vi.fn(),
+	startAddClaudeAccount: vi.fn(),
+	completeAddClaudeAccount: vi.fn(),
+	getAuthStatus: vi.fn()
 }));
 
 vi.mock('$lib/api/model-providers', async (importOriginal) => {
@@ -35,7 +39,14 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 
 vi.mock('$lib/api/auth', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/api/auth')>();
-	return { ...actual, listClaudeAccounts: mocks.listClaudeAccounts };
+	return {
+		...actual,
+		listClaudeAccounts: mocks.listClaudeAccounts,
+		deleteClaudeAccount: mocks.deleteClaudeAccount,
+		startAddClaudeAccount: mocks.startAddClaudeAccount,
+		completeAddClaudeAccount: mocks.completeAddClaudeAccount,
+		getAuthStatus: mocks.getAuthStatus
+	};
 });
 
 vi.mock('$lib/constants/models.svelte', async (importOriginal) => {
@@ -71,7 +82,12 @@ beforeEach(() => {
 	mocks.toggleModelProvider.mockReset();
 	mocks.hydrateModelRegistry.mockReset();
 	mocks.listClaudeAccounts.mockReset();
+	mocks.deleteClaudeAccount.mockReset();
+	mocks.startAddClaudeAccount.mockReset();
+	mocks.completeAddClaudeAccount.mockReset();
+	mocks.getAuthStatus.mockReset();
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
+	mocks.getAuthStatus.mockResolvedValue({ authenticated: true });
 	providers.clear();
 });
 
@@ -199,6 +215,109 @@ describe('providers store — Anthropic API key integration', () => {
 		expect(providers.current.anthropicKeySet).toBe(false);
 		expect(providers.current.anthropicKeyMasked).toBe(null);
 		expect(providers.current.claudeCodeAuthMethod).toBe('account');
+
+		vi.unstubAllGlobals();
+	});
+});
+
+describe('providers store — Claude single-account lifecycle', () => {
+	function acct(id: string, isActive: boolean): ClaudeAccount {
+		return {
+			id,
+			email: `${id}@example.com`,
+			is_active: isActive,
+			sync_pending: false,
+			expires_at: null,
+			has_refresh_token: true,
+			subscription_type: 'pro'
+		} as unknown as ClaudeAccount;
+	}
+
+	it('disconnectClaude deletes inactive accounts before the active one, then refreshes + re-checks auth', async () => {
+		// Seed three accounts: two inactive, one active.
+		mocks.listClaudeAccounts.mockResolvedValueOnce({
+			accounts: [acct('i1', false), acct('i2', false), acct('a1', true)],
+			active_account_id: 'a1',
+			encryption_ready: true
+		});
+		await providers.loadClaudeAccounts();
+		expect(providers.current.claudeAccounts.length).toBe(3);
+
+		mocks.deleteClaudeAccount.mockResolvedValue(undefined);
+		// After all deletes, the refresh sees an empty list (auth logged out).
+		mocks.listClaudeAccounts.mockResolvedValueOnce({
+			accounts: [],
+			active_account_id: null,
+			encryption_ready: true
+		});
+
+		await providers.disconnectClaude();
+
+		// Every account deleted, inactive first and the active one LAST.
+		expect(mocks.deleteClaudeAccount).toHaveBeenCalledTimes(3);
+		const deletedOrder = mocks.deleteClaudeAccount.mock.calls.map((c) => c[0]);
+		expect(deletedOrder).toEqual(['i1', 'i2', 'a1']);
+		expect(deletedOrder[deletedOrder.length - 1]).toBe('a1');
+
+		// Refresh (2nd list call) + auth re-check both ran.
+		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
+		expect(mocks.getAuthStatus).toHaveBeenCalledTimes(1);
+		expect(providers.current.claudeAccounts).toEqual([]);
+		expect(providers.current.accountsError).toBe('');
+	});
+
+	it('disconnectClaude surfaces a failure via accountsError', async () => {
+		mocks.listClaudeAccounts.mockResolvedValueOnce({
+			accounts: [acct('a1', true)],
+			active_account_id: 'a1',
+			encryption_ready: true
+		});
+		await providers.loadClaudeAccounts();
+
+		mocks.deleteClaudeAccount.mockRejectedValueOnce({ detail: 'switch first' });
+
+		await providers.disconnectClaude();
+
+		expect(providers.current.accountsError).toBe('switch first');
+		// No refresh/auth-recheck after the failed delete.
+		expect(mocks.getAuthStatus).not.toHaveBeenCalled();
+	});
+
+	it('completeAddAccount prunes inactive siblings after a successful add', async () => {
+		vi.stubGlobal('open', vi.fn());
+
+		// Open the add-account flow so addAccountState is populated.
+		mocks.startAddClaudeAccount.mockResolvedValueOnce({
+			success: true,
+			oauth_url: 'https://claude.ai/oauth',
+			state: 'st-1'
+		});
+		await providers.startAddAccount();
+		providers.setAddAccountCode('paste-code');
+
+		mocks.completeAddClaudeAccount.mockResolvedValueOnce(undefined);
+		// 1st list (post-complete): the newly-active account plus a stale sibling.
+		mocks.listClaudeAccounts.mockResolvedValueOnce({
+			accounts: [acct('old', false), acct('new', true)],
+			active_account_id: 'new',
+			encryption_ready: true
+		});
+		mocks.deleteClaudeAccount.mockResolvedValue(undefined);
+		// 2nd list (post-prune): only the active account remains.
+		mocks.listClaudeAccounts.mockResolvedValueOnce({
+			accounts: [acct('new', true)],
+			active_account_id: 'new',
+			encryption_ready: true
+		});
+
+		await providers.completeAddAccount();
+
+		// Only the inactive sibling was pruned; the active account was kept.
+		expect(mocks.deleteClaudeAccount).toHaveBeenCalledTimes(1);
+		expect(mocks.deleteClaudeAccount).toHaveBeenCalledWith('old');
+		// Refreshed once after complete, once after pruning.
+		expect(mocks.listClaudeAccounts).toHaveBeenCalledTimes(2);
+		expect(providers.current.claudeAccounts).toEqual([acct('new', true)]);
 
 		vi.unstubAllGlobals();
 	});

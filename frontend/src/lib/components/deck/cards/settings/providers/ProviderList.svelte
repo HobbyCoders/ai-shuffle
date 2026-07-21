@@ -18,9 +18,9 @@
 	 *        - ChatGPT subscription (auth_mode='chatgpt'): native-auth, status pill,
 	 *          no toggle, "Sign in / Reconnect" (opens the `ChatGptDeviceFlow` modal
 	 *          in reconnect mode against the existing row), removable.
-	 *        - gateway rows (OpenRouter / OpenAI / custom): enable toggle, "Manage
-	 *          models" (no-op this chunk — Chunk 7 wires the drawer), Edit (opens
-	 *          the real `ProviderEditForm`), and Remove.
+	 *        - gateway rows (OpenRouter / OpenAI / custom): "Manage models" (no-op
+	 *          this chunk — Chunk 7 wires the drawer), Edit (opens the real
+	 *          `ProviderEditForm`), and Remove.
 	 *
 	 * All mutations funnel through the store so the model registry re-hydrates
 	 * (landmine L4). Row presentation lives in `ProviderRow`; this component owns
@@ -34,11 +34,11 @@
 	import type { ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import ProviderRow from './ProviderRow.svelte';
-	import ClaudeAccountsPanel from './ClaudeAccountsPanel.svelte';
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
 	import ProviderEditForm from './ProviderEditForm.svelte';
 	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
+	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 
 	const s = $derived(providers.current);
 
@@ -52,9 +52,16 @@
 	// authenticated account OR at least one saved account.
 	let claudeRowVisible = $derived($claudeAuthenticated || s.claudeAccounts.length > 0);
 
+	// The single Claude account backing the subscription row — the active one, or
+	// the sole saved account when none is flagged active. Multiple accounts are no
+	// longer allowed; this is the one row we render.
+	const claudeAccount = $derived(s.claudeAccounts.find((a) => a.is_active) ?? s.claudeAccounts[0]);
+
 	// ----- Transient view state (component-local) -----
-	// Whether the Claude subscription row's saved-accounts panel is expanded.
-	let claudeExpanded = $state(false);
+	// Whether the Claude sign-in modal is open.
+	let claudeSignInOpen = $state(false);
+	// Whether the Claude subscription row is armed for delete (inline confirm).
+	let confirmDeleteClaude = $state(false);
 	// Whether the Anthropic-key row's replace-key panel is expanded.
 	let keyEditOpen = $state(false);
 	// Whether the Anthropic-key row is armed for delete (inline confirm).
@@ -69,6 +76,8 @@
 	let reconnectId = $state<string | null>(null);
 	// True while the reconnect device flow has an operation in flight — guards close.
 	let reconnectBusy = $state(false);
+	// True while the Claude sign-in flow has an operation in flight — guards close.
+	let claudeSignInBusy = $state(false);
 
 	// Fullscreen at handheld widths for the reconnect modal (mirrors AddProviderModal).
 	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
@@ -77,6 +86,7 @@
 	// Esc fires on keydown within the dialog container, which only receives events
 	// while focus is inside it — so focus it on open (AddProviderModal precedent).
 	let reconnectDialogEl = $state<HTMLDivElement | null>(null);
+	let claudeSignInDialogEl = $state<HTMLDivElement | null>(null);
 
 	onMount(() => {
 		const onResize = () => (viewportWidth = window.innerWidth);
@@ -88,12 +98,22 @@
 	$effect(() => {
 		if (reconnectId !== null) reconnectDialogEl?.focus();
 	});
+	$effect(() => {
+		if (claudeSignInOpen) claudeSignInDialogEl?.focus();
+	});
 
 	function closeReconnect() {
 		if (!reconnectBusy) reconnectId = null;
 	}
 	function handleReconnectKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') closeReconnect();
+	}
+
+	function closeClaudeSignIn() {
+		if (!claudeSignInBusy) claudeSignInOpen = false;
+	}
+	function handleClaudeSignInKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeClaudeSignIn();
 	}
 
 	// Token present but expired/invalid: the credential exists (so
@@ -152,8 +172,17 @@
 	}
 
 	// ----- Actions -----
-	function onManageAccounts() {
-		claudeExpanded = !claudeExpanded;
+	// Claude subscription delete: inline-confirm (parity with the ChatGPT rows),
+	// then fully disconnect via the store (deletes every saved account).
+	function armDeleteClaude() {
+		confirmDeleteClaude = true;
+	}
+	function cancelDeleteClaude() {
+		confirmDeleteClaude = false;
+	}
+	async function confirmDeleteClaude_() {
+		confirmDeleteClaude = false;
+		await providers.disconnectClaude();
 	}
 
 	// Anthropic-key row: Edit toggles the replace-key panel; delete is inline-confirmed.
@@ -205,18 +234,27 @@
 	{#if claudeRowVisible}
 		<li class="prov-item">
 			<ProviderRow
-				title="Claude subscription"
+				title="Claude"
 				badge="Subscription"
 				iconKind="claude"
 				status={claudeStatus}
 				highlight={claudeHighlight}
-				onManageAccounts={onManageAccounts}
-				expanded={claudeExpanded}
+				meta={claudeAccount?.email
+					? `${claudeAccount.email}${claudeAccount.sync_pending ? ' · sync pending' : ''}`
+					: undefined}
+				onSignIn={() => (claudeSignInOpen = true)}
+				signInLabel={tokenExpired ? 'Reconnect' : 'Sign in'}
+				onRemove={s.claudeAccounts.length > 0 ? armDeleteClaude : undefined}
+				confirmingDelete={confirmDeleteClaude}
+				onConfirmDelete={confirmDeleteClaude_}
+				onCancelDelete={cancelDeleteClaude}
 			/>
-			{#if claudeExpanded}
-				<div class="prov-sub">
-					<ClaudeAccountsPanel />
-				</div>
+			{#if !s.accountsEncryptionReady}
+				<p class="prov-note warn">
+					Encryption is locked — log in again as admin to manage the Claude account.
+				</p>
+			{:else if s.accountsError}
+				<p class="prov-note err">{s.accountsError}</p>
 			{/if}
 		</li>
 	{/if}
@@ -281,19 +319,14 @@
 					<ManageModelsDrawer provider={p} onClose={() => (manageModelsId = null)} />
 				{/if}
 			{:else}
-				<!-- Gateway row: enable toggle + manage-models(no-op) + edit + remove. -->
+				<!-- Gateway row: manage-models(no-op) + edit + remove. -->
 				<ProviderRow
 					title={p.name}
 					badge={badgeFor(kind)}
 					iconKind="server"
-					status={p.enabled ? { label: 'Enabled', tone: 'ok' } : { label: 'Disabled', tone: 'off' }}
+					status={p.enabled ? { label: 'Active', tone: 'ok' } : { label: 'Disabled', tone: 'off' }}
 					highlight={p.enabled}
 					meta={providerMeta(p, kind)}
-					toggle={{
-						on: p.enabled,
-						busy: s.togglingProviderId === p.id,
-						onToggle: () => providers.toggleProvider(p.id)
-					}}
 					onManageModels={() => (manageModelsId = p.id)}
 					onEdit={() => openEdit(p.id)}
 					onRemove={() => armDelete(p.id)}
@@ -367,6 +400,58 @@
 	</div>
 {/if}
 
+{#if claudeSignInOpen}
+	<!-- Claude subscription sign-in: hosts ClaudeSubscriptionFlow (primary connect
+	     when signed out, add-account reconnect when signed in). Modal chrome copies
+	     the ChatGPT reconnect modal above verbatim. -->
+	<div
+		bind:this={claudeSignInDialogEl}
+		class="fixed inset-0 z-50 flex items-center justify-center {reconnectFullscreen ? 'p-0' : 'p-4'}"
+		role="dialog"
+		aria-modal="true"
+		aria-label="Claude subscription"
+		onkeydown={handleClaudeSignInKeydown}
+		tabindex="-1"
+	>
+		<!-- Backdrop -->
+		<button
+			class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+			onclick={closeClaudeSignIn}
+			aria-label="Close"
+		></button>
+
+		<!-- Modal card -->
+		<div
+			class="relative flex flex-col bg-card border border-border shadow-xl {reconnectFullscreen
+				? 'w-full h-full max-w-none rounded-none'
+				: 'w-full max-w-lg max-h-[90vh] rounded-xl'}"
+		>
+			<!-- Header -->
+			<div class="flex items-center gap-2 px-6 py-4 border-b border-border">
+				<h2 class="flex-1 text-lg font-semibold text-foreground">Claude subscription</h2>
+				<button
+					type="button"
+					onclick={closeClaudeSignIn}
+					disabled={claudeSignInBusy}
+					class="p-2 -mr-2 hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
+					aria-label="Close"
+				>
+					<X class="w-5 h-5 text-muted-foreground" />
+				</button>
+			</div>
+
+			<!-- Content -->
+			<div class="flex-1 overflow-y-auto p-6">
+				<ClaudeSubscriptionFlow
+					onDone={() => (claudeSignInOpen = false)}
+					onCancel={() => (claudeSignInOpen = false)}
+					onBusyChange={(b) => (claudeSignInBusy = b)}
+				/>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
 	.prov-list {
 		list-style: none;
@@ -396,6 +481,18 @@
 		font-size: 12px;
 		color: var(--muted-foreground);
 		padding: 6px 2px 4px;
+	}
+	/* One-line status notice under the Claude subscription row. */
+	.prov-note {
+		margin: 4px 2px 0;
+		font-size: 11.5px;
+		line-height: 1.4;
+	}
+	.prov-note.warn {
+		color: var(--warning, #d97706);
+	}
+	.prov-note.err {
+		color: var(--destructive);
 	}
 
 	@media (max-width: 560px) {

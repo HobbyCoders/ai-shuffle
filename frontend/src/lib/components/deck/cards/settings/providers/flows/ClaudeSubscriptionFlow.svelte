@@ -63,6 +63,8 @@
 	async function complete() {
 		if (!code.trim() || completing) return;
 		if (addMode) {
+			// A new sign-in always becomes the live session (single-account model).
+			providers.setAddAccountMakeActive(true);
 			await providers.completeAddAccount();
 			// completeAddAccount clears the flow on success and only sets
 			// accountsError on failure.
@@ -88,8 +90,8 @@
 <div class="space-y-4">
 	<p class="text-sm text-muted-foreground leading-relaxed">
 		{#if addMode}
-			You're already signed in. Add another Claude account — your current login stays active
-			unless you make the new one active.
+			Sign in again to reconnect your Claude account. The new sign-in replaces your current
+			session.
 		{:else}
 			Sign in with your Claude account. A sign-in page opens in a new window; paste the code it
 			gives you back here.
@@ -131,19 +133,6 @@
 			>
 				<ExternalLink class="w-4 h-4" />Reopen sign-in page
 			</a>
-		{/if}
-
-		{#if addMode}
-			<label class="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-				<input
-					type="checkbox"
-					checked={s.addAccountMakeActive}
-					onchange={(e) => providers.setAddAccountMakeActive(e.currentTarget.checked)}
-					disabled={completing}
-					class="cursor-pointer"
-				/>
-				Make this the active account
-			</label>
 		{/if}
 
 		<div>

@@ -14,7 +14,7 @@
 	 * "Manage models" and "Sign in" are rendered as buttons wired to no-op
 	 * callbacks in this chunk — Chunks 5/6/7 wire the modal/drawer behind them.
 	 */
-	import { Server, Pencil, Trash2, Loader2, SlidersHorizontal, LogIn, Users } from 'lucide-svelte';
+	import { Server, Pencil, Trash2, SlidersHorizontal, LogIn } from 'lucide-svelte';
 
 	type Tone = 'ok' | 'warn' | 'off';
 
@@ -30,13 +30,6 @@
 		meta?: string;
 		/** Row highlights green when true (enabled gateway / active auth). */
 		highlight?: boolean;
-
-		/** Enable toggle (gateway rows only). Omit for native-auth rows. */
-		toggle?: { on: boolean; busy: boolean; onToggle: () => void };
-
-		/** "Manage accounts" expander (Claude subscription only). */
-		onManageAccounts?: () => void;
-		expanded?: boolean;
 
 		/** "Manage models" — no-op in this chunk (Chunk 7 wires the drawer). */
 		onManageModels?: () => void;
@@ -61,9 +54,6 @@
 		iconKind = 'server',
 		meta,
 		highlight = false,
-		toggle,
-		onManageAccounts,
-		expanded = false,
 		onManageModels,
 		onSignIn,
 		signInLabel = 'Sign in',
@@ -103,34 +93,6 @@
 			<button type="button" class="ed-btn danger acct-sm" onclick={onConfirmDelete}>Delete</button>
 			<button type="button" class="ed-btn acct-sm" onclick={onCancelDelete}>Cancel</button>
 		{:else}
-			{#if toggle}
-				{#if toggle.busy}
-					<Loader2 class="spin mp-toggle-spin" />
-				{:else}
-					<button
-						type="button"
-						class="switch"
-						class:on={toggle.on}
-						role="switch"
-						aria-checked={toggle.on}
-						aria-label={toggle.on ? `Disable ${title}` : `Enable ${title}`}
-						onclick={toggle.onToggle}
-					><i></i></button>
-				{/if}
-			{/if}
-
-			{#if onManageAccounts}
-				<button
-					type="button"
-					class="ed-btn acct-sm"
-					class:primary={expanded}
-					aria-expanded={expanded}
-					onclick={onManageAccounts}
-				>
-					<Users />Manage accounts
-				</button>
-			{/if}
-
 			{#if onManageModels}
 				<button type="button" class="ed-btn acct-sm" onclick={onManageModels}>
 					<SlidersHorizontal />Manage models
@@ -144,7 +106,7 @@
 			{/if}
 
 			{#if onEdit}
-				<button type="button" class="acct-iconbtn" title="Edit" aria-label="Edit provider" onclick={onEdit}><Pencil /></button>
+				<button type="button" class="ed-btn acct-sm" onclick={onEdit}><Pencil />Edit</button>
 			{/if}
 
 			{#if onRemove}
