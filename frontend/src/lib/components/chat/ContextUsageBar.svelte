@@ -58,11 +58,9 @@
 		windowLabel,
 		effectivePct,
 		formatCountdown,
-		formatAsOf,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
-		isBucketStale,
 		type UsageBucket,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
@@ -302,6 +300,21 @@
 		return null;
 	}
 
+	// Compact one-value credits chip for a collapsed provider header — used as the
+	// fallback summary when the provider has no rate-limit windows to draw a pct
+	// from (e.g. OpenRouter, which reports only dollar credits). Same field
+	// semantics as creditsSummary; prefers usage, then remaining, then balance.
+	function creditsShort(credits: Record<string, unknown> | null): string | null {
+		if (!credits || typeof credits !== 'object') return null;
+		const used = typeof credits.usage === 'number' ? credits.usage : null;
+		if (used != null) return `$${used.toFixed(2)} used`;
+		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
+		if (left != null) return `$${left.toFixed(2)} left`;
+		const balance = typeof credits.balance === 'number' ? credits.balance : null;
+		if (balance != null) return `$${balance.toFixed(2)}`;
+		return null;
+	}
+
 	const target = $derived($usageTargetInstance);
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
 	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
@@ -314,28 +327,16 @@
 		usageSeverity(Math.max(contextPercent, fiveHourPct ?? 0))
 	);
 
-	// ── Resolved-install header (device/account label) ────────────────────
-	function staleLineFor(bucket: UsageBucket): string | null {
-		const offline = bucket.online === false;
-		const old = isBucketStale(bucket, now);
-		if (!offline && !old) return null;
-		const age = formatAsOf(bucket.fetchedAt, now);
-		const asOf = age ? `as of ${age}` : 'as of unknown';
-		return offline ? `offline · ${asOf}` : asOf;
-	}
+	// ── Resolved-install header (device label) ────────────────────────────
+	// The Claude section header always renders (ChatGPT-provider parity): a fixed
+	// "Claude" label, plus the resolved install's device name when known, or an
+	// "Other device" hint for a resolved remote install with no device label. No
+	// account naming and no staleness/"as of" line.
 	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
-	const accountLabel = $derived(resolvedBucket?.accountName ?? resolvedBucket?.accountEmail ?? null);
-	const staleLine = $derived(resolvedBucket ? staleLineFor(resolvedBucket) : null);
-	// Show the header when we know who this belongs to, or when it's a resolved
-	// remote install. A bucket-less (no data) resolve shows no header.
-	const showSectionHeader = $derived(
-		!!resolvedBucket && (!!(deviceLabel || accountLabel) || !isSelf)
-	);
 
-	// Claude plan-usage collapse: with a header the rows follow the 'plan' toggle;
-	// with no header there's nothing to collapse against, so rows always show.
-	const planRowsVisible = $derived(!showSectionHeader || isSectionOpen('plan'));
+	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
+	const planRowsVisible = $derived(isSectionOpen('plan'));
 	// Compact summary shown on the collapsed header: the MAX pct across the plan
 	// windows (null → omit, e.g. an empty bucket).
 	const planMaxPct = $derived<number | null>(
@@ -474,51 +475,43 @@
 
 			<div class="popover-divider"></div>
 
-			<!-- ═══ Plan usage limits ═══ -->
-			<!-- With a resolved-install header, the head becomes the collapse toggle
-			     (device/account/stale labels stay inside it); collapsed shows the max
-			     plan pct on the right and hides the window rows + "No usage data" line.
-			     With no header there's nothing to attach a control to — rows show as
-			     before (gated by `planRowsVisible`). -->
-			{#if showSectionHeader}
-				{@const planOpen = isSectionOpen('plan')}
-				<div class="popover-section">
-					<button
-						type="button"
-						class="sec-header"
-						aria-expanded={planOpen}
-						aria-label="Plan usage limits — {planOpen ? 'collapse' : 'expand'}"
-						onclick={() => toggleSection('plan')}
-					>
-						<span class="sec-head-labels">
-							{#if deviceLabel}
-								<span class="section-device">{deviceLabel}</span>
-							{/if}
-							{#if accountLabel}
-								<span class="section-account">{accountLabel}</span>
-							{/if}
-							{#if !deviceLabel && !accountLabel}
-								<span class="section-device">{isSelf ? 'This device' : 'Other device'}</span>
-							{/if}
-							{#if staleLine}
-								<span class="section-stale">{staleLine}</span>
-							{/if}
-						</span>
-						{#if !planOpen && planMaxPct != null}
-							<span class="row-pct {usageSeverity(planMaxPct)} sec-summary">{planMaxPct}%</span>
+			<!-- ═══ Plan usage limits (Claude) ═══ -->
+			<!-- The header always renders (ChatGPT-provider parity): a fixed "Claude"
+			     label + the resolved device name (or "Other device" for a resolved
+			     remote install). It is the collapse toggle for the window rows;
+			     collapsed shows the max plan pct on the right and hides the rows +
+			     "No usage data" line. No account naming, no "as of" staleness line. -->
+			<div class="popover-section">
+				<button
+					type="button"
+					class="sec-header"
+					aria-expanded={planRowsVisible}
+					aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
+					onclick={() => toggleSection('plan')}
+				>
+					<span class="sec-head-labels">
+						<span class="section-device">Claude</span>
+						{#if deviceLabel}
+							<span class="section-account">{deviceLabel}</span>
 						{/if}
-						<svg
-							class="ctx-chevron {planOpen ? '' : 'collapsed'}"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							aria-hidden="true"
-						>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-						</svg>
-					</button>
-				</div>
-			{/if}
+						{#if !isSelf && !deviceLabel}
+							<span class="section-account">Other device</span>
+						{/if}
+					</span>
+					{#if !planRowsVisible && planMaxPct != null}
+						<span class="row-pct {usageSeverity(planMaxPct)} sec-summary">{planMaxPct}%</span>
+					{/if}
+					<svg
+						class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						aria-hidden="true"
+					>
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</button>
+			</div>
 			{#if planRowsVisible}
 				{#if items.length > 0}
 					{#each items as item (item.type)}
@@ -576,8 +569,15 @@
 								<span class="section-account">{pb.planType}</span>
 							{/if}
 						</span>
-						{#if !pbOpen && pbMaxPct != null}
-							<span class="row-pct {usageSeverity(pbMaxPct)} sec-summary">{pbMaxPct}%</span>
+						{#if !pbOpen}
+							{#if pbMaxPct != null}
+								<span class="row-pct {usageSeverity(pbMaxPct)} sec-summary">{pbMaxPct}%</span>
+							{:else}
+								{@const pbCreditsShort = creditsShort(pb.credits)}
+								{#if pbCreditsShort}
+									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+								{/if}
+							{/if}
 						{/if}
 						<svg
 							class="ctx-chevron {pbOpen ? '' : 'collapsed'}"
@@ -972,6 +972,15 @@
 	.sec-summary {
 		flex-shrink: 0;
 	}
+	/* Credits fallback summary — dollars carry no severity, so stay neutral. */
+	.sec-credits {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
 	.section-device {
 		font-size: 11px;
 		font-weight: 600;
@@ -980,9 +989,5 @@
 	.section-account {
 		font-size: 10.5px;
 		color: var(--muted-foreground);
-	}
-	.section-stale {
-		font-size: 10px;
-		color: var(--warning);
 	}
 </style>

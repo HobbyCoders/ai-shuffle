@@ -36,7 +36,6 @@ import {
 	startAddClaudeAccount,
 	completeAddClaudeAccount,
 	activateClaudeAccount,
-	renameClaudeAccount,
 	deleteClaudeAccount,
 	type ClaudeAccount
 } from '$lib/api/auth';
@@ -83,7 +82,6 @@ interface ProvidersState {
 	addAccountOAuthUrl: string | null;
 	addAccountState: string | null;
 	addAccountCode: string;
-	addAccountName: string;
 	addAccountMakeActive: boolean;
 	addAccountLoading: boolean;
 	addAccountCompleting: boolean;
@@ -129,7 +127,6 @@ const initialState: ProvidersState = {
 	addAccountOAuthUrl: null,
 	addAccountState: null,
 	addAccountCode: '',
-	addAccountName: '',
 	addAccountMakeActive: false,
 	addAccountLoading: false,
 	addAccountCompleting: false,
@@ -196,9 +193,6 @@ export const providers = {
 	},
 	setAddAccountCode(value: string) {
 		_update((s) => ({ ...s, addAccountCode: value }));
-	},
-	setAddAccountName(value: string) {
-		_update((s) => ({ ...s, addAccountName: value }));
 	},
 	setAddAccountMakeActive(value: boolean) {
 		_update((s) => ({ ...s, addAccountMakeActive: value }));
@@ -345,7 +339,6 @@ export const providers = {
 			await completeAddClaudeAccount(
 				_state.addAccountCode.trim(),
 				_state.addAccountState,
-				_state.addAccountName.trim() || undefined,
 				_state.addAccountMakeActive
 			);
 			// Reset the add-account flow.
@@ -355,7 +348,6 @@ export const providers = {
 				addAccountOAuthUrl: null,
 				addAccountState: null,
 				addAccountCode: '',
-				addAccountName: '',
 				addAccountMakeActive: false
 			}));
 			await providers.loadClaudeAccounts();
@@ -376,7 +368,6 @@ export const providers = {
 			addAccountOAuthUrl: null,
 			addAccountState: null,
 			addAccountCode: '',
-			addAccountName: '',
 			addAccountMakeActive: false,
 			accountsError: ''
 		}));
@@ -400,16 +391,6 @@ export const providers = {
 			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to switch account') }));
 		} finally {
 			_update((s) => ({ ...s, switchingAccountId: null }));
-		}
-	},
-
-	async renameAccount(id: string, name: string) {
-		_update((s) => ({ ...s, accountsError: '' }));
-		try {
-			await renameClaudeAccount(id, name);
-			await providers.loadClaudeAccounts();
-		} catch (e) {
-			_update((s) => ({ ...s, accountsError: detailOf(e, 'Failed to rename account') }));
 		}
 	},
 

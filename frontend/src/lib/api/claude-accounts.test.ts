@@ -13,7 +13,6 @@ import {
 	startAddClaudeAccount,
 	completeAddClaudeAccount,
 	activateClaudeAccount,
-	renameClaudeAccount,
 	deleteClaudeAccount,
 	type ClaudeAccount
 } from './auth';
@@ -107,7 +106,7 @@ describe('Claude accounts API', () => {
 	});
 
 	describe('completeAddClaudeAccount', () => {
-		it('POSTs only code+state when name/makeActive omitted', async () => {
+		it('POSTs only code+state when makeActive omitted', async () => {
 			fetchMock.mockResolvedValueOnce(
 				okJson({ success: true, account: mockAccount, active_account_id: 'acc-1' })
 			);
@@ -123,12 +122,12 @@ describe('Claude accounts API', () => {
 			);
 		});
 
-		it('includes name and make_active when provided', async () => {
+		it('includes make_active when provided (no account name)', async () => {
 			fetchMock.mockResolvedValueOnce(
 				okJson({ success: true, account: mockAccount, active_account_id: 'acc-1' })
 			);
 
-			await completeAddClaudeAccount('the-code', 'st-1', 'Personal', true);
+			await completeAddClaudeAccount('the-code', 'st-1', true);
 
 			expect(fetchMock).toHaveBeenCalledWith(
 				'/api/v1/auth/claude/accounts/complete',
@@ -136,7 +135,6 @@ describe('Claude accounts API', () => {
 					body: JSON.stringify({
 						code: 'the-code',
 						state: 'st-1',
-						name: 'Personal',
 						make_active: true
 					})
 				})
@@ -176,25 +174,6 @@ describe('Claude accounts API', () => {
 		it('propagates a 409 when encryption is locked', async () => {
 			fetchMock.mockResolvedValueOnce(errJson(409, { detail: 'locked' }));
 			await expect(activateClaudeAccount('acc-2')).rejects.toMatchObject({ status: 409 });
-		});
-	});
-
-	describe('renameClaudeAccount', () => {
-		it('PATCHes the account with the new name', async () => {
-			fetchMock.mockResolvedValueOnce(
-				okJson({ success: true, account: { ...mockAccount, name: 'Renamed' } })
-			);
-
-			const res = await renameClaudeAccount('acc-1', 'Renamed');
-
-			expect(fetchMock).toHaveBeenCalledWith(
-				'/api/v1/auth/claude/accounts/acc-1',
-				expect.objectContaining({
-					method: 'PATCH',
-					body: JSON.stringify({ name: 'Renamed' })
-				})
-			);
-			expect(res.account.name).toBe('Renamed');
 		});
 	});
 

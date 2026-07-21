@@ -132,7 +132,6 @@ export async function startAddClaudeAccount(): Promise<{
 export async function completeAddClaudeAccount(
 	code: string,
 	state: string,
-	name?: string,
 	makeActive?: boolean
 ): Promise<{
 	success: boolean;
@@ -140,7 +139,6 @@ export async function completeAddClaudeAccount(
 	active_account_id: string | null;
 }> {
 	const body: Record<string, unknown> = { code, state };
-	if (name) body.name = name;
 	if (makeActive !== undefined) body.make_active = makeActive;
 	return api.post('/auth/claude/accounts/complete', body);
 }
@@ -152,13 +150,6 @@ export async function activateClaudeAccount(id: string): Promise<{
 	active_account_id: string | null;
 }> {
 	return api.post(`/auth/claude/accounts/${id}/activate`);
-}
-
-export async function renameClaudeAccount(id: string, name: string): Promise<{
-	success: boolean;
-	account: ClaudeAccount;
-}> {
-	return api.patch(`/auth/claude/accounts/${id}`, { name });
 }
 
 /** Remove an account. Throws `{ status: 409, detail }` when deleting the active

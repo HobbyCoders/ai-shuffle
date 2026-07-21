@@ -531,8 +531,9 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
 		const rows = container.querySelectorAll('.popover-row');
 		expect(rows.length).toBe(3);
-		// A lone unlabeled install keeps the flat limits list (no section header).
-		expect(container.querySelector('.popover-section')).toBeNull();
+		// The Claude section header always renders now (self, unlabeled → just "Claude").
+		expect(container.querySelector('.popover-section')).not.toBeNull();
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.textContent).toContain('5-hour limit');
 		expect(container.textContent).toContain('Weekly (all models)');
 		expect(container.textContent).toContain('Fable 5 limit');
@@ -565,14 +566,16 @@ describe('ContextUsageBar — plan usage limits', () => {
 		// A single section + row for the resolved (self) install only.
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		// Header is "Claude" + the resolved device name; the account email is never shown.
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.textContent).toContain('Studio');
-		expect(container.textContent).toContain('a@example.com');
+		expect(container.textContent).not.toContain('a@example.com');
 		expect(container.textContent).not.toContain('Worker');
 		expect(container.textContent).not.toContain('b@example.com');
 		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('heads the self section with the resolved install device + account label', async () => {
+	it('heads the Claude section with the resolved install device label (never the account name/email)', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -582,6 +585,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 					instance_id: 'primary',
 					device_name: 'Studio',
 					account_email: 'a@example.com',
+					account_name: 'Personal',
 					available: true,
 					windows: [{ type: 'five_hour', utilization: 12, resets_at: future() }],
 				},
@@ -590,11 +594,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Studio');
-		expect(container.querySelector('.section-account')?.textContent).toBe('a@example.com');
+		// Fixed "Claude" label + the resolved install's device name as the sub-label.
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.section-account')?.textContent).toBe('Studio');
+		// Neither the account email nor the account name leaks into the header.
+		expect(container.textContent).not.toContain('a@example.com');
+		expect(container.textContent).not.toContain('Personal');
 	});
 
-	it('unlabeled self keeps a flat limits list (no header, no other installs)', async () => {
+	it('unlabeled self shows just the "Claude" header (no device / "Other device")', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -615,13 +623,42 @@ describe('ContextUsageBar — plan usage limits', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		// Unlabeled self → no section header at all.
-		expect(container.querySelector('.popover-section')).toBeNull();
+		// The Claude header always renders; unlabeled self → just "Claude", with
+		// no device sub-label and no "Other device" hint (this IS the self install).
+		expect(container.querySelector('.popover-section')).not.toBeNull();
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.section-account')).toBeNull();
 		expect(container.textContent).not.toContain('This device');
 		expect(container.textContent).not.toContain('Other device');
 		// Only the self window is shown (12%), not the worker's live 50%.
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).not.toContain('50%');
+	});
+
+	it('collapses the Claude plan section on header click: hides window rows and persists', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Open by default → the Claude header plus its single window row.
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+
+		const secHeader = container.querySelector('.sec-header') as HTMLButtonElement;
+		await fireEvent.click(secHeader); // collapse
+		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+		expect(secHeader.getAttribute('aria-expanded')).toBe('false');
+		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('0');
+		// Collapsed → the max plan pct rides on the header summary.
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('42%');
+
+		await fireEvent.click(secHeader); // expand again
+		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(secHeader.getAttribute('aria-expanded')).toBe('true');
+		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('1');
 	});
 });
 
@@ -647,9 +684,14 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// No Claude bucket resolves → the only section header is the provider's.
-		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Codex');
+		// The Claude header always renders (self, empty windows → just "Claude");
+		// the provider adds its own section header below it.
+		expect(container.querySelectorAll('.popover-section').length).toBe(2);
+		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		expect(deviceLabels).toEqual(['Claude', 'Codex']);
+		// The only .section-account belongs to the provider header (Claude self is unlabeled).
 		expect(container.querySelector('.section-account')?.textContent).toBe('Plus');
 
 		// One row per provider window (the empty Claude section shows a
@@ -679,9 +721,13 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.section-device')?.textContent).toBe('openrouter');
-		// No planType → no .section-account in the provider header.
-		expect(container.querySelector('.popover-section .section-account')).toBeNull();
+		// [0] is the always-present Claude header; [1] is the provider (type fallback).
+		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		expect(deviceLabels).toEqual(['Claude', 'openrouter']);
+		// No planType → no .section-account anywhere (Claude self is unlabeled too).
+		expect(container.querySelector('.section-account')).toBeNull();
 		expect(container.textContent).toContain('Daily');
 	});
 
@@ -702,7 +748,11 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		expect(container.querySelector('.section-device')?.textContent).toBe('OpenRouter');
+		// [0] is the always-present Claude header; [1] is the OpenRouter provider.
+		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		expect(deviceLabels).toEqual(['Claude', 'OpenRouter']);
 		// Empty windows → no provider window rows and no bars anywhere (Claude
 		// section is also empty).
 		expect(container.querySelectorAll('.popover-row').length).toBe(0);
@@ -730,5 +780,81 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		// A window row (with bar) AND the credits line coexist.
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(container.textContent).toContain('Credits: unlimited');
+	});
+
+	it('collapsed credits-only provider (no windows) shows a compact credits summary on the header', async () => {
+		// Persisted-collapsed before render so the header renders in its collapsed state.
+		localStorage.setItem('aihub.usageSectionOpen:provider:or-credits', '0');
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-credits',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits: { usage: 12.34, limit_remaining: 87.66, unlimited: false },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// No windows → no pct chip; the credits summary rides the collapsed header.
+		const chip = container.querySelector('.sec-credits');
+		expect(chip).not.toBeNull();
+		expect(chip?.textContent).toBe('$12.34 used');
+		// It is a header summary, not a severity pct chip.
+		expect(container.querySelector('.row-pct.sec-summary')).toBeNull();
+		// Collapsed → the full body credits line is hidden.
+		expect(container.textContent).not.toContain('$12.34 used · $87.66 left');
+	});
+
+	it('expanded credits-only provider renders the full body credits line and no header chip', async () => {
+		// Provider sections default to open — no collapse seeding.
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-credits-open',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits: { usage: 12.34, limit_remaining: 87.66, unlimited: false },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Expanded → full credits line in the body, and no collapsed-header chip.
+		expect(container.textContent).toContain('$12.34 used · $87.66 left');
+		expect(container.querySelector('.sec-credits')).toBeNull();
+		expect(container.querySelector('.sec-summary')).toBeNull();
+	});
+
+	it('collapsed provider WITH windows keeps the % chip (not the credits summary)', async () => {
+		localStorage.setItem('aihub.usageSectionOpen:provider:or-both', '0');
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-both',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [{ type: 'five_hour', utilization: 30, resets_at: future() }],
+					credits: { usage: 12.34, limit_remaining: 87.66, unlimited: false },
+				},
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// A window exists → the max-window pct chip wins; credits fallback stays hidden.
+		expect(container.querySelector('.row-pct.sec-summary')?.textContent).toBe('30%');
+		expect(container.querySelector('.sec-credits')).toBeNull();
 	});
 });

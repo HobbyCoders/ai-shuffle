@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * ClaudeAccountsPanel — the saved-accounts sub-list for the Claude subscription
-	 * row (switch / rename / delete / add), revealed by expanding that row.
+	 * row (switch / delete / add), revealed by expanding that row.
 	 *
 	 * Lifted VERBATIM (mechanics unchanged, D8/A3) from ConnectionsSection's
 	 * saved-accounts block: same server round-trips, same messages, same
@@ -10,40 +10,21 @@
 	 * of prop-drilled callbacks (landmine L2). All `auth.checkAuth()` /
 	 * `rateLimit.markStale()` side effects live in the store's actions.
 	 */
-	import { UserPlus, Check, X, Lock, Pencil, Trash2, Loader2, CircleAlert } from 'lucide-svelte';
+	import { UserPlus, Lock, Trash2, Loader2, CircleAlert } from 'lucide-svelte';
 	import type { ClaudeAccount } from '$lib/api/auth';
 	import { providers } from '$lib/stores/providers.svelte';
 
 	const s = $derived(providers.current);
 
 	// ----- Account list local UI state (transient view state, as before) -----
-	// Inline rename: which row is editing + its draft text. Delete confirm: which
-	// row is armed. Both are transient, so they stay component-local.
-	let renamingId: string | null = $state(null);
-	let renameDraft = $state('');
+	// Delete confirm: which row is armed. Transient, so it stays component-local.
 	let confirmDeleteId: string | null = $state(null);
 	// Whether to reveal the add-account panel (button → inline form). The panel
 	// also stays open whenever an OAuth flow is mid-paste.
 	let showAddAccount = $state(false);
 
-	function beginRename(acc: ClaudeAccount) {
-		renamingId = acc.id;
-		renameDraft = acc.name || acc.email || '';
-		confirmDeleteId = null;
-	}
-	function cancelRename() {
-		renamingId = null;
-		renameDraft = '';
-	}
-	function saveRename(id: string) {
-		const next = renameDraft.trim();
-		if (next) providers.renameAccount(id, next);
-		renamingId = null;
-		renameDraft = '';
-	}
 	function requestDelete(id: string) {
 		confirmDeleteId = id;
-		renamingId = null;
 	}
 	function confirmDelete(id: string) {
 		confirmDeleteId = null;
@@ -54,26 +35,6 @@
 	// accurate without a refetch. Null expiry = treat as not-expired.
 	function isExpired(acc: ClaudeAccount): boolean {
 		return acc.expires_at !== null && acc.expires_at < Date.now();
-	}
-
-	// Compact relative "last used" (e.g. "3h ago"). Returns '' when never used.
-	function relativeLastUsed(ts: number | null): string {
-		if (!ts) return '';
-		const diff = Date.now() - ts;
-		// Guard against non-finite input (NaN/Infinity) so a bad timestamp can
-		// never render as "NaNy ago".
-		if (!Number.isFinite(diff)) return '';
-		if (diff < 0) return 'just now';
-		const min = Math.floor(diff / 60000);
-		if (min < 1) return 'just now';
-		if (min < 60) return `${min}m ago`;
-		const hr = Math.floor(min / 60);
-		if (hr < 24) return `${hr}h ago`;
-		const day = Math.floor(hr / 24);
-		if (day < 30) return `${day}d ago`;
-		const mo = Math.floor(day / 30);
-		if (mo < 12) return `${mo}mo ago`;
-		return `${Math.floor(mo / 12)}y ago`;
 	}
 
 	// The add-account panel is open when the user toggled it OR a flow is in progress.
@@ -119,68 +80,42 @@
 		<ul class="acct-list">
 			{#each s.claudeAccounts as acc (acc.id)}
 				{@const expired = isExpired(acc)}
-				{@const lastUsed = relativeLastUsed(acc.last_used_at)}
 				<li class="acct-row" class:active={acc.is_active}>
 					<div class="acct-ic" aria-hidden="true">
-						{(acc.name || acc.email || '?').trim().charAt(0).toUpperCase()}
+						{(acc.email || '?').trim().charAt(0).toUpperCase()}
 					</div>
 					<div class="acct-body">
-						{#if renamingId === acc.id}
-							<!-- Inline rename: name field replaces the title until save/cancel. -->
-							<div class="acct-rename">
-								<input
-									type="text"
-									class="inp acct-rename-in"
-									value={renameDraft}
-									oninput={(e) => (renameDraft = e.currentTarget.value)}
-									onkeydown={(e) => {
-										if (e.key === 'Enter') saveRename(acc.id);
-										if (e.key === 'Escape') cancelRename();
-									}}
-									placeholder="Account name"
-									aria-label="Account name"
-								/>
-								<button type="button" class="acct-iconbtn ok" title="Save name" aria-label="Save name" onclick={() => saveRename(acc.id)}><Check /></button>
-								<button type="button" class="acct-iconbtn" title="Cancel" aria-label="Cancel rename" onclick={cancelRename}><X /></button>
-							</div>
-						{:else}
-							<div class="acct-name">
-								<span class="acct-title">{acc.name || acc.email || 'Claude account'}</span>
-								{#if acc.is_active}<span class="sb ok">Active</span>{/if}
-								{#if expired}<span class="sb warn" title="This account's token has expired">Token expired</span>{/if}
-								{#if !acc.has_refresh_token}<span class="sb warn" title="No refresh token — this sign-in can't renew automatically and will need re-authentication when it expires">No refresh token</span>{/if}
-								{#if acc.sync_pending}<span class="sb warn acct-sync" title="Latest tokens not yet saved — unlock encryption by logging in again as admin"><CircleAlert />Sync pending</span>{/if}
-							</div>
-							<p class="acct-meta">
-								<span>{acc.email || '—'}</span>
-								{#if acc.subscription_type}<span class="acct-dot">·</span><span>{acc.subscription_type}</span>{/if}
-								{#if lastUsed}<span class="acct-dot">·</span><span>used {lastUsed}</span>{/if}
-							</p>
+						<div class="acct-name">
+							<span class="acct-title">{acc.email || 'Claude account'}</span>
+							{#if acc.is_active}<span class="sb ok">Active</span>{/if}
+							{#if expired}<span class="sb warn" title="This account's token has expired">Token expired</span>{/if}
+							{#if !acc.has_refresh_token}<span class="sb warn" title="No refresh token — this sign-in can't renew automatically and will need re-authentication when it expires">No refresh token</span>{/if}
+							{#if acc.sync_pending}<span class="sb warn acct-sync" title="Latest tokens not yet saved — unlock encryption by logging in again as admin"><CircleAlert />Sync pending</span>{/if}
+						</div>
+						{#if acc.subscription_type}
+							<p class="acct-meta"><span>{acc.subscription_type}</span></p>
 						{/if}
 					</div>
 
-					{#if renamingId !== acc.id}
-						<div class="acct-acts">
-							{#if confirmDeleteId === acc.id}
-								<span class="acct-confirm">Delete?</span>
-								<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(acc.id)}>Delete</button>
-								<button type="button" class="ed-btn acct-sm" onclick={() => (confirmDeleteId = null)}>Cancel</button>
-							{:else}
-								{#if !acc.is_active}
-									<button
-										type="button"
-										class="ed-btn primary acct-sm"
-										onclick={() => providers.activateAccount(acc.id)}
-										disabled={s.switchingAccountId !== null}
-									>
-										{#if s.switchingAccountId === acc.id}<Loader2 class="spin" />Switching…{:else}Switch{/if}
-									</button>
-								{/if}
-								<button type="button" class="acct-iconbtn" title="Rename" aria-label="Rename account" onclick={() => beginRename(acc)}><Pencil /></button>
-								<button type="button" class="acct-iconbtn danger" title="Remove" aria-label="Remove account" onclick={() => requestDelete(acc.id)}><Trash2 /></button>
+					<div class="acct-acts">
+						{#if confirmDeleteId === acc.id}
+							<span class="acct-confirm">Delete?</span>
+							<button type="button" class="ed-btn danger acct-sm" onclick={() => confirmDelete(acc.id)}>Delete</button>
+							<button type="button" class="ed-btn acct-sm" onclick={() => (confirmDeleteId = null)}>Cancel</button>
+						{:else}
+							{#if !acc.is_active}
+								<button
+									type="button"
+									class="ed-btn primary acct-sm"
+									onclick={() => providers.activateAccount(acc.id)}
+									disabled={s.switchingAccountId !== null}
+								>
+									{#if s.switchingAccountId === acc.id}<Loader2 class="spin" />Switching…{:else}Switch{/if}
+								</button>
 							{/if}
-						</div>
-					{/if}
+							<button type="button" class="acct-iconbtn danger" title="Remove" aria-label="Remove account" onclick={() => requestDelete(acc.id)}><Trash2 /></button>
+						{/if}
+					</div>
 				</li>
 			{/each}
 		</ul>
@@ -205,14 +140,6 @@
 							oninput={(e) => providers.setAddAccountCode(e.currentTarget.value)}
 							placeholder="Paste code from browser"
 							aria-label="Authorization code"
-						/>
-						<input
-							type="text"
-							class="inp"
-							value={s.addAccountName}
-							oninput={(e) => providers.setAddAccountName(e.currentTarget.value)}
-							placeholder="Account name (optional)"
-							aria-label="Account name"
 						/>
 					</div>
 					<label class="acct-check">
@@ -333,9 +260,6 @@
 		gap: 6px;
 		flex-wrap: wrap;
 	}
-	.acct-dot {
-		opacity: 0.5;
-	}
 	.sb {
 		font-family: var(--font-mono, monospace);
 		font-size: 10px;
@@ -405,10 +329,6 @@
 		color: var(--foreground);
 		border-color: var(--foreground);
 	}
-	.acct-iconbtn.ok:hover {
-		color: var(--success, #16a34a);
-		border-color: var(--success, #16a34a);
-	}
 	.acct-iconbtn.danger:hover {
 		color: var(--destructive);
 		border-color: var(--destructive);
@@ -416,16 +336,6 @@
 	.acct-iconbtn:focus-visible {
 		outline: 2px solid var(--ring, var(--foreground));
 		outline-offset: 1px;
-	}
-	.acct-rename {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.acct-rename-in {
-		flex: 1;
-		min-width: 0;
-		max-width: 280px;
 	}
 	.acct-addpanel {
 		margin-top: 10px;

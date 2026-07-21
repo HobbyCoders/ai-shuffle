@@ -96,8 +96,11 @@ describe('ContextUsageBar — resolved target', () => {
 		// A single section + row for the resolved remote install — never the self one.
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Worker');
-		expect(container.textContent).toContain('b@example.com');
+		// Header is the fixed "Claude" label + the resolved install's device name;
+		// the account email never appears (ChatGPT-provider parity).
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.section-account')?.textContent).toBe('Worker');
+		expect(container.textContent).not.toContain('b@example.com');
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('88%');
 		// The self install (Studio / a@example.com / 12%) must NOT appear.
 		expect(container.textContent).not.toContain('Studio');
@@ -112,7 +115,9 @@ describe('ContextUsageBar — resolved target', () => {
 		await openPopover(container);
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
-		expect(container.querySelector('.section-device')?.textContent).toBe('Studio');
+		// Header is the fixed "Claude" label + the resolved self install's device name.
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.section-account')?.textContent).toBe('Studio');
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('12%');
 		// The worker install must NOT appear.
 		expect(container.textContent).not.toContain('Worker');

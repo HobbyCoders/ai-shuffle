@@ -134,20 +134,6 @@
 		{/if}
 
 		{#if addMode}
-			<div>
-				<label for="claude-acct-name" class="block text-sm font-medium text-foreground mb-1.5">
-					Account name <span class="text-muted-foreground font-normal">(optional)</span>
-				</label>
-				<input
-					id="claude-acct-name"
-					type="text"
-					value={s.addAccountName}
-					oninput={(e) => providers.setAddAccountName(e.currentTarget.value)}
-					placeholder="e.g. Work"
-					disabled={completing}
-					class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-				/>
-			</div>
 			<label class="flex items-center gap-2 text-sm text-foreground cursor-pointer">
 				<input
 					type="checkbox"
