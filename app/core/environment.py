@@ -637,6 +637,10 @@ def apply_provider_env(
       ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
     - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` / ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
       (clamped ≥100k)
+    - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
+      (openai/chatgpt ``provider_type`` or ``chatgpt`` ``auth_mode``); consumed by
+      :func:`attach_hooks_to_options` to register the S8-R1 Agent-arg-strip
+      PreToolUse hook
     - R4: ``ANTHROPIC_SMALL_FAST_MODEL`` set to ``small_fast_model or
       default_model or first curated model id`` (a STABLE provider-scoped value,
       NEVER the per-turn ``model``) so background probes / title-gen never send an
@@ -781,6 +785,13 @@ def apply_provider_env(
     env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "1"
+
+    # A translated (Responses-coerced) main forces the CLI to fill every Agent-tool
+    # property on every call. This marker wires the downstream S8-R1 PreToolUse hook
+    # (via attach_hooks_to_options) that strips the grammar-coerced Agent-tool
+    # `model`/`isolation` args so stamped-frontmatter subagent pins survive.
+    if is_translated:
+        env["AIH_GATEWAY_TRANSLATED_MAIN"] = "1"
 
     max_output = provider.get("max_output_tokens")
     if max_output:

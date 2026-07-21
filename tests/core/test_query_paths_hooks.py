@@ -64,7 +64,52 @@ class TestAttachHooksToOptions:
             project_id="proj-1",
             plugin_paths=["/plugins/ralph-loop"],
             stderr_callback=stderr_cb,
+            translated_main=False,
         )
+
+    def test_translated_main_passed_when_env_marker_present(self):
+        """The S8-R1 strip is opt-in: attach_hooks_to_options passes
+        translated_main=True iff options.env carries AIH_GATEWAY_TRANSLATED_MAIN
+        (presence, not truthiness)."""
+        options = _make_options()
+        options.env = {"AIH_GATEWAY_TRANSLATED_MAIN": "1", "PATH": "/usr/bin"}
+        with patch.object(
+            hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
+        ) as mock_build:
+            hook_service.attach_hooks_to_options(options)
+        assert mock_build.call_args.kwargs["translated_main"] is True
+
+    def test_translated_main_presence_not_truthiness(self):
+        """An empty-string marker value still counts — detection keys on the key
+        being present, not on its value being truthy."""
+        options = _make_options()
+        options.env = {"AIH_GATEWAY_TRANSLATED_MAIN": ""}
+        with patch.object(
+            hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
+        ) as mock_build:
+            hook_service.attach_hooks_to_options(options)
+        assert mock_build.call_args.kwargs["translated_main"] is True
+
+    def test_translated_main_false_without_marker(self):
+        """No marker in options.env → translated_main=False."""
+        options = _make_options()
+        options.env = {"PATH": "/usr/bin"}
+        with patch.object(
+            hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
+        ) as mock_build:
+            hook_service.attach_hooks_to_options(options)
+        assert mock_build.call_args.kwargs["translated_main"] is False
+
+    def test_translated_main_false_when_no_env_attr(self):
+        """Options without an env attribute at all → translated_main=False."""
+        options = _make_options()
+        # _make_options() namespace has no `env` attribute.
+        assert not hasattr(options, "env")
+        with patch.object(
+            hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
+        ) as mock_build:
+            hook_service.attach_hooks_to_options(options)
+        assert mock_build.call_args.kwargs["translated_main"] is False
 
     def test_noop_without_cwd(self):
         options = _make_options(cwd=None)

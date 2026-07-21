@@ -11,6 +11,7 @@ from app.core.hook_service import (
     create_stop_hook_handler,
     create_plugin_hook_handler,
     create_db_pretooluse_hook_handler,
+    create_agent_arg_strip_hook_handler,
     execute_plugin_hook,
     _fix_python_command_for_windows,
 )
@@ -686,3 +687,130 @@ class TestDbPreToolUseHooks:
             result = build_hooks_config(str(tmp_path), "test-project")
         assert "PreToolUse" not in result
         assert "Stop" in result
+
+
+# =============================================================================
+# S8-R1: Agent-arg-strip PreToolUse hook (translated mains)
+# =============================================================================
+
+class TestAgentArgStripHandler:
+    """Unit tests for create_agent_arg_strip_hook_handler."""
+
+    @pytest.mark.asyncio
+    async def test_strips_both_model_and_isolation(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {
+                "tool_name": "Agent",
+                "tool_input": {
+                    "prompt": "do it", "model": "opus",
+                    "isolation": "worktree", "run_in_background": False,
+                },
+            },
+            None,
+            {"signal": None},
+        )
+        updated = result["hookSpecificOutput"]["updatedInput"]
+        assert "model" not in updated
+        assert "isolation" not in updated
+        assert updated == {"prompt": "do it", "run_in_background": False}
+        assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+
+    @pytest.mark.asyncio
+    async def test_strips_when_only_model_present(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Agent", "tool_input": {"prompt": "x", "model": "sonnet"}},
+            None,
+            {"signal": None},
+        )
+        assert result["hookSpecificOutput"]["updatedInput"] == {"prompt": "x"}
+
+    @pytest.mark.asyncio
+    async def test_strips_when_only_isolation_present(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Task", "tool_input": {"prompt": "x", "isolation": "remote"}},
+            None,
+            {"signal": None},
+        )
+        assert result["hookSpecificOutput"]["updatedInput"] == {"prompt": "x"}
+
+    @pytest.mark.asyncio
+    async def test_preserves_all_other_keys(self):
+        handler = create_agent_arg_strip_hook_handler()
+        original = {
+            "prompt": "p", "description": "d", "subagent_type": "claude",
+            "run_in_background": True, "model": "opus", "isolation": "worktree",
+        }
+        result = await handler(
+            {"tool_name": "Agent", "tool_input": original}, None, {"signal": None},
+        )
+        updated = result["hookSpecificOutput"]["updatedInput"]
+        assert updated == {
+            "prompt": "p", "description": "d", "subagent_type": "claude",
+            "run_in_background": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_opinion_when_neither_present(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Agent", "tool_input": {"prompt": "x", "run_in_background": False}},
+            None,
+            {"signal": None},
+        )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_no_opinion_for_non_dict_tool_input(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Agent", "tool_input": None}, None, {"signal": None},
+        )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_no_opinion_for_non_agent_tool(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Bash", "tool_input": {"model": "opus", "isolation": "worktree"}},
+            None,
+            {"signal": None},
+        )
+        assert result.get("hookSpecificOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_output_has_no_permission_decision(self):
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": "Agent", "tool_input": {"prompt": "x", "model": "opus"}},
+            None,
+            {"signal": None},
+        )
+        assert result.get("permissionDecision") is None
+        assert "permissionDecision" not in result["hookSpecificOutput"]
+
+
+class TestBuildHooksConfigTranslatedMain:
+    """build_hooks_config translated_main registration."""
+
+    def test_registers_agent_strip_matcher_when_translated(self, tmp_path):
+        result = build_hooks_config(str(tmp_path), "test-project", translated_main=True)
+        assert "PreToolUse" in result
+        matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent|Task"]
+        assert len(matchers) == 1
+
+    def test_default_false_does_not_register_agent_strip(self, tmp_path):
+        with patch("app.core.hook_service._project_has_db_pretooluse_hooks", return_value=False):
+            result = build_hooks_config(str(tmp_path), "test-project")
+        # No PreToolUse matcher at all (no plugin/DB hooks, no translated strip).
+        assert "PreToolUse" not in result
+
+    def test_translated_strip_coexists_with_db_pretooluse(self, tmp_path):
+        with patch("app.core.hook_service._project_has_db_pretooluse_hooks", return_value=True):
+            result = build_hooks_config(str(tmp_path), "test-project", translated_main=True)
+        agent_matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent|Task"]
+        assert len(agent_matchers) == 1
+        # DB handler (no matcher) is still present alongside.
+        assert len(result["PreToolUse"]) >= 2

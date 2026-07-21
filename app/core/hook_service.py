@@ -830,6 +830,50 @@ def create_db_pretooluse_hook_handler(
     return handler
 
 
+def create_agent_arg_strip_hook_handler(
+    stderr_callback: StderrCallback = None,
+) -> Callable[[HookInput, Optional[str], HookContext], Awaitable[SyncHookJSONOutput]]:
+    """
+    Create a PreToolUse handler that strips coerced ``model``/``isolation`` args
+    from Agent/Task tool calls on translated (ChatGPT/Codex-served) mains.
+
+    Ruling S8-R1: a translated main's Responses backend coerces every tool schema
+    to strict:true + all-props-required, so the model is grammar-forced to fill
+    ``model`` and ``isolation`` on every Agent call. Both are enums with no neutral
+    value, so the filled value carries no intent — and on a translated main every
+    ``model`` alias is an unservable claude id. Stripping both is lossless and
+    restores the stamped-frontmatter subagent pins.
+    """
+
+    async def handler(
+        hook_input: HookInput,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> SyncHookJSONOutput:
+        tool_input = (hook_input or {}).get("tool_input")
+        if not isinstance(tool_input, dict):
+            return SyncHookJSONOutput()
+
+        if (hook_input or {}).get("tool_name") not in ("Agent", "Task"):
+            return SyncHookJSONOutput()
+
+        if "model" not in tool_input and "isolation" not in tool_input:
+            return SyncHookJSONOutput()
+
+        stripped = [k for k in ("model", "isolation") if k in tool_input]
+        logger.debug(f"[HookService] S8-R1: stripping Agent args {stripped} on translated main")
+
+        updated_input = {k: v for k, v in tool_input.items() if k not in ("model", "isolation")}
+        return SyncHookJSONOutput(
+            hookSpecificOutput={
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated_input,
+            }
+        )
+
+    return handler
+
+
 def _project_has_db_pretooluse_hooks(project_id: Optional[str]) -> bool:
     """
     Return True if the project (or app-level) has any enabled DB PreToolUse hooks.
@@ -852,7 +896,9 @@ def build_hooks_config(
     working_dir: str,
     project_id: Optional[str] = None,
     plugin_paths: Optional[List[str]] = None,
-    stderr_callback: StderrCallback = None
+    stderr_callback: StderrCallback = None,
+    *,
+    translated_main: bool = False,
 ) -> Optional[Dict[str, List[HookMatcher]]]:
     """
     Build SDK hooks configuration from all sources.
@@ -907,6 +953,15 @@ def build_hooks_config(
         )
         logger.debug(f"[HookService] Registered DB PreToolUse handler for project {project_id}")
 
+    # On a translated (ChatGPT/Codex-served) main the backend coerces the Agent
+    # tool schema to all-props-required, force-filling `model`/`isolation`. Strip
+    # them so stamped-frontmatter subagent pins survive (ruling S8-R1).
+    if translated_main:
+        hooks_config.setdefault("PreToolUse", []).append(
+            HookMatcher(matcher="Agent|Task", hooks=[create_agent_arg_strip_hook_handler(stderr_callback)])
+        )
+        logger.debug("[HookService] Registered S8-R1 Agent-arg-strip PreToolUse handler (translated main)")
+
     # ALWAYS register the Stop hook handler for database hooks support
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
     stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
@@ -938,11 +993,17 @@ def attach_hooks_to_options(
         if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
             plugin_paths.append(plugin_entry["path"])
 
+    # The S8-R1 Agent-arg-strip hook is registered only on translated mains,
+    # detected via the forced env marker set by the provider overlay
+    # (apply_provider_env). Presence — not truthiness — is the signal.
+    translated_main = "AIH_GATEWAY_TRANSLATED_MAIN" in (getattr(options, "env", None) or {})
+
     hooks_config = build_hooks_config(
         working_dir=working_dir,
         project_id=project_id,
         plugin_paths=plugin_paths,
         stderr_callback=stderr_callback,
+        translated_main=translated_main,
     )
     if hooks_config:
         options.hooks = hooks_config

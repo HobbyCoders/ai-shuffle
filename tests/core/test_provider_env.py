@@ -37,6 +37,7 @@ SUBAGENT_KEY = "CLAUDE_CODE_SUBAGENT_MODEL"
 DISABLE_1M_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
 AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 MAX_OUTPUT_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+TRANSLATED_MAIN_KEY = "AIH_GATEWAY_TRANSLATED_MAIN"
 MITIGATION_KEYS = (
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
@@ -215,6 +216,41 @@ class TestApplyProviderEnv:
         assert env[BASE_URL_KEY] == "http://localhost:4000"
         assert env[AUTH_TOKEN_KEY] == ""
         assert env[API_KEY] == ""
+
+    def test_translated_main_marker_set_for_chatgpt(self, mock_db):
+        """S8-R1: a chatgpt-type (translated) main sets AIH_GATEWAY_TRANSLATED_MAIN
+        so attach_hooks_to_options wires the Agent-arg-strip PreToolUse hook."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+
+    def test_translated_main_marker_absent_for_openrouter(self, mock_db):
+        """A non-translated (openrouter) main does NOT set the marker."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_type="openrouter", token="gw-secret")
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert TRANSLATED_MAIN_KEY not in env
+
+    def test_translated_main_marker_absent_for_custom(self, mock_db):
+        """A custom-type main (Anthropic-compatible endpoint) is not translated →
+        no marker."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db, provider_type="custom", token="gw-secret",
+            base_url="https://custom.example/api",
+        )
+        env = apply_provider_env({}, "op", "custom/model")
+        assert TRANSLATED_MAIN_KEY not in env
 
     def test_ProviderConfigError_is_value_error(self):
         """R5 mechanism: ProviderConfigError subclasses ValueError so the query
