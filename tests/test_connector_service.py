@@ -2,6 +2,8 @@
 Tests for connector service — business logic, config handling, CRUD operations.
 """
 
+import types
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -301,3 +303,203 @@ class TestTestConnector:
         # Should have response_time_ms, not elapsed_ms
         assert "response_time_ms" in result
         assert "elapsed_ms" not in result
+
+
+# =============================================================================
+# Discord Guided-Setup Schema Metadata
+# =============================================================================
+
+
+class TestDiscordSchemaMetadata:
+    def _discord_fields(self):
+        types_ = get_connector_type_info()
+        discord = next(t for t in types_ if t["type"] == "discord")
+        return {f["key"]: f for f in discord["config_fields"]}
+
+    def test_guild_ids_has_picker(self):
+        assert self._discord_fields()["guild_ids"]["picker"] == "discord_guilds"
+
+    def test_channel_ids_has_picker(self):
+        assert self._discord_fields()["allowed_channel_ids"]["picker"] == "discord_channels"
+
+    def test_command_prefix_has_presets(self):
+        assert self._discord_fields()["command_prefix"]["presets"] == ["!", "?", "."]
+
+    def test_other_types_have_no_picker(self):
+        """Additive keys must not leak onto other connector types."""
+        types_ = get_connector_type_info()
+        for t in types_:
+            if t["type"] == "discord":
+                continue
+            for f in t["config_fields"]:
+                assert "picker" not in f
+
+
+# =============================================================================
+# discover_resources (Discord discovery)
+# =============================================================================
+
+
+class _FakeTextChannel:
+    def __init__(self, cid, name):
+        self.id = cid
+        self.name = name
+
+
+class _FakeVoiceChannel:
+    """A non-text channel that discovery must filter out."""
+    def __init__(self, cid, name):
+        self.id = cid
+        self.name = name
+
+
+def _make_fake_discord(client_factory):
+    """Build a stand-in for the ``discord`` module used by discord_connector.
+
+    Exception classes are plain ``Exception`` subclasses so the tests can raise
+    them and the ``except`` clauses in ``discover_resources`` still catch them.
+    """
+    class FakeLoginFailure(Exception):
+        pass
+
+    class FakeForbidden(Exception):
+        pass
+
+    class FakeHTTPException(Exception):
+        pass
+
+    intents = MagicMock()
+    intents.none.return_value = MagicMock()
+
+    return types.SimpleNamespace(
+        Client=client_factory,
+        Intents=intents,
+        LoginFailure=FakeLoginFailure,
+        Forbidden=FakeForbidden,
+        HTTPException=FakeHTTPException,
+        TextChannel=_FakeTextChannel,
+    ), FakeLoginFailure, FakeForbidden, FakeHTTPException
+
+
+class TestDiscoverResources:
+    @pytest.mark.asyncio
+    async def test_discover_happy_path(self):
+        from app.core.connectors import discord_connector
+
+        closed = {"value": False}
+
+        class FakeClient:
+            def __init__(self, intents=None):
+                self.user = types.SimpleNamespace(id=111, name="TestBot")
+
+            async def login(self, token):
+                assert token == "tok"
+
+            async def application_info(self):
+                return types.SimpleNamespace(id=222)
+
+            async def fetch_guilds(self, *, limit=200):
+                for g in [types.SimpleNamespace(id=333, name="Server A")]:
+                    yield g
+
+            async def fetch_guild(self, gid):
+                async def fetch_channels():
+                    return [
+                        _FakeTextChannel(444, "general"),
+                        _FakeVoiceChannel(445, "Voice"),  # filtered out
+                    ]
+                return types.SimpleNamespace(fetch_channels=fetch_channels)
+
+            async def close(self):
+                closed["value"] = True
+
+        fake_discord, *_ = _make_fake_discord(FakeClient)
+        with patch.object(discord_connector, "discord", fake_discord), \
+             patch.object(discord_connector, "DISCORD_AVAILABLE", True):
+            result = await discord_connector.discover_resources("tok")
+
+        assert result == {
+            "bot": {"id": "111", "name": "TestBot"},
+            "application_id": "222",
+            "guilds": [
+                {
+                    "id": "333",
+                    "name": "Server A",
+                    "channels": [{"id": "444", "name": "general"}],
+                    "error": None,
+                }
+            ],
+        }
+        # All IDs are strings (snowflakes overflow JS numbers).
+        assert isinstance(result["bot"]["id"], str)
+        assert isinstance(result["guilds"][0]["channels"][0]["id"], str)
+        # Client is always closed.
+        assert closed["value"] is True
+
+    @pytest.mark.asyncio
+    async def test_discover_invalid_token_raises_valueerror(self):
+        from app.core.connectors import discord_connector
+
+        holder = {}
+
+        class FakeClient:
+            def __init__(self, intents=None):
+                self.user = None
+
+            async def login(self, token):
+                raise holder["LoginFailure"]("bad")
+
+            async def close(self):
+                holder["closed"] = True
+
+        fake_discord, LoginFailure, _, _ = _make_fake_discord(FakeClient)
+        holder["LoginFailure"] = LoginFailure
+        with patch.object(discord_connector, "discord", fake_discord), \
+             patch.object(discord_connector, "DISCORD_AVAILABLE", True):
+            with pytest.raises(ValueError, match="Invalid bot token"):
+                await discord_connector.discover_resources("tok")
+        assert holder.get("closed") is True
+
+    @pytest.mark.asyncio
+    async def test_discover_forbidden_guild_included_with_error(self):
+        from app.core.connectors import discord_connector
+
+        holder = {}
+
+        class FakeClient:
+            def __init__(self, intents=None):
+                self.user = types.SimpleNamespace(id=1, name="B")
+
+            async def login(self, token):
+                pass
+
+            async def application_info(self):
+                return types.SimpleNamespace(id=2)
+
+            async def fetch_guilds(self, *, limit=200):
+                for g in [types.SimpleNamespace(id=9, name="Locked")]:
+                    yield g
+
+            async def fetch_guild(self, gid):
+                raise holder["Forbidden"]("no access")
+
+            async def close(self):
+                pass
+
+        fake_discord, _, Forbidden, _ = _make_fake_discord(FakeClient)
+        holder["Forbidden"] = Forbidden
+        with patch.object(discord_connector, "discord", fake_discord), \
+             patch.object(discord_connector, "DISCORD_AVAILABLE", True):
+            result = await discord_connector.discover_resources("tok")
+
+        guild = result["guilds"][0]
+        assert guild["channels"] == []
+        assert guild["error"] == "no access"
+
+    @pytest.mark.asyncio
+    async def test_discover_raises_when_sdk_missing(self):
+        from app.core.connectors import discord_connector
+
+        with patch.object(discord_connector, "DISCORD_AVAILABLE", False):
+            with pytest.raises(RuntimeError, match="discord.py not installed"):
+                await discord_connector.discover_resources("tok")

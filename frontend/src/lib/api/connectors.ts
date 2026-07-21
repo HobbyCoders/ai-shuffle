@@ -85,10 +85,32 @@ export interface ConnectorTypeInfo {
 		required: boolean;
 		placeholder?: string;
 		description?: string;
+		picker?: string; // e.g. 'discord_guilds', 'discord_channels'
+		presets?: string[]; // preset chip values, e.g. ['!', '?', '.']
 	}>;
 	triggers: ConnectorTriggerInfo[];
 	actions: ConnectorActionInfo[];
 	tools: ConnectorToolInfo[];
+}
+
+// ---- Discord guided setup ----
+
+export interface DiscordDiscoverChannel {
+	id: string;
+	name: string;
+}
+
+export interface DiscordDiscoverGuild {
+	id: string;
+	name: string;
+	channels: DiscordDiscoverChannel[];
+	error: string | null;
+}
+
+export interface DiscordDiscoverResult {
+	bot: { id: string; name: string };
+	application_id: string;
+	guilds: DiscordDiscoverGuild[];
 }
 
 export interface ConnectorEventLog {
@@ -182,6 +204,17 @@ export async function getConnectorTypes(): Promise<ConnectorTypeInfo[]> {
  */
 export async function getConnectorEvents(): Promise<string[]> {
 	return api.get<string[]>('/connectors/events');
+}
+
+/**
+ * Discover a Discord bot's guilds/channels for guided setup.
+ * Provide exactly one of bot_token or connector_id.
+ */
+export async function discoverDiscord(body: {
+	bot_token?: string;
+	connector_id?: string;
+}): Promise<DiscordDiscoverResult> {
+	return api.post<DiscordDiscoverResult>('/connectors/discord/discover', body);
 }
 
 /**

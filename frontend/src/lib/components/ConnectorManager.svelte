@@ -17,7 +17,8 @@
 		Connector,
 		ConnectorTypeInfo,
 		ConnectorCreate,
-		ConnectorEventLog
+		ConnectorEventLog,
+		DiscordDiscoverResult
 	} from '$lib/api/connectors';
 	import {
 		getConnectors,
@@ -29,7 +30,8 @@
 		deactivateConnector,
 		getConnectorTypes,
 		getConnectorEvents,
-		getConnectorLogs
+		getConnectorLogs,
+		discoverDiscord
 	} from '$lib/api/connectors';
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
@@ -46,7 +48,7 @@
 
 	// UI state
 	let view: 'list' | 'add' | 'setup' | 'edit' = $state('list');
-	let selectedType: ConnectorTypeInfo | null = $state(null);
+	let selectedType = $state<ConnectorTypeInfo | null>(null);
 	let editingConnector: Connector | null = $state(null);
 	let expandedLogs: Set<string> = $state(new Set());
 	let connectorLogs: Map<string, ConnectorEventLog[]> = $state(new Map());
@@ -62,6 +64,181 @@
 	let formError = $state('');
 	let testingId: string | null = $state(null);
 	let deletingId: string | null = $state(null);
+
+	// -----------------------------------------------------------------
+	// Discord guided setup state
+	// -----------------------------------------------------------------
+	let discovering = $state(false);
+	let discoverError = $state('');
+	let discoverResult = $state<DiscordDiscoverResult | null>(null);
+	let manualMode = $state(false); // "Enter IDs manually" fallback (create view)
+	let selectedGuildIds: Set<string> = $state(new Set());
+	let selectedChannelIds: Set<string> = $state(new Set());
+	let prefixMode: 'none' | 'preset' | 'custom' = $state('none');
+	let customPrefix = $state('');
+
+	let isDiscord = $derived(selectedType?.type === 'discord');
+	// Pickers are active only in guided mode once a discovery has succeeded.
+	let showPickers = $derived(isDiscord && !manualMode && discoverResult !== null);
+	let prefixPresets = $derived(
+		(selectedType?.config_fields.find((f) => f.presets)?.presets as string[] | undefined) ?? []
+	);
+	let inviteUrl = $derived(
+		discoverResult
+			? `https://discord.com/oauth2/authorize?client_id=${discoverResult.application_id}&scope=bot&permissions=277025508416`
+			: ''
+	);
+
+	// Guilds to render: fetched guilds, plus any pre-selected id absent from the
+	// fetched list (edit view) surfaced as an "Unknown" row so a save can't drop it.
+	let guildRows = $derived.by(() => {
+		if (!discoverResult) return [] as { id: string; name: string; error: string | null }[];
+		const fetchedIds = new Set(discoverResult.guilds.map((g) => g.id));
+		const rows = discoverResult.guilds.map((g) => ({ id: g.id, name: g.name, error: g.error }));
+		for (const id of selectedGuildIds) {
+			if (!fetchedIds.has(id)) rows.push({ id, name: `Unknown (${id})`, error: null });
+		}
+		return rows;
+	});
+
+	// Channel groups: text channels grouped under guild headings. When one or more
+	// guilds are checked, only checked guilds' channels show; otherwise all show.
+	// Selected channel ids not present in any shown group are surfaced separately.
+	let channelGroups = $derived.by(() => {
+		if (!discoverResult)
+			return [] as {
+				guildId: string;
+				guildName: string;
+				error: string | null;
+				channels: { id: string; name: string }[];
+			}[];
+		const anyGuildChecked = selectedGuildIds.size > 0;
+		const groups: {
+			guildId: string;
+			guildName: string;
+			error: string | null;
+			channels: { id: string; name: string }[];
+		}[] = [];
+		const shown = new Set<string>();
+		for (const g of discoverResult.guilds) {
+			if (anyGuildChecked && !selectedGuildIds.has(g.id)) continue;
+			if (g.channels.length === 0 && !g.error) continue;
+			groups.push({ guildId: g.id, guildName: g.name, error: g.error, channels: g.channels });
+			for (const c of g.channels) shown.add(c.id);
+		}
+		const unknown = [...selectedChannelIds].filter((id) => !shown.has(id));
+		if (unknown.length) {
+			groups.push({
+				guildId: '__unknown__',
+				guildName: 'Other (stored)',
+				error: null,
+				channels: unknown.map((id) => ({ id, name: `Unknown (${id})` }))
+			});
+		}
+		return groups;
+	});
+
+	// Keep the flat formConfig in sync with the picker selections while pickers are
+	// active, so handleCreate/handleUpdate serialize them (comma-joined → lists).
+	$effect(() => {
+		if (!showPickers) return;
+		formConfig.guild_ids = [...selectedGuildIds].join(',');
+		formConfig.allowed_channel_ids = [...selectedChannelIds].join(',');
+	});
+
+	function parseIds(v: any): string[] {
+		if (!v) return [];
+		if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
+		return String(v)
+			.split(/[\s,]+/)
+			.filter(Boolean);
+	}
+
+	function resetDiscordState() {
+		discovering = false;
+		discoverError = '';
+		discoverResult = null;
+		manualMode = false;
+		selectedGuildIds = new Set();
+		selectedChannelIds = new Set();
+		prefixMode = 'none';
+		customPrefix = '';
+	}
+
+	function initPrefix(value: string) {
+		if (!value) {
+			prefixMode = 'none';
+			customPrefix = '';
+			formConfig.command_prefix = '';
+		} else if (prefixPresets.includes(value)) {
+			prefixMode = 'preset';
+			customPrefix = '';
+			formConfig.command_prefix = value;
+		} else {
+			prefixMode = 'custom';
+			customPrefix = value;
+			formConfig.command_prefix = value;
+		}
+	}
+
+	function toggleGuild(id: string) {
+		const next = new Set(selectedGuildIds);
+		if (next.has(id)) {
+			next.delete(id);
+			// Uncheck channels of this guild (per spec) — visibility is guild-filtered.
+			const guild = discoverResult?.guilds.find((g) => g.id === id);
+			if (guild) {
+				const chans = new Set(guild.channels.map((c) => c.id));
+				selectedChannelIds = new Set([...selectedChannelIds].filter((c) => !chans.has(c)));
+			}
+		} else {
+			next.add(id);
+		}
+		selectedGuildIds = next;
+	}
+
+	function toggleChannel(id: string) {
+		const next = new Set(selectedChannelIds);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		selectedChannelIds = next;
+	}
+
+	function selectPrefixNone() {
+		prefixMode = 'none';
+		formConfig.command_prefix = '';
+	}
+	function selectPrefixPreset(p: string) {
+		prefixMode = 'preset';
+		formConfig.command_prefix = p;
+	}
+	function selectPrefixCustom() {
+		prefixMode = 'custom';
+		formConfig.command_prefix = customPrefix;
+	}
+	function syncCustomPrefix() {
+		if (prefixMode === 'custom') formConfig.command_prefix = customPrefix;
+	}
+
+	async function runDiscover() {
+		const token = (formConfig.bot_token || '').trim();
+		discovering = true;
+		discoverError = '';
+		try {
+			let result: DiscordDiscoverResult;
+			if (view === 'edit' && token.startsWith('****') && editingConnector) {
+				// Masked token still in the field — reuse the stored one via connector_id.
+				result = await discoverDiscord({ connector_id: editingConnector.id });
+			} else {
+				result = await discoverDiscord({ bot_token: token });
+			}
+			discoverResult = result;
+		} catch (e: any) {
+			discoverError = e.detail || 'Invalid bot token';
+		} finally {
+			discovering = false;
+		}
+	}
 
 	// Connector type icons (SVG path data)
 	const typeIcons: Record<string, string> = {
@@ -282,18 +459,32 @@
 		formConfig = {};
 		formEvents = [];
 		formError = '';
+		resetDiscordState();
 		view = 'setup';
 	}
 
 	function startEdit(connector: Connector) {
 		editingConnector = connector;
 		formName = connector.name;
-		formConfig = { ...connector.config };
+		// Normalize list-typed config values (e.g. discord guild_ids) to comma-joined
+		// strings so plain inputs bind cleanly; picker selections are re-hydrated below.
+		const cfg: Record<string, string> = {};
+		for (const [k, v] of Object.entries(connector.config)) {
+			cfg[k] = Array.isArray(v) ? v.map((x) => String(x)).join(',') : (v as any);
+		}
+		formConfig = cfg;
 		formEvents = [...connector.events];
 		formError = '';
 
 		// Find the type info for this connector
 		selectedType = connectorTypes.find((t) => t.type === connector.type) || null;
+
+		resetDiscordState();
+		if (connector.type === 'discord') {
+			selectedGuildIds = new Set(parseIds(connector.config.guild_ids));
+			selectedChannelIds = new Set(parseIds(connector.config.allowed_channel_ids));
+			initPrefix(String(connector.config.command_prefix ?? ''));
+		}
 		view = 'edit';
 	}
 
@@ -306,6 +497,7 @@
 		formConfig = {};
 		formEvents = [];
 		formError = '';
+		resetDiscordState();
 	}
 
 	function toggleEvent(event: string) {
@@ -898,42 +1090,219 @@
 					<!-- Dynamic Config Fields -->
 					{#if selectedType}
 						{#each selectedType.config_fields as field (field.key)}
-							<div>
-								<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">
-									{field.label}
-									{#if field.required}
-										<span class="text-destructive">*</span>
+							{#if isDiscord && field.key === 'bot_token'}
+								<!-- Discord: bot token + Validate (guided discovery) -->
+								<div>
+									<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">
+										{field.label}
+										{#if field.required}<span class="text-destructive">*</span>{/if}
+									</label>
+									<div class="flex gap-2">
+										<input
+											id="connector-field-{field.key}"
+											type="password"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || ''}
+											class="flex-1 min-w-0 px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+										/>
+										<button
+											type="button"
+											onclick={runDiscover}
+											disabled={discovering || !(formConfig[field.key] || '').trim()}
+											class="px-3 py-2 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-primary-foreground text-sm rounded-md transition-colors font-medium whitespace-nowrap"
+										>
+											{discovering ? 'Validating…' : discoverResult ? 'Re-validate' : 'Validate'}
+										</button>
+									</div>
+									{#if field.description}
+										<p class="text-xs text-muted-foreground mt-1">{field.description}</p>
 									{/if}
-								</label>
-								{#if field.type === 'textarea'}
-									<textarea
-										id="connector-field-{field.key}"
-										bind:value={formConfig[field.key]}
-										placeholder={field.placeholder || ''}
-										rows="3"
-										class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors resize-vertical"
-									></textarea>
-								{:else if field.type === 'password'}
-									<input
-										id="connector-field-{field.key}"
-										type="password"
-										bind:value={formConfig[field.key]}
-										placeholder={field.placeholder || ''}
-										class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
-									/>
-								{:else}
-									<input
-										id="connector-field-{field.key}"
-										type="text"
-										bind:value={formConfig[field.key]}
-										placeholder={field.placeholder || ''}
-										class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
-									/>
+									{#if discoverResult}
+										<p class="discord-auth-ok" transition:slide={{ duration: 150 }}>
+											&#10003; Authenticated as <strong>{discoverResult.bot.name}</strong>
+											· {discoverResult.guilds.length} server{discoverResult.guilds.length === 1 ? '' : 's'} visible
+										</p>
+									{/if}
+									{#if discoverError}
+										<p class="discord-auth-err" transition:slide={{ duration: 150 }}>{discoverError}</p>
+									{/if}
+									{#if view === 'setup'}
+										<button
+											type="button"
+											class="manual-toggle"
+											onclick={() => (manualMode = !manualMode)}
+										>
+											{manualMode ? 'Use guided setup' : 'Enter IDs manually'}
+										</button>
+									{/if}
+								</div>
+							{:else if isDiscord && field.picker === 'discord_guilds'}
+								{#if showPickers}
+									<div>
+										<span class="block text-xs font-medium text-muted-foreground mb-1">{field.label}</span>
+										{#if guildRows.length === 0}
+											<div class="invite-box">
+												<p class="text-xs text-muted-foreground mb-2">
+													This bot isn't in any servers yet. Invite it, then re-validate.
+												</p>
+												<a class="invite-link" href={inviteUrl} target="_blank" rel="noopener noreferrer">
+													Open Discord invite &rarr;
+												</a>
+											</div>
+										{:else}
+											<div class="picker-list">
+												{#each guildRows as g (g.id)}
+													<label class="picker-item">
+														<input
+															type="checkbox"
+															checked={selectedGuildIds.has(g.id)}
+															onchange={() => toggleGuild(g.id)}
+															class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+														/>
+														<span class="picker-item-name">{g.name}</span>
+														{#if g.error}
+															<span class="picker-item-warn" title={g.error}>limited access</span>
+														{/if}
+													</label>
+												{/each}
+											</div>
+											<p class="text-xs text-muted-foreground mt-1">
+												Leave all unchecked to allow every visible server.
+											</p>
+										{/if}
+									</div>
+								{:else if manualMode || view === 'edit'}
+									<div>
+										<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">{field.label}</label>
+										<input
+											id="connector-field-{field.key}"
+											type="text"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || 'Comma-separated guild IDs'}
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+										/>
+										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
+									</div>
 								{/if}
-								{#if field.description}
-									<p class="text-xs text-muted-foreground mt-1">{field.description}</p>
+							{:else if isDiscord && field.picker === 'discord_channels'}
+								{#if showPickers}
+									<div>
+										<span class="block text-xs font-medium text-muted-foreground mb-1">{field.label}</span>
+										{#if channelGroups.length === 0}
+											<p class="text-xs text-muted-foreground">
+												No text channels found for the selected server(s).
+											</p>
+										{:else}
+											<div class="picker-list">
+												{#each channelGroups as grp (grp.guildId)}
+													<div class="picker-group-label">{grp.guildName}</div>
+													{#if grp.error}
+														<p class="picker-group-err">{grp.error}</p>
+													{/if}
+													{#each grp.channels as c (c.id)}
+														<label class="picker-item picker-item-indent">
+															<input
+																type="checkbox"
+																checked={selectedChannelIds.has(c.id)}
+																onchange={() => toggleChannel(c.id)}
+																class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+															/>
+															<span class="picker-item-name">#{c.name}</span>
+														</label>
+													{/each}
+												{/each}
+											</div>
+											<p class="text-xs text-muted-foreground mt-1">
+												Leave all unchecked to allow every channel.
+											</p>
+										{/if}
+									</div>
+								{:else if manualMode || view === 'edit'}
+									<div>
+										<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">{field.label}</label>
+										<input
+											id="connector-field-{field.key}"
+											type="text"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || 'Comma-separated channel IDs'}
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+										/>
+										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
+									</div>
 								{/if}
-							</div>
+							{:else if isDiscord && field.presets}
+								{#if manualMode}
+									<div>
+										<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">{field.label}</label>
+										<input
+											id="connector-field-{field.key}"
+											type="text"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || ''}
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+										/>
+										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
+									</div>
+								{:else if showPickers || view === 'edit'}
+									<div>
+										<span class="block text-xs font-medium text-muted-foreground mb-1">{field.label}</span>
+										<div class="prefix-chips">
+											<button type="button" class="prefix-chip" class:active={prefixMode === 'none'} onclick={selectPrefixNone}>None</button>
+											{#each prefixPresets as p}
+												<button type="button" class="prefix-chip" class:active={prefixMode === 'preset' && formConfig.command_prefix === p} onclick={() => selectPrefixPreset(p)}>{p}</button>
+											{/each}
+											<button type="button" class="prefix-chip" class:active={prefixMode === 'custom'} onclick={selectPrefixCustom}>Custom</button>
+										</div>
+										{#if prefixMode === 'custom'}
+											<input
+												type="text"
+												bind:value={customPrefix}
+												oninput={syncCustomPrefix}
+												placeholder="e.g., !!"
+												class="mt-2 w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+											/>
+										{/if}
+										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
+									</div>
+								{/if}
+							{:else}
+								<div>
+									<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">
+										{field.label}
+										{#if field.required}
+											<span class="text-destructive">*</span>
+										{/if}
+									</label>
+									{#if field.type === 'textarea'}
+										<textarea
+											id="connector-field-{field.key}"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || ''}
+											rows="3"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors resize-vertical"
+										></textarea>
+									{:else if field.type === 'password'}
+										<input
+											id="connector-field-{field.key}"
+											type="password"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || ''}
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+										/>
+									{:else}
+										<input
+											id="connector-field-{field.key}"
+											type="text"
+											bind:value={formConfig[field.key]}
+											placeholder={field.placeholder || ''}
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+										/>
+									{/if}
+									{#if field.description}
+										<p class="text-xs text-muted-foreground mt-1">{field.description}</p>
+									{/if}
+								</div>
+							{/if}
 						{/each}
 					{/if}
 
@@ -1019,7 +1388,7 @@
 					<div class="flex items-center gap-2 pt-2">
 						<button
 							onclick={view === 'edit' ? handleUpdate : handleCreate}
-							disabled={formSaving}
+							disabled={formSaving || (view === 'setup' && isDiscord && !manualMode && !discoverResult)}
 							class="px-4 py-2 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-primary-foreground text-sm rounded-md transition-colors font-medium"
 						>
 							{formSaving
@@ -1585,5 +1954,135 @@
 		background: color-mix(in oklch, var(--foreground) 6%, transparent);
 		border-radius: 4px;
 		opacity: 0.7;
+	}
+
+	/* ========================================
+	   Discord guided setup
+	   ======================================== */
+	.discord-auth-ok {
+		font-size: 12px;
+		margin-top: 6px;
+		color: var(--success, oklch(0.7 0.15 150));
+	}
+
+	.discord-auth-err {
+		font-size: 12px;
+		margin-top: 6px;
+		color: var(--destructive);
+	}
+
+	.manual-toggle {
+		margin-top: 8px;
+		font-size: 12px;
+		color: var(--primary);
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		text-decoration: underline;
+	}
+
+	.picker-list {
+		max-height: 220px;
+		overflow-y: auto;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 8px;
+		background: var(--input);
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.picker-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 6px;
+		border-radius: 6px;
+		cursor: pointer;
+	}
+
+	.picker-item:hover {
+		background: color-mix(in oklch, var(--foreground) 5%, transparent);
+	}
+
+	.picker-item-indent {
+		padding-left: 18px;
+	}
+
+	.picker-item-name {
+		font-size: 13px;
+		color: var(--foreground);
+	}
+
+	.picker-item-warn {
+		font-size: 10px;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+	}
+
+	.picker-group-label {
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--muted-foreground);
+		margin-top: 6px;
+		padding: 0 6px;
+	}
+
+	.picker-group-err {
+		font-size: 11px;
+		color: var(--destructive);
+		padding: 0 6px;
+	}
+
+	.invite-box {
+		border: 1px dashed var(--border);
+		border-radius: var(--radius);
+		padding: 12px;
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+	}
+
+	.invite-link {
+		font-size: 13px;
+		color: var(--primary);
+		font-weight: 500;
+		text-decoration: none;
+	}
+
+	.invite-link:hover {
+		text-decoration: underline;
+	}
+
+	.prefix-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.prefix-chip {
+		min-width: 32px;
+		padding: 4px 10px;
+		font-size: 13px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--input);
+		color: var(--foreground);
+		cursor: pointer;
+		transition: all 150ms;
+	}
+
+	.prefix-chip:hover {
+		border-color: var(--primary);
+	}
+
+	.prefix-chip.active {
+		background: var(--primary);
+		border-color: var(--primary);
+		color: var(--primary-foreground);
 	}
 </style>

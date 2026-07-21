@@ -1341,6 +1341,17 @@ class ConnectorUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class DiscordDiscoverRequest(BaseModel):
+    """Request to discover a Discord bot's guilds/channels for guided setup.
+
+    Exactly one of ``bot_token`` or ``connector_id`` must be provided. Use
+    ``connector_id`` to reuse the token already stored on an existing connector
+    (e.g. from the edit view, where the token is masked).
+    """
+    bot_token: Optional[str] = None
+    connector_id: Optional[str] = None
+
+
 class Connector(ConnectorBase):
     """Full connector response"""
     id: str

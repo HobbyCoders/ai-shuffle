@@ -389,9 +389,9 @@ def get_connector_type_info() -> List[Dict]:
             "description": "Discord bot via discord.py",
             "config_fields": [
                 {"key": "bot_token", "label": "Bot Token", "type": "password", "required": True},
-                {"key": "guild_ids", "label": "Guild IDs", "type": "list", "required": False},
-                {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False},
-                {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False},
+                {"key": "guild_ids", "label": "Guild IDs", "type": "list", "required": False, "picker": "discord_guilds"},
+                {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False, "picker": "discord_channels"},
+                {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False, "presets": ["!", "?", "."]},
             ],
         },
         {

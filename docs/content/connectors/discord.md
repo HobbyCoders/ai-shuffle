@@ -77,14 +77,20 @@ To restrict the bot to specific servers or channels, you need their IDs:
 
 ### Step 6: Configure the Connector in AI Shuffle
 
+AI Shuffle offers a **guided setup** that discovers the servers and channels your bot can see, so you can pick them from a list instead of copying IDs by hand. (Step 5 is only needed if you prefer to enter IDs manually.)
+
 1. Open the AI Shuffle web UI and navigate to **Settings > Connectors**.
 2. Click **Add Connector** and select **Discord**.
-3. Fill in the configuration fields:
-   - **Bot Token**: Paste the bot token from Step 2
-   - **Guild IDs** (optional): Comma-separated server IDs to limit the bot to specific servers
-   - **Allowed Channel IDs** (optional): Comma-separated channel IDs to limit the bot to specific channels
-   - **Command Prefix** (optional): Change the prefix for text commands (default is `!`)
-4. Click **Save** and then **Enable** the connector.
+3. Enter a **Connector Name**, choose an **API User** (or leave it to auto-create one), and paste the **Bot Token** from Step 2.
+4. Click **Validate**. AI Shuffle logs into Discord with the token and confirms the bot identity ("Authenticated as ...") along with how many servers it can see.
+   - If the bot is not in any server yet, an **Open Discord invite** link appears -- use it to add the bot, then click **Re-validate**.
+5. Select the servers (guilds) and text channels the bot should operate in from the checklists. Leaving a list unchecked allows **all** visible servers/channels.
+6. Choose a **Command Prefix** from the preset chips (`!`, `?`, `.`), pick **None**, or choose **Custom** to type your own.
+7. Select the **Events** this connector should listen to, then click **Create Connector** and **Enable** it.
+
+Prefer to type IDs yourself? Click **Enter IDs manually** under the Bot Token field to switch to plain text inputs for Guild IDs, Allowed Channel IDs, and Command Prefix (see Step 5 for how to obtain the IDs).
+
+When editing an existing Discord connector, the stored token is masked. Click **Validate** to re-run discovery against the saved token (you do not need to re-enter it), or paste a new token first to validate that instead.
 
 ## Configuration Reference
 

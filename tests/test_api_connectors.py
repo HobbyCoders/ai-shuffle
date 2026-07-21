@@ -201,6 +201,117 @@ class TestConnectorActions:
 
 
 # =============================================================================
+# Discord Guided Setup — /discord/discover
+# =============================================================================
+
+
+class TestDiscordDiscover:
+    URL = "/api/v1/connectors/discord/discover"
+
+    def _fake_result(self):
+        return {
+            "bot": {"id": "111", "name": "TestBot"},
+            "application_id": "222",
+            "guilds": [
+                {
+                    "id": "333",
+                    "name": "My Server",
+                    "channels": [{"id": "444", "name": "general"}],
+                    "error": None,
+                },
+            ],
+        }
+
+    def test_discover_with_valid_token(self, authenticated_client):
+        with patch(
+            "app.core.connectors.discord_connector.discover_resources",
+            new=AsyncMock(return_value=self._fake_result()),
+        ):
+            resp = authenticated_client.post(self.URL, json={"bot_token": "realtoken1234"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["bot"]["name"] == "TestBot"
+        assert data["application_id"] == "222"
+        assert data["guilds"][0]["channels"][0]["name"] == "general"
+
+    def test_discover_invalid_token(self, authenticated_client):
+        with patch(
+            "app.core.connectors.discord_connector.discover_resources",
+            new=AsyncMock(side_effect=ValueError("Invalid bot token")),
+        ):
+            resp = authenticated_client.post(self.URL, json={"bot_token": "badtoken"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid bot token"
+
+    def test_discover_upstream_failure_502(self, authenticated_client):
+        with patch(
+            "app.core.connectors.discord_connector.discover_resources",
+            new=AsyncMock(side_effect=TimeoutError("timed out")),
+        ):
+            resp = authenticated_client.post(self.URL, json={"bot_token": "realtoken1234"})
+        assert resp.status_code == 502
+
+    def test_discover_masked_token_rejected(self, authenticated_client):
+        resp = authenticated_client.post(self.URL, json={"bot_token": "****abcd"})
+        assert resp.status_code == 400
+
+    def test_discover_neither_provided(self, authenticated_client):
+        resp = authenticated_client.post(self.URL, json={})
+        assert resp.status_code == 400
+
+    def test_discover_both_provided(self, authenticated_client):
+        resp = authenticated_client.post(
+            self.URL, json={"bot_token": "x", "connector_id": "y"}
+        )
+        assert resp.status_code == 400
+
+    def test_discover_connector_id_uses_stored_token(self, authenticated_client, mock_encryption):
+        with patch("app.core.encryption.is_encrypted", return_value=True):
+            create = authenticated_client.post(
+                "/api/v1/connectors",
+                json={
+                    "name": "Disco",
+                    "type": "discord",
+                    "config": {"bot_token": "secrettoken1234"},
+                    "events": [],
+                },
+            )
+            assert create.status_code == 201
+            cid = create.json()["id"]
+
+            mock = AsyncMock(return_value=self._fake_result())
+            with patch(
+                "app.core.connectors.discord_connector.discover_resources", new=mock
+            ):
+                resp = authenticated_client.post(self.URL, json={"connector_id": cid})
+        assert resp.status_code == 200
+        # The decrypted stored token must be forwarded to discover_resources.
+        mock.assert_awaited_once_with("secrettoken1234")
+
+    def test_discover_connector_id_not_found(self, authenticated_client):
+        resp = authenticated_client.post(self.URL, json={"connector_id": "nonexistent"})
+        assert resp.status_code == 404
+
+    def test_discover_connector_id_wrong_type(self, authenticated_client, mock_encryption):
+        create = authenticated_client.post(
+            "/api/v1/connectors",
+            json={
+                "name": "Not Discord",
+                "type": "webhook",
+                "config": {"mode": "inbound", "inbound_path": "nd"},
+                "events": [],
+            },
+        )
+        cid = create.json()["id"]
+        resp = authenticated_client.post(self.URL, json={"connector_id": cid})
+        assert resp.status_code == 404
+
+    def test_discover_requires_admin(self, client):
+        resp = client.post(self.URL, json={"bot_token": "realtoken1234"})
+        assert resp.status_code in (401, 403)
+
+
+# =============================================================================
 # WhatsApp Webhook Verification
 # =============================================================================
 

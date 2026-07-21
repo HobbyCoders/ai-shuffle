@@ -15,6 +15,7 @@ from fastapi.responses import PlainTextResponse
 from app.core.models import (
     Connector, ConnectorCreate, ConnectorUpdate,
     ConnectorTestResponse, ConnectorEventLog, VALID_CONNECTOR_EVENTS,
+    DiscordDiscoverRequest,
 )
 from app.api.auth import require_admin
 from app.api.common import api_error_handler
@@ -74,6 +75,76 @@ async def create_connector_endpoint(
     except RuntimeError as e:
         logger.exception("Failed to create connector")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create connector")
+
+
+# ---- Discord guided setup ----
+#
+# NOTE: this literal path MUST be declared BEFORE the parametrized
+# ``/{connector_id}`` routes below — FastAPI matches routes in declaration
+# order, and a ``/{connector_id}`` route would otherwise swallow
+# ``/discord/discover``.
+
+@router.post("/discord/discover")
+async def discover_discord_resources(
+    data: DiscordDiscoverRequest,
+    token: str = Depends(require_admin),
+):
+    """Log into Discord with a bot token and return the bot identity plus the
+    guilds/channels it can see, for the guided setup pickers.
+
+    Provide exactly one of ``bot_token`` or ``connector_id``. When
+    ``connector_id`` is given, the connector's stored (encrypted) token is
+    decrypted and used — this is how the edit view reuses a masked token.
+    """
+    from app.core.connectors.discord_connector import discover_resources
+    from app.core.connector_service import decrypt_config
+
+    bot_token = data.bot_token
+    connector_id = data.connector_id
+
+    # Exactly one of bot_token / connector_id must be provided.
+    if bool(bot_token) == bool(connector_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide exactly one of bot_token or connector_id",
+        )
+
+    if connector_id:
+        connector = database.get_connector(connector_id)
+        if not connector or connector.get("type") != "discord":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Discord connector not found: {connector_id}",
+            )
+        decrypted = decrypt_config(connector.get("config", {}) or {}, "discord")
+        bot_token = decrypted.get("bot_token")
+        if not bot_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Connector has no stored bot token",
+            )
+    elif bot_token.startswith("****"):
+        # A masked token was submitted — the real value lives on the connector.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token is masked — pass connector_id to reuse the stored token",
+        )
+
+    try:
+        return await discover_resources(bot_token)
+    except ValueError:
+        # Invalid bot token. Do not echo the token.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot token",
+        )
+    except Exception:
+        # TimeoutError, discord.HTTPException, or any other upstream failure.
+        # Never log or echo the token.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Discord discovery failed",
+        )
 
 
 @router.get("/{connector_id}", response_model=Connector)

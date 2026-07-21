@@ -538,3 +538,92 @@ class DiscordConnector(BaseConnector):
                 await client.close()
         except Exception as exc:
             return {"success": False, "message": str(exc)}
+
+
+# ----------------------------------------------------------------------------
+# Guided-setup discovery (module-level — no connector instance required)
+# ----------------------------------------------------------------------------
+
+async def discover_resources(bot_token: str) -> Dict[str, Any]:
+    """Log into Discord (HTTP-only, no gateway) and enumerate the bot's
+    identity plus the guilds and text channels it can see.
+
+    This powers the guided connector-setup flow: instead of hand-typing guild
+    and channel IDs, the client presents pickers built from this result.
+
+    Args:
+        bot_token: A Discord bot token.
+
+    Returns:
+        {
+          "bot": {"id": str, "name": str},
+          "application_id": str,
+          "guilds": [
+            {
+              "id": str,
+              "name": str,
+              "channels": [{"id": str, "name": str}],
+              "error": str | None,
+            },
+            ...
+          ],
+        }
+
+        All IDs are strings because Discord snowflakes overflow JS numbers.
+        A guild whose channels could not be fetched (missing access) is still
+        returned with ``channels: []`` and a short ``error`` message.
+
+    Raises:
+        RuntimeError: discord.py is not installed.
+        ValueError: the bot token is invalid.
+        TimeoutError: discovery exceeded the timeout budget.
+    """
+    if not DISCORD_AVAILABLE:
+        raise RuntimeError("discord.py not installed")
+
+    async def _run() -> Dict[str, Any]:
+        # HTTP-only client — no gateway connection.
+        client = discord.Client(intents=discord.Intents.none())
+        try:
+            try:
+                await client.login(bot_token)
+            except discord.LoginFailure:
+                raise ValueError("Invalid bot token")
+
+            app_info = await client.application_info()
+
+            guilds_out = []
+            async for g in client.fetch_guilds(limit=200):
+                entry: Dict[str, Any] = {
+                    "id": str(g.id),
+                    "name": g.name,
+                    "channels": [],
+                    "error": None,
+                }
+                try:
+                    full = await client.fetch_guild(g.id)
+                    channels = await full.fetch_channels()
+                    entry["channels"] = [
+                        {"id": str(c.id), "name": c.name}
+                        for c in channels
+                        if isinstance(c, discord.TextChannel)
+                    ]
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    entry["error"] = str(exc) or exc.__class__.__name__
+                guilds_out.append(entry)
+
+            return {
+                "bot": {
+                    "id": str(client.user.id),
+                    "name": client.user.name,
+                },
+                "application_id": str(app_info.id),
+                "guilds": guilds_out,
+            }
+        finally:
+            await client.close()
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=20)
+    except asyncio.TimeoutError:
+        raise TimeoutError("Discord discovery timed out")
