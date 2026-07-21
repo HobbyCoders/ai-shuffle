@@ -609,8 +609,10 @@ def build_options_from_profile(
     # S3: on a PROVIDER (non-native) session, build the subagent leg-map from the
     # profile-default leg + each enabled subagent's composite, and STAMP each
     # enabled subagent's frontmatter model via the S2 resolver. The native branch
-    # below (``if not provider_id``) is untouched — a native session keeps each
-    # subagent's raw stored model exactly as today. ``honored_legs`` defaults to
+    # below (``else``) also runs the resolver, but with ``gateway_routed=False``
+    # (ruling S8-R2): composites are omitted (inherit main) and Claude aliases/ids
+    # are kept — a native CLI cannot serve a ``prov:...`` composite, so it must
+    # never be stamped verbatim into frontmatter. ``honored_legs`` defaults to
     # ``()`` so ``apply_provider_env`` gets an empty map on the native path.
     honored_legs = ()
     if provider_id:
@@ -632,6 +634,19 @@ def build_options_from_profile(
                 honored_leg_models=honored_leg_models,
                 session_default=plan.session_default,
                 main_serves_claude_ids=plan.main_serves_claude_ids,
+            )
+    else:
+        # S8-R2: a NATIVE session must also run the S2 resolver — the stored
+        # subagent model may be a provider composite (`prov:...`), which the
+        # CLI cannot serve natively. Native semantics: composite → omit
+        # (inherit main), Claude alias/id → keep, unpinned → stays None.
+        for agent_id, agent_def in (agents_dict or {}).items():
+            agent_def.model = resolve_subagent_frontmatter_model(
+                enabled_subagents.get(agent_id, {}).get("model"),
+                gateway_routed=False,
+                honored_leg_models=(),
+                session_default=None,
+                main_serves_claude_ids=True,
             )
 
     betas_to_use = []

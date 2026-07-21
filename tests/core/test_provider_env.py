@@ -1058,6 +1058,59 @@ class TestSubagentFrontmatterStamping:
         assert opts.agents["cl"].model == "sonnet"
         assert opts.agents["unp"].model is None
 
+    def test_native_composite_pin_omitted(self, mock_db, tmp_path):
+        """S8-R2: a NATIVE (no-provider) session with a composite-pinned subagent
+        omits the model (→ None → inherit main); the CLI cannot serve a
+        ``prov:...`` composite, so it must never be stamped verbatim."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_subagent(db, "comp", "prov:sub:gpt-5.6-luna")
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "opus", "cwd": str(tmp_path),
+                "enabled_agents": ["comp"],
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            opts = _build_options(profile)
+        m.assert_not_called()
+        assert opts.agents["comp"].model is None
+
+    def test_native_claude_alias_pin_kept(self, mock_db, tmp_path):
+        """S8-R2: a NATIVE session keeps a Claude-alias-pinned subagent's model."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_subagent(db, "cl", "sonnet")
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "opus", "cwd": str(tmp_path),
+                "enabled_agents": ["cl"],
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            opts = _build_options(profile)
+        m.assert_not_called()
+        assert opts.agents["cl"].model == "sonnet"
+
+    def test_native_unpinned_stays_none(self, mock_db, tmp_path):
+        """S8-R2: a NATIVE session leaves an unpinned subagent's model None."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_subagent(db, "unp", None)
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "opus", "cwd": str(tmp_path),
+                "enabled_agents": ["unp"],
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            opts = _build_options(profile)
+        m.assert_not_called()
+        assert opts.agents["unp"].model is None
+
     def test_behavior_delta_openrouter_main_sonnet_sub_to_small_fast(self, mock_db, tmp_path):
         """Behavior delta: on an openrouter (non-Claude-serving) provider main, a
         `sonnet`-pinned subagent is stamped the provider small/fast (not sonnet)."""
