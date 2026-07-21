@@ -10,6 +10,7 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
+	import type { Session } from '$lib/api/sessions';
 	import type {
 		ApiUser,
 		ApiUserCreateResponse,
@@ -22,6 +23,9 @@
 		deleteApiUser as deleteApiUserApi,
 		rotateApiUserKey
 	} from '$lib/api/apiUsers';
+	import { appData, apiUserSessions } from '$lib/stores/app-data.svelte';
+	import { activeSession } from '$lib/stores/active-session';
+	import { layout } from '$lib/stores/layout.svelte';
 
 	interface Project {
 		id: string;
@@ -46,6 +50,11 @@
 	let revealedApiKey: string | null = $state(null);
 	let revealedForUserId: string | null = $state(null);
 	let copied = $state(false);
+
+	// Expanded "Sessions" sections, keyed by API user id (collapsed by default).
+	let expandedSessions: Set<string> = $state(new Set());
+	// Loading feedback for the manual Sessions refresh affordance.
+	let sessionsRefreshing = $state(false);
 
 	// Form state
 	let formName = $state('');
@@ -206,10 +215,87 @@
 		return new Date(dateStr).toLocaleString();
 	}
 
+	// Parse a backend timestamp robustly. Session timestamps may be offset-aware
+	// (…±HH:MM or trailing Z) or naive UTC (no zone). Offset-aware strings parse
+	// as-is; naive ones get a 'Z' so they're read as UTC, not local time.
+	function parseTimestamp(dateStr: string): Date {
+		const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/.test(dateStr);
+		return new Date(hasOffset ? dateStr : dateStr + 'Z');
+	}
+
+	// Relative "time ago" for session updated_at.
+	function formatRelativeTime(dateStr: string | null | undefined): string {
+		if (!dateStr) return '';
+		const date = parseTimestamp(dateStr);
+		if (isNaN(date.getTime())) return '';
+		const diffMs = Date.now() - date.getTime();
+		const mins = Math.floor(diffMs / 60000);
+		if (mins < 1) return 'just now';
+		if (mins < 60) return `${mins}m ago`;
+		const hours = Math.floor(mins / 60);
+		if (hours < 24) return `${hours}h ago`;
+		const days = Math.floor(hours / 24);
+		if (days < 7) return `${days}d ago`;
+		if (days < 30) return `${Math.floor(days / 7)}w ago`;
+		return date.toLocaleDateString();
+	}
+
 	function getProjectName(projectId: string | null): string | null {
 		if (!projectId) return null;
 		const project = projects.find(p => p.id === projectId);
 		return project?.name || projectId;
+	}
+
+	function getProfileName(profileId: string | null | undefined): string | null {
+		if (!profileId) return null;
+		const profile = profiles.find(p => p.id === profileId);
+		return profile?.name || profileId;
+	}
+
+	// Sessions belonging to a given API user, most recently updated first.
+	function sessionsForUser(userId: string): Session[] {
+		return $apiUserSessions
+			.filter(s => s.api_user_id === userId)
+			.slice()
+			.sort((a, b) => parseTimestamp(b.updated_at).getTime() - parseTimestamp(a.updated_at).getTime());
+	}
+
+	function toggleSessions(userId: string) {
+		const next = new Set(expandedSessions);
+		if (next.has(userId)) {
+			next.delete(userId);
+		} else {
+			next.add(userId);
+		}
+		expandedSessions = next;
+	}
+
+	async function refreshSessions() {
+		if (sessionsRefreshing) return;
+		sessionsRefreshing = true;
+		try {
+			await appData.loadApiUserSessions();
+		} finally {
+			sessionsRefreshing = false;
+		}
+	}
+
+	// Open an API-user session in the main chat view via the same session-switch
+	// mechanism the normal session list uses (handleOpenSession in +page.svelte):
+	// prime the switcher with the session's project/worktree state, then navigate.
+	function openSession(session: Session) {
+		const worktreeInfo = session.worktree_id || session.worktree_branch || session.branch ? {
+			worktreeId: session.worktree_id ?? null,
+			worktreeBranch: session.worktree_branch ?? session.branch ?? '',
+			worktreeDeleted: session.worktree_deleted ?? false,
+			executionMode: 'worktree' as const,
+		} : null;
+		activeSession.switchSession(session.id, session.project_id ?? null, worktreeInfo, session.title || null);
+		layout.openChat(session.id);
+	}
+
+	function sessionLabel(session: Session): string {
+		return session.title?.trim() || session.id.slice(0, 8);
 	}
 
 	onMount(async () => {
@@ -405,6 +491,7 @@
 		{:else}
 			<div class="space-y-2">
 				{#each apiUsers as user}
+					{@const userSessions = sessionsForUser(user.id)}
 					<div class="bg-card/30 rounded-lg p-3 border border-border">
 						<div class="flex items-start justify-between gap-4">
 							<div class="flex-1 min-w-0">
@@ -500,6 +587,83 @@
 								{/if}
 							</div>
 						</div>
+
+						<!-- Sessions (collapsed by default) -->
+						<div class="mt-3 pt-3 border-t border-border">
+							<div class="flex items-center gap-2">
+								<button
+									onclick={() => toggleSessions(user.id)}
+									aria-expanded={expandedSessions.has(user.id)}
+									class="sessions-toggle flex items-center gap-1.5 text-xs font-medium text-muted-foreground rounded px-1 py-0.5 -ml-1 transition-colors"
+								>
+									<svg
+										class={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${expandedSessions.has(user.id) ? 'rotate-90' : ''}`}
+										fill="none" stroke="currentColor" viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+									</svg>
+									<span>Sessions</span>
+									<span class="px-1.5 py-0.5 bg-muted text-muted-foreground rounded-full text-[10px] leading-none">
+										{userSessions.length}
+									</span>
+								</button>
+								{#if expandedSessions.has(user.id)}
+									<button
+										onclick={refreshSessions}
+										disabled={sessionsRefreshing}
+										class="sessions-toggle p-1 text-muted-foreground rounded transition-colors disabled:opacity-50"
+										title="Refresh sessions"
+									>
+										<svg class={`w-3.5 h-3.5 ${sessionsRefreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+										</svg>
+									</button>
+								{/if}
+							</div>
+
+							{#if expandedSessions.has(user.id)}
+								{#if userSessions.length === 0}
+									<p class="text-xs text-muted-foreground mt-2 ml-1">
+										No sessions yet for this API user.
+									</p>
+								{:else}
+									<div class="space-y-1.5 mt-2">
+										{#each userSessions as session (session.id)}
+											<button
+												onclick={() => openSession(session)}
+												class="session-row w-full text-left rounded-[10px] border border-border bg-muted/40 px-3 py-2 transition-colors"
+											>
+												<div class="flex items-center gap-2 min-w-0">
+													<span class="text-xs font-medium text-foreground truncate flex-1 min-w-0">
+														{sessionLabel(session)}
+													</span>
+													<span class="text-[10px] text-muted-foreground flex-shrink-0">
+														{formatRelativeTime(session.updated_at)}
+													</span>
+												</div>
+												<div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+													{#if session.status}
+														<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-[10px] rounded">
+															{session.status}
+														</span>
+													{/if}
+													{#if getProfileName(session.profile_id)}
+														<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-[10px] rounded truncate max-w-[45%]">
+															{getProfileName(session.profile_id)}
+														</span>
+													{/if}
+													{#if getProjectName(session.project_id)}
+														<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-[10px] rounded truncate max-w-[45%]">
+															{getProjectName(session.project_id)}
+														</span>
+													{/if}
+												</div>
+											</button>
+										{/each}
+									</div>
+								{/if}
+							{/if}
+						</div>
 					</div>
 				{/each}
 			</div>
@@ -513,6 +677,26 @@
 	}
 
 	.action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	/* Session rows: hover feedback via border-color only — no opaque background
+	   fill, which sticks on touch devices (:hover latches after tap). */
+	.session-row:hover {
+		border-color: var(--primary);
+	}
+
+	.session-row:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.sessions-toggle:hover {
+		color: var(--foreground);
+	}
+
+	.sessions-toggle:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
 	}
