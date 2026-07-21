@@ -26,7 +26,9 @@ import {
 	resolveBucketKey,
 	selfBucketKey,
 	windowLabel,
+	displayWindows,
 	SELF_BUCKET_KEY,
+	type UsageWindow,
 } from './rate-limit';
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
@@ -639,5 +641,36 @@ describe('windowLabel — provider window types', () => {
 
 	it('falls back to a humanized label for unknown types', () => {
 		expect(windowLabel('some_other_thing')).toBe('some other thing');
+	});
+});
+
+describe('displayWindows — drops degenerate zero-length rolling windows', () => {
+	function win(type: string): UsageWindow {
+		return {
+			type,
+			utilization: 10,
+			resets_at: null,
+			received_at: 0,
+			source: 'poll',
+		};
+	}
+
+	it('returns orderedWindows order, minus window_0m', () => {
+		const windows: Record<string, UsageWindow> = {
+			seven_day: win('seven_day'),
+			window_0m: win('window_0m'),
+			five_hour: win('five_hour'),
+		};
+		const result = displayWindows(windows);
+		expect(result.map((w) => w.type)).toEqual(['five_hour', 'seven_day']);
+	});
+
+	it('keeps a non-zero rolling window like window_60m', () => {
+		const windows: Record<string, UsageWindow> = {
+			window_0m: win('window_0m'),
+			window_60m: win('window_60m'),
+		};
+		const result = displayWindows(windows);
+		expect(result.map((w) => w.type)).toEqual(['window_60m']);
 	});
 });

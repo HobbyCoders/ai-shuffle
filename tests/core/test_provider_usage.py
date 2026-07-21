@@ -33,6 +33,14 @@ class TestWindowTypeMapping:
     def test_none_minutes_is_none(self):
         assert provider_usage._window_type_for_minutes(None) is None
 
+    def test_zero_minutes_is_none(self):
+        # ChatGPT plus-plan headers carry a degenerate window-minutes: 0 that
+        # must not become a bogus "window_0m" row.
+        assert provider_usage._window_type_for_minutes(0) is None
+
+    def test_negative_minutes_is_none(self):
+        assert provider_usage._window_type_for_minutes(-5) is None
+
     def test_primary_and_secondary_windows_mapped(self):
         headers = {
             "x-codex-primary-used-percent": "12.5",
@@ -57,6 +65,18 @@ class TestWindowTypeMapping:
         assert u.windows == [
             {"type": "window_60m", "utilization": 5.0, "resets_at": None}
         ]
+
+    def test_zero_window_minutes_omits_degenerate_window(self):
+        # A valid weekly window plus a secondary that reports window-minutes: 0
+        # (ChatGPT plus-plan) -> only the seven_day window is emitted.
+        headers = {
+            "x-codex-primary-used-percent": "12.5",
+            "x-codex-primary-window-minutes": "10080",
+            "x-codex-secondary-used-percent": "40",
+            "x-codex-secondary-window-minutes": "0",
+        }
+        u = provider_usage.normalize_codex_headers(headers)
+        assert [w["type"] for w in u.windows] == ["seven_day"]
 
     def test_missing_percent_or_minutes_omits_window(self):
         # No minutes header at all -> window omitted entirely.

@@ -301,6 +301,12 @@ export function orderedWindows(windows: Record<string, UsageWindow>): UsageWindo
 	return [...known, ...extra];
 }
 
+/** Windows for display: ordered, minus degenerate zero-length rolling windows
+ *  (`window_0m`) that older backends captured from ChatGPT plus-plan headers. */
+export function displayWindows(windows: Record<string, UsageWindow>): UsageWindow[] {
+	return orderedWindows(windows).filter((w) => w.type !== 'window_0m');
+}
+
 /** The key of the self (local install's) bucket for the given state. */
 export function selfBucketKey(state: RateLimitState): string {
 	return state.selfInstanceId ?? SELF_BUCKET_KEY;

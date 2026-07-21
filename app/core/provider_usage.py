@@ -111,7 +111,7 @@ def _as_bool(value: Any) -> Optional[bool]:
 
 def _window_type_for_minutes(minutes: Optional[int]) -> Optional[str]:
     """Map a rate-limit window's minutes to a stable window-type key."""
-    if minutes is None:
+    if minutes is None or minutes <= 0:
         return None
     if minutes == 10080:
         return "seven_day"

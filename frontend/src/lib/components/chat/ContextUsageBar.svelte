@@ -54,7 +54,7 @@
 	} from './context-usage';
 	import {
 		rateLimit,
-		orderedWindows,
+		displayWindows,
 		windowLabel,
 		effectivePct,
 		formatCountdown,
@@ -229,6 +229,32 @@
 		}
 	}
 
+	// ── Per-account usage-section collapse state (persisted, default expanded) ──
+	// One entry per section id: the literal `'plan'` for the resolved Claude
+	// install, and `provider:<id>` for each provider bucket. Mirrors the
+	// context-breakdown collapse pattern — absent/any non-'0' value → expanded,
+	// only an explicit '0' collapses. The record is the reactive cache; a toggle
+	// writes it (and best-effort persists), so reads prefer it over localStorage.
+	const SECTION_OPEN_PREFIX = 'aihub.usageSectionOpen:';
+	let sectionOpen = $state<Record<string, boolean>>({});
+	function isSectionOpen(id: string): boolean {
+		if (id in sectionOpen) return sectionOpen[id];
+		try {
+			return localStorage.getItem(SECTION_OPEN_PREFIX + id) !== '0';
+		} catch {
+			return true;
+		}
+	}
+	function toggleSection(id: string) {
+		const next = !isSectionOpen(id);
+		sectionOpen[id] = next;
+		try {
+			localStorage.setItem(SECTION_OPEN_PREFIX + id, next ? '1' : '0');
+		} catch {
+			// best-effort persistence
+		}
+	}
+
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────
 	// Per-second tick — keeps countdowns fresh and flips windows to 0% on reset.
 	// Runs only while the popover is open; refreshed once otherwise.
@@ -250,7 +276,7 @@
 		hasReset: boolean;
 	}
 	function itemsFor(bucket: UsageBucket): WindowItem[] {
-		return orderedWindows(bucket.windows).map((w) => ({
+		return displayWindows(bucket.windows).map((w) => ({
 			type: w.type,
 			label: windowLabel(w.type),
 			pct: effectivePct(w, now),
@@ -305,6 +331,15 @@
 	// remote install. A bucket-less (no data) resolve shows no header.
 	const showSectionHeader = $derived(
 		!!resolvedBucket && (!!(deviceLabel || accountLabel) || !isSelf)
+	);
+
+	// Claude plan-usage collapse: with a header the rows follow the 'plan' toggle;
+	// with no header there's nothing to collapse against, so rows always show.
+	const planRowsVisible = $derived(!showSectionHeader || isSectionOpen('plan'));
+	// Compact summary shown on the collapsed header: the MAX pct across the plan
+	// windows (null → omit, e.g. an empty bucket).
+	const planMaxPct = $derived<number | null>(
+		items.length ? Math.max(...items.map((it) => it.pct)) : null
 	);
 
 	// ── Document-level click/tap-away + Escape ────────────────────────────
@@ -440,90 +475,151 @@
 			<div class="popover-divider"></div>
 
 			<!-- ═══ Plan usage limits ═══ -->
+			<!-- With a resolved-install header, the head becomes the collapse toggle
+			     (device/account/stale labels stay inside it); collapsed shows the max
+			     plan pct on the right and hides the window rows + "No usage data" line.
+			     With no header there's nothing to attach a control to — rows show as
+			     before (gated by `planRowsVisible`). -->
 			{#if showSectionHeader}
+				{@const planOpen = isSectionOpen('plan')}
 				<div class="popover-section">
-					<div class="section-head">
-						{#if deviceLabel}
-							<span class="section-device">{deviceLabel}</span>
+					<button
+						type="button"
+						class="sec-header"
+						aria-expanded={planOpen}
+						aria-label="Plan usage limits — {planOpen ? 'collapse' : 'expand'}"
+						onclick={() => toggleSection('plan')}
+					>
+						<span class="sec-head-labels">
+							{#if deviceLabel}
+								<span class="section-device">{deviceLabel}</span>
+							{/if}
+							{#if accountLabel}
+								<span class="section-account">{accountLabel}</span>
+							{/if}
+							{#if !deviceLabel && !accountLabel}
+								<span class="section-device">{isSelf ? 'This device' : 'Other device'}</span>
+							{/if}
+							{#if staleLine}
+								<span class="section-stale">{staleLine}</span>
+							{/if}
+						</span>
+						{#if !planOpen && planMaxPct != null}
+							<span class="row-pct {usageSeverity(planMaxPct)} sec-summary">{planMaxPct}%</span>
 						{/if}
-						{#if accountLabel}
-							<span class="section-account">{accountLabel}</span>
-						{/if}
-						{#if !deviceLabel && !accountLabel}
-							<span class="section-device">{isSelf ? 'This device' : 'Other device'}</span>
-						{/if}
-					</div>
-					{#if staleLine}
-						<div class="section-stale">{staleLine}</div>
-					{/if}
+						<svg
+							class="ctx-chevron {planOpen ? '' : 'collapsed'}"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							aria-hidden="true"
+						>
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
 				</div>
 			{/if}
-			{#if items.length > 0}
-				{#each items as item (item.type)}
-					{@const rowSeverity = usageSeverity(item.pct)}
-					<div class="popover-row">
-						<div class="row-line">
-							<span class="row-label">{item.label}</span>
-							<span class="row-value">
-								<span class="row-reset-inline">
-									{#if item.countdown}
-										resets in {item.countdown}
-									{:else if item.hasReset}
-										resets soon
-									{:else}
-										no reset window
-									{/if}
+			{#if planRowsVisible}
+				{#if items.length > 0}
+					{#each items as item (item.type)}
+						{@const rowSeverity = usageSeverity(item.pct)}
+						<div class="popover-row">
+							<div class="row-line">
+								<span class="row-label">{item.label}</span>
+								<span class="row-value">
+									<span class="row-reset-inline">
+										{#if item.countdown}
+											resets in {item.countdown}
+										{:else if item.hasReset}
+											resets soon
+										{:else}
+											no reset window
+										{/if}
+									</span>
+									<span class="row-pct {rowSeverity}">{item.pct}%</span>
 								</span>
-								<span class="row-pct {rowSeverity}">{item.pct}%</span>
-							</span>
+							</div>
+							<div class="row-bar">
+								<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
+							</div>
 						</div>
-						<div class="row-bar">
-							<div class="row-fill {rowSeverity}" style="width: {item.pct}%"></div>
-						</div>
-					</div>
-				{/each}
-			{:else}
-				<div class="row-reset no-data">No usage data yet</div>
+					{/each}
+				{:else}
+					<div class="row-reset no-data">No usage data yet</div>
+				{/if}
 			{/if}
 
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
+			<!-- Each bucket's head is its collapse toggle (name + planType stay);
+			     collapsed shows the bucket's max window pct and hides both the window
+			     rows and the credits line. -->
 			{#each Object.values($rateLimit.providerBuckets ?? {}) as pb (pb.providerId)}
+				{@const sectionId = `provider:${pb.providerId}`}
+				{@const pbOpen = isSectionOpen(sectionId)}
+				{@const pbWindows = displayWindows(pb.windows)}
+				{@const pbMaxPct = pbWindows.length
+					? Math.max(...pbWindows.map((w) => effectivePct(w, now)))
+					: null}
 				<div class="popover-section">
-					<div class="section-head">
-						<span class="section-device">{pb.providerName ?? pb.providerType ?? 'Provider'}</span>
-						{#if pb.planType}
-							<span class="section-account">{pb.planType}</span>
+					<button
+						type="button"
+						class="sec-header"
+						aria-expanded={pbOpen}
+						aria-label="{pb.providerName ?? pb.providerType ?? 'Provider'} usage — {pbOpen
+							? 'collapse'
+							: 'expand'}"
+						onclick={() => toggleSection(sectionId)}
+					>
+						<span class="sec-head-labels">
+							<span class="section-device">{pb.providerName ?? pb.providerType ?? 'Provider'}</span>
+							{#if pb.planType}
+								<span class="section-account">{pb.planType}</span>
+							{/if}
+						</span>
+						{#if !pbOpen && pbMaxPct != null}
+							<span class="row-pct {usageSeverity(pbMaxPct)} sec-summary">{pbMaxPct}%</span>
 						{/if}
-					</div>
+						<svg
+							class="ctx-chevron {pbOpen ? '' : 'collapsed'}"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							aria-hidden="true"
+						>
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
 				</div>
-				{#each orderedWindows(pb.windows) as w (w.type)}
-					{@const pct = effectivePct(w, now)}
-					{@const sev = usageSeverity(pct)}
-					{@const countdown = formatCountdown(w.resets_at, now)}
-					<div class="popover-row">
-						<div class="row-line">
-							<span class="row-label">{windowLabel(w.type)}</span>
-							<span class="row-value">
-								<span class="row-reset-inline">
-									{#if countdown}
-										resets in {countdown}
-									{:else if w.resets_at != null}
-										resets soon
-									{:else}
-										no reset window
-									{/if}
+				{#if pbOpen}
+					{#each pbWindows as w (w.type)}
+						{@const pct = effectivePct(w, now)}
+						{@const sev = usageSeverity(pct)}
+						{@const countdown = formatCountdown(w.resets_at, now)}
+						<div class="popover-row">
+							<div class="row-line">
+								<span class="row-label">{windowLabel(w.type)}</span>
+								<span class="row-value">
+									<span class="row-reset-inline">
+										{#if countdown}
+											resets in {countdown}
+										{:else if w.resets_at != null}
+											resets soon
+										{:else}
+											no reset window
+										{/if}
+									</span>
+									<span class="row-pct {sev}">{pct}%</span>
 								</span>
-								<span class="row-pct {sev}">{pct}%</span>
-							</span>
+							</div>
+							<div class="row-bar">
+								<div class="row-fill {sev}" style="width: {pct}%"></div>
+							</div>
 						</div>
-						<div class="row-bar">
-							<div class="row-fill {sev}" style="width: {pct}%"></div>
-						</div>
-					</div>
-				{/each}
-				{@const credits = creditsSummary(pb.credits)}
-				{#if credits}
-					<div class="row-reset">{credits}</div>
+					{/each}
+					{@const credits = creditsSummary(pb.credits)}
+					{#if credits}
+						<div class="row-reset">{credits}</div>
+					{/if}
 				{/if}
 			{/each}
 		</div>
@@ -839,6 +935,42 @@
 		align-items: baseline;
 		gap: 6px;
 		flex-wrap: wrap;
+	}
+
+	/* Collapsible account/provider section header — a full-width button mirroring
+	   .ctx-header: label group left, optional max-pct summary + chevron right. */
+	.sec-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		width: 100%;
+		padding: 0;
+		background: none;
+		border: none;
+		font: inherit;
+		text-align: left;
+		color: inherit;
+		cursor: pointer;
+	}
+	.sec-header:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
+		border-radius: 3px;
+	}
+	/* Device/account (or provider name/planType) labels — wrap as the original
+	   .section-head did; the stale line rides along and wraps to a new line. */
+	.sec-head-labels {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		flex-wrap: wrap;
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+	/* Collapsed-header summary — same look as a plan-usage row percent. */
+	.sec-summary {
+		flex-shrink: 0;
 	}
 	.section-device {
 		font-size: 11px;
