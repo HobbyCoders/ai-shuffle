@@ -224,33 +224,18 @@ chown -R appuser:appuser /data /workspace
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
 
 # =============================================================================
-# Claude in Chrome browser
+# Browser-automation browser
 # =============================================================================
-# Launch headless Google Chrome as appuser (the same user the app + bundled CLI
-# run as) so the native-messaging host the CLI writes to
-# /home/appuser/.config/google-chrome/NativeMessagingHosts/ is the one this
-# browser reads. Supervised so a crash auto-restarts. Disable with START_CHROME=0.
-# One-time extension sign-in/pairing uses CHROME_DEBUG=1 (DevTools on :9222).
+# Launch the headless Chromium as appuser (the same user the app runs as) so the
+# built-in browser MCP server (browser-mcp) has a browser to drive over CDP.
+# Supervised so a crash auto-restarts. Disable with START_CHROME=0.
 if [ "${START_CHROME:-1}" = "1" ]; then
     # The browser profile lives in a NON-default dir (~/chrome-profile) so Chrome
-    # 136+ keeps honoring --remote-debugging-port for the one-time CHROME_DEBUG
-    # sign-in. Native-messaging manifests still go under ~/.config/google-chrome.
-    mkdir -p /home/appuser/chrome-profile \
-             /home/appuser/.config/google-chrome/NativeMessagingHosts
-    chown -R appuser:appuser /home/appuser/chrome-profile \
-             /home/appuser/.config/google-chrome 2>/dev/null || true
-    # arm64 runs Chromium (symlinked as google-chrome-stable). Chromium reads user
-    # native-messaging host manifests from ~/.config/chromium/NativeMessagingHosts/,
-    # but the bundled CLI writes them to ~/.config/google-chrome/NativeMessagingHosts/.
-    # Bridge the two so the Claude-in-Chrome extension can reach its host (#14391).
-    if readlink -f "${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" 2>/dev/null | grep -qi chromium; then
-        mkdir -p /home/appuser/.config/google-chrome/NativeMessagingHosts \
-                 /home/appuser/.config/chromium
-        ln -sfn /home/appuser/.config/google-chrome/NativeMessagingHosts \
-                /home/appuser/.config/chromium/NativeMessagingHosts
-        chown -R appuser:appuser /home/appuser/.config/chromium 2>/dev/null || true
-    fi
-    echo "Starting Chrome for Claude in Chrome (CHROME_DEBUG=${CHROME_DEBUG:-0})..."
+    # 136+ keeps honoring --remote-debugging-port (the loopback CDP surface the
+    # browser-mcp server attaches to).
+    mkdir -p /home/appuser/chrome-profile
+    chown -R appuser:appuser /home/appuser/chrome-profile 2>/dev/null || true
+    echo "Starting Chromium for browser automation (CHROME_CDP=${CHROME_CDP:-1}, port ${CHROME_CDP_PORT:-9221})..."
     # The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
     # docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
     # applies the circuit breaker + exponential backoff, and (crucially) drops
@@ -271,7 +256,7 @@ if [ "${START_CHROME:-1}" = "1" ]; then
         chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
     echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor"
 else
-    echo "START_CHROME=0 — skipping Chrome launch (Claude in Chrome will be unavailable)"
+    echo "START_CHROME=0 — skipping Chrome launch (browser automation will be unavailable)"
 fi
 
 # =============================================================================

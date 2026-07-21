@@ -27,7 +27,26 @@ COPY tools/ ./
 
 
 # ============================================================================
-# Stage 3: Runtime — lean Python image with only what's needed
+# Stage 3: Browser MCP — build the browser-automation MCP server (TypeScript)
+# ============================================================================
+FROM node:20-slim AS browser-mcp-builder
+
+WORKDIR /browser-mcp
+# Install deps first (cached unless the lockfile changes). --ignore-scripts skips
+# the package's deprecated `prepublish` (tsc) lifecycle so `npm ci` doesn't do a
+# redundant build here — the real build runs below. playwright-core pulls NO
+# bundled browsers (the server drives the supervised Chromium over CDP), which
+# saves ~300MB versus the full `playwright` package.
+COPY browser-mcp/package.json browser-mcp/package-lock.json* ./
+RUN npm ci --ignore-scripts
+COPY browser-mcp/ ./
+# Compile TS -> dist/ (entry point: dist/index.js), then drop devDeps
+# (typescript, vitest) from node_modules so only runtime deps ship in the image.
+RUN npm run build && npm prune --omit=dev
+
+
+# ============================================================================
+# Stage 4: Runtime — lean Python image with only what's needed
 # ============================================================================
 FROM python:3.11-slim
 
@@ -69,46 +88,23 @@ RUN mkdir -p /etc/apt/keyrings \
 
 RUN node --version && npm --version && gh --version
 
-# ── Browser for the "Claude in Chrome" integration ──
-# Gives the bundled Claude Code CLI's --chrome integration a real browser to drive.
-# socat relays Chrome's localhost-only DevTools port when CHROME_DEBUG=1 (one-time
-# extension sign-in/pairing).
+# ── Browser for the built-in browser-automation MCP server ──
+# The browser-mcp server (Stage 3) drives this browser over CDP; the
+# chrome-supervisor owns the process (see docker/start-chrome.sh). No browser
+# extension, no native-messaging host, and no --chrome CLI flag are involved.
 #
 # BOTH arches install Debian **Chromium** (this is python:3.11-slim / bookworm,
 # package name `chromium`) and symlink it to /usr/bin/google-chrome-stable so
 # CHROME_EXECUTABLE and start-chrome.sh resolve unchanged. We switched amd64 off
 # full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
 # in this headless single-tab setup; Chromium is far leaner and behaves
-# identically for the extension + native-messaging path used here.
-#
-# Native-messaging caveat (#14391): Chromium reads user native-messaging host
-# manifests from ~/.config/chromium/NativeMessagingHosts/, but the bundled CLI
-# writes them under ~/.config/google-chrome/NativeMessagingHosts/. entrypoint.sh
-# already bridges that at runtime for any chromium-resolving CHROME_EXECUTABLE,
-# so it now applies on amd64 too. The managed-policy files below are written to
-# BOTH /etc/opt/chrome/... and /etc/chromium/... so the force-install applies
-# regardless; Chromium honours /etc/chromium/policies/managed/.
+# identically for the CDP automation used here.
 ARG TARGETARCH
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
-        chromium socat; \
+        chromium; \
     ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable; \
     rm -rf /var/lib/apt/lists/*
-
-# Auto-install the "Claude in Chrome" extension via enterprise policy so it
-# doesn't need to be clicked through the Web Store inside the container.
-# DeveloperToolsAvailability=1 lifts the default ban on DevTools for
-# force-installed extensions — the pairing/sign-in pages can only be reached
-# through DevTools in this headless setup (CHROME_DEBUG=1).
-# Written to both the Google Chrome (/etc/opt/chrome) and Chromium (/etc/chromium)
-# managed-policy dirs so the force-install applies regardless of which dir the
-# installed browser reads (we now ship Chromium on both arches → /etc/chromium).
-RUN echo '{"ExtensionInstallForcelist":["fcoeoabgfenejglbffodgkkbkcdhcgfn;https://clients2.google.com/service/update2/crx"],"DeveloperToolsAvailability":1}' \
-      > /tmp/claude-extension.json && \
-    mkdir -p /etc/opt/chrome/policies/managed /etc/chromium/policies/managed && \
-    cp /tmp/claude-extension.json /etc/opt/chrome/policies/managed/claude-extension.json && \
-    cp /tmp/claude-extension.json /etc/chromium/policies/managed/claude-extension.json && \
-    rm /tmp/claude-extension.json
 
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
@@ -152,9 +148,18 @@ COPY --from=frontend-builder --chown=appuser:appuser /build/build/ /app/app/stat
 # ── Copy pre-built AI tools from builder stage ──
 COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
 
+# ── Copy the built browser-automation MCP server from its builder stage ──
+# The SDK spawns `node /opt/browser-mcp/dist/index.js` per session (see
+# app/core/builtin_mcp_servers.py DEFAULT_BROWSER_MCP_ENTRY). node_modules here
+# is the pruned prod-only set; package.json ships so its `"type": "module"`
+# resolves at runtime.
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/dist/ /opt/browser-mcp/dist/
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
+
 COPY --chown=appuser:appuser .env.example .
 
-# Copy entrypoint + Claude in Chrome helper scripts
+# Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
@@ -174,17 +179,15 @@ ENV GIT_SHA=$GIT_SHA
 LABEL org.opencontainers.image.revision=$GIT_SHA
 RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
 
-# ── Claude in Chrome integration defaults ──
-# START_CHROME=1 launches headless Chromium at container start so the bundled
-# CLI's --chrome integration has a browser to drive (set 0 to disable).
-# CHROME_CDP=1 binds DevTools to a localhost-only port so the AI Shuffle backend
-#   can proxy it for the in-app "Set up browser" panel (one-time sign-in/pairing
-#   with no exposed port). Set 0 to disable the in-app browser setup UI.
-# CHROME_DEBUG=1 additionally relays DevTools out to :9222 for manual/legacy
-#   access — prefer the in-app panel; this exposes the browser to the network.
+# ── Browser-automation defaults ──
+# START_CHROME=1 launches the supervised headless Chromium at container start so
+#   the built-in browser MCP server has a browser to drive (set 0 to disable).
+# CHROME_CDP=1 binds DevTools to a localhost-only port (CHROME_CDP_PORT, default
+#   9221) inside the container. Nothing is published to the network; the
+#   browser-mcp server attaches via connectOverCDP('http://127.0.0.1:9221').
 ENV START_CHROME=1 \
     CHROME_CDP=1 \
-    CHROME_DEBUG=0 \
+    CHROME_CDP_PORT=9221 \
     CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
 
 EXPOSE 8000

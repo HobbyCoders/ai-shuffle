@@ -72,27 +72,25 @@ services:
       - claude-auth:/home/appuser/.claude
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
-      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing).
-      # Non-default dir on purpose — Chrome 136+ disables the DevTools debug port
-      # on the default ~/.config/google-chrome profile (see docker/start-chrome.sh).
+      # Persist the browser-automation Chrome profile (logged-in sessions the
+      # browser-mcp server drives). Non-default dir on purpose — Chrome 136+
+      # disables the DevTools debug port on the default ~/.config/google-chrome
+      # profile (see docker/start-chrome.sh).
       - browser-profile:/home/appuser/chrome-profile
       # Persist database and session data
       - ai-shuffle-data:/data
       # Mount workspace directory for projects
       - ${WORKSPACE_DIR:-./workspace}:/workspace
 
-    # Chrome (Claude in Chrome) needs more than Docker's default 64MB /dev/shm.
+    # The browser-automation Chromium needs more than Docker's default 64MB
+    # /dev/shm.
     shm_size: '1gb'
 
-    # Port mapping
+    # Port mapping. The browser's CDP port stays loopback-only inside the
+    # container (the browser-mcp server attaches to it in-process) — it is never
+    # published to the network, so only the app port is mapped.
     ports:
       - "${PORT:-8000}:8000"
-      # Claude in Chrome sign-in/pairing is done IN-APP (Settings → Browser →
-      # Set up browser) over a localhost-only DevTools port proxied behind the
-      # admin login — no port mapping needed. The line below is the legacy
-      # CHROME_DEBUG=1 escape hatch that exposes DevTools on the network; leave
-      # it commented unless you specifically need raw DevTools access.
-      # - "${CHROME_DEBUG_PORT:-9222}:9222"
 
     # Health check — readiness probe (DB SELECT 1 + session-pool headroom).
     # /health/ready returns 503 until the DB is reachable, so give a generous
@@ -163,7 +161,7 @@ volumes:
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
     driver: local
-  # Named volume for the Chrome profile (Claude in Chrome extension + sign-in)
+  # Named volume for the browser-automation Chrome profile (persisted logins)
   browser-profile:
     driver: local
   # Named volume for AI Shuffle data (database, sessions)

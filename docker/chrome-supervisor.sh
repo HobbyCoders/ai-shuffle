@@ -1,5 +1,5 @@
 #!/bin/bash
-# Supervises the headless "Claude in Chrome" browser (docker/start-chrome.sh)
+# Supervises the headless browser-automation Chromium (docker/start-chrome.sh)
 # inside the ai-shuffle container so a crash auto-restarts. Launched backgrounded
 # by entrypoint.sh (START_CHROME=1) with its stdout/stderr redirected to
 # /home/appuser/.config/chrome.log. Installed in the image as
