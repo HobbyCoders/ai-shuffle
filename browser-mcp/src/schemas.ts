@@ -137,11 +137,179 @@ export const screenshotSchema: JsonSchema = {
   additionalProperties: false,
 };
 
+export const findSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    query: {
+      type: "string",
+      description:
+        "What to find, in plain words (e.g. \"the checkout button\", \"email field\").",
+    },
+  },
+  required: ["query"],
+  additionalProperties: false,
+};
+
+export const readTextSchema: JsonSchema = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+};
+
+export const evalSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    code: {
+      type: "string",
+      description:
+        "JavaScript run in the page. REPL semantics: top-level await allowed. A single bare expression returns its value automatically; multi-statement code must `return` the value explicitly.",
+    },
+  },
+  required: ["code"],
+  additionalProperties: false,
+};
+
+export const consoleSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    pattern: {
+      type: "string",
+      description:
+        "REQUIRED substring or regex; only matching console messages are returned.",
+    },
+    only_errors: {
+      type: "boolean",
+      description: "Keep only level=error messages.",
+    },
+    limit: {
+      type: "integer",
+      description: "Max messages to return, newest last (default 20).",
+      minimum: 1,
+    },
+    clear: {
+      type: "boolean",
+      description: "Empty the console buffer for this page after returning.",
+    },
+  },
+  required: ["pattern"],
+  additionalProperties: false,
+};
+
+export const networkSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    url_pattern: {
+      type: "string",
+      description: "Substring or regex to filter the request list by URL.",
+    },
+    request_id: {
+      type: "string",
+      description: "Return this recorded request's response body instead of a list.",
+    },
+    limit: {
+      type: "integer",
+      description: "Max requests to list, newest last (default 20).",
+      minimum: 1,
+    },
+    clear: {
+      type: "boolean",
+      description: "Empty the network buffer for this page after returning.",
+    },
+  },
+  additionalProperties: false,
+};
+
+export const TABS_OPS = ["list", "create", "close", "select"] as const;
+
+export const tabsSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    op: {
+      type: "string",
+      enum: [...TABS_OPS],
+      description: "list | create | close | select.",
+    },
+    tab_id: {
+      type: "string",
+      description: "Target tab (e.g. tab2) for op=close or op=select.",
+    },
+  },
+  required: ["op"],
+  additionalProperties: false,
+};
+
+export const RESIZE_PRESETS = ["mobile", "tablet", "desktop"] as const;
+
+export const resizeSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    preset: {
+      type: "string",
+      enum: [...RESIZE_PRESETS],
+      description: "mobile 375x812 | tablet 768x1024 | desktop 1280x800.",
+    },
+    width: {
+      type: "integer",
+      description: "Explicit viewport width (with height; overrides preset).",
+      minimum: 1,
+      maximum: 4096,
+    },
+    height: {
+      type: "integer",
+      description: "Explicit viewport height (with width; overrides preset).",
+      minimum: 1,
+      maximum: 4096,
+    },
+  },
+  additionalProperties: false,
+};
+
+export const uploadSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    ref: {
+      type: "string",
+      description: "Ref of the file <input> to populate (e.g. e12).",
+    },
+    paths: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Absolute file paths to upload. Only files under BROWSER_UPLOAD_DIR are allowed.",
+    },
+  },
+  required: ["ref", "paths"],
+  additionalProperties: false,
+};
+
+export const batchSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    actions: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        'Each item is a JSON string {"tool":"browser_...","input":{...}}, run in order, stop on first error. Cannot contain browser_batch.',
+    },
+  },
+  required: ["actions"],
+  additionalProperties: false,
+};
+
 export const TOOL_SCHEMAS = {
   browser_navigate: navigateSchema,
   browser_snapshot: snapshotSchema,
   browser_act: actSchema,
   browser_screenshot: screenshotSchema,
+  browser_find: findSchema,
+  browser_read_text: readTextSchema,
+  browser_eval: evalSchema,
+  browser_console: consoleSchema,
+  browser_network: networkSchema,
+  browser_tabs: tabsSchema,
+  browser_resize: resizeSchema,
+  browser_upload: uploadSchema,
+  browser_batch: batchSchema,
 } as const;
 
 export interface ValidationResult {

@@ -26,6 +26,9 @@ async function main(): Promise<void> {
   const manager = new BrowserManager();
   const session = new Session(manager);
 
+  // Log the effective SSRF egress policy to stderr (stdout is the MCP channel).
+  process.stderr.write(`[browser-mcp] ssrf policy: ${manager.ssrfPolicySummary()}\n`);
+
   const server = new Server(
     { name: "browser", version: "0.1.0" },
     {

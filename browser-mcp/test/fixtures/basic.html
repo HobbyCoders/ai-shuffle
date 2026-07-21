@@ -31,6 +31,9 @@
       <p id="deepout"></p>
     </main>
     <script>
+      // Emit console output so browser_console has something to filter.
+      console.log("fixture-console-log ready");
+      console.error("fixture-console-error boom");
       // Render many similar rows to exercise sibling collapsing.
       const ul = document.getElementById("rows");
       for (let i = 1; i <= 20; i++) {

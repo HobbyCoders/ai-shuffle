@@ -35,6 +35,20 @@ export function jsonResult(body: Record<string, unknown>, trailing?: string): Mc
   return { content: parts };
 }
 
+/**
+ * Cap a text payload to `maxChars`, cutting at a UTF-16 boundary. Returns the
+ * (possibly shortened) text plus the original length so callers can attach a
+ * self-describing truncation note in their own vocabulary.
+ */
+export function capText(
+  value: string,
+  maxChars: number,
+): { text: string; truncated: boolean; fullChars: number } {
+  const fullChars = value.length;
+  if (fullChars <= maxChars) return { text: value, truncated: false, fullChars };
+  return { text: value.slice(0, maxChars), truncated: true, fullChars };
+}
+
 export function errorResult(error: string, extra: Record<string, unknown> = {}): McpToolResult {
   return {
     content: [text(JSON.stringify({ ok: false, error, ...extra }))],

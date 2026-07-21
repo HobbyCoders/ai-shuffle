@@ -7,6 +7,15 @@
 import type { Session } from "../session.js";
 import { jsonResult, type McpToolResult } from "./result.js";
 
+/** Extract the host from a URL string, or "" if it has none / is unparseable. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
 export function normalizeUrl(input: string): string {
   const trimmed = input.trim();
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) return trimmed;
@@ -25,12 +34,25 @@ export async function runNavigate(
   // A committed navigation invalidates all refs.
   session.notifyNavigation();
 
-  if (target === "back") {
-    await page.goBack({ waitUntil: "domcontentloaded" });
-  } else if (target === "forward") {
-    await page.goForward({ waitUntil: "domcontentloaded" });
-  } else {
-    await page.goto(normalizeUrl(input.url), { waitUntil: "domcontentloaded" });
+  try {
+    if (target === "back") {
+      await page.goBack({ waitUntil: "domcontentloaded" });
+    } else if (target === "forward") {
+      await page.goForward({ waitUntil: "domcontentloaded" });
+    } else {
+      await page.goto(normalizeUrl(input.url), { waitUntil: "domcontentloaded" });
+    }
+  } catch (err) {
+    // The SSRF guard aborts blocked requests with `blockedbyclient`, which
+    // Chromium surfaces as an opaque `net::ERR_BLOCKED_BY_CLIENT`. Swap in the
+    // guard's terse reason so a blocked navigate reads clearly.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/ERR_BLOCKED_BY_CLIENT|ERR_ABORTED|ERR_FAILED/.test(msg) && target !== "back" && target !== "forward") {
+      const host = hostOf(normalizeUrl(input.url));
+      const reason = host ? session.ssrfBlockReason(host) : undefined;
+      if (reason) throw new Error(`blocked by SSRF policy: ${reason}`);
+    }
+    throw err;
   }
 
   const snap = await session.snapshot({ filter: "interactive" });
