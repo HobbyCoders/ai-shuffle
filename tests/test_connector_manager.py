@@ -92,6 +92,36 @@ class TestPublicAccessors:
         result = list(manager.get_running_connectors())
         assert result == []
 
+    def test_get_running_instance_found(self, manager):
+        fake = FakeConnector(connector_id="ri-1")
+        manager._connectors["ri-1"] = fake
+        assert manager.get_running_instance("ri-1") is fake
+
+    def test_get_running_instance_not_found(self, manager):
+        assert manager.get_running_instance("nope") is None
+
+
+# =============================================================================
+# Connector context (system-prompt append)
+# =============================================================================
+
+
+class TestConnectorContext:
+    def test_discord_context_mentions_native_tools(self):
+        fake = FakeConnector(connector_id="d1", connector_type="discord")
+        ctx = ConnectorManager._build_connector_context(
+            {"type": "discord", "name": "My Bot"}, fake, "12345"
+        )
+        assert "DiscordCreatePoll" in ctx
+        assert "DiscordReadMessages" in ctx
+
+    def test_non_discord_context_omits_discord_tools(self):
+        fake = FakeConnector(connector_id="t1", connector_type="telegram")
+        ctx = ConnectorManager._build_connector_context(
+            {"type": "telegram", "name": "TG"}, fake, "12345"
+        )
+        assert "DiscordCreatePoll" not in ctx
+
 
 # =============================================================================
 # Status Helpers

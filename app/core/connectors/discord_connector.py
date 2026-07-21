@@ -117,6 +117,10 @@ class DiscordConnector(BaseConnector):
         )
         self._client: Optional[Any] = None
         self._permission_prompts: Dict[str, Dict[str, str]] = {}  # request_id -> metadata
+        # Emit the "typing indicator failed" warning at most once per connector
+        # so a class of silent breakage (e.g. a removed discord.py API) surfaces
+        # loudly the first time, without spamming the log on every 4s keep-alive.
+        self._typing_warned: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -370,9 +374,26 @@ class DiscordConnector(BaseConnector):
             try:
                 channel = self._client.get_channel(int(platform_chat_id))
                 if channel:
-                    await channel.trigger_typing()
+                    # discord.py 2.x removed Messageable.trigger_typing(). The
+                    # replacement, channel.typing(), returns a Typing context
+                    # manager that is ALSO awaitable — awaiting it fires a single
+                    # one-shot typing indicator (the same semantics as the old
+                    # trigger_typing()). Verified against discord.py 2.7.1:
+                    # discord.context_managers.Typing defines __await__.
+                    await channel.typing()
             except Exception:
-                logger.debug("Discord typing indicator failed", exc_info=True)
+                # Surface this once per connector at WARNING so a future silent
+                # breakage of this API is visible; keep subsequent ticks quiet.
+                if not self._typing_warned:
+                    self._typing_warned = True
+                    logger.warning(
+                        "Discord typing indicator failed for connector %s "
+                        "(suppressing further occurrences)",
+                        self.connector_id,
+                        exc_info=True,
+                    )
+                else:
+                    logger.debug("Discord typing indicator failed", exc_info=True)
 
     async def send_ack_reaction(
         self, platform_chat_id: str, platform_message_id: str

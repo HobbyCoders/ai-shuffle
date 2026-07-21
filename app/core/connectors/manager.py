@@ -5,6 +5,7 @@ ConnectorManager — lifecycle management, event dispatch, and message routing.
 import asyncio
 import logging
 import secrets
+import uuid
 from typing import Any, Dict, List, Optional
 
 from app.core.connectors.base import (
@@ -314,6 +315,19 @@ class ConnectorManager:
                 "Split long responses if needed."
             )
 
+        # Discord-native tooling: nudge the model to behave like a real Discord
+        # participant rather than defaulting to plain text.
+        if connector_type == "discord":
+            parts.append(
+                "You have native Discord tools: DiscordCreatePoll, DiscordSendEmbed, "
+                "DiscordAddReaction, DiscordCreateThread, and DiscordReadMessages. "
+                "Prefer these native features over plain text when they fit — create a "
+                "real poll with DiscordCreatePoll instead of text-listing options, use "
+                "DiscordSendEmbed for structured answers, and open a DiscordCreateThread "
+                "for long tangents. Use DiscordReadMessages to pull recent channel "
+                "context when it helps. All of these act on this channel only."
+            )
+
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -384,6 +398,56 @@ class ConnectorManager:
                     logger.error("No profiles available for connector query")
                     return
 
+            # Pre-mint + link the AI session BEFORE the query runs.
+            #
+            # Per-session builtin tools (notably the Discord-native tools) are
+            # registered at query build time by resolving session_id -> linked
+            # connector session. Historically the linkage was written only AFTER
+            # the first turn, so those tools were missing on the very first
+            # message of a channel. execute_query resolves an existing session by
+            # id (it RAISES on an unknown id — it does not create one from a fresh
+            # id), so we create the AI-session row here via the same helper
+            # execute_query uses and link it first, then hand the query that id to
+            # resume. On subsequent turns the connector session already carries
+            # the link, so this is a no-op.
+            ai_session_id = session.get("session_id") if session else None
+            if not ai_session_id and session and session.get("id"):
+                minted_id = str(uuid.uuid4())
+                title = (message.text or "")[:50].strip()
+                if len(message.text or "") > 50:
+                    title += "..."
+                try:
+                    database.create_session(
+                        session_id=minted_id,
+                        profile_id=profile_id,
+                        project_id=project_id,
+                        title=title or "Discord conversation",
+                        api_user_id=api_user_id,
+                        is_active=True,
+                    )
+                    database.update_connector_session_ai_session(
+                        session.get("id"), minted_id
+                    )
+                    ai_session_id = minted_id
+                    # Mirror execute_query's sidebar broadcast for new sessions so
+                    # connector-started conversations appear without a refresh.
+                    try:
+                        from app.core.sync_engine import sync_engine
+                        await sync_engine.broadcast_user_session_created(
+                            user_id="admin",
+                            session_id=minted_id,
+                            source_device_id=None,
+                        )
+                    except Exception:
+                        logger.debug("session-created broadcast failed", exc_info=True)
+                except Exception:
+                    # Fall back to letting execute_query create the session (tools
+                    # then register from the 2nd message, as before the fix).
+                    logger.exception(
+                        "Failed to pre-create AI session for connector message"
+                    )
+                    ai_session_id = None
+
             # Send typing indicator and keep it alive while the query runs
             typing_task: Optional[asyncio.Task] = None
             if instance:
@@ -424,7 +488,7 @@ class ConnectorManager:
                     prompt=message.text,
                     profile_id=profile_id,
                     project_id=project_id,
-                    session_id=session.get("session_id") if session else None,
+                    session_id=ai_session_id,
                     api_user_id=api_user_id,
                     overrides=overrides or None,
                 )
@@ -528,6 +592,16 @@ class ConnectorManager:
         """Return a running connector instance by ID, or None."""
         async with self._lock:
             return self._connectors.get(connector_id)
+
+    def get_running_instance(self, connector_id: str) -> Optional[BaseConnector]:
+        """Return a running connector instance by ID without acquiring the async
+        lock, for synchronous / tool-call resolution paths.
+
+        Reads a single dict key (atomic in CPython); returns None when the
+        connector is not running on this install. Lets external code (e.g. the
+        Discord-native MCP tools) resolve the live instance without reaching
+        into ``_connectors`` directly."""
+        return self._connectors.get(connector_id)
 
     def get_running_connectors(self, connector_type: Optional[str] = None):
         """Yield (connector_id, instance) pairs, optionally filtered by type.
