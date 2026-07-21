@@ -9,25 +9,26 @@ import re
 from typing import Dict, List, Optional, Set
 
 # ============================================================================
-# Browser Tools (Claude in Chrome)
+# Browser Tools (browser MCP)
 # ============================================================================
 
-# The headless browser MCP is "Claude in Chrome" (replaced the legacy Playwright
-# `browser_*` tools). Tool names are namespaced under the MCP server.
-CHROME_BROWSER_TOOLS: List[str] = [
-    "mcp__Claude_in_Chrome__navigate",
-    "mcp__Claude_in_Chrome__computer",
-    "mcp__Claude_in_Chrome__find",
-    "mcp__Claude_in_Chrome__form_input",
-    "mcp__Claude_in_Chrome__get_page_text",
-    "mcp__Claude_in_Chrome__read_page",
-    "mcp__Claude_in_Chrome__read_console_messages",
-    "mcp__Claude_in_Chrome__read_network_requests",
-    "mcp__Claude_in_Chrome__javascript_tool",
-    "mcp__Claude_in_Chrome__resize_window",
-    "mcp__Claude_in_Chrome__tabs_create_mcp",
-    "mcp__Claude_in_Chrome__tabs_close_mcp",
-    "mcp__Claude_in_Chrome__tabs_context_mcp",
+# The browser MCP is AI Shuffle's own spawned STDIO server (server name
+# ``browser``), replacing the previous "Claude in Chrome" integration. Tool
+# names are namespaced under the server: ``mcp__browser__<tool>``. Only the
+# core 4 tools ship today; tier-2 tools are added to this list as they land.
+BROWSER_TOOLS: List[str] = [
+    "mcp__browser__browser_navigate",
+    "mcp__browser__browser_snapshot",
+    "mcp__browser__browser_act",
+    "mcp__browser__browser_screenshot",
+    "mcp__browser__browser_read_text",
+    "mcp__browser__browser_eval",
+    "mcp__browser__browser_console",
+    "mcp__browser__browser_network",
+    "mcp__browser__browser_tabs",
+    "mcp__browser__browser_resize",
+    "mcp__browser__browser_upload",
+    "mcp__browser__browser_batch",
 ]
 
 # ============================================================================
@@ -41,7 +42,7 @@ TOOL_CATEGORIES: Dict[str, Optional[List[str]]] = {
     "web": ["WebFetch", "WebSearch"],
     "management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "Agent"],
     "notebook": ["NotebookEdit"],
-    "browser": CHROME_BROWSER_TOOLS,
+    "browser": BROWSER_TOOLS,
     "all": None,  # Special: inherit all tools
 }
 
@@ -83,7 +84,7 @@ DOMAIN_TOOLS: Dict[str, Optional[List[str]]] = {
     # Web browsing
     "web-browsing": [
         "Read", "Grep", "Glob", "WebFetch", "WebSearch",
-        *CHROME_BROWSER_TOOLS,
+        *BROWSER_TOOLS,
     ],
 
     # General - inherits all

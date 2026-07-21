@@ -9,48 +9,44 @@ MCP server list and respect the same enable/disable mechanism
 
 Currently this provides a single built-in:
 
-- ``claude-in-chrome`` — Anthropic's official "Claude in Chrome" integration.
-  This is NOT a separately spawned MCP server; it is a Claude Code CLI feature
-  enabled by passing ``--chrome`` to the bundled CLI. When enabled, the CLI
-  starts its own internal browser MCP server and exposes the browser as tools
-  named ``mcp__claude-in-chrome__<tool>`` (navigate, computer, get_page_text,
-  read_console_messages, …). The agent drives a REAL Chrome/Chromium running
-  the Claude in Chrome extension (id ``fcoeoabgfenejglbffodgkkbkcdhcgfn``).
+- ``browser`` — AI Shuffle's own browser-automation tool suite. This IS a normal
+  spawned STDIO MCP server: the SDK launches ``node /opt/browser-mcp/dist/index.js``
+  once per session and tears it down on exit (session isolation + cleanup for free).
+  It exposes tools named ``mcp__browser__<tool>`` (``browser_navigate``,
+  ``browser_snapshot``, ``browser_act``, ``browser_screenshot``; more land in later
+  PRs).
 
-Why Claude in Chrome (vs Playwright MCP, which this replaces):
-  Playwright MCP drives an ephemeral, isolated, throwaway Chromium with no
-  account and no extension — fine for scraping but unusable for tasks that need
-  the user's real, signed-in browser. Claude in Chrome connects to a persistent
-  browser the user controls: real cookies/sessions, the Claude in Chrome
-  extension, and Anthropic's first-party browser tools.
+Architecture (the decision record — see docs/BROWSER_SUITE_PLAN.md):
+  Each spawned server is a thin CDP client built on ``playwright-core``. It calls
+  ``connectOverCDP('http://127.0.0.1:9221')`` to attach to the *existing supervised
+  Chromium* (port from ``CHROME_CDP_PORT``, default 9221) and drives a single
+  ``Page`` in the persistent default context. That persistent context preserves the
+  logged-in profile (``browser-profile`` volume); the chrome-supervisor keeps
+  ownership of the process (SingletonLock) so the MCP server never launches or owns a
+  browser itself. No Claude account, no browser extension, no native-messaging host,
+  and no ``--chrome`` CLI flag are involved — this replaces the previous "Claude in
+  Chrome" integration entirely.
 
-How it is wired here (the key difference from a normal MCP server):
-  ``get_browser_server_config()`` returns an McpServerConfig with ``cli_flag``
-  set (and no command/url). The mcp_servers builder SKIPS such entries, and
-  ``build_options_from_profile`` instead:
-    1. adds ``mcp__claude-in-chrome`` to allowed_tools, and
-    2. sets ``extra_args["chrome"] = None`` (→ the CLI flag ``--chrome``)
-  whenever this built-in is enabled (i.e. not in disabledMcpServers).
+  Because it is an ordinary STDIO server, ``get_browser_server_config()`` returns a
+  spawnable ``McpServerConfig`` (``command="node"``, ``args=[BROWSER_MCP_ENTRY]``);
+  the mcp_servers builder adds it like any other server, and its per-session env
+  (``ANTHROPIC_*`` for the future ``browser_find`` sub-call plus ``CHROME_CDP_PORT``)
+  is injected by mcp_config for this server only. The old ``cli_flag`` path is gone.
 
-Browser-side requirements (the part the CLI cannot do on its own):
-  The CLI auto-installs the native-messaging host on first ``--chrome`` run
-  (host ``com.anthropic.claude_code_browser_extension``; Windows registers it
-  under ``HKCU\\Software\\<Browser>\\NativeMessagingHosts``, Linux writes a
-  manifest under ``~/.config/<browser>/NativeMessagingHosts``). But a real
-  Chrome/Chromium must be running with the Claude in Chrome extension installed,
-  signed in to the same Claude account, and paired. On the user's Windows
-  machine this is the existing desktop Chrome; in Docker a headless Chromium
-  must be provisioned and paired once (see LOCAL_SETUP / Dockerfile notes).
+  The entry point is installed at ``/opt/browser-mcp/dist/index.js`` in the Docker
+  image (PR A3); ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
 
-SECURITY NOTE (SSRF / local-network reach): the agent drives a real browser
-with no egress filtering. It can reach loopback (127.0.0.1/localhost), RFC1918
-private hosts on the same network, and cloud metadata endpoints (e.g.
-169.254.169.254, which on some clouds exposes credentials). Operators who run
-untrusted prompts should isolate the host at the network layer. We do NOT
-implement egress filtering here.
+SECURITY NOTE (SSRF / local-network reach): the spawned server drives a real browser
+that can currently reach loopback (127.0.0.1/localhost), RFC1918 private hosts on the
+same network, and cloud metadata endpoints (e.g. 169.254.169.254, which on some
+clouds exposes credentials). Egress filtering is NOT implemented yet — the SSRF guard
+(Playwright request interception blocking metadata + loopback, RFC1918 configurable)
+lands in PR A6. Until then, operators who run untrusted prompts should isolate the
+host at the network layer.
 """
 
 import logging
+import os
 from typing import List
 
 from app.core.mcp_service import McpServerConfig, McpServerType
@@ -59,44 +55,44 @@ logger = logging.getLogger(__name__)
 
 
 # Name the browser integration is registered under. Tools are exposed to the
-# agent as ``mcp__claude-in-chrome__<tool>`` (e.g.
-# ``mcp__claude-in-chrome__navigate``); the allow rule uses the server-level
-# wildcard ``mcp__claude-in-chrome`` which permits every tool from it.
-BROWSER_SERVER_NAME = "claude-in-chrome"
+# agent as ``mcp__browser__<tool>`` (e.g. ``mcp__browser__browser_navigate``);
+# the allow rule uses the server-level wildcard ``mcp__browser`` which permits
+# every tool from it.
+BROWSER_SERVER_NAME = "browser"
 
-# The Claude Code CLI flag that enables this integration. ``extra_args`` maps a
-# None value to a bare ``--<flag>`` (see SubprocessCLITransport), so this becomes
-# ``--chrome`` on the bundled CLI command line.
-BROWSER_CLI_FLAG = "chrome"
+# Default path to the spawned STDIO server's entry point inside the Docker image
+# (installed by PR A3). Overridable via the ``BROWSER_MCP_ENTRY`` env var for
+# local/dev checkouts where the built package lives elsewhere.
+DEFAULT_BROWSER_MCP_ENTRY = "/opt/browser-mcp/dist/index.js"
 
-# Chrome extension id for the Claude in Chrome extension. Referenced for docs /
-# Docker enterprise-policy force-install.
-CHROME_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn"
+
+def _browser_mcp_entry() -> str:
+    """Resolve the browser MCP entry point (env override → packaged default)."""
+    return os.environ.get("BROWSER_MCP_ENTRY") or DEFAULT_BROWSER_MCP_ENTRY
 
 
 def get_browser_server_config() -> McpServerConfig:
     """
-    Build the McpServerConfig for the Claude in Chrome integration.
+    Build the McpServerConfig for the ``browser`` built-in.
 
-    Returns a CLI-flag built-in (``cli_flag="chrome"``) with no spawn command.
-    It is surfaced in the admin MCP list and toggled like any other server, but
-    is enabled by adding ``--chrome`` to the CLI rather than by spawning a
-    subprocess.
+    Returns a spawnable STDIO server (``command="node"``,
+    ``args=[<entry>]``) — an ordinary MCP server the SDK launches per session,
+    NOT a CLI-flag integration. It is surfaced in the admin MCP list and toggled
+    like any other server via ``disabledMcpServers``.
     """
     return McpServerConfig(
         name=BROWSER_SERVER_NAME,
         type=McpServerType.STDIO,
-        command=None,
-        cli_flag=BROWSER_CLI_FLAG,
+        command="node",
+        args=[_browser_mcp_entry()],
         scope="builtin",
         enabled=True,
         builtin=True,
         description=(
-            "Claude in Chrome — drive a real, signed-in Chrome/Chromium browser "
-            "via Anthropic's browser extension. Exposes mcp__claude-in-chrome__* "
-            "tools (navigate, read pages, click/type, screenshots, console/network "
-            "logs). Requires Chrome with the Claude in Chrome extension installed, "
-            "signed in, and paired."
+            "Browser automation — drive the supervised Chromium over CDP with a "
+            "provider-agnostic Playwright tool suite. Exposes mcp__browser__* tools "
+            "(navigate, snapshot, act, screenshot). Uses the persistent logged-in "
+            "profile; no Claude account or browser extension required."
         ),
     )
 

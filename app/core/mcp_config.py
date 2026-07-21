@@ -6,6 +6,7 @@ for ClaudeAgentOptions.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -15,8 +16,58 @@ from app.core.mcp_service import get_mcp_service, McpServerType
 logger = logging.getLogger(__name__)
 
 
+# Env vars injected into the spawned ``browser`` MCP server subprocess, sourced
+# from the session's full_env (built by query_options). Keyed on server name so
+# no other STDIO server is affected. The ANTHROPIC_* subset feeds the future
+# ``browser_find`` cheap-model sub-call (PR A4): it inherits the session's
+# gateway routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
+# small-fast model id. CHROME_CDP_PORT tells the server which supervised
+# Chromium CDP port to attach to (default 9221); BROWSER_MCP_ENTRY is passed
+# through for dev overrides. BROWSER_UPLOAD_DIR gates browser_upload — the
+# server rejects all uploads unless it is set to an allowlisted directory.
+# Values that are unset/empty are omitted.
+_BROWSER_ENV_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CHROME_CDP_PORT",
+    "BROWSER_MCP_ENTRY",
+    "BROWSER_UPLOAD_DIR",
+    "BROWSER_SSRF_BLOCK",
+    "BROWSER_SSRF_ALLOW",
+)
+
+# Keys that may also be sourced from the process environment when absent from
+# full_env (Docker sets these on the container, not per-session).
+_BROWSER_ENV_OS_FALLBACK_KEYS = ("CHROME_CDP_PORT", "BROWSER_MCP_ENTRY", "BROWSER_UPLOAD_DIR")
+
+
+def _build_browser_server_env(
+    tool_env: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    """
+    Build the curated env subset for the spawned ``browser`` MCP server.
+
+    Pulls the whitelisted keys from the session's full_env (``tool_env``),
+    falling back to the process environment for the container-level knobs
+    (``CHROME_CDP_PORT``/``BROWSER_MCP_ENTRY``). Only non-empty values are
+    included so we never inject blank overrides.
+    """
+    src = tool_env or {}
+    env: Dict[str, str] = {}
+    for key in _BROWSER_ENV_KEYS:
+        value = src.get(key)
+        if not value and key in _BROWSER_ENV_OS_FALLBACK_KEYS:
+            value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
 def _build_mcp_servers_dict(
     project_dir: Optional[Path] = None,
+    tool_env: Optional[Dict[str, str]] = None,
 ) -> Optional[dict]:
     """
     Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
@@ -27,11 +78,15 @@ def _build_mcp_servers_dict(
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
+        tool_env: The session's full_env; a curated subset is injected into the
+            spawned ``browser`` built-in server only (see _build_browser_server_env).
 
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
     """
     import json as _json
+
+    from app.core.builtin_mcp_servers import BROWSER_SERVER_NAME
 
     mcp_servers: dict = {}
 
@@ -50,17 +105,25 @@ def _build_mcp_servers_dict(
                 continue
             if server.name in mcp_servers:
                 continue
-            # CLI-flag built-ins (e.g. Claude in Chrome) are not spawnable MCP
-            # servers — they carry no command/url and are enabled via a CLI flag
-            # in build_options_from_profile. Never add them to mcp_servers.
+            # Legacy CLI-flag built-ins carried no command/url and were skipped
+            # here; the ``browser`` built-in is now an ordinary spawnable STDIO
+            # server and passes through the normal path below. Any stray config
+            # without a command is still skipped defensively.
             if getattr(server, "cli_flag", None):
                 continue
             if server.type == McpServerType.STDIO or server.type == "stdio":
+                if not server.command:
+                    continue
                 config: dict = {"command": server.command}
                 if server.args:
                     config["args"] = server.args
-                if server.env:
-                    config["env"] = server.env
+                # Merge the server's own env with the curated per-session subset
+                # for the spawned ``browser`` built-in (ANTHROPIC_* + CDP port).
+                merged_env: dict = dict(server.env) if server.env else {}
+                if server.name == BROWSER_SERVER_NAME:
+                    merged_env.update(_build_browser_server_env(tool_env))
+                if merged_env:
+                    config["env"] = merged_env
                 mcp_servers[server.name] = config
             elif server.type == McpServerType.SSE or server.type == "sse":
                 config = {"type": "sse", "url": server.url}
@@ -99,14 +162,16 @@ def _build_mcp_servers_dict_with_ai_tools(
     Args:
         project_dir: Optional project directory for project-scoped servers.
         ai_tools_config: Optional dict with individual AI tool toggles.
-        tool_env: Environment variables (API keys, provider settings) to inject
-            into AI tool Node.js subprocesses.
+        tool_env: The session's full_env (API keys, provider settings). Injected
+            into AI tool Node.js subprocesses, and a curated subset is injected
+            into the spawned ``browser`` built-in server (see _build_mcp_servers_dict).
 
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
     """
     mcp_servers = _build_mcp_servers_dict(
         project_dir=project_dir,
+        tool_env=tool_env,
     ) or {}
 
     # Add AI tools SDK MCP server if any AI tools are enabled

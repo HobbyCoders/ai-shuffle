@@ -955,11 +955,12 @@ def build_options_from_profile(
             options.extra_args = {}
         options.extra_args["thinking-display"] = thinking_display
 
-    # Enable CLI-flag built-in integrations (e.g. Claude in Chrome -> --chrome).
-    # These built-ins are not spawnable MCP servers; the CLI itself starts an
-    # internal browser MCP server and exposes mcp__claude-in-chrome__* when the
-    # flag is present. Their tool wildcard is already added to allowed_tools
-    # above; here we add the flag for each enabled (non-disabled) one.
+    # Enable any CLI-flag built-in integrations (generic mechanism: a built-in
+    # whose McpServerConfig sets ``cli_flag`` is turned on by adding ``--<flag>``
+    # to the CLI rather than being spawned as a server). No built-in currently
+    # uses this path — the browser built-in is now a spawned STDIO server (added
+    # via mcp_servers with a ``mcp__browser`` wildcard above), so this loop
+    # no-ops and never sets ``--chrome``. Kept as generic infra for future flags.
     try:
         from app.core.builtin_mcp_servers import get_builtin_servers
         from app.core.mcp_service import get_mcp_service

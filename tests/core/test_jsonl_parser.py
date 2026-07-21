@@ -845,7 +845,7 @@ class TestParseSessionHistory:
             project_dir.mkdir(parents=True)
             session_id = "test-session"
             jsonl_file = project_dir / f"{session_id}.jsonl"
-            tool_use = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-shot", "name": "mcp__claude-in-chrome__computer", "input": {"action": "screenshot"}}]}, "uuid": "tool-use-1", "timestamp": "2024-01-01T00:00:00Z"}
+            tool_use = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-shot", "name": "mcp__browser__browser_screenshot", "input": {}}]}, "uuid": "tool-use-1", "timestamp": "2024-01-01T00:00:00Z"}
             tool_result = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-shot", "content": [
                 {"type": "text", "text": "screenshot of page"},
                 {"type": "image", "data": "iVBORscreenshot", "mimeType": "image/png"},

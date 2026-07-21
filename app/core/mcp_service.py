@@ -25,6 +25,33 @@ from app.core.platform import is_docker_mode, get_claude_credentials_dir
 logger = logging.getLogger(__name__)
 
 
+# One-time rename migration for built-in servers whose registered name changed.
+# The browser built-in used to be the CLI-flag "Claude in Chrome" integration
+# (``claude-in-chrome``); it is now a spawned STDIO server named ``browser``.
+# Installs that had the old server disabled must stay disabled under the new
+# name, so ``disabledMcpServers`` entries are mapped on read (and the normalized
+# list is persisted on the next write). Keep this map minimal and idempotent.
+_LEGACY_SERVER_NAME_MAP: Dict[str, str] = {
+    "claude-in-chrome": "browser",
+}
+
+
+def _normalize_disabled_servers(disabled: List[str]) -> List[str]:
+    """
+    Rewrite legacy built-in server names in a ``disabledMcpServers`` list.
+
+    Order-preserving and de-duplicating so remapping ``claude-in-chrome`` ->
+    ``browser`` never produces a duplicate ``browser`` entry. Idempotent: a list
+    with no legacy names (or already normalized) is returned unchanged in value.
+    """
+    result: List[str] = []
+    for name in disabled:
+        mapped = _LEGACY_SERVER_NAME_MAP.get(name, name)
+        if mapped not in result:
+            result.append(mapped)
+    return result
+
+
 class McpScope(str, Enum):
     """Scope for MCP server configuration"""
     USER = "user"       # ~/.claude.json (mcpServers key)
@@ -285,7 +312,7 @@ class McpService:
             List of disabled server names
         """
         data = self._read_json_file(self.SETTINGS_FILE, {})
-        return data.get("disabledMcpServers", [])
+        return _normalize_disabled_servers(data.get("disabledMcpServers", []))
 
     def get_project_disabled_servers(self) -> List[str]:
         """
@@ -490,7 +517,10 @@ class McpService:
             True if successful
         """
         data = self._read_json_file(self.SETTINGS_FILE, {})
-        disabled = data.get("disabledMcpServers", [])
+        # Normalize legacy built-in names first so the write-back persists the
+        # migration (e.g. an existing ``claude-in-chrome`` entry becomes
+        # ``browser``) and toggles resolve against the current name.
+        disabled = _normalize_disabled_servers(data.get("disabledMcpServers", []))
 
         if enabled:
             disabled = [s for s in disabled if s != name]

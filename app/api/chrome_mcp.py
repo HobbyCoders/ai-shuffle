@@ -61,11 +61,15 @@ from pydantic import BaseModel
 from app.api.auth import require_admin
 from app.api.common import api_error_handler
 from app.api.ws_auth import authenticate_websocket
-from app.core.builtin_mcp_servers import (
-    BROWSER_CLI_FLAG,
-    BROWSER_SERVER_NAME,
-    CHROME_EXTENSION_ID,
-)
+from app.core.builtin_mcp_servers import BROWSER_SERVER_NAME
+
+# NOTE: this router is the legacy "Claude in Chrome" management surface and is
+# rewritten/removed in PR C1 (frontend + API teardown). The old built-in
+# constants ``BROWSER_CLI_FLAG`` (="chrome") and ``CHROME_EXTENSION_ID`` were
+# deleted when the browser built-in became a spawned STDIO server; they are
+# inlined below only so this module keeps importing/compiling until C1 lands.
+_LEGACY_CHROME_CLI_FLAG = "chrome"
+_LEGACY_CHROME_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn"
 from app.core.mcp_service import get_mcp_service
 from app.core.platform import is_docker_mode
 
@@ -220,7 +224,7 @@ def _extension_manifest_globs() -> List[str]:
     Container uses the supervised Chrome's dedicated profile; native uses the
     user's real Chrome/Chromium profile dirs (any profile, not just Default).
     """
-    ext = CHROME_EXTENSION_ID
+    ext = _LEGACY_CHROME_EXTENSION_ID
     if _is_container():
         return [str(PROFILE_DIR / "Default/Extensions" / ext / "*/manifest.json")]
     if IS_WINDOWS:
@@ -337,7 +341,7 @@ def _extension_options_url() -> Optional[str]:
     )
     if not page:
         return None
-    return f"chrome-extension://{CHROME_EXTENSION_ID}/{page}"
+    return f"chrome-extension://{_LEGACY_CHROME_EXTENSION_ID}/{page}"
 
 
 def _paired_device() -> tuple[Optional[str], Optional[str]]:
@@ -572,8 +576,8 @@ async def _run_pairing_query() -> str:
         continue_conversation=False,
         fork_session=False,
         env=env,
-        # Enable the Claude in Chrome built-in → bare ``--chrome`` flag.
-        extra_args={BROWSER_CLI_FLAG: None},
+        # Legacy: bare ``--chrome`` flag (dead once C1 removes this router).
+        extra_args={_LEGACY_CHROME_CLI_FLAG: None},
     )
 
     chunks: List[str] = []

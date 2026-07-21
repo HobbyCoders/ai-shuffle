@@ -318,14 +318,13 @@ def _check_session_store_durability() -> None:
 
 
 def _check_browser_mcp_prereqs() -> None:
-    """Log guidance (non-fatally) about the Claude in Chrome integration.
+    """Log guidance (non-fatally) about the ``browser`` built-in.
 
-    Claude in Chrome is enabled by passing ``--chrome`` to the bundled CLI; the
-    CLI auto-installs its native-messaging host on first use. What it CANNOT do
-    on its own is provide a running, signed-in, paired Chrome — so when the
-    integration is enabled we just remind operators of that requirement. This is
-    a guidance log only; it never blocks startup, and we cannot reliably detect
-    pairing state from here.
+    The browser built-in is a spawned STDIO MCP server that attaches to the
+    supervised Chromium over CDP (``CHROME_CDP_PORT``, default 9221). What it
+    CANNOT do on its own is provide that running browser — so when the built-in
+    is enabled we just remind operators that a supervised Chromium must be up.
+    This is a guidance log only; it never blocks startup.
     """
     try:
         from app.core.builtin_mcp_servers import (
@@ -343,15 +342,14 @@ def _check_browser_mcp_prereqs() -> None:
             return
 
         logger.info(
-            "Claude in Chrome is ENABLED (sessions launch with --chrome, exposing "
-            "mcp__claude-in-chrome__* tools). Requires a running Chrome/Chromium "
-            "with the Claude in Chrome extension installed, signed in to your "
-            "Claude account, and paired. Disable the 'claude-in-chrome' server in "
-            "the MCP admin UI to turn this off."
+            "Browser automation is ENABLED (sessions spawn the 'browser' MCP "
+            "server, exposing mcp__browser__* tools). Requires a supervised "
+            "Chromium reachable over CDP (CHROME_CDP_PORT, default 9221). Disable "
+            "the 'browser' server in the MCP admin UI to turn this off."
         )
     except Exception:
         # Never let a best-effort prereq check break startup.
-        logger.debug("Claude in Chrome prereq check skipped", exc_info=True)
+        logger.debug("Browser MCP prereq check skipped", exc_info=True)
 
 
 async def start_services() -> None:
