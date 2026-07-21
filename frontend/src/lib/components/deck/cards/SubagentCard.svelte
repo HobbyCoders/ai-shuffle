@@ -205,9 +205,11 @@
 	const getModelBadgeClass = getModelBadgeClassShared;
 
 	// Detect whether a model value needs the "Custom..." free-text input.
-	// Empty (Inherit) is a preset sentinel — not custom.
+	// Empty (Inherit) is a preset sentinel — not custom. Provider composites
+	// (prov:<provider>:<model>) are picker selections, not custom either.
 	function isCustomModel(model?: string): boolean {
 		if (!model) return false;
+		if (model.startsWith('prov:')) return false;
 		return !isPresetModel(model);
 	}
 

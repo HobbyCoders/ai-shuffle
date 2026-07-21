@@ -5,10 +5,9 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
+	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
-		getModels,
 		CUSTOM_VALUE,
-		INHERIT_VALUE,
 		getBaseModel,
 		has1MContext,
 		withContextSuffix,
@@ -225,24 +224,20 @@
 				<div class="lab"><h4>Model</h4><p>Defaults to the session model when set to Inherit.</p></div>
 				<div class="ctl ctl-col">
 					<div class="grp-row">
-						<select
-							class="sel"
-							value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
-							onchange={(e) => {
-								const v = (e.target as HTMLSelectElement).value;
+						<ModelPicker
+							allowInherit
+							value={customModelMode ? CUSTOM_VALUE : (formModel.startsWith('prov:') ? formModel : getBaseModel(formModel))}
+							onSelect={(v) => {
 								if (v === CUSTOM_VALUE) {
 									onCustomModelModeChange(true, '');
+								} else if (v.startsWith('prov:')) {
+									// Provider composite is stored verbatim; no 1M suffix handling.
+									onCustomModelModeChange(false, v);
 								} else {
 									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
 								}
 							}}
-						>
-							<option value={INHERIT_VALUE}>Inherit</option>
-							{#each getModels() as model (model.value)}
-								<option value={model.value}>{model.label}</option>
-							{/each}
-							<option value={CUSTOM_VALUE}>Custom…</option>
-						</select>
+						/>
 						{#if !customModelMode && modelSupports1M(formModel)}
 							<label class="chk">
 								<input type="checkbox" checked={has1MContext(formModel)} onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))} />
@@ -252,6 +247,9 @@
 					</div>
 					{#if customModelMode}
 						<input type="text" value={formModel} oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-sonnet-4-5" />
+					{/if}
+					{#if !customModelMode && formModel.startsWith('prov:')}
+						<p class="hint">Provider models only take effect when this subagent runs under a gateway-routed profile whose main provider is gateway-servable; otherwise the agent inherits the session model.</p>
 					{/if}
 				</div>
 			</div>
@@ -447,6 +445,14 @@
 	.grp-row :global(.sel) {
 		flex: 1;
 		min-width: 0;
+	}
+
+	/* Inline hint below the model picker (provider-model caveat) */
+	p.hint {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.45;
+		color: var(--muted-foreground);
 	}
 
 	/* Inline checkbox (1M context) */
