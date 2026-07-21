@@ -46,6 +46,66 @@ curl http://localhost:8000/api/v1/connectors/events \
   -H "Authorization: Bearer aih_your_key"
 ```
 
+## Discord Guided Setup
+
+### POST /api/v1/connectors/discord/discover
+
+Log into Discord with a bot token and return the bot's identity plus the guilds
+(servers) and text channels it can see. Powers the guided Discord setup UI so
+admins can pick guilds/channels from a list instead of copying IDs. This performs
+an HTTP-only login (no Gateway connection) and does not modify anything.
+
+**Auth:** Admin only
+
+Provide **exactly one** of the following in the request body:
+
+- `bot_token` -- a plaintext bot token to validate. A masked value (starting with
+  `****`) is rejected.
+- `connector_id` -- the ID of an existing Discord connector; its stored token is
+  decrypted server-side and used. Useful when editing (the token stays masked in
+  the UI).
+
+```bash
+curl -X POST http://localhost:8000/api/v1/connectors/discord/discover \
+  -H "Authorization: Bearer aih_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"bot_token": "YOUR_BOT_TOKEN"}'
+```
+
+**Response:**
+```json
+{
+  "bot": { "id": "123456789012345678", "name": "AI Shuffle Bot" },
+  "application_id": "123456789012345678",
+  "guilds": [
+    {
+      "id": "223456789012345678",
+      "name": "My Server",
+      "channels": [
+        { "id": "323456789012345678", "name": "general" }
+      ],
+      "error": null
+    }
+  ]
+}
+```
+
+All IDs are returned as strings (Discord snowflakes exceed JavaScript's safe
+integer range). Only text channels are listed. If the bot cannot read a guild's
+channels, that guild's `error` field describes the problem and its `channels`
+array is empty; the guild is still returned so it can be selected.
+
+**Errors:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Neither or both of `bot_token`/`connector_id` provided, or a masked token was sent |
+| 404 | `connector_id` not found or is not a Discord connector |
+| 400 | Discord rejected the token (invalid bot token) |
+| 502 | Discord discovery failed (timeout or upstream error) |
+
+The token is never logged or echoed in the response.
+
 ## Connector CRUD
 
 ### GET /api/v1/connectors
