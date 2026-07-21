@@ -313,6 +313,10 @@ async def create_message(request: Request):
         body,
         upstream_mode=("openai" if mode == "openai" else "codex"),
         target_model=leg.upstream_model,
+        # Native array-form tool_result images only for the api.openai.com
+        # upstream; the Codex backend stays on the fallback path until B3
+        # live-validates that it accepts array-form function outputs.
+        images_native=(mode == "openai"),
     )
 
     if stream:

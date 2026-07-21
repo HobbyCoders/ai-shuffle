@@ -114,6 +114,168 @@ def _stringify_tool_result_content(content: Any) -> str:
     return json.dumps(content, separators=(",", ":"), ensure_ascii=False)
 
 
+# ─── image blocks → input_image content parts ────────────────────────────────
+#
+# The Responses API accepts image content parts of shape
+# ``{"type":"input_image","image_url": <data-url-or-url>, "detail":"auto"}``.
+# base64 sources become a ``data:`` URL; a genuine URL source passes through.
+# The upstream only accepts these four media types, so an unrecognized type is
+# dropped in favor of a short text breadcrumb rather than emitting a malformed
+# part.
+_SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
+    ("image/png", "image/jpeg", "image/gif", "image/webp")
+)
+_UNSUPPORTED_IMAGE_BREADCRUMB = "[unsupported image omitted]"
+
+
+def _image_part(source: Any) -> Optional[Dict[str, Any]]:
+    """Anthropic image ``source`` → a Responses ``input_image`` content part.
+
+    ``base64`` sources become a ``data:<media_type>;base64,<data>`` URL (media
+    type guarded to the four types the Responses API accepts); ``url`` sources
+    pass the URL through. An unrecognized or unsupported source returns ``None``
+    so the caller can emit a text breadcrumb in its place."""
+    if not isinstance(source, dict):
+        return None
+    stype = source.get("type")
+    if stype == "base64":
+        media_type = source.get("media_type")
+        if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
+            return None
+        data = source.get("data", "")
+        return {
+            "type": "input_image",
+            "image_url": f"data:{media_type};base64,{data}",
+            "detail": "auto",
+        }
+    if stype == "url":
+        url = source.get("url")
+        if not url:
+            return None
+        return {"type": "input_image", "image_url": url, "detail": "auto"}
+    return None
+
+
+def _content_has_image(blocks: List[Any]) -> bool:
+    """True if any block in a ``tool_result`` content list is an image block."""
+    return any(isinstance(b, dict) and b.get("type") == "image" for b in blocks)
+
+
+def _tool_result_native_output(blocks: List[Any]) -> List[Dict[str, Any]]:
+    """Native path: ``tool_result`` content → an ``output`` content-part array.
+
+    Text/JSON blocks become ``input_text`` parts and image blocks become
+    ``input_image`` parts, preserving walk order so the model sees the result and
+    its screenshots interleaved exactly as sent."""
+    parts: List[Dict[str, Any]] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append({"type": "input_text", "text": str(block.get("text", ""))})
+        elif isinstance(block, dict) and block.get("type") == "image":
+            part = _image_part(block.get("source"))
+            parts.append(
+                part
+                if part is not None
+                else {"type": "input_text", "text": _UNSUPPORTED_IMAGE_BREADCRUMB}
+            )
+        elif isinstance(block, str):
+            parts.append({"type": "input_text", "text": block})
+        else:
+            parts.append(
+                {
+                    "type": "input_text",
+                    "text": json.dumps(block, separators=(",", ":"), ensure_ascii=False),
+                }
+            )
+    return parts
+
+
+def _tool_result_fallback_items(
+    call_id: Any, blocks: List[Any], counter: List[int]
+) -> List[Dict[str, Any]]:
+    """Fallback path: ``tool_result`` content → a plain-string
+    ``function_call_output`` plus one synthetic user message per image.
+
+    The output string is the joined text/JSON blocks with a stable
+    ``[Screenshot captured: img_{N}]`` placeholder in each image's position; each
+    image is then re-attached as an ``input_image`` in a following user message
+    keyed to the same ``img_{N}`` and to ``call_id``. ``N`` is drawn from the
+    request-scoped ``counter`` (advanced in walk order) so a given request body
+    always translates to the same ids — the idempotency the CLI relies on when it
+    resends full history each turn."""
+    output_chunks: List[str] = []
+    synthetic: List[Dict[str, Any]] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            output_chunks.append(str(block.get("text", "")))
+        elif isinstance(block, dict) and block.get("type") == "image":
+            part = _image_part(block.get("source"))
+            if part is None:
+                output_chunks.append(_UNSUPPORTED_IMAGE_BREADCRUMB)
+                continue
+            counter[0] += 1
+            img_id = f"img_{counter[0]}"
+            output_chunks.append(f"[Screenshot captured: {img_id}]")
+            synthetic.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"Tool result image {img_id} (for tool call {call_id}):",
+                        },
+                        part,
+                    ],
+                }
+            )
+        elif isinstance(block, str):
+            output_chunks.append(block)
+        else:
+            output_chunks.append(
+                json.dumps(block, separators=(",", ":"), ensure_ascii=False)
+            )
+    items: List[Dict[str, Any]] = [
+        {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": "".join(output_chunks),
+        }
+    ]
+    items.extend(synthetic)
+    return items
+
+
+def _translate_tool_result(
+    block: Dict[str, Any], counter: List[int], images_native: bool
+) -> List[Dict[str, Any]]:
+    """A single Anthropic ``tool_result`` block → one or more Responses items.
+
+    Image-free results keep the historical plain-string ``function_call_output``
+    verbatim. Image-bearing results either fold the images into the output array
+    (``images_native``) or fall back to placeholder + synthetic user messages."""
+    call_id = block.get("tool_use_id")
+    content = block.get("content")
+    blocks = content if isinstance(content, list) else None
+    if blocks is None or not _content_has_image(blocks):
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": _stringify_tool_result_content(content),
+            }
+        ]
+    if images_native:
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": _tool_result_native_output(blocks),
+            }
+        ]
+    return _tool_result_fallback_items(call_id, blocks, counter)
+
+
 def _normalize_message_content(content: Any) -> List[Dict[str, Any]]:
     """Anthropic message ``content`` may be a bare string; normalize to blocks."""
     if content is None:
@@ -127,14 +289,24 @@ def _normalize_message_content(content: Any) -> List[Dict[str, Any]]:
 
 # ─── messages[] → input[] ────────────────────────────────────────────────────
 
-def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _translate_messages(
+    messages: List[Dict[str, Any]], *, images_native: bool = False
+) -> List[Dict[str, Any]]:
     """Translate Anthropic messages into Responses ``input`` items.
 
     A single Anthropic message can carry multiple content blocks that map to
     *different* Responses item types (e.g. an assistant turn with a thinking
     block + text + tool_use). We flatten in order. No item ever carries ``id``
-    or ``status`` (surprise #6)."""
+    or ``status`` (surprise #6).
+
+    ``text`` and ``image`` blocks are coalesced into a single message item whose
+    ``content`` array holds ``input_text``/``output_text`` and ``input_image``
+    parts interleaved. ``tool_result`` images are handled per
+    :func:`_translate_tool_result` (fallback placeholder + synthetic user message,
+    or a native output array when ``images_native``). A request-scoped image
+    ``counter`` numbers the fallback screenshots deterministically."""
     input_items: List[Dict[str, Any]] = []
+    counter: List[int] = [0]  # request-scoped img_{N} sequence (walk order)
 
     for message in messages:
         if not isinstance(message, dict):
@@ -147,33 +319,61 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out_role = "developer" if role in ("system", "developer") else role
         blocks = _normalize_message_content(message.get("content"))
 
-        # Text blocks for this message are coalesced into one message item so we
-        # do not fragment a plain turn into many items.
-        text_segments: List[str] = []
+        # Text/image parts for this message are coalesced into one message item so
+        # we do not fragment a turn into many items. Assistant turns stay
+        # output_text-only; everything else uses input_* parts. Consecutive text
+        # blocks fold into a single part (historical behavior); an image or
+        # breadcrumb closes that run so parts stay in walk order.
+        text_type = "output_text" if out_role == "assistant" else "input_text"
+        content_parts: List[Dict[str, Any]] = []
+        open_text_run = False
 
-        def _flush_text() -> None:
-            if not text_segments:
+        def _flush_content() -> None:
+            if not content_parts:
                 return
-            joined = "".join(text_segments)
-            content_type = "output_text" if out_role == "assistant" else "input_text"
             input_items.append(
                 {
                     "type": "message",
                     "role": out_role,
-                    "content": [{"type": content_type, "text": joined}],
+                    "content": list(content_parts),
                 }
             )
-            text_segments.clear()
+            content_parts.clear()
 
         for block in blocks:
             btype = block.get("type")
 
             if btype == "text":
-                text_segments.append(str(block.get("text", "")))
+                segment = str(block.get("text", ""))
+                if open_text_run:
+                    content_parts[-1]["text"] += segment
+                else:
+                    content_parts.append({"type": text_type, "text": segment})
+                    open_text_run = True
+                continue
+
+            # Any non-text block ends the current text run.
+            open_text_run = False
+
+            if btype == "image":
+                # User/developer image → input_image content part. Assistant
+                # images are not a real case; skip with a breadcrumb so we stay
+                # output_text-only. Unsupported sources leave a breadcrumb too.
+                if out_role == "assistant":
+                    content_parts.append(
+                        {"type": text_type, "text": _UNSUPPORTED_IMAGE_BREADCRUMB}
+                    )
+                else:
+                    part = _image_part(block.get("source"))
+                    content_parts.append(
+                        part
+                        if part is not None
+                        else {"type": text_type, "text": _UNSUPPORTED_IMAGE_BREADCRUMB}
+                    )
 
             elif btype == "tool_use":
                 # Assistant tool call → Responses function_call.
-                _flush_text()
+                _flush_content()
                 raw_input = block.get("input", {})
                 # arguments must be a JSON *string*; deterministic serialization.
                 arguments = json.dumps(
@@ -190,14 +390,11 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
             elif btype == "tool_result":
                 # User-provided tool result → Responses function_call_output,
-                # joined back to the call by call_id.
-                _flush_text()
-                input_items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": block.get("tool_use_id"),
-                        "output": _stringify_tool_result_content(block.get("content")),
-                    }
+                # joined back to the call by call_id. Image-bearing results also
+                # emit synthetic user messages (fallback) or a native output array.
+                _flush_content()
+                input_items.extend(
+                    _translate_tool_result(block, counter, images_native)
                 )
 
             elif btype == "thinking":
@@ -205,7 +402,7 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 # reasoning input item (encrypted_content preserved verbatim). A
                 # foreign signature (native-Claude thinking) → DROP; we never
                 # fabricate a reasoning item the upstream did not produce.
-                _flush_text()
+                _flush_content()
                 envelope = decode_reasoning_signature(block.get("signature"))
                 if envelope is None:
                     continue  # drop native-Claude / unrecognized thinking
@@ -221,13 +418,13 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             elif btype == "redacted_thinking":
                 # Anthropic-encrypted native reasoning — not ours, cannot map to
                 # a Responses reasoning item; drop (same rule as foreign thinking).
-                _flush_text()
+                _flush_content()
                 continue
 
-            # Unknown block types (images, documents, …) are out of scope for the
+            # Other unknown block types (documents, …) remain out of scope for the
             # stage-1 translation core and are skipped.
 
-        _flush_text()
+        _flush_content()
 
     return input_items
 
@@ -400,6 +597,7 @@ def translate_request(
     *,
     upstream_mode: str = "codex",
     target_model: Optional[str] = None,
+    images_native: bool = False,
 ) -> Dict[str, Any]:
     """Translate an Anthropic Messages request body into a Responses request body.
 
@@ -417,10 +615,19 @@ def translate_request(
         The real upstream model id from the routing table (stage 2). When absent,
         the Anthropic request's own ``model`` is passed through. We never forward
         a Claude alias as the upstream model when a target is supplied (§A.2).
+    images_native:
+        When ``True`` a ``tool_result``'s images are folded directly into the
+        ``function_call_output.output`` as an ``input_text``/``input_image`` array;
+        when ``False`` (default) they fall back to a text placeholder plus a
+        synthetic user message per image. The router enables native mode only for
+        the api.openai.com upstream; the Codex backend stays on fallback until
+        live-validated (B3). Image-free tool results are unaffected either way.
     """
     body: Dict[str, Any] = {
         "model": target_model or anthropic_body.get("model"),
-        "input": _translate_messages(anthropic_body.get("messages", []) or []),
+        "input": _translate_messages(
+            anthropic_body.get("messages", []) or [], images_native=images_native
+        ),
         # Non-negotiable spike invariants.
         "store": False,
         "stream": True,

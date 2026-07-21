@@ -384,6 +384,234 @@ def test_strictify_does_not_mutate_input():
     assert schema == snapshot
 
 
+# ── image content survives translation (B2) ──────────────────────────────────
+
+def _user_image_block(media_type="image/png", data="AAAA"):
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+def test_user_base64_image_becomes_input_image_data_url():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "look at this"},
+                _user_image_block("image/png", "AAAA"),
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    items = body["input"]
+    assert len(items) == 1
+    msg = items[0]
+    assert msg["type"] == "message" and msg["role"] == "user"
+    # text and image are interleaved in one content array, in order
+    assert msg["content"] == [
+        {"type": "input_text", "text": "look at this"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
+    ]
+
+
+def test_user_image_only_message_produces_input_image_part():
+    body = translate_request({"model": "m", "messages": [
+        {"role": "user", "content": [_user_image_block("image/jpeg", "ZZZZ")]},
+    ]})
+    msg = body["input"][0]
+    assert msg["content"] == [
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,ZZZZ", "detail": "auto"},
+    ]
+
+
+def test_user_url_image_source_passes_url_through():
+    body = translate_request({"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://ex.com/a.png"}},
+        ]},
+    ]})
+    msg = body["input"][0]
+    assert msg["content"] == [
+        {"type": "input_image", "image_url": "https://ex.com/a.png", "detail": "auto"},
+    ]
+
+
+def test_unsupported_media_type_becomes_text_breadcrumb():
+    body = translate_request({"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "hi"},
+            _user_image_block("image/tiff", "AAAA"),
+        ]},
+    ]})
+    msg = body["input"][0]
+    assert msg["content"] == [
+        {"type": "input_text", "text": "hi"},
+        {"type": "input_text", "text": "[unsupported image omitted]"},
+    ]
+
+
+def test_assistant_image_block_dropped_with_breadcrumb_stays_output_text():
+    body = translate_request({"model": "m", "messages": [
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "here"},
+            _user_image_block("image/png", "AAAA"),
+        ]},
+    ]})
+    msg = body["input"][0]
+    # assistant stays output_text-only; no input_image ever appears on assistant
+    assert msg["role"] == "assistant"
+    assert msg["content"] == [
+        {"type": "output_text", "text": "here"},
+        {"type": "output_text", "text": "[unsupported image omitted]"},
+    ]
+
+
+def test_tool_result_image_fallback_placeholder_and_following_user_item():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "screenshot", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": [
+                    {"type": "text", "text": "captured page"},
+                    _user_image_block("image/png", "SHOT"),
+                ]},
+            ]},
+        ],
+    }
+    body = translate_request(history)  # default = fallback
+    items = body["input"]
+    types = [it["type"] for it in items]
+    # function_call, then function_call_output, then the synthetic user message
+    assert types == ["function_call", "function_call_output", "message"]
+
+    fco = items[1]
+    assert fco["call_id"] == "call_1"
+    assert fco["output"] == "captured page[Screenshot captured: img_1]"
+
+    synth = items[2]
+    assert synth["role"] == "user"
+    assert synth["content"] == [
+        {"type": "input_text", "text": "Tool result image img_1 (for tool call call_1):"},
+        {"type": "input_image", "image_url": "data:image/png;base64,SHOT", "detail": "auto"},
+    ]
+
+
+def test_tool_result_without_image_is_unchanged_regression():
+    # list content with only text → same joined string, no synthetic message
+    history = {"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": [
+                {"type": "text", "text": "18C "},
+                {"type": "text", "text": "sunny"},
+            ]},
+        ]},
+    ]}
+    body = translate_request(history)
+    items = body["input"]
+    assert [it["type"] for it in items] == ["function_call_output"]
+    assert items[0]["output"] == "18C sunny"
+
+
+def test_multi_image_parallel_tool_use_ordering_and_numbering():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_a", "name": "shot", "input": {}},
+                {"type": "tool_use", "id": "call_b", "name": "shot", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_a", "content": [
+                    _user_image_block("image/png", "A1"),
+                    _user_image_block("image/png", "A2"),
+                ]},
+                {"type": "tool_result", "tool_use_id": "call_b", "content": [
+                    _user_image_block("image/png", "B1"),
+                ]},
+            ]},
+        ],
+    }
+    body = translate_request(history)
+    items = body["input"]
+    # two function_calls, then per tool_result: its fco immediately followed by
+    # its synthetic image messages, in walk order.
+    assert [it["type"] for it in items] == [
+        "function_call", "function_call",
+        "function_call_output", "message", "message",  # call_a + img_1, img_2
+        "function_call_output", "message",              # call_b + img_3
+    ]
+    assert items[2]["output"] == "[Screenshot captured: img_1][Screenshot captured: img_2]"
+    assert items[3]["content"][0]["text"] == "Tool result image img_1 (for tool call call_a):"
+    assert items[4]["content"][0]["text"] == "Tool result image img_2 (for tool call call_a):"
+    assert items[5]["output"] == "[Screenshot captured: img_3]"
+    assert items[6]["content"][0]["text"] == "Tool result image img_3 (for tool call call_b):"
+    assert items[6]["content"][1]["image_url"] == "data:image/png;base64,B1"
+
+
+def test_translation_is_deterministic_stable_img_ids():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": [_user_image_block("image/png", "X")]},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c2", "content": [_user_image_block("image/png", "Y")]},
+            ]},
+        ],
+    }
+    first = translate_request(copy.deepcopy(history))
+    second = translate_request(copy.deepcopy(history))
+    assert first == second  # byte-for-byte identical output
+    # counter is request-scoped: restarts at img_1 on a fresh call, not global
+    ids = [
+        it["content"][0]["text"]
+        for it in first["input"]
+        if it["type"] == "message"
+    ]
+    assert ids == [
+        "Tool result image img_1 (for tool call c1):",
+        "Tool result image img_2 (for tool call c2):",
+    ]
+    assert [it["content"][0]["text"] for it in second["input"] if it["type"] == "message"] == ids
+
+
+def test_native_mode_tool_result_image_array_output_no_synthetic_message():
+    history = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": [
+                    {"type": "text", "text": "page"},
+                    _user_image_block("image/png", "SHOT"),
+                ]},
+            ]},
+        ],
+    }
+    body = translate_request(history, images_native=True)
+    items = body["input"]
+    # native: only the function_call_output, output is an array; no synthetic msg
+    assert [it["type"] for it in items] == ["function_call_output"]
+    fco = items[0]
+    assert fco["call_id"] == "c1"
+    assert fco["output"] == [
+        {"type": "input_text", "text": "page"},
+        {"type": "input_image", "image_url": "data:image/png;base64,SHOT", "detail": "auto"},
+    ]
+
+
+def test_native_mode_leaves_image_free_tool_result_as_string():
+    # native flag must NOT change image-free results (regression)
+    history = {"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "plain text"},
+        ]},
+    ]}
+    body = translate_request(history, images_native=True)
+    assert body["input"][0]["output"] == "plain text"
+
+
 def test_translate_tools_applies_strictify_end_to_end():
     req = {
         "model": "m",
