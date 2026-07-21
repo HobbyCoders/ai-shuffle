@@ -542,57 +542,16 @@
 		}
 	}
 
-	function getStatusColor(status: Connector['status']): string {
+	function statusTone(status: Connector['status']): 'ok' | 'warn' | 'danger' | 'off' {
 		switch (status) {
-			case 'connected':
-				return 'bg-success';
-			case 'connecting':
-				return 'bg-warning';
-			case 'error':
-				return 'bg-destructive';
-			default:
-				return 'bg-muted-foreground';
-		}
-	}
-
-	function getStatusBadgeClass(status: Connector['status']): string {
-		switch (status) {
-			case 'connected':
-				return 'badge success';
-			case 'connecting':
-				return 'badge warning';
-			case 'error':
-				return 'badge danger';
-			default:
-				return 'badge muted';
+			case 'connected': return 'ok';
+			case 'connecting': return 'warn';
+			case 'error': return 'danger';
+			default: return 'off';
 		}
 	}
 
 
-	function getTypeBadgeClass(type: string): string {
-		switch (type) {
-			case 'telegram':
-				return 'badge-type badge-telegram';
-			case 'discord':
-				return 'badge-type badge-discord';
-			case 'whatsapp':
-				return 'badge-type badge-whatsapp';
-			case 'slack':
-				return 'badge-type badge-slack';
-			case 'line':
-				return 'badge-type badge-line';
-			case 'signal':
-				return 'badge-type badge-signal';
-			case 'imessage':
-				return 'badge-type badge-imessage';
-			case 'msteams':
-				return 'badge-type badge-msteams';
-			case 'bluebubbles':
-				return 'badge-type badge-bluebubbles';
-			default:
-				return 'badge-type badge-webhook';
-		}
-	}
 </script>
 
 <div class="connector-manager">
@@ -680,24 +639,21 @@
 									{@const typeInfo = connectorTypes.find(t => t.type === connector.type)}
 									<!-- Main Row -->
 									<div class="flex items-start justify-between gap-4">
+										<div class="connector-ic" aria-hidden="true">
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+												<path stroke-linecap="round" stroke-linejoin="round" d={typeIcons[connector.type] || typeIcons.webhook} />
+											</svg>
+										</div>
 										<div class="flex-1 min-w-0">
 											<div class="flex items-center gap-2 flex-wrap">
-												<!-- Status Dot -->
-												<span
-													class={`w-2 h-2 rounded-full flex-shrink-0 ${getStatusColor(connector.status)}`}
-												></span>
 												<!-- Name -->
 												<span class="text-sm font-medium text-foreground truncate">
 													{connector.name}
 												</span>
 												<!-- Type Badge -->
-												<span class={getTypeBadgeClass(connector.type)}>
-													{connector.type}
-												</span>
+												<span class="sb off">{connector.type}</span>
 												<!-- Status Badge -->
-												<span class={getStatusBadgeClass(connector.status)}>
-													{connector.status}
-												</span>
+												<span class="sb {statusTone(connector.status)}">{connector.status}</span>
 												<!-- Runner affinity: only shown when this connector runs on a DIFFERENT install -->
 												{#if runnerBadgeLabel(connector)}
 													<span
@@ -716,31 +672,22 @@
 												{/each}
 											</div>
 
-											<!-- Variant Badges (Triggers, Actions, Tools) -->
-											{#if typeInfo && (typeInfo.triggers?.length || typeInfo.actions?.length || typeInfo.tools?.length)}
-												<div class="connector-variant-badges">
-													{#if typeInfo.triggers?.length}
-														<span class="variant-badge variant-badge--info" title="Triggers: {typeInfo.triggers.map(t => t.name).join(', ')}">
-															&#9889; {typeInfo.triggers.length} trigger{typeInfo.triggers.length !== 1 ? 's' : ''}
-														</span>
-													{/if}
-													{#if typeInfo.actions?.length}
-														<span class="variant-badge variant-badge--success" title="Actions: {typeInfo.actions.map(a => a.name).join(', ')}">
-															&#9654; {typeInfo.actions.length} action{typeInfo.actions.length !== 1 ? 's' : ''}
-														</span>
-													{/if}
-													{#if typeInfo.tools?.length}
-														<span class="variant-badge variant-badge--warning" title="AI Tools: {typeInfo.tools.map(t => t.name).join(', ')}">
-															&#128295; {typeInfo.tools.length} tool{typeInfo.tools.length !== 1 ? 's' : ''}
-														</span>
-													{/if}
-												</div>
-											{/if}
-
 											<!-- Meta info -->
 											<div
-												class="flex items-center gap-4 mt-2 text-xs text-muted-foreground"
+												class="flex items-center gap-2 flex-wrap mt-2 text-xs text-muted-foreground"
 											>
+												{#if typeInfo?.triggers?.length}
+													<span title="Triggers: {typeInfo.triggers.map(t => t.name).join(', ')}">{typeInfo.triggers.length} trigger{typeInfo.triggers.length !== 1 ? 's' : ''}</span>
+													<span class="meta-sep">·</span>
+												{/if}
+												{#if typeInfo?.actions?.length}
+													<span title="Actions: {typeInfo.actions.map(a => a.name).join(', ')}">{typeInfo.actions.length} action{typeInfo.actions.length !== 1 ? 's' : ''}</span>
+													<span class="meta-sep">·</span>
+												{/if}
+												{#if typeInfo?.tools?.length}
+													<span title="AI Tools: {typeInfo.tools.map(t => t.name).join(', ')}">{typeInfo.tools.length} tool{typeInfo.tools.length !== 1 ? 's' : ''}</span>
+													<span class="meta-sep">·</span>
+												{/if}
 												<span>Last event: {formatDateTime(connector.last_event_at)}</span>
 												{#if connector.failure_count > 0}
 													<span class="text-warning"
@@ -756,7 +703,7 @@
 										</div>
 
 										<!-- Actions -->
-										<div class="flex items-center gap-1 flex-shrink-0">
+										<div class="flex items-center gap-1.5 flex-shrink-0">
 											<!-- Toggle Switch (canonical .switch pattern) -->
 											<button
 												type="button"
@@ -775,12 +722,12 @@
 											<button
 												onclick={() => handleTest(connector.id)}
 												disabled={testingId === connector.id}
-												class="connector-action-btn p-1.5 text-muted-foreground hover:text-primary rounded transition-colors disabled:opacity-50"
+												class="connector-action-btn"
 												title="Test connection"
 											>
 												{#if testingId === connector.id}
 													<svg
-														class="w-4 h-4 animate-spin"
+														class="animate-spin"
 														fill="none"
 														viewBox="0 0 24 24"
 													>
@@ -800,7 +747,6 @@
 													</svg>
 												{:else}
 													<svg
-														class="w-4 h-4"
 														fill="none"
 														stroke="currentColor"
 														viewBox="0 0 24 24"
@@ -824,12 +770,11 @@
 											<!-- Logs -->
 											<button
 												onclick={() => toggleLogs(connector.id)}
-												class="connector-action-btn p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors"
-												class:text-primary={expandedLogs.has(connector.id)}
+												class="connector-action-btn"
+												class:active={expandedLogs.has(connector.id)}
 												title="View event logs"
 											>
 												<svg
-													class="w-4 h-4"
 													fill="none"
 													stroke="currentColor"
 													viewBox="0 0 24 24"
@@ -846,11 +791,10 @@
 											<!-- Edit -->
 											<button
 												onclick={() => startEdit(connector)}
-												class="connector-action-btn p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors"
+												class="connector-action-btn"
 												title="Edit connector"
 											>
 												<svg
-													class="w-4 h-4"
 													fill="none"
 													stroke="currentColor"
 													viewBox="0 0 24 24"
@@ -867,11 +811,10 @@
 											<!-- Delete -->
 											<button
 												onclick={() => handleDelete(connector.id)}
-												class="connector-action-btn p-1.5 text-muted-foreground hover:text-destructive rounded transition-colors"
+												class="connector-action-btn act-danger"
 												title="Delete connector"
 											>
 												<svg
-													class="w-4 h-4"
 													fill="none"
 													stroke="currentColor"
 													viewBox="0 0 24 24"
@@ -1620,131 +1563,95 @@
 		white-space: nowrap;
 	}
 
+	/* Leading type-icon tile — matches the providers row (.acct-ic). */
+	.connector-ic {
+		flex-shrink: 0;
+		width: 32px;
+		height: 32px;
+		border-radius: 8px;
+		display: grid;
+		place-items: center;
+		background: var(--background);
+		color: var(--foreground);
+	}
+	.connector-ic svg {
+		width: 17px;
+		height: 17px;
+	}
+
+	/* Canonical status/type pill — copied from the providers row (.sb). */
+	.sb {
+		font-family: var(--font-mono, monospace);
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		padding: 2px 7px;
+		border-radius: 999px;
+		line-height: 1.5;
+	}
+	.sb.ok {
+		color: var(--success, #16a34a);
+		background: color-mix(in oklch, var(--success, #16a34a) 14%, transparent);
+	}
+	.sb.warn {
+		color: var(--warning, #d97706);
+		background: color-mix(in oklch, var(--warning, #d97706) 16%, transparent);
+	}
+	.sb.danger {
+		color: var(--destructive);
+		background: color-mix(in oklch, var(--destructive) 14%, transparent);
+	}
+	.sb.off {
+		color: var(--muted-foreground);
+		background: var(--background);
+	}
+
+	.meta-sep {
+		opacity: 0.45;
+		user-select: none;
+	}
+
 	.connector-action-btn {
-		transition: all 100ms;
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border-radius: 8px;
+		border: 1px solid var(--border);
+		background: var(--background);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: color 0.15s, border-color 0.15s, background 0.15s;
 	}
-
-	.connector-action-btn:hover {
-		background: var(--hover-overlay);
+	.connector-action-btn svg {
+		width: 15px;
+		height: 15px;
 	}
-
+	.connector-action-btn:hover:not(:disabled) {
+		color: var(--foreground);
+		border-color: var(--foreground);
+	}
+	.connector-action-btn.act-danger:hover:not(:disabled) {
+		color: var(--destructive);
+		border-color: var(--destructive);
+	}
+	.connector-action-btn.active {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	}
+	.connector-action-btn:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
 	.connector-action-btn:focus-visible {
 		outline: 2px solid var(--ring);
-		outline-offset: 2px;
+		outline-offset: 1px;
 	}
 
 	/* The enable/disable toggle reuses the app's canonical `.switch`
 	   pattern (button.switch > <i>), themed globally by StudioEditorShell's
 	   `.ed-content :global(.switch)` rules — no bespoke toggle CSS here. */
-
-	/* ========================================
-	   Type Badges
-	   ======================================== */
-	.badge-type {
-		display: inline-flex;
-		align-items: center;
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		font-weight: 600;
-		border-radius: 4px;
-		text-transform: uppercase;
-		letter-spacing: 0.02em;
-	}
-
-	.badge-telegram {
-		background: color-mix(in oklch, oklch(0.6 0.15 230) 15%, transparent);
-		color: oklch(0.6 0.15 230);
-		border: 1px solid color-mix(in oklch, oklch(0.6 0.15 230) 30%, transparent);
-	}
-
-	.badge-discord {
-		background: color-mix(in oklch, oklch(0.55 0.18 280) 15%, transparent);
-		color: oklch(0.55 0.18 280);
-		border: 1px solid color-mix(in oklch, oklch(0.55 0.18 280) 30%, transparent);
-	}
-
-	.badge-whatsapp {
-		background: color-mix(in oklch, oklch(0.65 0.2 150) 15%, transparent);
-		color: oklch(0.65 0.2 150);
-		border: 1px solid color-mix(in oklch, oklch(0.65 0.2 150) 30%, transparent);
-	}
-
-	.badge-webhook {
-		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
-		color: var(--muted-foreground);
-		border: 1px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
-	}
-
-	.badge-slack {
-		background: color-mix(in oklch, oklch(0.6 0.15 330) 15%, transparent);
-		color: oklch(0.6 0.15 330);
-		border: 1px solid color-mix(in oklch, oklch(0.6 0.15 330) 30%, transparent);
-	}
-
-	.badge-line {
-		background: color-mix(in oklch, oklch(0.65 0.2 150) 15%, transparent);
-		color: oklch(0.65 0.2 150);
-		border: 1px solid color-mix(in oklch, oklch(0.65 0.2 150) 30%, transparent);
-	}
-
-	.badge-signal {
-		background: color-mix(in oklch, oklch(0.6 0.18 250) 15%, transparent);
-		color: oklch(0.6 0.18 250);
-		border: 1px solid color-mix(in oklch, oklch(0.6 0.18 250) 30%, transparent);
-	}
-
-	.badge-imessage {
-		background: color-mix(in oklch, oklch(0.6 0.15 260) 15%, transparent);
-		color: oklch(0.6 0.15 260);
-		border: 1px solid color-mix(in oklch, oklch(0.6 0.15 260) 30%, transparent);
-	}
-
-	.badge-msteams {
-		background: color-mix(in oklch, oklch(0.55 0.18 280) 15%, transparent);
-		color: oklch(0.55 0.18 280);
-		border: 1px solid color-mix(in oklch, oklch(0.55 0.18 280) 30%, transparent);
-	}
-
-	.badge-bluebubbles {
-		background: color-mix(in oklch, oklch(0.6 0.17 240) 15%, transparent);
-		color: oklch(0.6 0.17 240);
-		border: 1px solid color-mix(in oklch, oklch(0.6 0.17 240) 30%, transparent);
-	}
-
-	/* Status badges */
-	.badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		font-weight: 600;
-		border-radius: 9999px;
-		letter-spacing: 0.02em;
-	}
-
-	.badge.success {
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
-	}
-
-	.badge.warning {
-		background: color-mix(in oklch, var(--warning) 15%, transparent);
-		color: var(--warning);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-	}
-
-	.badge.danger {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	.badge.muted {
-		background: var(--muted);
-		color: var(--muted-foreground);
-		border: 1px solid var(--border);
-	}
 
 	/* ========================================
 	   Event Log Table
@@ -1862,51 +1769,14 @@
 		display: inline-flex;
 		align-items: center;
 		font-family: var(--font-mono, monospace);
-		font-size: 10.5px;
+		font-size: 10px;
 		font-weight: 500;
-		letter-spacing: 0.01em;
-		line-height: 1.4;
-		padding: 2px 7px;
-		border-radius: 6px;
+		letter-spacing: 0.02em;
+		line-height: 1.5;
+		padding: 1px 7px;
+		border-radius: 999px;
 		color: var(--muted-foreground);
-		background: var(--background);
-		border: 1px solid var(--border);
-	}
-
-	.connector-variant-badges {
-		display: flex;
-		gap: 6px;
-		flex-wrap: wrap;
-		margin-top: 4px;
-	}
-
-	.variant-badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 3px;
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: 4px;
-		letter-spacing: 0.01em;
-	}
-
-	.variant-badge--info {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.variant-badge--success {
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
-	}
-
-	.variant-badge--warning {
-		background: color-mix(in oklch, var(--warning) 15%, transparent);
-		color: var(--warning);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+		background: color-mix(in oklch, var(--foreground) 5%, transparent);
 	}
 
 	/* ========================================
