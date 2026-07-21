@@ -28,7 +28,7 @@ export interface McpServerInfo {
 	enabled: boolean;
 	description?: string;
 	builtin?: boolean;
-	/** Set for CLI-flag built-ins (e.g. "chrome" for Claude in Chrome): enabled via a CLI flag, not a spawned server. */
+	/** Legacy: set for CLI-flag built-ins (enabled via a CLI flag rather than a spawned server). No current built-in uses this. */
 	cli_flag?: string;
 }
 

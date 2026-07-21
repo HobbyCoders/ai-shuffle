@@ -144,9 +144,6 @@ async def complete_add_account(request: Request, token: str = Depends(require_ad
 @router.post("/{account_id}/activate")
 async def activate_account(account_id: str, token: str = Depends(require_admin)):
     """Switch the active account to ``account_id`` for this install."""
-    # Remember the account we're switching AWAY from so we only rebind the
-    # browser integration when the active account actually changes.
-    prev_active_id = accounts.get_active_account_id()
     # Run the switch off the event loop: it now performs a (blocking) token
     # refresh when the target's access token is expired/near-expiry.
     result = await run_sync(accounts.switch_account, account_id)
@@ -182,21 +179,6 @@ async def activate_account(account_id: str, token: str = Depends(require_admin))
                             detail=f"Could not switch account: {err}")
     # Re-poll usage for the newly-active account and broadcast to all clients.
     schedule_usage_refresh()
-
-    # A manual switch has the same Claude-in-Chrome desync as auto-failover: the
-    # container browser stays signed in to the previous account. Clear the stale
-    # pairing pin + prompt a reconnect, but only when the account really changed.
-    if prev_active_id != account_id:
-        try:
-            from app.core.chrome_rebind import rebind_browser_after_account_switch
-            summary = accounts.get_active_account_summary()
-            await rebind_browser_after_account_switch(
-                session_id=None,
-                api_user_id=None,
-                new_account_name=(summary or {}).get("name"),
-            )
-        except Exception:  # noqa: BLE001 — never break the switch response
-            pass
 
     return {"success": True, "active_account_id": result["active_account_id"]}
 

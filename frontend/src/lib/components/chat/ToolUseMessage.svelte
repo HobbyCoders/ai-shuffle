@@ -13,7 +13,7 @@
 		status: 'running' | 'complete' | 'error';
 		streaming?: boolean;
 		serverSide?: boolean;
-		/** Data URI of a screenshot from MCP image results (e.g. Claude-in-Chrome), shown inline below the tool call. */
+		/** Data URI of a screenshot from MCP image results (e.g. browser automation), shown inline below the tool call. */
 		screenshot?: string;
 	}
 
@@ -414,7 +414,7 @@
 				{/if}
 			</div>
 		</details>
-		<!-- Screenshot (e.g. Claude-in-Chrome) rendered directly below the tool
+		<!-- Screenshot (e.g. browser automation) rendered directly below the tool
 		     call, OUTSIDE the <details> so it shows regardless of expand/collapse
 		     state. When this tool is grouped, ToolUseGroup omits the screenshot
 		     here and hoists it below the whole group instead (so it isn't trapped

@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * ToolScreenshot — renders a tool's screenshot (e.g. a Claude-in-Chrome MCP
+	 * ToolScreenshot — renders a tool's screenshot (e.g. a browser-automation MCP
 	 * image result) using the shared media UI, so it gets the same expand button,
 	 * download button, and click-to-open lightbox as generated images.
 	 *

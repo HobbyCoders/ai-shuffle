@@ -87,7 +87,7 @@ export interface ChatMessage {
 	toolInput?: Record<string, unknown>;
 	toolResult?: string; // Result content for tool_use messages (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
-	toolScreenshot?: string; // Data URI of a screenshot from MCP image results (e.g. Claude-in-Chrome) — rendered inline below the tool call
+	toolScreenshot?: string; // Data URI of a screenshot from MCP image results (e.g. browser automation) — rendered inline below the tool call
 	serverSide?: boolean; // True for server-executed tools (advisor, web_search, web_fetch) — SDK 0.1.65+
 	server_side?: boolean; // Snake-case alias emitted by backend on some paths
 	metadata?: Record<string, unknown>;

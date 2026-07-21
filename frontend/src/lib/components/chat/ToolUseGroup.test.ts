@@ -37,7 +37,7 @@ describe('ToolUseGroup screenshot hoisting', () => {
 	it('renders a tool-result screenshot OUTSIDE the collapsible <details>', () => {
 		const tools = [
 			makeTool({ id: 't1', toolName: 'Read' }),
-			makeTool({ id: 't2', toolName: 'mcp__claude-in-chrome__computer', toolScreenshot: PNG })
+			makeTool({ id: 't2', toolName: 'mcp__browser__browser_screenshot', toolScreenshot: PNG })
 		];
 		const { container } = render(ToolUseGroup, { props: { tools } });
 

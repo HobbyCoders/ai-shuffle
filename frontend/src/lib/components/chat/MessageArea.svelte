@@ -866,7 +866,7 @@
 			// During streaming, toolInput is not yet parsed — track partialToolInput
 			// so auto-scroll triggers as content streams in (e.g. TodoWrite).
 			else if (lastMsg.partialToolInput) content = lastMsg.partialToolInput;
-			// A screenshot (e.g. Claude-in-Chrome) landing on the last tool call
+			// A screenshot (e.g. browser automation) landing on the last tool call
 			// grows the layout but never touches toolInput — fold its presence in
 			// so the scroll effect re-fires when it arrives. The image-load listener
 			// then re-pins once the browser has actually decoded it.

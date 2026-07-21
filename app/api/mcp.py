@@ -47,8 +47,8 @@ class McpServerResponse(BaseModel):
     enabled: bool = True
     description: Optional[str] = None
     builtin: bool = False
-    # Set for CLI-flag built-ins (e.g. "chrome" for Claude in Chrome): not a
-    # spawnable server, enabled via a CLI flag. None for normal servers.
+    # Legacy: set for CLI-flag built-ins (not a spawnable server, enabled via a
+    # CLI flag). No current built-in uses this; None for normal servers.
     cli_flag: Optional[str] = None
 
 
@@ -540,7 +540,7 @@ async def toggle_project_mcp_server(
 
         service = get_mcp_service(project_path)
 
-        # Built-in/managed servers (e.g. the `claude-in-chrome` browser
+        # Built-in/managed servers (e.g. the `browser` automation
         # integration) have no per-project disable mechanism —
         # get_builtin_servers() only honours
         # the GLOBAL disable list (settings.json -> disabledMcpServers). Route a
