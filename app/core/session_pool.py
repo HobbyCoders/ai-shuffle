@@ -52,6 +52,16 @@ PROVIDER_IDENTITY_ENV_KEYS = (
 )
 PROVIDER_OVERLAY_ENV_KEYS = (
     "ANTHROPIC_SMALL_FAST_MODEL",
+    # TRANSITION GUARD (S6). Dead as a write-target: since S3, subagent model
+    # selection moved to per-agent frontmatter stamping and NOTHING emits this
+    # var anymore (see app/core/environment.py — it is intentionally not set).
+    # It stays in this overlay set ONLY to purge pre-S3 pooled sessions: such a
+    # session still carries CLAUDE_CODE_SUBAGENT_MODEL in its old_env, and S0
+    # proved the env var OVERRIDES every frontmatter pin — so a surviving pinned
+    # session would silently ignore per-subagent config. Keeping the key here
+    # makes the key-present→absent diff force the one respawn that drops the pin.
+    # Do NOT remove until no pre-S3 pooled session can plausibly still be alive
+    # (a future cleanup, not now).
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -77,6 +87,21 @@ def provider_env_requires_reconnect(
 
     Logs the differing key NAME only, never its value (provider env carries the
     decrypted auth token).
+
+    POST-S3 LEG SEMANTICS (S6) — the designed contract, DO NOT "fix":
+    With frontmatter stamping, the ONLY leg-driven respawn is the legs
+    empty↔non-empty flip on an anthropic-provider main, because that flips
+    ANTHROPIC_BASE_URL identity between direct and gateway (caught by the
+    identity-key loop above). A leg-CONTENT change (same non-empty legs,
+    different subagent models/providers) re-mints the SAME gateway token →
+    byte-identical env → this function returns False → no respawn. That is
+    correct: the gateway leg-map refresh takes effect IMMEDIATELY for routing,
+    and frontmatter stamping takes effect on the NEXT spawn. Profile-default-leg
+    edits are likewise next-spawn-effective. This is ACCEPTED behavior, not a
+    bug. A future maintainer must NEVER add any leg-derived value into
+    PROVIDER_OVERLAY_ENV_KEYS or into the emitted env content to make
+    leg-content changes respawn — that would churn a subagent-killing respawn on
+    every mapping edit. Immediate-routing + next-spawn-stamping is the contract.
     """
     old_env = old_env or {}
     new_env = new_env or {}

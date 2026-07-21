@@ -172,6 +172,66 @@ def test_env_both_empty_dict_no_reconnect():
     assert requires_reconnect(state, new) is False
 
 
+# ─── S6: post-S3 leg semantics ──────────────────────────────────────────────
+
+
+class TestPostS3LegSemantics:
+    """S6 (resolved 2026-07-20). After S3, nothing WRITES
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` — subagent model selection is frontmatter-
+    stamped. These tests pin the two rulings:
+
+      * Transition guard — the key stays in the overlay set so pre-S3 pooled
+        sessions carrying it are respawned (its present→absent diff), purging a
+        stale pin that S0 proved overrides all frontmatter config.
+      * Post-S3 respawn semantics — the only leg-driven respawn is the legs
+        empty↔non-empty flip (ANTHROPIC_BASE_URL identity flip). A leg-CONTENT
+        change re-mints the same token → byte-identical env → no respawn
+        (immediate routing + next-spawn stamping is the designed contract).
+    """
+
+    def test_transition_guard_stale_subagent_model_key_forces_reconnect(self):
+        """A pre-S3 pooled session carries CLAUDE_CODE_SUBAGENT_MODEL in its
+        old_env; the new env (post-S3) no longer sets it. The present→absent
+        diff on this overlay key MUST respawn to purge the stale pin. Both sides
+        are gateway sessions (ANTHROPIC_BASE_URL present) so overlay keys apply."""
+        base = "https://gateway.example.com"
+        old_env = {
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_AUTH_TOKEN": "gw-token",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "claude-3-5-haiku",
+        }
+        new_env = {
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_AUTH_TOKEN": "gw-token",
+        }
+        assert provider_env_requires_reconnect(old_env, new_env) is True
+
+    def test_leg_content_change_is_byte_identical_env_no_reconnect(self):
+        """A leg-CONTENT change (same non-empty legs, different subagent
+        models/providers) re-mints the SAME gateway token → byte-identical env.
+        The reconnect check sees no diff → no respawn. The gateway map refresh
+        routes immediately; frontmatter stamping applies next spawn."""
+        env = {
+            "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+            "ANTHROPIC_AUTH_TOKEN": "gw-token-stable",
+        }
+        # Two byte-identical dicts stand in for before/after a leg-content edit.
+        assert provider_env_requires_reconnect(dict(env), dict(env)) is False
+
+    def test_legs_empty_to_nonempty_flip_forces_reconnect(self):
+        """The legs empty↔non-empty flip on an anthropic-provider main flips
+        ANTHROPIC_BASE_URL between direct (absent) and gateway (present) — an
+        identity-key change that MUST respawn, in both directions."""
+        direct = {"ANTHROPIC_AUTH_TOKEN": "direct-token"}
+        gateway = {
+            "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+            "ANTHROPIC_AUTH_TOKEN": "gw-token",
+        }
+        assert provider_env_requires_reconnect(direct, gateway) is True
+        # And the reverse direction (gateway → direct).
+        assert provider_env_requires_reconnect(gateway, direct) is True
+
+
 # ─── claude_adapter mirror (latent-correctness only, per R2) ────────────────
 
 
