@@ -10,6 +10,9 @@ websockets>=12,<17
 bcrypt==4.2.1
 cryptography>=42.0.0
 claude-agent-sdk==0.2.122
+# Real BPE tokenizer for the translator_gateway count_tokens endpoint (o200k_base).
+# Falls back to a chars/token heuristic if the BPE vocab fetch fails offline.
+tiktoken>=0.7.0
 # Native git reads (pygit2/libgit2) — falls back to CLI subprocess if unavailable
 pygit2>=1.19.0
 # Mobile support dependencies
