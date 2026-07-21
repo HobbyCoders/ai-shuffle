@@ -490,10 +490,13 @@ def assemble_subagent_legs(
     """Build the gateway leg-map for a provider session from the profile-default
     subagent leg + each enabled subagent's ``prov:<pid>:<mid>`` composite.
 
-    The default leg is emitted FIRST (so its provider wins a same-model collision
-    on the gateway's first-match scan — S5 will formalize collision handling), then
-    each enabled subagent whose stored model is a servable+enabled ``prov:``
-    composite. Legs are pre-honored here (servable + enabled, accounts resolved) so
+    The default leg is emitted FIRST, then each enabled subagent whose stored
+    model is a servable+enabled ``prov:`` composite. Same-model-id collisions are
+    resolved deterministically here: for each upstream model id at most ONE leg
+    survives — the profile-default leg wins for its mid; otherwise the entry with
+    the lexicographically-smallest provider id. Exact-duplicate tuples of the
+    winner drop silently; any non-exact-dup losers are named in one aggregate
+    ``warning`` (ids only). Legs are pre-honored here (servable + enabled, accounts resolved) so
     ``apply_provider_env`` trusts them without re-gating. If the MAIN provider is
     not gateway-servable, the WHOLE map is dropped (A2). Non-servable/disabled
     candidates are collected and logged ONCE (ids only, never tokens).
@@ -562,15 +565,42 @@ def assemble_subagent_legs(
 
     session_default = default_leg_mid if default_leg_mid is not None else small_fast
 
-    # Dedup EXACT-duplicate (mid, pid, acct) tuples, preserving first occurrence.
-    # (Same-mid/different-pid collision handling is S5's job — not collapsed here.)
-    deduped: List[LegEntry] = []
-    seen: set = set()
+    # S5: resolve same-model-id collisions deterministically. Group by mid; for
+    # each mid with >1 entry exactly ONE survives — the profile-default leg
+    # (always index 0 when present) wins for its mid, else the entry with the
+    # lexicographically-smallest provider id. Exact-duplicate tuples of the winner
+    # drop silently; non-exact-dup losers are named in one aggregate warning.
+    default_leg_entry = honored_legs[0] if default_leg_mid is not None else None
+
+    winners: Dict[str, LegEntry] = {}
     for leg in honored_legs:
-        if leg not in seen:
-            seen.add(leg)
-            deduped.append(leg)
-    honored_legs = deduped
+        mid = leg[0]
+        current = winners.get(mid)
+        if current is None:
+            winners[mid] = leg
+        elif current is default_leg_entry:
+            # Profile-default leg already holds this mid — it always wins.
+            pass
+        elif leg[1] < current[1]:
+            winners[mid] = leg
+
+    survivors: List[LegEntry] = []
+    losers: List[Tuple[str, str]] = []
+    for leg in honored_legs:
+        winner = winners[leg[0]]
+        if leg is winner:
+            survivors.append(leg)
+        elif leg != winner:
+            # A genuine collision loser (an exact-dup of the winner drops silently).
+            losers.append((leg[0], leg[1]))
+    honored_legs = survivors
+
+    if losers:
+        logger.warning(
+            "Resolved %d same-model-id leg collision(s); dropped loser(s): %s",
+            len(losers),
+            losers,
+        )
 
     if dropped:
         logger.error(

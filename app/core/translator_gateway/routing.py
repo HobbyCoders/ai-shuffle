@@ -45,6 +45,12 @@ class RouteBinding:
     spawn time and lives ONLY here (never persisted on the session row). A gateway
     request for a model named by some leg routes to that leg's provider; every
     other request stays on the main ``provider_id``.
+
+    The legs tuple arrives collision-free — at most one entry per upstream model
+    id, since same-model-id resolution happens at assembly in
+    ``assemble_subagent_legs`` (profile-default leg wins for its mid, else the
+    lexicographically-smallest provider id). The first-match scan therefore needs
+    no collision awareness.
     """
 
     session_id: Optional[str]

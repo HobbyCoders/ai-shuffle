@@ -555,6 +555,100 @@ class TestAssembleSubagentLegs:
         )
         assert plan.honored_legs == [("sub/model", "sub", None)]
 
+    def test_default_leg_wins_same_mid_collision(self, mock_db, caplog):
+        """Profile-default leg and a per-subagent entry collide on the SAME mid
+        (different pids) → the default-leg entry survives, the subagent entry is
+        gone, and one aggregate warning names the losing pid."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="main", name="Main", provider_type="chatgpt",
+            base_url="", auth_token=None, small_fast_model="m/small",
+            models=[{"id": "m", "label": "M"}],
+        )
+        db.create_model_provider(
+            provider_id="dl", name="DL", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "DL"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "Sub"}],
+        )
+        main_row = db.get_model_provider("main", include_token=False)
+        with caplog.at_level(logging.WARNING):
+            plan = assemble_subagent_legs(
+                main_provider_row=main_row,
+                default_leg_provider="dl",
+                default_leg_model="shared/mid",
+                enabled_subagents={"agent-x": {"model": "prov:sub:shared/mid"}},
+            )
+        assert plan.honored_legs == [("shared/mid", "dl", None)]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        assert "sub" in warns[0].getMessage()
+
+    def test_lexicographic_pid_wins_same_mid_collision(self, mock_db, caplog):
+        """Two per-subagent entries collide on the SAME mid (different pids, no
+        default-leg collision) → the lexicographically-smallest pid survives; the
+        aggregate warning names the loser."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="main", name="Main", provider_type="chatgpt",
+            base_url="", auth_token=None, small_fast_model="m/small",
+            models=[{"id": "m", "label": "M"}],
+        )
+        db.create_model_provider(
+            provider_id="aaa", name="Aaa", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "A"}],
+        )
+        db.create_model_provider(
+            provider_id="zzz", name="Zzz", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "Z"}],
+        )
+        main_row = db.get_model_provider("main", include_token=False)
+        with caplog.at_level(logging.WARNING):
+            plan = assemble_subagent_legs(
+                main_provider_row=main_row,
+                default_leg_provider=None, default_leg_model=None,
+                enabled_subagents={
+                    "agent-z": {"model": "prov:zzz:shared/mid"},
+                    "agent-a": {"model": "prov:aaa:shared/mid"},
+                },
+            )
+        assert plan.honored_legs == [("shared/mid", "aaa", None)]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        assert "zzz" in warns[0].getMessage()
+
+    def test_exact_duplicate_collision_no_warning(self, mock_db, caplog):
+        """Exact-duplicate tuples (same mid+pid+acct from two subagents) → a single
+        survivor and NO warning (an exact dup is not a genuine collision loser)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="main", name="Main", provider_type="chatgpt",
+            base_url="", auth_token=None, small_fast_model="m/small",
+            models=[{"id": "m", "label": "M"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
+        )
+        main_row = db.get_model_provider("main", include_token=False)
+        with caplog.at_level(logging.WARNING):
+            plan = assemble_subagent_legs(
+                main_provider_row=main_row,
+                default_leg_provider=None, default_leg_model=None,
+                enabled_subagents={
+                    "a": {"model": "prov:sub:sub/model"},
+                    "b": {"model": "prov:sub:sub/model"},
+                },
+            )
+        assert plan.honored_legs == [("sub/model", "sub", None)]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warns == []
+
 
 # ---------------------------------------------------------------------------
 # query_options: subagent leg resolution (config-only) + A2 legality
