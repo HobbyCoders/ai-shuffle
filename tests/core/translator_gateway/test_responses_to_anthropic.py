@@ -11,6 +11,7 @@ import json
 
 from app.core.translator_gateway.responses_to_anthropic import (
     ResponsesToAnthropicTranslator,
+    _normalize_usage,
     strip_null_values,
     translate_responses_stream,
 )
@@ -193,6 +194,88 @@ def test_usage_cache_fields_map_from_details():
     usage = next(f for f in frames if f["type"] == "message_delta")["usage"]
     assert usage["cache_read_input_tokens"] == 150
     assert usage["cache_creation_input_tokens"] == 30
+    # Anthropic semantics: input_tokens EXCLUDES the cache subsets (200 - 150 - 30).
+    assert usage["input_tokens"] == 20
+    # Invariant: emitted input + cache_read + cache_creation == upstream input_tokens.
+    assert (
+        usage["input_tokens"]
+        + usage["cache_read_input_tokens"]
+        + usage["cache_creation_input_tokens"]
+        == 200
+    )
+
+
+# ── _normalize_usage: cache subsets subtracted from input_tokens ─────────────
+
+def test_normalize_usage_subtracts_cache_subsets_from_input():
+    usage = {
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 20},
+        "output_tokens": 30,
+        "output_tokens_details": {"reasoning_tokens": 10},
+        "total_tokens": 130,
+    }
+    norm = _normalize_usage(usage)
+    assert norm.input_tokens == 20            # 100 - 60 - 20
+    assert norm.cache_read_input_tokens == 60
+    assert norm.cache_creation_input_tokens == 20
+    assert norm.output_tokens == 30
+    assert norm.reasoning_tokens == 10
+    assert norm.total_tokens == 130           # raw upstream total, unchanged
+    # Invariant: emitted input + caches == upstream input_tokens.
+    assert (
+        norm.input_tokens
+        + norm.cache_read_input_tokens
+        + norm.cache_creation_input_tokens
+        == 100
+    )
+
+
+def test_normalize_usage_clamps_input_at_zero_when_caches_exceed_input():
+    # Defensive: if the cache subsets exceed input_tokens, clamp at 0 (never negative).
+    usage = {
+        "input_tokens": 50,
+        "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 20},
+        "output_tokens": 5,
+        "total_tokens": 55,
+    }
+    norm = _normalize_usage(usage)
+    assert norm.input_tokens == 0
+    assert norm.cache_read_input_tokens == 60
+    assert norm.cache_creation_input_tokens == 20
+
+
+def test_normalize_usage_missing_details_passthrough():
+    # No input_tokens_details → input_tokens unchanged, cache fields zero.
+    usage = {"input_tokens": 100, "output_tokens": 30, "total_tokens": 130}
+    norm = _normalize_usage(usage)
+    assert norm.input_tokens == 100
+    assert norm.cache_read_input_tokens == 0
+    assert norm.cache_creation_input_tokens == 0
+    assert norm.total_tokens == 130
+
+
+def test_message_delta_usage_carries_subtracted_input_tokens_end_to_end():
+    # End-to-end streaming: the emitted message_delta usage frame must carry the
+    # cache-subtracted input_tokens, not the raw upstream value.
+    events = _fixtures.plain_text_stream()
+    events[-1] = (
+        "response.completed",
+        {"response": {"id": "r", "model": "m", "status": "completed", "output": [], "usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 20},
+            "output_tokens": 30,
+            "output_tokens_details": {"reasoning_tokens": 10},
+            "total_tokens": 130,
+        }}},
+    )
+    frames = _run(events)
+    usage = next(f for f in frames if f["type"] == "message_delta")["usage"]
+    assert usage["input_tokens"] == 20
+    assert usage["cache_read_input_tokens"] == 60
+    assert usage["cache_creation_input_tokens"] == 20
+    assert usage["output_tokens"] == 30
+    assert "reasoning_tokens" not in usage
 
 
 # ── (9) empty response.completed.output ignored; output_item.done wins ───────

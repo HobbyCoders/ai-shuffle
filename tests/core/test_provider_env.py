@@ -124,6 +124,54 @@ class TestApplyProviderEnv:
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
         assert env[AUTO_COMPACT_KEY] == "400000"
 
+    def test_null_context_window_pins_default_200k(self, mock_db):
+        """FIX: a provider row with context_window NULL must still pin the
+        auto-compact window to 200000 (the CLI's third-party-base-URL default)
+        so the CLI never self-derives a window off an unrecognized model id."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[AUTO_COMPACT_KEY] == "200000"
+
+    def test_null_context_window_auto_compact_preset_wins(self, mock_db):
+        """setdefault semantics: a pre-set value survives even on the NULL
+        context_window fallback."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env(
+            {AUTO_COMPACT_KEY: "654321"}, "op", "openai/gpt-5.6"
+        )
+        assert env[AUTO_COMPACT_KEY] == "654321"
+
+    def test_disable_1m_set_for_codex_mode_provider(self, mock_db):
+        """A translated (codex/chatgpt-mode) provider with a foreign model id gets
+        DISABLE_1M="1" and the default 200k pin — the exact autocompact-on-spawn
+        bug this fix addresses."""
+        from app.core.translator_gateway import routing
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert env[DISABLE_1M_KEY] == "1"
+        assert env[AUTO_COMPACT_KEY] == "200000"
+
+    def test_1m_model_allows_wide_window_no_auto_compact_pin(self, mock_db):
+        """An app [1m]-opted model keeps the wide window (DISABLE_1M="0") and does
+        NOT pin auto-compaction — parity with the native path's early return."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert AUTO_COMPACT_KEY not in env
+
     def test_r4_fallback_default_model(self, mock_db):
         """No small_fast_model → falls back to default_model."""
         from app.db import database as db
@@ -827,8 +875,10 @@ class TestBuildOptionsFromProfile:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Context-window (1M) logic is Claude-specific → skipped for providers.
-        assert DISABLE_1M_KEY not in env
+        # Context-window safety pins now apply on the provider path too: a
+        # non-[1m] model forces the 200k guard so the CLI can't self-derive an
+        # auto-compact window off a foreign model id.
+        assert env[DISABLE_1M_KEY] == "1"
 
     def test_native_profile_unchanged(self, mock_db, tmp_path):
         """Regression: a native profile still gets the 1M-guard and no gateway
@@ -859,7 +909,7 @@ class TestBuildOptionsFromProfile:
         ).env
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[API_KEY] == ""
-        assert DISABLE_1M_KEY not in env
+        assert env[DISABLE_1M_KEY] == "1"  # provider path now pins the 200k guard
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +928,7 @@ class TestBuildGenerationOptions:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        assert DISABLE_1M_KEY not in env
+        assert env[DISABLE_1M_KEY] == "1"  # provider path now pins the 200k guard
 
     def test_native_config_unchanged(self, mock_db):
         """Regression: native generation still pins the 200k window and has no

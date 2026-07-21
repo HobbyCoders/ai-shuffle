@@ -28,7 +28,14 @@ Binding contract points (docs/CODEX_SPIKE_FINDINGS.md):
   * Reasoning summary text streams as Anthropic ``thinking_delta``; the reasoning
     round-trip envelope (§D4) is emitted as a ``signature_delta`` at block close.
   * Usage: input/output/total + cache fields; ``reasoning_tokens`` ⊂
-    ``output_tokens`` (never double-counted, surprise E5 / §D3c).
+    ``output_tokens`` (never double-counted, surprise E5 / §D3c). The Responses
+    ``input_tokens`` INCLUDES its cached/cache-write detail subsets, but Anthropic
+    clients treat ``input_tokens`` as EXCLUSIVE of the cache fields and compute
+    context as input + cache_read + cache_creation. So on the way out we subtract
+    the cached/cache-write subsets from ``input_tokens`` (clamped ≥ 0), preserving
+    the invariant: emitted ``input_tokens`` + ``cache_read`` + ``cache_creation``
+    == upstream ``input_tokens`` (no double count; ``total_tokens`` stays the raw
+    upstream total).
 
 No network, no I/O, no credentials.
 """
@@ -255,15 +262,35 @@ class ResponsesNormalizer:
 
 
 def _normalize_usage(usage: Optional[Dict[str, Any]]) -> NormalizedUsage:
-    """Map the Responses usage object to Anthropic-shaped fields (§D3c / E5)."""
+    """Map the Responses usage object to Anthropic-shaped fields (§D3c / E5).
+
+    Responses semantics: ``input_tokens`` INCLUDES its ``input_tokens_details``
+    subsets (``cached_tokens`` = cache reads, ``cache_write_tokens`` = cache
+    creation). Anthropic semantics: ``input_tokens`` EXCLUDES the cache fields —
+    every Anthropic client (Claude Code CLI, our ContextUsageBar) computes context
+    as ``input_tokens`` + ``cache_read_input_tokens`` + ``cache_creation_input_tokens``.
+    Copying ``input_tokens`` verbatim while also emitting the cache fields would
+    double-count the cached/written portions and inflate context (premature
+    auto-compaction). So we subtract the cache subsets from ``input_tokens``,
+    clamped at 0, preserving the invariant:
+
+        emitted input_tokens + cache_read + cache_creation == upstream input_tokens
+
+    ``reasoning_tokens`` stays a subset of ``output_tokens`` (never added), and
+    ``total_tokens`` stays the raw upstream total (unchanged).
+    """
     usage = usage or {}
     input_details = usage.get("input_tokens_details", {}) or {}
     output_details = usage.get("output_tokens_details", {}) or {}
+    raw_input = int(usage.get("input_tokens", 0) or 0)
+    cached = int(input_details.get("cached_tokens", 0) or 0)
+    cache_write = int(input_details.get("cache_write_tokens", 0) or 0)
+    input_tokens = max(raw_input - cached - cache_write, 0)
     return NormalizedUsage(
-        input_tokens=int(usage.get("input_tokens", 0) or 0),
+        input_tokens=input_tokens,
         output_tokens=int(usage.get("output_tokens", 0) or 0),
-        cache_read_input_tokens=int(input_details.get("cached_tokens", 0) or 0),
-        cache_creation_input_tokens=int(input_details.get("cache_write_tokens", 0) or 0),
+        cache_read_input_tokens=cached,
+        cache_creation_input_tokens=cache_write,
         # Subset of output_tokens — carried for internal accounting, NOT added.
         reasoning_tokens=int(output_details.get("reasoning_tokens", 0) or 0),
         total_tokens=int(usage.get("total_tokens", 0) or 0),

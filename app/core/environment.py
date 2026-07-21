@@ -635,8 +635,15 @@ def apply_provider_env(
       (``CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS``,
       ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``,
       ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
-    - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` / ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
-      (clamped ≥100k)
+    - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
+    - context-window safety pins (ALL provider modes) mirroring the native
+      ``apply_context_window_env``: ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` for
+      an app ``[1m]`` model, else ``"1"``) and — for non-``[1m]`` models —
+      ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` pinned to the provider's
+      ``context_window`` (clamped ≥100k) or ``200000`` when the row leaves it
+      NULL. This stops the CLI self-deriving an auto-compact window off an
+      unrecognized (foreign/translated) model id and autocompacting immediately.
+      All use ``setdefault`` so an explicit profile/user/extra_env value wins.
     - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
       (openai/chatgpt ``provider_type`` or ``chatgpt`` ``auth_mode``); consumed by
       :func:`attach_hooks_to_options` to register the S8-R1 Agent-arg-strip
@@ -802,16 +809,38 @@ def apply_provider_env(
     if max_output:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output)
 
+    # Context-window safety pins — mirror the native path's
+    # ``apply_context_window_env`` intent (see this module ~L390) so a
+    # provider-routed session NEVER lets the CLI self-derive an auto-compact
+    # window off an unrecognized model id (e.g. ``gpt-5.x-codex``) and
+    # autocompact immediately. Without this the native path pinned the window but
+    # the provider path only pinned when the row carried a ``context_window``
+    # (NULL by default → skipped), leaving the CLI to guess. The pins apply to
+    # ALL provider modes because every one of them faces the same risk:
+    #   - translated (codex/openai): the upstream model id is foreign, so the CLI
+    #     cannot recognize it — pinning is exactly the fix.
+    #   - anthropic_passthrough (anthropic main + foreign legs): the id is a real
+    #     ``claude-*`` id, so the native ``[1m]``-opt-in gate is correct here too.
+    #   - direct openrouter/custom: same non-Anthropic-upstream risk.
+    # We honor the app's ``[1m]`` opt-in exactly like the native path: a ``[1m]``
+    # model keeps the wide window (``DISABLE_1M="0"``, auto-compaction left to the
+    # CLI's native tuning); everything else is forced back to the standard 200k
+    # window. ``setdefault`` throughout so an explicit profile/user/extra_env
+    # value still wins (preset-wins parity with the native path).
     context_window = provider.get("context_window")
-    if context_window:
-        # Clamp to ≥100k: the CLI's auto-compact window must not undercut a usable
-        # working context even if the provider advertises a tiny window. Use
-        # setdefault so a profile-supplied preset wins — preset-wins parity with
-        # the native path (see the setdefault at the top of this module).
-        env.setdefault(
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-            str(max(int(context_window), 100000)),
-        )
+    if has_1m_context(model):
+        # 1M explicitly opted in — allow the wide window and DON'T pin
+        # auto-compaction (parity with apply_context_window_env's early return).
+        env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0")
+    else:
+        env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1")
+        # Pin the auto-compact trigger. Prefer the provider's advertised
+        # context_window, clamped ≥100k so a tiny advertised window can't undercut
+        # a usable working context; fall back to 200000 — the CLI's own
+        # third-party-base-URL default window — when the row leaves
+        # context_window NULL, so the CLI never self-derives.
+        pin = str(max(int(context_window), 100000)) if context_window else "200000"
+        env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", pin)
 
     # R4: point the small/fast model at something the gateway knows. Fall back to
     # a STABLE provider-scoped value (never the per-turn `model`): a within-provider
