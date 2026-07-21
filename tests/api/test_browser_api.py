@@ -108,6 +108,36 @@ class TestBuildStatus:
         assert status.browser_running is False
         assert status.tool_server_ok is False
 
+    @pytest.mark.asyncio
+    async def test_reachable_has_no_detail(self):
+        with _Probes():
+            status = await _build_status()
+        assert status.detail is None
+
+    @pytest.mark.asyncio
+    async def test_unreachable_missing_entry_reports_not_built(self):
+        # No supervisor detail + the browser-mcp entry file does not exist →
+        # detail explains the tool server was never built.
+        with _Probes(cdp_version=None), \
+             patch.object(br.native_chrome, "get_detail", return_value=None), \
+             patch.object(br.os.path, "exists", return_value=False):
+            status = await _build_status()
+        assert status.browser_running is False
+        assert status.detail is not None
+        assert status.detail.startswith("browser-mcp not built")
+
+    @pytest.mark.asyncio
+    async def test_unreachable_prefers_supervisor_detail(self):
+        # When the native supervisor has a detail, it wins over the entry check.
+        with _Probes(cdp_version=None), \
+             patch.object(
+                 br.native_chrome,
+                 "get_detail",
+                 return_value="external browser on port 9221",
+             ):
+            status = await _build_status()
+        assert status.detail == "external browser on port 9221"
+
 
 # =============================================================================
 # HTTP endpoints
@@ -118,7 +148,12 @@ class TestEndpoints:
             resp = client.get("/api/v1/browser/status")
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"enabled": True, "browser_running": True, "tool_server_ok": True}
+        assert body == {
+            "enabled": True,
+            "browser_running": True,
+            "tool_server_ok": True,
+            "detail": None,
+        }
 
     def test_toggle_calls_service_and_returns_status(self, client):
         with _Probes(disabled_servers=[]) as probes:

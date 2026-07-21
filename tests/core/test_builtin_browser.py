@@ -42,7 +42,10 @@ def _profile():
 
 class TestBuiltinShape:
     def test_browser_builtin_is_a_spawnable_stdio_server(self):
-        b = get_browser_server_config()
+        # Force the docker-path branch of _browser_mcp_entry (the packaged path
+        # exists) so the args assertion is stable regardless of host layout.
+        with patch("app.core.builtin_mcp_servers.os.path.exists", return_value=True):
+            b = get_browser_server_config()
         assert b.name == BROWSER_SERVER_NAME == "browser"
         assert b.type == McpServerType.STDIO
         assert b.command == "node"
@@ -65,7 +68,8 @@ class TestBuiltinShape:
 class TestMcpServersInclusion:
     def test_browser_builtin_is_spawned_with_curated_env(self):
         """The spawnable browser built-in reaches mcp_servers WITH its env subset."""
-        builtin = get_browser_server_config()
+        with patch("app.core.builtin_mcp_servers.os.path.exists", return_value=True):
+            builtin = get_browser_server_config()
         normal = McpServerConfig(
             name="normal", type=McpServerType.STDIO, command="echo", args=["hi"]
         )

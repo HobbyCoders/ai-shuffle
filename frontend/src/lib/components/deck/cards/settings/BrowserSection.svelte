@@ -74,6 +74,9 @@
 			<div class="lab">
 				<h4><span class="dot {health}" title={healthLabel}></span>Enable browser tools</h4>
 				<p>Exposes the <code>mcp__browser__*</code> tools to every session. {healthLabel}.</p>
+				{#if healthLabel === 'Enabled — browser unreachable' && status.detail}
+					<p class="detail">{status.detail}</p>
+				{/if}
 			</div>
 			<div class="ctl">
 				<button type="button" class="ed-btn sm" onclick={load} title="Refresh status">
@@ -122,6 +125,12 @@
 	.msg {
 		margin: 0;
 		font-size: 12.5px;
+	}
+	.detail {
+		margin: 4px 0 0;
+		font-size: 12px;
+		color: var(--muted-foreground);
+		opacity: 0.85;
 	}
 	.msg.err {
 		color: var(--destructive);

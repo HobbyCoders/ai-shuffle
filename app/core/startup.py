@@ -347,6 +347,22 @@ def _check_browser_mcp_prereqs() -> None:
             "Chromium reachable over CDP (CHROME_CDP_PORT, default 9221). Disable "
             "the 'browser' server in the MCP admin UI to turn this off."
         )
+
+        # On native (non-container) installs nothing else launches Chromium, so
+        # fire-and-forget a native supervisor that launches a local Chrome/Edge
+        # headless on the CDP port. Best-effort: it must never block or fail
+        # startup, so we schedule it as a task and swallow any error.
+        from app.core import native_chrome
+
+        if not native_chrome._in_container():
+            try:
+                asyncio.get_running_loop().create_task(
+                    native_chrome.ensure_started()
+                )
+            except Exception:
+                logger.warning(
+                    "Could not schedule native Chrome supervisor", exc_info=True
+                )
     except Exception:
         # Never let a best-effort prereq check break startup.
         logger.debug("Browser MCP prereq check skipped", exc_info=True)
@@ -674,6 +690,17 @@ async def shutdown_services() -> None:
         from app.core.task_registry import task_registry
         permission_handler.reset_all()
         task_registry.reset_all()
+    except Exception:
+        pass
+
+    # Stop the native Chrome supervisor (no-op in container / when never started).
+    # Looked up via sys.modules so a process that never imported it stays
+    # import-free here too.
+    try:
+        native_chrome_mod = sys.modules.get("app.core.native_chrome")
+        if native_chrome_mod is not None:
+            await native_chrome_mod.stop()
+            logger.info("Native Chrome supervisor stopped")
     except Exception:
         pass
 

@@ -16,6 +16,8 @@ export interface BrowserStatus {
 	browser_running: boolean;
 	/** Enabled AND the browser is reachable — the tools can actually drive it. */
 	tool_server_ok: boolean;
+	/** Human-readable reason when the browser is unreachable (else null). */
+	detail?: string | null;
 }
 
 export async function getBrowserStatus(): Promise<BrowserStatus> {

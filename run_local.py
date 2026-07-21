@@ -300,7 +300,8 @@ def build_frontend():
         print_status("Frontend directory not found", "error")
         return False
 
-    if not shutil.which("npm"):
+    npm = shutil.which("npm")
+    if not npm:
         print_status("npm not found - cannot build frontend", "error")
         print_status("Install Node.js from https://nodejs.org/", "info")
         return False
@@ -309,10 +310,10 @@ def build_frontend():
 
     try:
         # Install npm dependencies
-        subprocess.run(["npm", "install"], cwd=str(frontend_dir), check=True)
+        subprocess.run([npm, "install"], cwd=str(frontend_dir), check=True)
 
         # Build the frontend
-        subprocess.run(["npm", "run", "build"], cwd=str(frontend_dir), check=True)
+        subprocess.run([npm, "run", "build"], cwd=str(frontend_dir), check=True)
 
         # Copy build output to static directory
         build_dir = frontend_dir / "build"
@@ -326,8 +327,65 @@ def build_frontend():
             print_status("Build output not found", "error")
             return False
 
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, OSError) as e:
         print_status(f"Failed to build frontend: {e}", "error")
+        return False
+
+
+def build_browser_mcp():
+    """Build the bundled browser-mcp STDIO server (browser-automation tools).
+
+    Mirrors build_frontend(): same npm discovery and status printing. The backend
+    spawns ``node browser-mcp/dist/index.js`` per session to drive a local
+    headless Chrome/Edge over CDP, so the package must be compiled once (tsc ->
+    dist/). Skipped when dist/index.js already exists AND is newer than the
+    newest file under browser-mcp/src/ (i.e. nothing changed since last build).
+    """
+    project_root = Path(__file__).parent
+    mcp_dir = project_root / "browser-mcp"
+    dist_entry = mcp_dir / "dist" / "index.js"
+    src_dir = mcp_dir / "src"
+
+    if not mcp_dir.exists():
+        print_status("browser-mcp directory not found - skipping", "warning")
+        return False
+
+    # Up-to-date check: dist newer than the newest source file → nothing to do.
+    if dist_entry.exists() and src_dir.exists():
+        try:
+            newest_src = max(
+                (p.stat().st_mtime for p in src_dir.rglob("*") if p.is_file()),
+                default=0,
+            )
+            if dist_entry.stat().st_mtime >= newest_src:
+                print_status("browser-mcp already built (up to date)", "info")
+                return True
+        except OSError:
+            pass  # fall through to a rebuild on any stat error
+
+    npm = shutil.which("npm")
+    if not npm:
+        print_status("npm not found - cannot build browser-mcp", "error")
+        print_status("Install Node.js from https://nodejs.org/", "info")
+        return False
+
+    print_status("Building browser-mcp...", "info")
+
+    try:
+        # --ignore-scripts: no postinstall browser download (attach-only server).
+        subprocess.run(
+            [npm, "ci", "--ignore-scripts"], cwd=str(mcp_dir), check=True
+        )
+        subprocess.run([npm, "run", "build"], cwd=str(mcp_dir), check=True)
+
+        if dist_entry.exists():
+            print_status("browser-mcp built (dist/index.js)", "success")
+            return True
+        print_status("browser-mcp build output not found", "error")
+        return False
+
+    except (subprocess.CalledProcessError, OSError) as e:
+        print_status(f"Failed to build browser-mcp: {e}", "error")
         return False
 
 
@@ -353,14 +411,24 @@ def run_setup():
     if not install_dependencies():
         return False
 
-    # Browser automation now uses Claude in Chrome (the bundled CLI's --chrome
-    # flag + your real Chrome), so there's no Playwright Chromium to install.
-    # Install the "Claude in Chrome" extension in Chrome and sign in once;
-    # see LOCAL_SETUP.md → "Browser automation — Claude in Chrome".
-    print_status("Browser automation: Claude in Chrome (no Playwright install needed)", "info")
+    # Browser automation uses the bundled browser-mcp server + a local Chrome or
+    # Edge in headless mode, auto-launched by the backend over CDP. No Claude
+    # account, browser extension, or Playwright Chromium download is involved.
+    # Knobs: CHROME_EXECUTABLE (pick a specific binary), CHROME_CDP_PORT (default
+    # 9221), START_CHROME=0 (opt out of auto-launch). See LOCAL_SETUP.md →
+    # "Browser automation (native installs)".
+    print_status(
+        "Browser automation: bundled browser-mcp + auto-launched headless Chrome/Edge",
+        "info",
+    )
 
     if not build_frontend():
         print_status("Frontend build skipped - you can build it later", "warning")
+
+    if not build_browser_mcp():
+        print_status(
+            "browser-mcp build skipped - browser tools unavailable until built", "warning"
+        )
 
     check_claude_auth()
 

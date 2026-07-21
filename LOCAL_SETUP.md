@@ -119,42 +119,55 @@ DATA_DIR=/path/to/custom/data
 WORKSPACE_DIR=/path/to/custom/workspace
 ```
 
-### Browser automation — Claude in Chrome
+### Browser automation (native installs)
 
-AI Shuffle's built-in browser integration is Anthropic's **Claude in Chrome**
-(built-in server `claude-in-chrome`). When enabled, agent sessions launch the
-bundled Claude Code CLI with `--chrome`, which exposes `mcp__claude-in-chrome__*`
-tools and drives a **real, signed-in Chrome/Chromium** through the Claude in
-Chrome browser extension — not a throwaway headless browser.
+AI Shuffle's built-in browser integration is the bundled **`browser` MCP server**
+(TypeScript package `browser-mcp/`). When enabled, each agent session spawns
+`node browser-mcp/dist/index.js`, which exposes `mcp__browser__*` tools
+(`browser_navigate`, `browser_snapshot`, `browser_act`, `browser_screenshot`) and
+attaches over CDP to a **local headless Chrome/Edge** — no Claude account, no
+browser extension, and no native-messaging host.
 
-On **Windows local mode** this uses your existing desktop Chrome:
+On native installs there are two moving parts, both handled for you:
 
-1. Install the **Claude in Chrome** extension in Chrome and sign in to your
-   Claude account (the same setup you use for Claude Code's `/chrome`).
-2. Keep that Chrome running while AI Shuffle sessions are active. The CLI
-   auto-installs its native-messaging host (registered under
-   `HKCU\Software\Google\Chrome\NativeMessagingHosts`) the first time a session
-   runs with `--chrome`; pair the browser once when prompted.
-3. The integration is on by default. Toggle it off via the `claude-in-chrome`
-   entry in the MCP admin UI.
+1. **The tool server is built once.** `run_local.py` compiles `browser-mcp/`
+   (`npm ci --ignore-scripts && npm run build` → `dist/index.js`) during setup,
+   skipping the rebuild when the output is already up to date. To build it by
+   hand: `cd browser-mcp && npm ci --ignore-scripts && npm run build`.
+2. **The browser is auto-launched.** When the `browser` built-in is enabled, the
+   backend launches and supervises a headless Chrome/Edge on a loopback
+   DevTools/CDP port (default 9221, localhost only — never published), restarting
+   it if it exits. The tool server attaches to that same port.
 
-> **Concurrency:** Claude in Chrome pairs to a single account/browser. AI Shuffle
-> runs multiple pooled sessions that all share that one browser, so browser
-> actions across concurrent sessions may serialize or interfere. Use it from one
-> active session at a time for predictable results.
+The integration is on by default. Toggle it off via the `browser` entry in the
+MCP admin UI (**Settings → Browser automation**).
 
-> **Docker:** the container image bundles Google Chrome + the Claude in Chrome
-> extension and launches a headless browser automatically (`START_CHROME=1`). Do
-> the one-time sign-in/pairing from the app — **Settings → Browser → Set up
-> browser** opens an interactive view of the headless browser behind the admin
-> login (no exposed DevTools port). See "Claude in Chrome (Docker)" in the README.
+**Environment knobs** (see `.env.example`):
+
+| Variable | Purpose |
+|----------|---------|
+| `CHROME_CDP_PORT` | Loopback DevTools port (default `9221`). |
+| `CHROME_EXECUTABLE` | Explicit Chrome/Edge/Chromium path. Auto-detected from the standard Chrome/Edge install locations when unset. |
+| `START_CHROME=0` | Opt out of auto-launch (run your own browser on the CDP port). |
+| `BROWSER_MCP_ENTRY` | Override the tool-server entry path (defaults to `<repo>/browser-mcp/dist/index.js` on native checkouts). |
+
+**Troubleshooting.** The **Settings → Browser automation** card shows a health
+dot and, when the browser is unreachable, a **detail line** explaining why —
+e.g. `browser-mcp not built: … missing` (run the build in step 1),
+`no Chrome/Edge executable found; set CHROME_EXECUTABLE` (install Chrome/Edge or
+point `CHROME_EXECUTABLE` at it), `external browser on port 9221` (something else
+already owns the port), or `Chrome crash-looped …` (check the app logs).
+
+> **Docker:** the container image bundles Chromium and supervises it itself
+> (`docker/chrome-supervisor.sh`, `START_CHROME=1`); the native supervisor
+> described above is a no-op inside the container.
 
 > **Security note (SSRF / local-network reach).** The agent drives a real browser
-> with **no egress filtering** and your real cookies/sessions. It can reach
-> `localhost`/loopback services, other RFC1918 private hosts on your network, and
-> cloud metadata endpoints such as `169.254.169.254` (which on some clouds exposes
-> credentials). If you run untrusted prompts, isolate the host at the network
-> layer or disable the `claude-in-chrome` built-in server in the MCP admin UI.
+> that can reach `localhost`/loopback services, other RFC1918 private hosts on
+> your network, and cloud metadata endpoints such as `169.254.169.254` (which on
+> some clouds exposes credentials). Egress filtering is not implemented yet. If
+> you run untrusted prompts, isolate the host at the network layer or disable the
+> `browser` built-in server in the MCP admin UI.
 
 ## Differences from Docker Mode
 

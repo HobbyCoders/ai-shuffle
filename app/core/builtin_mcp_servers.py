@@ -47,6 +47,7 @@ host at the network layer.
 
 import logging
 import os
+from pathlib import Path
 from typing import List
 
 from app.core.mcp_service import McpServerConfig, McpServerType
@@ -67,8 +68,28 @@ DEFAULT_BROWSER_MCP_ENTRY = "/opt/browser-mcp/dist/index.js"
 
 
 def _browser_mcp_entry() -> str:
-    """Resolve the browser MCP entry point (env override → packaged default)."""
-    return os.environ.get("BROWSER_MCP_ENTRY") or DEFAULT_BROWSER_MCP_ENTRY
+    """Resolve the browser MCP entry point.
+
+    Resolution order:
+      1. ``BROWSER_MCP_ENTRY`` env override, if set.
+      2. The packaged Docker path ``/opt/browser-mcp/dist/index.js`` — but only
+         when it actually exists (i.e. we are in the container image).
+      3. Repo-relative fallback ``<repo_root>/browser-mcp/dist/index.js`` for
+         native/local checkouts, where ``repo_root`` is derived from this file's
+         location (``<repo_root>/app/core/builtin_mcp_servers.py``). Returned
+         regardless of existence — a missing build is diagnosed elsewhere
+         (startup prereq log + the browser status ``detail`` field).
+    """
+    env_override = os.environ.get("BROWSER_MCP_ENTRY")
+    if env_override:
+        return env_override
+
+    if os.path.exists(DEFAULT_BROWSER_MCP_ENTRY):
+        return DEFAULT_BROWSER_MCP_ENTRY
+
+    # app/core/builtin_mcp_servers.py -> repo root is two parents up from app/.
+    repo_root = Path(__file__).resolve().parents[2]
+    return str(repo_root / "browser-mcp" / "dist" / "index.js")
 
 
 def get_browser_server_config() -> McpServerConfig:
