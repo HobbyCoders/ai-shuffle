@@ -35,6 +35,7 @@ No network, no I/O, no credentials.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from app.core.translator_gateway.events import (
@@ -55,6 +56,27 @@ from app.core.translator_gateway.events import (
     UsageUpdate,
     encode_reasoning_signature,
 )
+
+
+# ─── null-strip on the return path (counterpart of the request nullable wrap) ─
+
+def strip_null_values(obj: Any) -> Any:
+    """Recursively drop dict keys whose value is ``None``.
+
+    Recurses into nested dicts and into dicts nested inside lists. Falsy-but-not-
+    None values (``0``, ``""``, ``False``, ``[]``, ``{}``) are preserved.
+
+    This is the counterpart of the request-side nullable wrap
+    (anthropic_to_responses._strictify_schema): the Codex upstream forces the
+    model to emit a value for every optional tool param, so we make those params
+    nullable on the way out and strip the resulting nulls here on the way back.
+    TRADEOFF: a tool that genuinely distinguishes an explicit ``null`` from an
+    absent key loses that distinction — the two collapse to "absent"."""
+    if isinstance(obj, dict):
+        return {k: strip_null_values(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [strip_null_values(v) for v in obj]
+    return obj
 
 
 # ─── Layer 1: Responses SSE → normalized events ──────────────────────────────
@@ -278,8 +300,10 @@ class AnthropicSSESerializer:
         self._block_index = -1
         # currently open block: {"kind", "item_id", "index"}
         self._open: Optional[Dict[str, Any]] = None
-        # per-item flag: did we emit any input_json_delta for this tool block?
-        self._tool_emitted_args: Dict[str, bool] = {}
+        # per-item accumulator of raw function-call argument fragments. Fragments
+        # are buffered (not passed through) and consolidated into a single
+        # null-stripped input_json_delta when the call's arguments complete.
+        self._tool_arg_buffer: Dict[str, List[str]] = {}
         self._usage = NormalizedUsage()
 
     # -- block bookkeeping ----------------------------------------------------
@@ -381,31 +405,39 @@ class AnthropicSSESerializer:
                 event.item_id,
                 {"type": "tool_use", "id": event.call_id, "name": event.name, "input": {}},
             )
-            self._tool_emitted_args[event.item_id] = False
+            self._tool_arg_buffer[event.item_id] = []
             return frames
 
         if isinstance(event, ToolCallArgsDelta):
-            # Byte-exact re-emit of the raw fragment — the critical fidelity path.
-            self._tool_emitted_args[event.item_id] = True
-            return [
-                {
-                    "type": "content_block_delta",
-                    "index": self._open["index"] if self._open else self._block_index,
-                    "delta": {"type": "input_json_delta", "partial_json": event.delta},
-                }
-            ]
+            # Buffer the raw fragment; do NOT pass it through. The complete
+            # arguments are consolidated + null-stripped at ToolCallEnd. (Re-
+            # chunking fragments mid-escape is the LiteLLM #25321 hazard; a single
+            # complete re-serialized JSON delta avoids it entirely.)
+            self._tool_arg_buffer.setdefault(event.item_id, []).append(event.delta)
+            return []
 
         if isinstance(event, ToolCallEnd):
             frames: List[Dict[str, Any]] = []
-            # If the backend emitted no argument deltas (e.g. empty-args call),
-            # emit the authoritative arguments as a single input_json_delta so the
-            # tool_use block's input is never empty when it should not be.
-            if not self._tool_emitted_args.get(event.item_id) and event.arguments:
+            # Complete arguments: the buffered fragment concatenation, falling
+            # back to the authoritative arguments carried on the done event when
+            # no deltas streamed (e.g. empty-args call).
+            buffered = "".join(self._tool_arg_buffer.pop(event.item_id, []))
+            full_arguments = buffered or (event.arguments or "")
+            if full_arguments:
+                try:
+                    parsed = json.loads(full_arguments)
+                    partial_json = json.dumps(
+                        strip_null_values(parsed), separators=(",", ":"), ensure_ascii=False
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    # Safety rule: never drop or truncate arguments on parse
+                    # failure — emit the raw buffered string verbatim.
+                    partial_json = full_arguments
                 frames.append(
                     {
                         "type": "content_block_delta",
                         "index": self._open["index"] if self._open else self._block_index,
-                        "delta": {"type": "input_json_delta", "partial_json": event.arguments},
+                        "delta": {"type": "input_json_delta", "partial_json": partial_json},
                     }
                 )
             frames += self._close_open()

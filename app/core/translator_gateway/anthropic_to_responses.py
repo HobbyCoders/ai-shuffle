@@ -25,6 +25,7 @@ in memory; we round-trip the item statelessly via the signature envelope instead
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Dict, List, Optional
 
@@ -233,6 +234,103 @@ def _translate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ─── tools[] / tool_choice ───────────────────────────────────────────────────
 
+def _type_has_null(type_value: Any) -> bool:
+    """True if a JSON Schema ``type`` (string or list) already admits null."""
+    if type_value == "null":
+        return True
+    if isinstance(type_value, list) and "null" in type_value:
+        return True
+    return False
+
+
+def _make_nullable(schema: Any) -> Any:
+    """Widen a (already-strictified) property schema so it also admits ``null``.
+
+    The Codex upstream coerces every tool schema to strict mode: all properties
+    become required and the model is FORCED to emit a value for each one (surprise
+    #4). To keep optional params genuinely optional we make them nullable on the
+    way out (and strip the resulting nulls on the return path — see
+    ``responses_to_anthropic.strip_null_values``)."""
+    if not isinstance(schema, dict):
+        return schema
+    # anyOf/oneOf branch union: append a null branch if none admits null already.
+    for combinator in ("anyOf", "oneOf"):
+        branches = schema.get(combinator)
+        if isinstance(branches, list):
+            if not any(
+                isinstance(b, dict) and _type_has_null(b.get("type")) for b in branches
+            ):
+                branches.append({"type": "null"})
+            return schema
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        # plain "type": "T" → ["T", "null"] (enum-with-type also lands here:
+        # null is added to the type union per spec).
+        if type_value != "null":
+            schema["type"] = [type_value, "null"]
+        return schema
+    if isinstance(type_value, list):
+        if "null" not in type_value:
+            type_value.append("null")
+        return schema
+    # No type info: an enum-only schema is wrapped in an anyOf with a null branch;
+    # a fully typeless schema is already permissive and is left untouched.
+    if "enum" in schema:
+        return {"anyOf": [schema, {"type": "null"}]}
+    return schema
+
+
+def _strictify_node(node: Any) -> Any:
+    """Recursively transform an already-deep-copied JSON Schema node in place.
+
+    For every object schema (``"type": "object"`` with ``properties``): set
+    ``required`` to ALL property names and make each originally-optional property
+    nullable. Recurses through nested ``properties``, ``items`` (object or list
+    form), ``anyOf``/``oneOf``/``allOf`` branches, and ``$defs``/``definitions``.
+    Never sets ``additionalProperties``; preserves all other keys untouched."""
+    if not isinstance(node, dict):
+        return node
+
+    for defs_key in ("$defs", "definitions"):
+        defs = node.get(defs_key)
+        if isinstance(defs, dict):
+            for def_name, def_schema in list(defs.items()):
+                defs[def_name] = _strictify_node(def_schema)
+
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        branches = node.get(combinator)
+        if isinstance(branches, list):
+            node[combinator] = [_strictify_node(branch) for branch in branches]
+
+    items = node.get("items")
+    if isinstance(items, dict):
+        node["items"] = _strictify_node(items)
+    elif isinstance(items, list):
+        node["items"] = [_strictify_node(item) for item in items]
+
+    properties = node.get("properties")
+    if node.get("type") == "object" and isinstance(properties, dict):
+        original_required = node.get("required")
+        required_set = set(original_required) if isinstance(original_required, list) else set()
+        for prop_name, prop_schema in list(properties.items()):
+            child = _strictify_node(prop_schema)
+            if prop_name not in required_set:
+                child = _make_nullable(child)
+            properties[prop_name] = child
+        node["required"] = list(properties.keys())
+
+    return node
+
+
+def _strictify_schema(schema: Any) -> Any:
+    """Deep-copy ``schema`` and return the strict-mode-safe transform of it.
+
+    The input is never mutated."""
+    if not isinstance(schema, dict):
+        return schema
+    return _strictify_node(copy.deepcopy(schema))
+
+
 def _translate_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
     if not tools:
         return None
@@ -246,9 +344,16 @@ def _translate_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dic
                 "name": tool.get("name"),
                 "description": tool.get("description", ""),
                 # Anthropic input_schema IS a JSON Schema → Responses parameters.
-                # (Backend coerces strict:true + all-props-required — surprise #4;
-                # nothing to do here, callers must tolerate the echo.)
-                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                # The Codex backend coerces strict:true + all-props-required
+                # (surprise #4), FORCING the model to emit a value for every
+                # optional param. We pre-empt that by making optional properties
+                # nullable here (required → ALL props, optional props widened to
+                # admit null); the counterpart null-strip on the return path
+                # (responses_to_anthropic.strip_null_values) removes the junk
+                # nulls before they reach the tool_use input.
+                "parameters": _strictify_schema(
+                    tool.get("input_schema", {"type": "object", "properties": {}})
+                ),
             }
         )
     return out or None

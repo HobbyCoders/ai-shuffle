@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 
-from app.core.translator_gateway.anthropic_to_responses import translate_request
+import copy
+
+from app.core.translator_gateway.anthropic_to_responses import (
+    _strictify_schema,
+    translate_request,
+)
 from app.core.translator_gateway.events import encode_reasoning_signature
 
 
@@ -256,3 +261,147 @@ def test_adaptive_thinking_xhigh_clamps_to_high():
         "output_config": {"effort": "xhigh"},
     })
     assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+# ── strict-mode nullable wrap (surprise #4 adapter) ──────────────────────────
+
+def test_strictify_optional_string_becomes_nullable_and_all_required():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a"],
+    }
+    out = _strictify_schema(schema)
+    # required is now ALL property names
+    assert set(out["required"]) == {"a", "b"}
+    # the originally-required prop is untouched
+    assert out["properties"]["a"] == {"type": "string"}
+    # the optional prop is widened to admit null
+    assert out["properties"]["b"] == {"type": ["string", "null"]}
+
+
+def test_strictify_required_props_not_wrapped():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "boolean"}},
+        "required": ["a", "b"],
+    }
+    out = _strictify_schema(schema)
+    assert out["properties"]["a"] == {"type": "integer"}
+    assert out["properties"]["b"] == {"type": "boolean"}
+    assert set(out["required"]) == {"a", "b"}
+
+
+def test_strictify_nested_object_recursion():
+    schema = {
+        "type": "object",
+        "properties": {
+            "outer": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}, "y": {"type": "number"}},
+                "required": ["x"],
+            }
+        },
+        "required": [],
+    }
+    out = _strictify_schema(schema)
+    outer = out["properties"]["outer"]
+    # 'outer' itself was optional → object type widened with null
+    assert outer["type"] == ["object", "null"]
+    # recursion: nested required = all props, nested optional 'y' made nullable
+    assert set(outer["required"]) == {"x", "y"}
+    assert outer["properties"]["x"] == {"type": "string"}
+    assert outer["properties"]["y"] == {"type": ["number", "null"]}
+
+
+def test_strictify_array_items_object_recursion():
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"k": {"type": "string"}, "v": {"type": "string"}},
+                    "required": ["k"],
+                },
+            }
+        },
+        "required": ["tags"],
+    }
+    out = _strictify_schema(schema)
+    items = out["properties"]["tags"]["items"]
+    assert set(items["required"]) == {"k", "v"}
+    assert items["properties"]["k"] == {"type": "string"}
+    assert items["properties"]["v"] == {"type": ["string", "null"]}
+
+
+def test_strictify_enum_optional_prop_adds_null_to_type_union():
+    schema = {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["a", "b"]}},
+        "required": [],
+    }
+    out = _strictify_schema(schema)
+    mode = out["properties"]["mode"]
+    assert mode["type"] == ["string", "null"]
+    assert mode["enum"] == ["a", "b"]
+
+
+def test_strictify_anyof_optional_prop_appends_null_branch():
+    schema = {
+        "type": "object",
+        "properties": {"val": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+        "required": [],
+    }
+    out = _strictify_schema(schema)
+    branches = out["properties"]["val"]["anyOf"]
+    assert {"type": "null"} in branches
+    assert {"type": "string"} in branches and {"type": "integer"} in branches
+
+
+def test_strictify_schema_without_type_left_untouched():
+    schema = {
+        "type": "object",
+        "properties": {"anything": {"description": "no type info"}},
+        "required": [],
+    }
+    out = _strictify_schema(schema)
+    # typeless (and enum-less) schema is already permissive → unchanged
+    assert out["properties"]["anything"] == {"description": "no type info"}
+    # still promoted to required
+    assert out["required"] == ["anything"]
+
+
+def test_strictify_does_not_mutate_input():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a"],
+    }
+    snapshot = copy.deepcopy(schema)
+    _strictify_schema(schema)
+    assert schema == snapshot
+
+
+def test_translate_tools_applies_strictify_end_to_end():
+    req = {
+        "model": "m",
+        "messages": [],
+        "tools": [
+            {
+                "name": "edit",
+                "description": "Edit",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "old": {"type": "string"}},
+                    "required": ["path"],
+                },
+            }
+        ],
+    }
+    body = translate_request(req)
+    params = body["tools"][0]["parameters"]
+    assert set(params["required"]) == {"path", "old"}
+    assert params["properties"]["path"] == {"type": "string"}
+    assert params["properties"]["old"] == {"type": ["string", "null"]}

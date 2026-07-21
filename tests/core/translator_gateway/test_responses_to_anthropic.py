@@ -11,6 +11,7 @@ import json
 
 from app.core.translator_gateway.responses_to_anthropic import (
     ResponsesToAnthropicTranslator,
+    strip_null_values,
     translate_responses_stream,
 )
 
@@ -70,7 +71,9 @@ def test_message_delta_carries_stop_reason_end_turn():
 
 # ── (2) streaming tool call: byte-exact argument reassembly ──────────────────
 
-def test_tool_call_arguments_reassemble_byte_exact():
+def test_tool_call_arguments_consolidated_into_single_delta():
+    # New contract: the streamed argument fragments are buffered and re-emitted as
+    # ONE consolidated, null-stripped, compactly re-serialized input_json_delta.
     arguments = '{"city":"Paris","unit":"celsius","include_forecast":true}'
     frames = _run(_fixtures.tool_call_stream(arguments=arguments, n_deltas=16))
 
@@ -81,16 +84,58 @@ def test_tool_call_arguments_reassemble_byte_exact():
     assert cb_start["content_block"]["name"] == "get_weather"
     assert cb_start["content_block"]["input"] == {}
 
-    # every argument fragment streamed as input_json_delta, concatenating exactly
     partials = [
         f["delta"]["partial_json"]
         for f in frames
         if f["type"] == "content_block_delta" and f["delta"]["type"] == "input_json_delta"
     ]
-    assert len(partials) >= 16
-    joined = "".join(partials)
-    assert joined == arguments  # BYTE-EXACT — the LiteLLM #25321 surface
+    # exactly one delta regardless of how many fragments streamed
+    assert len(partials) == 1
+    joined = partials[0]
     assert json.loads(joined) == {"city": "Paris", "unit": "celsius", "include_forecast": True}
+    # already compact + null-free → re-serialization is byte-identical
+    assert joined == arguments
+
+
+def test_tool_call_arguments_null_stripped_in_single_delta():
+    # The upstream (nullable-wrapped optional params) emits explicit nulls; they
+    # must be stripped, non-null falsy values (0) preserved.
+    arguments = '{"path":"x","old_string":null,"count":0,"nested":{"a":1,"b":null}}'
+    frames = _run(_fixtures.tool_call_stream(arguments=arguments, n_deltas=8))
+    partials = [
+        f["delta"]["partial_json"]
+        for f in frames
+        if f["type"] == "content_block_delta" and f["delta"]["type"] == "input_json_delta"
+    ]
+    assert len(partials) == 1
+    assert json.loads(partials[0]) == {"path": "x", "count": 0, "nested": {"a": 1}}
+    assert "null" not in partials[0]  # no explicit nulls survive
+
+
+def test_tool_call_arguments_no_nulls_single_delta_semantically_identical():
+    arguments = '{"a":1,"b":"two","c":[1,2,3]}'
+    frames = _run(_fixtures.tool_call_stream(arguments=arguments, n_deltas=5))
+    partials = [
+        f["delta"]["partial_json"]
+        for f in frames
+        if f["type"] == "content_block_delta" and f["delta"]["type"] == "input_json_delta"
+    ]
+    assert len(partials) == 1
+    assert json.loads(partials[0]) == {"a": 1, "b": "two", "c": [1, 2, 3]}
+
+
+def test_tool_call_arguments_parse_failure_emitted_verbatim():
+    # Safety rule: malformed JSON is NEVER dropped or truncated — the raw buffered
+    # string is emitted verbatim as the single delta.
+    bad = '{"a": 1, "b":'  # invalid JSON
+    frames = _run(_fixtures.tool_call_stream(arguments=bad, n_deltas=1))
+    partials = [
+        f["delta"]["partial_json"]
+        for f in frames
+        if f["type"] == "content_block_delta" and f["delta"]["type"] == "input_json_delta"
+    ]
+    assert len(partials) == 1
+    assert partials[0] == bad
 
 
 def test_tool_call_stop_reason_is_tool_use():
@@ -184,3 +229,33 @@ def test_max_tokens_stop_reason_when_truncated():
     frames = _run(events)
     delta = next(f for f in frames if f["type"] == "message_delta")
     assert delta["delta"]["stop_reason"] == "max_tokens"
+
+
+# ── strip_null_values (return-path counterpart of the request nullable wrap) ──
+
+def test_strip_null_values_top_level_null_removed():
+    assert strip_null_values({"a": 1, "b": None}) == {"a": 1}
+
+
+def test_strip_null_values_nested_null_removed():
+    assert strip_null_values(
+        {"outer": {"keep": "v", "drop": None}, "top": None}
+    ) == {"outer": {"keep": "v"}}
+
+
+def test_strip_null_values_null_inside_list_of_objects_removed():
+    assert strip_null_values(
+        {"items": [{"a": 1, "b": None}, {"c": None, "d": 2}]}
+    ) == {"items": [{"a": 1}, {"d": 2}]}
+
+
+def test_strip_null_values_preserves_non_null_falsy():
+    # 0, "", False, [] and {} are NOT None and must survive.
+    src = {"zero": 0, "empty_str": "", "false": False, "empty_list": [], "empty_obj": {}, "drop": None}
+    assert strip_null_values(src) == {
+        "zero": 0,
+        "empty_str": "",
+        "false": False,
+        "empty_list": [],
+        "empty_obj": {},
+    }

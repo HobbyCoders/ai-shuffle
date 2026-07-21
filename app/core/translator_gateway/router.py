@@ -40,6 +40,7 @@ from app.core.translator_gateway.events import (
 )
 from app.core.translator_gateway.responses_to_anthropic import (
     ResponsesToAnthropicTranslator,
+    strip_null_values,
 )
 from app.core.translator_gateway.token_estimate import count_tokens
 
@@ -210,7 +211,7 @@ def _messages_response_body(
             content.append({"type": "text", "text": item.text})
         elif isinstance(item, FinalToolCallItem):
             try:
-                parsed = json.loads(item.arguments) if item.arguments else {}
+                parsed = strip_null_values(json.loads(item.arguments)) if item.arguments else {}
             except (json.JSONDecodeError, ValueError):
                 parsed = {}
             content.append(
