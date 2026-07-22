@@ -348,18 +348,14 @@ class ConnectorManager:
                 "Split long responses if needed."
             )
 
-        # Discord-native tooling: nudge the model to behave like a real Discord
-        # participant rather than defaulting to plain text.
-        if connector_type == "discord":
-            parts.append(
-                "You have native Discord tools: DiscordCreatePoll, DiscordSendEmbed, "
-                "DiscordAddReaction, DiscordCreateThread, and DiscordReadMessages. "
-                "Prefer these native features over plain text when they fit — create a "
-                "real poll with DiscordCreatePoll instead of text-listing options, use "
-                "DiscordSendEmbed for structured answers, and open a DiscordCreateThread "
-                "for long tangents. Use DiscordReadMessages to pull recent channel "
-                "context when it helps. All of these act on this channel only."
-            )
+        # Connector-provided usage instructions (e.g. the Discord action
+        # gateway blurb). Each connector owns its own guidance.
+        try:
+            extra = instance.get_context_instructions(platform_chat_id)
+            if extra:
+                parts.append(extra)
+        except Exception:
+            logger.debug("get_context_instructions failed", exc_info=True)
 
         return "\n\n".join(parts)
 

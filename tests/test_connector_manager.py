@@ -107,20 +107,24 @@ class TestPublicAccessors:
 
 
 class TestConnectorContext:
-    def test_discord_context_mentions_native_tools(self):
+    def test_connector_instructions_appended(self):
         fake = FakeConnector(connector_id="d1", connector_type="discord")
+        fake.get_context_instructions = lambda chat_id: (
+            f"Use discord_actions/discord_invoke in chat {chat_id}."
+        )
         ctx = ConnectorManager._build_connector_context(
             {"type": "discord", "name": "My Bot"}, fake, "12345"
         )
-        assert "DiscordCreatePoll" in ctx
-        assert "DiscordReadMessages" in ctx
+        assert "discord_actions/discord_invoke in chat 12345" in ctx
 
-    def test_non_discord_context_omits_discord_tools(self):
+    def test_no_instructions_hook_is_fine(self):
         fake = FakeConnector(connector_id="t1", connector_type="telegram")
+        fake.get_context_instructions = lambda chat_id: None
         ctx = ConnectorManager._build_connector_context(
             {"type": "telegram", "name": "TG"}, fake, "12345"
         )
-        assert "DiscordCreatePoll" not in ctx
+        assert "discord_invoke" not in ctx
+        assert "You are communicating via TG" in ctx
 
 
 # =============================================================================

@@ -1,8 +1,10 @@
 """DiscordConnector — Discord bot integration via discord.py."""
 
 import asyncio
+import json
 import logging
-from typing import Any, Dict, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     ActionDef,
@@ -14,10 +16,10 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
-    ToolDef,
     TriggerDef,
     chunk_text,
 )
+from app.core.connectors import discord_actions
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ class DiscordConnector(BaseConnector):
 
     MAX_MESSAGE_LENGTH = 2000
     CAPABILITIES = ConnectorCapabilities(
-        typing_indicator=True, reactions=True, buttons=True,
+        typing_indicator=True, reactions=True, threads=True, buttons=True,
         rich_text=True, file_upload=True,
     )
 
@@ -69,37 +71,16 @@ class DiscordConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see discord_actions.py). Exposed to the
+    # AI through the generic discord_actions/discord_invoke gateway tool pair
+    # instead of one MCP tool per action.
+    ACTIONS = discord_actions.DISCORD_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="discord_send",
-            name="Send a message via Discord",
-            description="Send a message via Discord",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `discord_send` tool (which leaked to unlinked sessions).
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -117,6 +98,7 @@ class DiscordConnector(BaseConnector):
         )
         self._client: Optional[Any] = None
         self._permission_prompts: Dict[str, Dict[str, str]] = {}  # request_id -> metadata
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
         # Emit the "typing indicator failed" warning at most once per connector
         # so a class of silent breakage (e.g. a removed discord.py API) surfaces
         # loudly the first time, without spamming the log on every 4s keep-alive.
@@ -305,6 +287,21 @@ class DiscordConnector(BaseConnector):
                 return
 
             custom_id = interaction.data.get("custom_id", "")
+
+            # Destructive-action approval buttons (action gateway)
+            if custom_id.startswith("actreq:"):
+                parts = custom_id.split(":")
+                if len(parts) == 3:
+                    _, request_id, decision = parts
+                    fut = self._pending_action_approvals.get(request_id)
+                    if fut is not None and not fut.done():
+                        fut.set_result(decision == "approve")
+                    label = "Approved" if decision == "approve" else "Denied"
+                    await interaction.response.send_message(
+                        f"Action {label}", ephemeral=True,
+                    )
+                return
+
             if not custom_id.startswith("perm:"):
                 return
 
@@ -510,33 +507,130 @@ class DiscordConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see discord_actions.py).
 
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+        ``context`` carries session scoping (bound channel, allow-list) when
+        invoked through the action gateway; automations and API callers use
+        the two-argument form and pass explicit targets in ``params``.
+        """
+        return await discord_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "discord_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    async def get_action_availability(
+        self, context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Tuple[bool, Optional[str]]]:
+        """Category gating (base) + the bot's live guild permissions."""
+        out = await super().get_action_availability(context)
+
+        guild = None
+        bound = str((context or {}).get("bound_chat_id") or "")
+        if self._client is not None and bound:
+            try:
+                channel = self._client.get_channel(int(bound))
+                guild = getattr(channel, "guild", None)
+            except (TypeError, ValueError):
+                guild = None
+
+        perms = discord_actions.bot_guild_permissions(self, guild) if guild is not None else None
+        if perms is None:
+            return out
+
+        for action in self.ACTIONS:
+            available, _reason = out.get(action.id, (True, None))
+            if (
+                available
+                and action.required_permission
+                and not getattr(perms, action.required_permission, False)
+            ):
+                out[action.id] = (
+                    False,
+                    f"Bot lacks the '{action.required_permission}' permission in this server.",
+                )
+        return out
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "DISCORD TOOLS: You are a full Discord participant. Call discord_actions "
+            "to discover everything you can do here (messages, embeds, polls, files, "
+            "reactions, pins, threads, channels, roles, members, moderation, webhooks, "
+            "invites, scheduled events, server info) along with each action's input "
+            "schema, then call discord_invoke with {action, params} to act. Prefer "
+            "native features over plain text — a real poll instead of text-listed "
+            "options, an embed for structured answers, a thread for long tangents. "
+            "Message actions work on this channel and the connector's allowed "
+            "channels only. Destructive actions (deletes, bans, purges) show the "
+            "user an in-channel Approve/Deny prompt before running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Post an Approve/Deny embed for a destructive action and await the click."""
+        if self._client is None:
+            return False, "Discord client is not running."
+        try:
+            channel = self._client.get_channel(int(platform_chat_id))
+        except (TypeError, ValueError):
+            return False, f"Invalid approval channel id: {platform_chat_id!r}"
+        if channel is None:
+            return False, f"Approval channel {platform_chat_id} not found."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            params_preview = json.dumps(params, default=str)[:900]
+            embed = discord.Embed(
+                title="Destructive Action Approval",
+                description=(
+                    f"The AI wants to run **{action.name}** (`{action.id}`). "
+                    "Approve to proceed."
+                ),
+                color=discord.Color.red(),
+            )
+            embed.add_field(name="Parameters", value=f"```json\n{params_preview}\n```", inline=False)
+
+            view = discord.ui.View(timeout=None)
+            view.add_item(discord.ui.Button(
+                label="Approve", style=discord.ButtonStyle.success,
+                custom_id=f"actreq:{request_id}:approve",
+            ))
+            view.add_item(discord.ui.Button(
+                label="Deny", style=discord.ButtonStyle.danger,
+                custom_id=f"actreq:{request_id}:deny",
+            ))
+            await channel.send(embed=embed, view=view)
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test

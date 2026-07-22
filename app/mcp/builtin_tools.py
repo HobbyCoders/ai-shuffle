@@ -955,31 +955,17 @@ def create_builtin_tools_server(
     all_tools.append(get_app_errors)
 
     # ------------------------------------------------------------------
-    # Discord-native tools — registered ONLY when this AI session is linked to
-    # a Discord-type connector session. This is the seam that makes the tools
+    # Connector action-gateway tools ({type}_actions / {type}_invoke) —
+    # registered ONLY when this AI session is linked to a gateway-enabled
+    # connector session. This is the seam that makes connector capabilities
     # available to connector sessions (and to nobody else).
     # ------------------------------------------------------------------
     if session_id:
         try:
-            from app.db import database as _db
-
-            connector_sessions = _db.get_connector_sessions_for_ai_session(session_id)
-            has_discord = False
-            for _cs in connector_sessions or []:
-                _row = _db.get_connector(_cs.get("connector_id"))
-                if _row and _row.get("type") == "discord":
-                    has_discord = True
-                    break
-            if has_discord:
-                from app.mcp.discord_connector_tools import build_discord_tools
-                _discord_tools = build_discord_tools(session_id)
-                all_tools.extend(_discord_tools)
-                logger.info(
-                    "Registered %d Discord connector tool(s) for session %s",
-                    len(_discord_tools), session_id,
-                )
+            from app.mcp.connector_gateway_sdk import build_gateway_tools
+            all_tools.extend(build_gateway_tools(session_id))
         except Exception:
-            logger.debug("Discord connector tool registration skipped", exc_info=True)
+            logger.debug("Connector gateway tool registration skipped", exc_info=True)
 
     # ------------------------------------------------------------------
     # Server assembly
@@ -1013,12 +999,12 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
     ]
-    # Discord-native tools share the `builtins` server namespace. Allow-list
-    # them unconditionally — per-session REGISTRATION (only for Discord-linked
+    # Connector gateway tools share the `builtins` server namespace. Allow-list
+    # them unconditionally — per-session REGISTRATION (only for linked
     # sessions, in create_builtin_tools_server) is what gates real availability.
     try:
-        from app.mcp.discord_connector_tools import get_discord_connector_tool_names
-        names.extend(get_discord_connector_tool_names())
+        from app.mcp.connector_gateway_sdk import get_gateway_tool_names
+        names.extend(get_gateway_tool_names())
     except Exception:
-        logger.debug("Could not add Discord connector tool names to allowed_tools", exc_info=True)
+        logger.debug("Could not add connector gateway tool names to allowed_tools", exc_info=True)
     return names

@@ -405,6 +405,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "guild_ids", "label": "Guild IDs", "type": "list", "required": False, "picker": "discord_guilds"},
                 {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False, "picker": "discord_channels"},
                 {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False, "presets": ["!", "?", "."]},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, threads, channels, roles, members, moderation, webhooks, invites, emojis, events, server"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the in-channel Approve/Deny prompt for destructive AI actions (deletes, bans, purges)"},
             ],
         },
         {

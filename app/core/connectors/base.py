@@ -10,7 +10,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +121,61 @@ class TriggerDef:
 class ActionDef:
     """An action this connector can perform.
 
-    Actions are concrete operations invoked by automations or the API
-    (e.g. play a track on Spotify, send a message on Telegram).
+    Actions are concrete operations invoked by automations, the API, or —
+    for connectors that opt into the action gateway — the AI model via the
+    generic ``{type}_actions`` / ``{type}_invoke`` MCP tool pair.
     """
     id: str                                                        # e.g. "play_track"
     name: str                                                      # e.g. "Play Track"
     description: str                                               # Human-readable description
     input_schema: Dict[str, Any] = field(default_factory=dict)     # JSON Schema of action params
+    category: str = "general"                                      # Grouping, e.g. "messages", "moderation"
+    required_permission: Optional[str] = None                      # Platform permission flag, e.g. "ban_members"
+    risk: str = "safe"                                             # "safe" (read) | "write" | "destructive"
+
+
+def validate_action_params(action: ActionDef, params: Dict[str, Any]) -> Optional[str]:
+    """Validate ``params`` against an action's JSON Schema subset.
+
+    Supports the schema features the catalogs actually use: top-level object
+    ``properties`` with ``type``/``enum``/``minimum``/``maximum`` and a
+    ``required`` list. Returns an error message, or ``None`` when valid.
+    Unknown params are tolerated (handlers ignore them).
+    """
+    schema = action.input_schema or {}
+    if not isinstance(params, dict):
+        return "params must be an object"
+
+    for req in schema.get("required", []):
+        if params.get(req) is None:
+            return f"Missing required parameter: {req!r}"
+
+    _TYPE_CHECKS = {
+        "string": lambda v: isinstance(v, str),
+        "boolean": lambda v: isinstance(v, bool),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+    }
+
+    for key, prop in (schema.get("properties") or {}).items():
+        value = params.get(key)
+        if value is None:
+            continue
+        expected = prop.get("type")
+        check = _TYPE_CHECKS.get(expected)
+        if check and not check(value):
+            return f"Parameter {key!r} must be of type {expected}"
+        enum = prop.get("enum")
+        if enum and value not in enum:
+            return f"Parameter {key!r} must be one of: {', '.join(map(str, enum))}"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if prop.get("minimum") is not None and value < prop["minimum"]:
+                return f"Parameter {key!r} must be >= {prop['minimum']}"
+            if prop.get("maximum") is not None and value > prop["maximum"]:
+                return f"Parameter {key!r} must be <= {prop['maximum']}"
+    return None
 
 
 @dataclass
@@ -163,6 +211,11 @@ class BaseConnector(ABC):
     TRIGGERS: List[TriggerDef] = []
     ACTIONS: List[ActionDef] = []
     TOOLS: List[ToolDef] = []
+
+    # Opt-in to the action gateway: sessions linked to this connector get a
+    # generic `{type}_actions` (discover) + `{type}_invoke` (execute) MCP tool
+    # pair driven by the ACTIONS catalog, instead of one MCP tool per action.
+    SUPPORTS_ACTION_GATEWAY: bool = False
 
     def __init__(
         self,
@@ -308,8 +361,67 @@ class BaseConnector(ABC):
     # ------------------------------------------------------------------
 
     async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action.  Override in subclasses that declare ACTIONS."""
+        """Execute a named action.  Override in subclasses that declare ACTIONS.
+
+        Gateway connectors may accept an additional keyword-only ``context``
+        dict in their override (session/bound-channel info supplied by the
+        action gateway); plain callers keep using the two-argument form.
+        """
         raise NotImplementedError(f"Action '{action_id}' not implemented by {self.connector_type}")
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks — used when SUPPORTS_ACTION_GATEWAY is True
+    # ------------------------------------------------------------------
+
+    def get_enabled_action_categories(self) -> Optional[List[str]]:
+        """Categories enabled for this install, or None meaning "all"."""
+        raw = (self.config or {}).get("enabled_action_categories")
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(c).strip().lower() for c in raw if str(c).strip()]
+
+    async def get_action_availability(
+        self, context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Tuple[bool, Optional[str]]]:
+        """Map action_id -> (available, reason-if-not).
+
+        The base implementation applies only per-install category gating.
+        Subclasses layer platform checks on top (e.g. the Discord connector
+        checks the bot's live guild permissions).
+        """
+        enabled = self.get_enabled_action_categories()
+        out: Dict[str, Tuple[bool, Optional[str]]] = {}
+        for action in self.ACTIONS:
+            if enabled is not None and action.category.lower() not in enabled:
+                out[action.id] = (
+                    False,
+                    f"Category '{action.category}' is disabled for this connector install.",
+                )
+            else:
+                out[action.id] = (True, None)
+        return out
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        """Short system-prompt blurb describing how to use this connector's
+        tools.  Appended to connector-session prompts by ConnectorManager."""
+        return None
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Ask a human in-channel to approve a destructive action.
+
+        Returns (approved, reason). The default denies — connectors without
+        an interactive approval surface cannot run destructive actions unless
+        the install sets ``auto_approve_destructive``.
+        """
+        return False, "This connector does not support interactive approval."
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a named tool call.  Override in subclasses that declare TOOLS."""

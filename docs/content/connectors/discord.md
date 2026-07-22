@@ -59,7 +59,9 @@ Construct an invite URL using your **Application ID** (from Step 1). The bot nee
 - Use Slash Commands
 - Manage Messages (optional, for cleanup)
 
-The permissions integer for these scopes is `277025770560`. Use this invite URL format:
+You can grant the bot **any additional permissions** you want the AI to be able to use (Manage Roles, Manage Channels, Kick/Ban Members, Manage Webhooks, Manage Events, ...). The AI's available actions automatically reflect whatever the bot is actually allowed to do in the server — see [AI Actions](#ai-actions-action-gateway) below.
+
+The permissions integer for the baseline scopes is `277025770560`. Use this invite URL format:
 
 ```
 https://discord.com/api/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=277025770560&scope=bot%20applications.commands
@@ -100,6 +102,8 @@ When editing an existing Discord connector, the stored token is masked. Click **
 | `guild_ids` | array of strings | No | List of Discord server (guild) IDs where the bot should operate. If empty, the bot responds in all servers it has been invited to. |
 | `allowed_channel_ids` | array of strings | No | List of channel IDs the bot is allowed to respond in. If empty, the bot responds in all channels it can see. This filter applies in addition to `guild_ids`. |
 | `command_prefix` | string | No | The prefix character(s) that trigger bot commands. Defaults to `!`. Set to an empty string to make the bot respond to all messages (use with caution). |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all categories. Valid values: `messages`, `reactions`, `threads`, `channels`, `roles`, `members`, `moderation`, `webhooks`, `invites`, `emojis`, `events`, `server`. |
+| `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (deletes, bans, purges, ...). Default: prompts are required. |
 
 ## Capabilities
 
@@ -111,10 +115,23 @@ The Discord connector supports the following capabilities:
 | Reactions | Yes | Can add emoji reactions to user messages |
 | Rich text | Yes | Full Discord Markdown support including bold, italic, code blocks, blockquotes, spoiler tags, and embeds |
 | File upload | Yes | Supports file attachments up to 25 MB (or higher with server boost level) |
-| Threads | No | The connector does not declare thread support; it does not create or manage threads as a dedicated capability |
+| Threads | Yes | The AI can create, list, and manage threads through the action gateway |
 | Buttons | Yes | Supports interactive message components including buttons and select menus |
 
 **Message Length Limit:** 2,000 characters per message. Messages exceeding this limit are automatically split across multiple messages. Embed descriptions have a separate limit of 4,096 characters.
+
+## AI Actions (Action Gateway)
+
+Sessions bound to a Discord channel get two MCP tools instead of one tool per feature:
+
+- **`discord_actions`** — discovery. Returns the full action catalog (~45 actions across messages, embeds, polls, files, reactions, pins, threads, channels, roles, members, moderation, webhooks, invites, custom emojis, scheduled events, and server info), each with its input schema. The catalog is filtered live by (a) this install's `enabled_action_categories` and (b) the permissions the bot actually holds in the server — grant the bot a new Discord permission and the matching actions light up with no code changes.
+- **`discord_invoke`** — execution. Takes `{action, params}`, validates `params` against the catalog schema server-side, and dispatches.
+
+Safety rails:
+
+- Message-level actions only work in the session's bound channel, the connector's `allowed_channel_ids`, and threads belonging to those channels. Guild-level actions are limited to the server containing the bound channel.
+- Actions tagged **destructive** (delete message/channel/role, kick, ban, timeout, purge, webhook create/delete, ...) post an in-channel **Approve/Deny** button prompt and only run after a human clicks Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+- The bot token never passes through the AI; all Discord calls run server-side through the connector's gateway client.
 
 ## Troubleshooting
 
