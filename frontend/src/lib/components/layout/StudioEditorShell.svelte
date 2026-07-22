@@ -327,6 +327,9 @@
 		overflow: hidden;
 		margin-bottom: 18px;
 	}
+	.ed-content :global(.set-group:has(.mpk-panel)) {
+		overflow: visible;
+	}
 	.ed-content :global(.set-group:last-child) {
 		margin-bottom: 0;
 	}
