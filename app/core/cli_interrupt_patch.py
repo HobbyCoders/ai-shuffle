@@ -11,29 +11,48 @@ triggers — stops EVERY in-flight ``Task`` child, so stopping the main turn als
 kills any background sub-agents the user wanted to keep running. There is no
 task-filtered interrupt to call; the only real fix lives in the CLI itself.
 
-The one call site responsible is uniquely anchored by the byte sequence
-``remote-cancel"));sYr(``. Neutralizing it is a SAME-LENGTH, three-byte edit:
-replace the ``sYr`` token with ``0&&`` so the anchor becomes
-``remote-cancel"));0&&(`` — turning the cancel-broadcast call into a dead
-``0 && (...)`` short-circuit. Equal length means the edit is done in place (a
-single ``seek``+``write`` of three bytes), never a full-file rewrite, and Bun
-does not integrity-check its embedded payload, so the patched binary runs clean.
+The one call site responsible is the cancel-broadcast call
+``remote-cancel"));<tok>({taskRegistry:``, where ``<tok>`` is a minified
+identifier. Neutralizing it is a SAME-LENGTH, three-byte edit: replace the
+3-char ``<tok>`` with ``0&&`` so the anchor becomes
+``remote-cancel"));0&&({taskRegistry:`` — turning the cancel-broadcast call into
+a dead ``0 && (...)`` short-circuit. Equal length means the edit is done in
+place (a single ``seek``+``write`` of three bytes), never a full-file rewrite,
+and Bun does not integrity-check its embedded payload, so the patched binary
+runs clean.
 
 Safety
 ------
-The token is a MINIFIED identifier that rotates between CLI bundles (it was
-``jVr`` in CLI 2.1.205 / SDK 0.2.114 and is ``sYr`` in CLI 2.1.214 / SDK
-0.2.122). THREE OTHER bare ``sYr(`` sites exist elsewhere in the binary and MUST
-NOT be touched — they are unrelated. Worse, the bare prefix ``remote-cancel"));``
-itself now appears THREE times (the SIGINT/SIGTERM signal handler, this
-interrupt-request handler, and the SDK-control cancel path), so the prefix alone
-is NOT unique — only ONE of those is followed by the task-broadcast token. This
-module only ever edits when there is EXACTLY ONE unpatched anchor
-(``remote-cancel"));sYr(`` — prefix AND token together) and ZERO already-patched
-anchors; any other count means the CLI shifted between SDK versions and we refuse
-to edit (``"pattern-shifted"``, logged loudly). The FULL anchor (prefix + token)
-is what makes the match unique, so neither the repeated bare prefix nor the bare
-``sYr(`` occurrences are ever in scope.
+The token is a MINIFIED identifier that ROTATES between CLI bundles AND, since
+CLI 2.1.218, DIFFERS PER PLATFORM. Token history:
+
+  * ``jVr`` — CLI 2.1.205 / SDK 0.2.114
+  * ``sYr`` — CLI 2.1.214 / SDK 0.2.122
+  * ``Ppr`` (Windows ``claude.exe``) / ``Opr`` (Linux ``claude``) —
+    CLI 2.1.218 / SDK 0.2.126
+
+Because the identifier is no longer stable, the anchor is discovered DYNAMICALLY
+by regex (``_ANCHOR_RE``) rather than by a hardcoded token: the tail
+``({taskRegistry:`` is a property access, and minifiers do NOT mangle property
+names, so that tail stays stable across platforms and builds even as the
+identifier rotates. The regex requires EXACTLY THREE identifier chars between
+the prefix and ``({taskRegistry:`` — that constraint is load-bearing: the
+replacement ``0&&`` is exactly 3 bytes, so a same-length in-place edit is only
+valid for a 3-char identifier. A future build minifying to a 2- or 4-char
+identifier therefore yields ZERO regex matches → ``"pattern-shifted"`` refusal
+(correct — a different length needs a different, same-length neutralization).
+
+Several bare ``Ppr(``/``Opr(`` sites exist elsewhere in the binary and MUST NOT
+be touched — they are unrelated. The bare prefix ``remote-cancel"));`` itself
+appears MULTIPLE times (as of 2.1.218, twice: this cancel-broadcast site and a
+second site immediately followed by ``continue``), so the prefix alone is NOT
+unique — only ONE occurrence carries the ``({taskRegistry:`` tail. This module
+only ever edits when there is EXACTLY ONE unpatched anchor (full regex match,
+prefix + 3-char token + ``({taskRegistry:`` together) and ZERO already-patched
+anchors; any other count means the CLI shifted between SDK versions and we
+refuse to edit (``"pattern-shifted"``, logged loudly with the discovered
+tokens). The FULL anchor is what makes the match unique, so neither the repeated
+bare prefix nor bare token occurrences elsewhere are ever in scope.
 
 A sibling marker file (``.claude_interrupt_patch``) records the SDK version,
 binary size, and the absolute ``token_offset`` of the 3 patched bytes at patch
@@ -50,6 +69,8 @@ is set (see ``app/main.py``). No binary is ever touched by default.
 
 import json
 import logging
+import platform
+import re
 from pathlib import Path
 
 import claude_agent_sdk
@@ -58,12 +79,19 @@ logger = logging.getLogger(__name__)
 
 # The unique cancel-broadcast call site. Same-length replacement neutralizes it
 # by turning the call into a dead ``0 && (...)`` short-circuit.
-_UNPATCHED = b'remote-cancel"));sYr('
-_PATCHED = b'remote-cancel"));0&&('
+_PREFIX = b'remote-cancel"));'
+# The cancel-broadcast call site: prefix + EXACTLY-3-char minified identifier +
+# ``({taskRegistry:``. ``taskRegistry`` is a property name (minifiers don't
+# mangle props), so the tail is stable across platforms/builds even though the
+# identifier rotates (and, since CLI 2.1.218, differs per platform: ``Ppr`` on
+# Windows, ``Opr`` on Linux). The exactly-3 constraint is load-bearing: the
+# replacement ``0&&`` only fits a 3-char identifier as a same-length edit.
+_ANCHOR_RE = re.compile(rb'remote-cancel"\)\);([A-Za-z0-9_$]{3})\(\{taskRegistry:')
+_PATCHED = _PREFIX + b"0&&("  # patched-form detector (must stay exact)
+_NEW_TOKEN = b"0&&"
 # Offset of the 3-byte token within the anchor (computed, not hardcoded — the
 # prefix ``remote-cancel"));`` is 17 bytes, so the token starts at index 17).
-_TOKEN_OFFSET = _UNPATCHED.index(b"sYr")
-_NEW_TOKEN = b"0&&"
+_TOKEN_OFFSET = len(_PREFIX)
 
 # Sibling of the binary; lets a warm boot skip the full-file scan.
 _MARKER_NAME = ".claude_interrupt_patch"
@@ -88,13 +116,15 @@ def resolve_bundled_cli_path() -> Path | None:
 
     Mirrors the SDK's own ``_find_bundled_cli`` resolver: the ``_bundled``
     directory sits three levels up from ``subprocess_cli.py`` inside the
-    installed ``claude_agent_sdk`` package. We never set ``cli_path``, so this
-    is the exact binary every spawn runs.
+    installed ``claude_agent_sdk`` package. The SDK names the binary
+    ``claude.exe`` on Windows and ``claude`` elsewhere, so mirror that too. We
+    never set ``cli_path``, so this is the exact binary every spawn runs.
     """
     from claude_agent_sdk._internal.transport import subprocess_cli
 
+    cli_name = "claude.exe" if platform.system() == "Windows" else "claude"
     bundled = (
-        Path(subprocess_cli.__file__).parent.parent.parent / "_bundled" / "claude"
+        Path(subprocess_cli.__file__).parent.parent.parent / "_bundled" / cli_name
     )
     if bundled.exists() and bundled.is_file():
         return bundled
@@ -233,7 +263,8 @@ def _patch_cli_preserve_background_impl(binary: Path) -> str:
         logger.error("[CLI patch] Cannot read %s: %s", binary, e)
         return "unreadable"
 
-    n_unpatched = data.count(_UNPATCHED)
+    matches = list(_ANCHOR_RE.finditer(data))
+    n_unpatched = len(matches)
     n_patched = data.count(_PATCHED)
 
     # 3) Already patched (scan confirms) → refresh the marker and record active.
@@ -251,8 +282,9 @@ def _patch_cli_preserve_background_impl(binary: Path) -> str:
 
     # 4) Exactly one unpatched anchor, none already patched → edit in place.
     if n_unpatched == 1 and n_patched == 0:
-        anchor_idx = data.find(_UNPATCHED)
-        token_idx = anchor_idx + _TOKEN_OFFSET
+        # The regex guarantees the identifier is exactly 3 bytes, so writing the
+        # 3-byte ``_NEW_TOKEN`` at token_idx is a same-length, in-place edit.
+        token_idx = matches[0].start() + _TOKEN_OFFSET
         try:
             with open(binary, "r+b") as f:
                 f.seek(token_idx)
@@ -279,14 +311,15 @@ def _patch_cli_preserve_background_impl(binary: Path) -> str:
         return "patched"
 
     # 5) Anything else: the anchor shifted between SDK versions. NEVER edit —
-    #    guessing could corrupt an unrelated ``sYr(`` site.
+    #    guessing could corrupt an unrelated bare-token site.
     logger.error(
         "[CLI patch] Anchor pattern shifted in %s (unpatched=%d, patched=%d, "
-        "sdk %s) — refusing to edit. Interrupt will still kill background "
-        "sub-agents until the anchor is re-verified.",
+        "tokens=%r, sdk %s) — refusing to edit. Interrupt will still kill "
+        "background sub-agents until the anchor is re-verified.",
         binary,
         n_unpatched,
         n_patched,
+        [m.group(1) for m in matches],
         claude_agent_sdk.__version__,
     )
     return "pattern-shifted"
