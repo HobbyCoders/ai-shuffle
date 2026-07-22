@@ -765,12 +765,18 @@ def transform_agent_entries(entries) -> List[Dict[str, Any]]:
                         # Truncate for display
                         output = output[:2000] if output else ""
 
+                        # Inline screenshot (browser/computer-use image block) —
+                        # rendered below the child tool card, same as top-level.
+                        screenshot = extract_mcp_image(raw_content)
+
                         # Group tool result with its corresponding tool_use
                         found_tool_use = False
                         for child in children:
                             if child.get("type") == "tool_use" and child.get("toolId") == tool_use_id:
                                 child["toolResult"] = output
                                 child["toolStatus"] = "error" if is_error else "complete"
+                                if screenshot:
+                                    child["toolScreenshot"] = screenshot
                                 found_tool_use = True
                                 break
 
@@ -782,6 +788,7 @@ def transform_agent_entries(entries) -> List[Dict[str, Any]]:
                                 "content": output,
                                 "toolName": tool_names_by_id.get(tool_use_id),
                                 "toolId": tool_use_id,
+                                **({"toolScreenshot": screenshot} if screenshot else {}),
                                 "timestamp": timestamp
                             })
 

@@ -6,6 +6,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { extractToolResultMedia, mediaHtml } from '$lib/utils/media';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
+	import ToolScreenshot from '$lib/components/chat/ToolScreenshot.svelte';
 
 	interface Props {
 		message: ChatMessage;
@@ -292,6 +293,11 @@
 									{/if}
 								</div>
 							</details>
+							<!-- Screenshot sits OUTSIDE the collapsible details so it's
+							     visible regardless of expand state (matches main lane). -->
+							{#if child.toolScreenshot}
+								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
+							{/if}
 						</div>
 					{:else if child.type === 'tool_result'}
 						<!-- Standalone tool result (fallback) -->
@@ -319,6 +325,9 @@
 									{/if}
 								{/if}
 							</details>
+							{#if child.toolScreenshot}
+								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
+							{/if}
 						</div>
 					{:else if child.type === 'text'}
 						<!-- Text child (subagent's text output) -->

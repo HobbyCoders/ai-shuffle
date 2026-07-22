@@ -238,6 +238,18 @@ function str(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
 
+/**
+ * Serve URL for a screenshot content-addressed into the artifact store
+ * (`tool.result` `artifact_hashes`, stamped by the recorder's Q5 ingest).
+ * Returns undefined unless the first hash is a well-formed sha256 hex digest —
+ * the only shape the artifact route serves.
+ */
+function artifactScreenshotUrl(v: unknown): string | undefined {
+	if (!Array.isArray(v)) return undefined;
+	const hash = v.find((h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h));
+	return hash ? `/api/v1/artifacts/${hash}` : undefined;
+}
+
 /** Append a message and record its origin seq (for `transcript.rewound`). */
 function appendMessage(state: V2SessionState, msg: ChatMessage, seq: number): V2SessionState {
 	return {
@@ -285,6 +297,7 @@ function accumulateProgressChild(
 	if (kind === 'tool_result') {
 		const resultText = str(payload.output ?? payload.content ?? event.note);
 		const targetToolId = str(payload.tool_use_id ?? payload.id);
+		const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes);
 		const out = [...children];
 		if (targetToolId) {
 			for (let i = out.length - 1; i >= 0; i--) {
@@ -293,6 +306,7 @@ function accumulateProgressChild(
 						...out[i],
 						toolResult: resultText,
 						toolStatus: payload.is_error ? 'error' : 'complete',
+						...(screenshotUrl ? { toolScreenshot: screenshotUrl } : {}),
 					};
 					return out;
 				}
@@ -303,6 +317,7 @@ function accumulateProgressChild(
 			type: 'tool_result',
 			content: resultText,
 			toolName: str(payload.name ?? payload.tool_name) || undefined,
+			...(screenshotUrl ? { toolScreenshot: screenshotUrl } : {}),
 		});
 		return out;
 	}
@@ -928,12 +943,20 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const toolResult = event.is_error
 				? classifyToolRejection(rawResult) ?? rawResult
 				: rawResult;
+			// A screenshot result (browser/computer-use image block) arrives as a
+			// content-addressed artifact hash — surface it on the tool card so the
+			// image renders below the call. Keep an existing toolScreenshot (e.g.
+			// a backfilled data URI stamped on tool.use) if one is already set.
+			const screenshotUrl = existing.toolScreenshot
+				? undefined
+				: artifactScreenshotUrl(event.artifact_hashes);
 			return {
 				...state,
 				messages: replaceById(state.messages, existing.id, {
 					toolResult,
 					toolStatus: event.is_error ? 'error' : 'complete',
 					streaming: false,
+					...(screenshotUrl ? { toolScreenshot: screenshotUrl } : {}),
 				}),
 			};
 		}
@@ -989,6 +1012,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			} else if (kind === 'tool_result') {
 				const resultText = str(payload.output ?? payload.content ?? event.note);
 				const targetToolId = str(payload.tool_use_id ?? payload.id);
+				const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes);
 				// Merge into the matching tool_use child when identifiable.
 				let merged = false;
 				if (targetToolId) {
@@ -998,6 +1022,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 								...children[i],
 								toolResult: resultText,
 								toolStatus: payload.is_error ? 'error' : 'complete',
+								...(screenshotUrl ? { toolScreenshot: screenshotUrl } : {}),
 							};
 							merged = true;
 							break;
@@ -1010,6 +1035,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						type: 'tool_result',
 						content: resultText,
 						toolName: str(payload.name ?? payload.tool_name) || undefined,
+						...(screenshotUrl ? { toolScreenshot: screenshotUrl } : {}),
 					});
 				}
 			} else {

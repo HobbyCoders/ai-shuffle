@@ -23,6 +23,7 @@ export interface SubagentChildMessage {
 	partialToolInput?: string; // Streaming JSON accumulator for incomplete tool_input
 	toolResult?: string; // Result content for tool_use (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
+	toolScreenshot?: string; // Data URI / artifact URL of an MCP image result (e.g. browser screenshot) — rendered below the child tool
 	serverSide?: boolean;
 	server_side?: boolean;
 	timestamp?: string;

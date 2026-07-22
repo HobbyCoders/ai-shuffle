@@ -243,6 +243,30 @@ describe("runBatch", () => {
     const many = Array.from({ length: BATCH_MAX_ACTIONS + 1 }, () => '{"tool":"a"}');
     expect((await runBatch(session, { actions: many }, () => okTool)).isError).toBe(true);
   });
+
+  it("re-emits image blocks from sub-results (screenshot inside a batch)", async () => {
+    const imageTool = {
+      inputSchema: okTool.inputSchema,
+      run: async (): Promise<McpToolResult> => ({
+        content: [
+          { type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" },
+          { type: "text", text: "1280x720 — coordinates for browser_act must use this space" },
+        ],
+      }),
+    };
+    const lookup = (name: string) => (name === "shot" ? imageTool : okTool);
+    const res = await runBatch(
+      session,
+      { actions: ['{"tool":"a"}', '{"tool":"shot"}'] },
+      lookup,
+    );
+    const body = JSON.parse(firstText(res));
+    expect(body.ok).toBe(true);
+    const images = res.content.filter((c) => c.type === "image");
+    expect(images).toEqual([{ type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" }]);
+    // summary text still comes from the sub-result's text part
+    expect(body.results[1].summary).toMatch(/1280x720/);
+  });
 });
 
 describe("resize.resolveDims", () => {

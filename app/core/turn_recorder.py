@@ -92,6 +92,82 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return {"content": value}
 
 
+# Pump event types whose ``screenshot`` data URI is content-addressed into the
+# artifact store (Q5). ``tool_result`` renders on the main-lane tool card;
+# ``subagent_tool_result`` on the subagent child card.
+_SCREENSHOT_EVENT_TYPES = ("tool_result", "subagent_tool_result")
+
+
+def _stamp_screenshot(event: Dict[str, Any]) -> Optional[tuple]:
+    """Decode a pump event's ``screenshot`` data URI and stamp its content hash.
+
+    On a screenshot-bearing event (see ``_SCREENSHOT_EVENT_TYPES``), decode +
+    hash the bytes and append the digest to ``event["artifact_hashes"]`` so the
+    translated contract event references it. Returns ``(data, mime, filename,
+    digest)`` for the caller to store, or ``None`` when the event carries no
+    well-formed screenshot. Pure/synchronous; never raises on malformed input
+    (the parse simply misses).
+    """
+    if event.get("type") not in _SCREENSHOT_EVENT_TYPES:
+        return None
+    parsed = artifact_ingest.parse_screenshot_data_uri(event.get("screenshot"))
+    if parsed is None:
+        return None
+    data, mime = parsed
+    digest = artifact_ingest.content_hash(data)
+    existing = event.get("artifact_hashes")
+    hashes = list(existing) if isinstance(existing, list) else []
+    if digest not in hashes:
+        hashes.append(digest)
+    event["artifact_hashes"] = hashes
+    return data, mime, artifact_ingest.filename_for(digest, mime), digest
+
+
+async def _ingest_screenshot_unfenced(
+    session_id: str, event: Dict[str, Any], *, turn_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Unfenced-path screenshot ingest (drain pump / CLI wake turns).
+
+    Mirrors ``TurnRecorder._maybe_ingest_screenshot`` for callers with no live
+    recorder: stamp ``artifact_hashes`` onto the pump event, store the bytes
+    (awaited — these paths are not latency-critical and have no close() drain to
+    guarantee durability), and return the ``artifact.created`` row to append
+    before the translated event. Returns ``[]`` on flag-off / no screenshot;
+    never raises.
+    """
+    try:
+        if not settings.v2_placement:
+            return []
+        stamped = _stamp_screenshot(event)
+        if stamped is None:
+            return []
+        data, mime, filename, digest = stamped
+        try:
+            await asyncio.to_thread(
+                artifact_store.store_bytes,
+                data,
+                mime=mime,
+                filename=filename,
+                created_by_session=session_id,
+                runner_id=settings.effective_instance_id,
+            )
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] unfenced artifact store failed for %s hash %s",
+                session_id, digest, exc_info=True,
+            )
+        return [_build_event(
+            contract.ArtifactCreated, session_id, turn_id=turn_id,
+            hash=digest, mime=mime, filename=filename, size=len(data),
+        )]
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] unfenced screenshot ingest failed for %s",
+            session_id, exc_info=True,
+        )
+        return []
+
+
 def _build_event(
     model_cls: type,
     session_id: str,
@@ -190,9 +266,13 @@ def _translate_shared(
         )]
 
     if etype in ("subagent_chunk", "subagent_tool_use", "subagent_tool_result"):
+        # ``screenshot`` (a raw base64 data URI) is excluded: the ingest step
+        # content-addresses it into the artifact store and stamps
+        # ``artifact_hashes`` (kept in the payload) — the log never carries the
+        # bytes themselves.
         payload = {
             k: v for k, v in event.items()
-            if k not in ("type", "agent_id", "session_id")
+            if k not in ("type", "agent_id", "session_id", "screenshot")
         }
         return [_build_event(
             contract.SubagentProgress, session_id,
@@ -654,16 +734,16 @@ class TurnRecorder:
     def _maybe_ingest_screenshot(
         self, event: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Content-address a tool_result screenshot (flag-gated, fire-and-forget).
+        """Content-address a screenshot result (flag-gated, fire-and-forget).
 
-        On a ``tool_result`` pump event carrying a decoded screenshot data URI
-        (top-level Claude-in-Chrome / computer-use image results — surfaced at
-        both ``query_engine`` pump sites), and only when
+        On a ``tool_result`` / ``subagent_tool_result`` pump event carrying a
+        decoded screenshot data URI (browser / computer-use image results —
+        surfaced at the ``query_engine`` pump sites), and only when
         ``settings.v2_placement`` is on, decode + hash the bytes synchronously,
         stamp ``artifact_hashes`` onto the pump event (so ``_translate_shared``
-        carries the reference into the recorded ``tool.result``), schedule a
-        fire-and-forget disk/DB store, and return an ``artifact.created`` event
-        to append in the same batch.
+        carries the reference into the recorded ``tool.result`` /
+        ``subagent.progress``), schedule a fire-and-forget disk/DB store, and
+        return an ``artifact.created`` event to append in the same batch.
 
         Returns ``[]`` (a no-op) for every other event, when the flag is off, or
         when the screenshot is not a well-formed base64 data URI. Never raises:
@@ -673,23 +753,13 @@ class TurnRecorder:
         try:
             if not settings.v2_placement:
                 return []
-            if event.get("type") != "tool_result":
+            # Stamp the content address onto the pump event so the translated
+            # ToolResult / SubagentProgress append references it. Idempotent +
+            # dedup-friendly.
+            stamped = _stamp_screenshot(event)
+            if stamped is None:
                 return []
-            parsed = artifact_ingest.parse_screenshot_data_uri(
-                event.get("screenshot")
-            )
-            if parsed is None:
-                return []
-            data, mime = parsed
-            digest = artifact_ingest.content_hash(data)
-            # Stamp the content address onto the pump event so the ToolResult
-            # append references it. Idempotent + dedup-friendly.
-            existing = event.get("artifact_hashes")
-            hashes = list(existing) if isinstance(existing, list) else []
-            if digest not in hashes:
-                hashes.append(digest)
-            event["artifact_hashes"] = hashes
-            filename = artifact_ingest.filename_for(digest, mime)
+            data, mime, filename, digest = stamped
             self._spawn_artifact_store(data, mime, filename, digest)
             return [self._event(
                 contract.ArtifactCreated,
@@ -949,7 +1019,12 @@ async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:
                 etype, session_id,
             )
             return
-        await _append_unfenced(session_id, _translate_shared(event, session_id))
+        # Screenshot ingest BEFORE translation (mirrors the fenced record()
+        # order): a drained subagent_tool_result's image is content-addressed
+        # and its hash carried in the payload — translation strips the raw URI.
+        rows = await _ingest_screenshot_unfenced(session_id, event)
+        rows.extend(_translate_shared(event, session_id))
+        await _append_unfenced(session_id, rows)
     except Exception:
         logger.warning(
             "[TurnRecorder] record_drained_event failed for %s", session_id,
@@ -986,7 +1061,10 @@ async def record_cli_wake_event(
             or etype == "system"
         ):
             return 0
-        rows = _translate_shared(event, session_id, turn_id=turn_id)
+        # Screenshot ingest BEFORE translation (mirrors the fenced record()
+        # order) so a wake-turn browser/computer-use screenshot renders too.
+        rows = await _ingest_screenshot_unfenced(session_id, event, turn_id=turn_id)
+        rows.extend(_translate_shared(event, session_id, turn_id=turn_id))
         await _append_unfenced(session_id, rows)
         return len(rows)
     except Exception:

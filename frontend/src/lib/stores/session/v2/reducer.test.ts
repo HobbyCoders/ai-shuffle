@@ -647,6 +647,50 @@ describe('tool cards', () => {
 		expect(card.toolResult).toBe(raw); // no substitution on a miss
 	});
 
+	// ── Screenshot artifacts (tool.result artifact_hashes → inline render) ──
+	const HASH = 'a'.repeat(64);
+
+	it('tool.result with an artifact hash surfaces the screenshot serve URL', () => {
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't1', name: 'mcp__browser__browser_screenshot' }),
+			ev('tool.result', {
+				tool_use_id: 't1',
+				content_preview: '1280x720 — coordinates for browser_act must use this space',
+				artifact_hashes: [HASH],
+			}),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't1')!;
+		expect(card.toolScreenshot).toBe(`/api/v1/artifacts/${HASH}`);
+		expect(card.toolStatus).toBe('complete');
+	});
+
+	it('malformed artifact hashes are ignored (no screenshot URL)', () => {
+		const s = fold([
+			ev('tool.use', { tool_use_id: 't1', name: 'mcp__browser__browser_screenshot' }),
+			ev('tool.result', {
+				tool_use_id: 't1',
+				content_preview: 'x',
+				artifact_hashes: ['../../etc/passwd', 'not-a-hash', 42],
+			}),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't1')!;
+		expect(card.toolScreenshot).toBeUndefined();
+	});
+
+	it('an existing toolScreenshot (backfilled data URI on tool.use) is kept', () => {
+		const dataUri = 'data:image/jpeg;base64,abc';
+		const s = fold([
+			ev('tool.use', {
+				tool_use_id: 't1',
+				name: 'mcp__browser__browser_screenshot',
+				screenshot: dataUri,
+			}),
+			ev('tool.result', { tool_use_id: 't1', content_preview: 'x', artifact_hashes: [HASH] }),
+		]);
+		const card = s.messages.find((m) => m.toolId === 't1')!;
+		expect(card.toolScreenshot).toBe(dataUri);
+	});
+
 	it('is_error:false result is never classified even if it mentions an image', () => {
 		const preview = 'Read image exceeds expectations — looks great';
 		const s = fold([
@@ -690,6 +734,34 @@ describe('subagent cards', () => {
 	it('progress/completed for an unknown task_id are ignored', () => {
 		const s = fold([ev('subagent.progress', { task_id: 'nope', kind: 'chunk', note: 'x' })]);
 		expect(s.messages).toHaveLength(0);
+	});
+
+	it('progress tool_result artifact hash surfaces the screenshot on the child', () => {
+		const HASH = 'b'.repeat(64);
+		const s = fold([
+			ev('subagent.started', { task_id: 'task-1', description: 'browse' }),
+			ev('subagent.progress', {
+				task_id: 'task-1',
+				kind: 'tool_use',
+				payload: { name: 'mcp__browser__browser_screenshot', tool_use_id: 'c1', input: {} },
+			}),
+			ev('subagent.progress', {
+				task_id: 'task-1',
+				kind: 'tool_result',
+				payload: {
+					tool_use_id: 'c1',
+					output: '1280x720',
+					is_error: false,
+					artifact_hashes: [HASH],
+				},
+			}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent')!;
+		expect(card.agentChildren![0]).toMatchObject({
+			toolId: 'c1',
+			toolStatus: 'complete',
+			toolScreenshot: `/api/v1/artifacts/${HASH}`,
+		});
 	});
 
 	it('subagent.started drops the orphan launch placeholder opened by input_delta', () => {

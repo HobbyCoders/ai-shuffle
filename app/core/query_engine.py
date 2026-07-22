@@ -553,6 +553,7 @@ def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
                 "input": block.input or {},
             })
         elif isinstance(block, ToolResultBlock):
+            screenshot = extract_mcp_image(block.content)
             events.append({
                 "type": "subagent_tool_result",
                 "agent_id": parent_tool_id,
@@ -560,6 +561,7 @@ def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
                 "tool_use_id": getattr(block, "tool_use_id", None),
                 "output": truncate_large_payload(block.content) if block.content else "",
                 "is_error": getattr(block, "is_error", False),
+                **({"screenshot": screenshot} if screenshot else {}),
             })
     return events
 
@@ -685,12 +687,14 @@ def _cli_turn_events_from_message(
                         "classification=background-ack (cli-driven turn)",
                         session_id, tool_use_id,
                     )
+                screenshot = extract_mcp_image(block.content)
                 events.append({
                     "type": "tool_result",
                     "name": tool_name,
                     "tool_use_id": tool_use_id,
                     "output": output,
                     "is_error": bool(getattr(block, "is_error", False)),
+                    **({"screenshot": screenshot} if screenshot else {}),
                 })
         return events
 
@@ -3256,7 +3260,11 @@ async def _stream_to_websocket_impl(
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
-                                "is_error": getattr(block, 'is_error', False)
+                                "is_error": getattr(block, 'is_error', False),
+                                # Inline image (browser/computer-use screenshot):
+                                # the recorder content-addresses it and strips
+                                # the raw data URI before the event log append.
+                                **({"screenshot": screenshot} if screenshot else {}),
                             }
                         else:
                             # Regular top-level tool_result — record in ordered events
@@ -3558,7 +3566,11 @@ async def _stream_to_websocket_impl(
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
-                                "is_error": block.is_error
+                                "is_error": block.is_error,
+                                # Inline image (browser/computer-use screenshot):
+                                # the recorder content-addresses it and strips
+                                # the raw data URI before the event log append.
+                                **({"screenshot": screenshot_b64} if screenshot_b64 else {}),
                             }
                         else:
                             # Regular top-level tool_result — record in ordered events

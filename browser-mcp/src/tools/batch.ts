@@ -98,6 +98,10 @@ export async function runBatch(
   }
 
   const results: BatchItemResult[] = [];
+  // Image blocks (screenshots) from sub-results, re-emitted on the batch result
+  // — firstText() alone would silently drop them and the model would never see
+  // a screenshot taken inside a batch.
+  const images: McpContent[] = [];
   let allOk = true;
 
   for (const raw of actions) {
@@ -141,7 +145,12 @@ export async function runBatch(
       break;
     }
     results.push({ tool: action.tool, ok: true, summary });
+    for (const c of res.content) {
+      if (c.type === "image") images.push(c);
+    }
   }
 
-  return jsonResult({ ok: allOk, count: results.length, results });
+  const out = jsonResult({ ok: allOk, count: results.length, results });
+  out.content.push(...images);
+  return out;
 }

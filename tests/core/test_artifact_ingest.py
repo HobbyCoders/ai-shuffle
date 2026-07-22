@@ -253,3 +253,125 @@ async def test_ingest_inert_when_flag_off(mock_db, artifacts_dir, monkeypatch):
     # No store happened.
     assert artifacts_db.get_artifact(digest) is None
     assert not artifacts_dir.exists() or not any(artifacts_dir.rglob("*"))
+
+
+# ---------------------------------------------------------------------------
+# subagent lane — screenshot ingested, raw data URI stripped from the log
+# ---------------------------------------------------------------------------
+
+
+def _subagent_tool_result_event(screenshot=None):
+    ev = {"type": "subagent_tool_result", "agent_id": "parent-1",
+          "name": "mcp__browser__browser_screenshot", "tool_use_id": "tu_1",
+          "output": "1280x720", "is_error": False}
+    if screenshot is not None:
+        ev["screenshot"] = screenshot
+    return ev
+
+
+async def test_subagent_ingest_stamps_hash_and_strips_raw_uri(mock_db, artifacts_dir):
+    _mk_session()
+    rec = await _recorder()
+    payload = b"subagent-screenshot-bytes"
+    digest = artifact_ingest.content_hash(payload)
+
+    await rec.on_event(_subagent_tool_result_event(_data_uri(payload, "image/jpeg")))
+
+    rows = _rows()
+    assert rows[-2]["event_type"] == "artifact.created"
+    assert rows[-1]["event_type"] == "subagent.progress"
+
+    progress = rows[-1]["payload"]
+    assert progress["task_id"] == "parent-1"
+    assert progress["kind"] == "tool_result"
+    inner = progress["payload"]
+    # The content address is carried; the raw base64 URI never hits the log.
+    assert inner["artifact_hashes"] == [digest]
+    assert "screenshot" not in inner
+    assert inner["output"] == "1280x720"
+
+    # close() drains the fire-and-forget store: bytes durable on disk.
+    await rec.close()
+    on_disk = artifacts_dir / digest[:2] / digest
+    assert on_disk.exists()
+    assert on_disk.read_bytes() == payload
+
+
+async def test_subagent_without_screenshot_payload_unchanged(mock_db, artifacts_dir):
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event(_subagent_tool_result_event(screenshot=None))
+    assert _types() == ["subagent.progress"]
+    inner = _rows()[-1]["payload"]["payload"]
+    assert "screenshot" not in inner
+    assert "artifact_hashes" not in inner
+    await rec.close()
+
+
+# ---------------------------------------------------------------------------
+# unfenced paths — drain pump + CLI wake turns ingest too
+# ---------------------------------------------------------------------------
+
+
+async def test_drained_subagent_tool_result_ingests(mock_db, artifacts_dir):
+    from app.core import turn_recorder as tr
+
+    _mk_session()
+    payload = b"drained-subagent-screenshot"
+    digest = artifact_ingest.content_hash(payload)
+
+    await tr.record_drained_event(
+        SID, _subagent_tool_result_event(_data_uri(payload, "image/png"))
+    )
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["artifact.created", "subagent.progress"]
+    inner = rows[-1]["payload"]["payload"]
+    assert inner["artifact_hashes"] == [digest]
+    assert "screenshot" not in inner
+
+    # The unfenced store is awaited inline — bytes are durable immediately.
+    on_disk = artifacts_dir / digest[:2] / digest
+    assert on_disk.read_bytes() == payload
+    assert artifacts_db.get_artifact(digest) is not None
+
+
+async def test_cli_wake_tool_result_ingests(mock_db, artifacts_dir):
+    from app.core import turn_recorder as tr
+
+    _mk_session()
+    payload = b"wake-turn-screenshot"
+    digest = artifact_ingest.content_hash(payload)
+
+    count = await tr.record_cli_wake_event(
+        SID, _tool_result_event(_data_uri(payload, "image/png")), turn_id="wake-1"
+    )
+    assert count == 2  # artifact.created + tool.result
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == ["artifact.created", "tool.result"]
+    assert rows[0]["turn_id"] == "wake-1"
+    assert rows[-1]["payload"]["artifact_hashes"] == [digest]
+
+    on_disk = artifacts_dir / digest[:2] / digest
+    assert on_disk.read_bytes() == payload
+
+
+async def test_unfenced_ingest_inert_when_flag_off(mock_db, artifacts_dir, monkeypatch):
+    from app.core import turn_recorder as tr
+
+    monkeypatch.setattr(settings, "v2_placement", False)
+    _mk_session()
+    payload = b"flag-off-unfenced"
+    digest = artifact_ingest.content_hash(payload)
+
+    await tr.record_drained_event(
+        SID, _subagent_tool_result_event(_data_uri(payload))
+    )
+
+    assert _types() == ["subagent.progress"]
+    # Flag off: no ingest — and the raw URI is still stripped from the log.
+    inner = _rows()[-1]["payload"]["payload"]
+    assert "screenshot" not in inner
+    assert "artifact_hashes" not in inner
+    assert artifacts_db.get_artifact(digest) is None

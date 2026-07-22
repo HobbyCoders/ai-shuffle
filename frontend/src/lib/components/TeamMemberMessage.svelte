@@ -7,6 +7,7 @@
 	import type { ChatMessage, SubagentChildMessage, TeammateStatus } from '$lib/stores/types';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { killTeammate } from '$lib/api/client';
+	import ToolScreenshot from '$lib/components/chat/ToolScreenshot.svelte';
 
 	interface Props {
 		message: ChatMessage;
@@ -339,6 +340,9 @@
 									{/if}
 								</div>
 							</details>
+							{#if child.toolScreenshot}
+								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
+							{/if}
 						</div>
 					{:else if child.type === 'tool_result'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
@@ -365,6 +369,9 @@
 									{/if}
 								{/if}
 							</details>
+							{#if child.toolScreenshot}
+								<ToolScreenshot screenshot={child.toolScreenshot} name={child.toolName || 'Tool'} />
+							{/if}
 						</div>
 					{:else if child.type === 'text'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">

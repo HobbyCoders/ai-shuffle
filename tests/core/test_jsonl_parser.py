@@ -1449,3 +1449,55 @@ class TestBackgroundBashStatus:
                 result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 tool_msg = next(m for m in result if m.get("type") == "tool_use")
                 assert tool_msg["toolStatus"] == "complete"
+
+
+class TestAgentChildScreenshots:
+    """Subagent transcript image results attach toolScreenshot to the child."""
+
+    IMAGE_BLOCK = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="},
+    }
+
+    def test_child_tool_result_image_sets_tool_screenshot(self):
+        entries = [
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "shot-1",
+                 "name": "mcp__browser__browser_screenshot", "input": {}}]},
+             "uuid": "u1"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "shot-1", "content": [
+                    self.IMAGE_BLOCK,
+                    {"type": "text", "text": "1280x720"}]}]},
+             "uuid": "u2"},
+        ]
+        children = jsonl_parser.transform_agent_entries(entries)
+        child = next(c for c in children if c.get("toolId") == "shot-1")
+        assert child["toolScreenshot"] == "data:image/jpeg;base64,aGVsbG8="
+        assert child["toolStatus"] == "complete"
+        assert child["toolResult"] == "1280x720"
+
+    def test_child_tool_result_without_image_has_no_screenshot(self):
+        entries = [
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+             "uuid": "u1"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "hi"}]},
+             "uuid": "u2"},
+        ]
+        children = jsonl_parser.transform_agent_entries(entries)
+        child = next(c for c in children if c.get("toolId") == "t1")
+        assert "toolScreenshot" not in child
+
+    def test_unmatched_tool_result_image_sets_screenshot_on_fallback_child(self):
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "orphan-1", "content": [
+                    self.IMAGE_BLOCK]}]},
+             "uuid": "u1"},
+        ]
+        children = jsonl_parser.transform_agent_entries(entries)
+        child = next(c for c in children if c.get("toolId") == "orphan-1")
+        assert child["type"] == "tool_result"
+        assert child["toolScreenshot"] == "data:image/jpeg;base64,aGVsbG8="

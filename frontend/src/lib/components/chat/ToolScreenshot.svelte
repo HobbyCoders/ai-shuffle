@@ -20,9 +20,36 @@
 	}
 
 	let { screenshot, name }: Props = $props();
+
+	let container: HTMLElement | undefined = $state();
+
+	// Artifact-store screenshots (`/api/v1/artifacts/{hash}`) are written
+	// fire-and-forget by the recorder, so the first fetch can race the disk/DB
+	// store and 404. Retry a served (non-data:) URL a few times with backoff
+	// before giving up.
+	const MAX_RETRIES = 3;
+	$effect(() => {
+		if (!container || screenshot.startsWith('data:')) return;
+		const img = container.querySelector('img');
+		if (!img) return;
+		let attempts = 0;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const onError = () => {
+			if (attempts >= MAX_RETRIES) return;
+			attempts += 1;
+			timer = setTimeout(() => {
+				img.src = `${screenshot}${screenshot.includes('?') ? '&' : '?'}retry=${attempts}`;
+			}, 500 * 2 ** (attempts - 1));
+		};
+		img.addEventListener('error', onError);
+		return () => {
+			img.removeEventListener('error', onError);
+			if (timer !== undefined) clearTimeout(timer);
+		};
+	});
 </script>
 
-<div class="tool-screenshot">
+<div class="tool-screenshot" bind:this={container}>
 	{@html sanitizeHtml(mediaHtml('image', screenshot, `Screenshot from ${name}`))}
 </div>
 
