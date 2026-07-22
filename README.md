@@ -198,14 +198,6 @@ ai-shuffle/
 
 AI Shuffle exposes a full REST + WebSocket API. See the [API Reference](docs/content/api-reference/) or browse the built-in docs at `http://your-host:8000` → Documentation.
 
----
-
-## Contributing
-
-NOT accepting contributions at the moment.
-
----
-
 ## License
 
 MIT — see [LICENSE](LICENSE)
