@@ -44,13 +44,18 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def _resolve_gateway(
-    session_id: Optional[str], connector_type: str
+    session_id: Optional[str], connector_type: str, allow_global: bool = False
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Resolve ``(instance, context, error_envelope)`` for a gateway call.
 
     Re-done on every call so connector restarts and channel rebinds are always
     respected. ``context`` carries the session scoping handed to the
     connector's availability/execute hooks.
+
+    ``allow_global`` is set for non-messaging connectors (Home Assistant,
+    Gmail, ...): when the session has no link to a connector of this type, the
+    first running instance of the type is used with no bound channel — the
+    same reach their legacy globally-registered tools had.
     """
     if not session_id:
         return None, None, _err("No session context — connector tools require an active session.")
@@ -79,12 +84,25 @@ async def _resolve_gateway(
             connector_id = cid
             break
 
-    if not linked_cs or not connector_id:
-        return None, None, _err(
-            f"This session is not linked to a {connector_type} connector."
-        )
-
     from app.core.connectors.manager import connector_manager
+
+    if not linked_cs or not connector_id:
+        if not allow_global:
+            return None, None, _err(
+                f"This session is not linked to a {connector_type} connector."
+            )
+        running = list(connector_manager.get_running_connectors(connector_type))
+        if not running:
+            return None, None, _err(
+                f"No {connector_type} connector is running on this device."
+            )
+        connector_id, instance = running[0]
+        context = {
+            "session_id": session_id,
+            "connector_id": connector_id,
+            "bound_chat_id": "",
+        }
+        return instance, context, None
 
     instance = connector_manager.get_running_instance(connector_id)
     if instance is None:
@@ -165,20 +183,45 @@ def build_gateway_tools(session_id: Optional[str]) -> List[Any]:
         logger.debug("Gateway tool linkage lookup failed", exc_info=True)
         return []
 
+    # Non-messaging gateway connectors (Home Assistant, Gmail, ...) have no
+    # session/channel binding, so their pairs register for every session while
+    # an instance is running — the same reach their legacy tools had.
+    global_types: List[str] = []
+    try:
+        from app.core.connectors.manager import connector_manager
+
+        for _cid, instance in connector_manager.get_running_connectors():
+            ctype = instance.connector_type
+            if ctype in linked_types or ctype in global_types:
+                continue
+            if (
+                getattr(instance, "SUPPORTS_ACTION_GATEWAY", False)
+                and instance.ACTIONS
+                and not instance.CAPABILITIES.is_messaging
+            ):
+                global_types.append(ctype)
+    except Exception:
+        logger.debug("Gateway global connector lookup failed", exc_info=True)
+
     tools: List[Any] = []
     for connector_type in linked_types:
         tools.extend(_build_pair_for_type(tool, annotations, session_id, connector_type))
+    for connector_type in global_types:
+        tools.extend(_build_pair_for_type(
+            tool, annotations, session_id, connector_type, allow_global=True,
+        ))
 
     if tools:
         logger.info(
             "Registered %d gateway tool(s) for session %s (%s)",
-            len(tools), session_id, ", ".join(linked_types),
+            len(tools), session_id, ", ".join(linked_types + global_types),
         )
     return tools
 
 
 def _build_pair_for_type(
-    tool: Any, annotations: Any, session_id: str, connector_type: str
+    tool: Any, annotations: Any, session_id: str, connector_type: str,
+    allow_global: bool = False,
 ) -> List[Any]:
     """Build the {type}_actions / {type}_invoke pair for one connector type."""
 
@@ -210,7 +253,7 @@ def _build_pair_for_type(
         **tool_kwargs,
     )
     async def gateway_actions(args: dict) -> dict:
-        instance, context, err = await _resolve_gateway(session_id, connector_type)
+        instance, context, err = await _resolve_gateway(session_id, connector_type, allow_global)
         if err:
             return err
         try:
@@ -272,7 +315,7 @@ def _build_pair_for_type(
         if not isinstance(params, dict):
             return _err("params must be an object.")
 
-        instance, context, err = await _resolve_gateway(session_id, connector_type)
+        instance, context, err = await _resolve_gateway(session_id, connector_type, allow_global)
         if err:
             return err
 

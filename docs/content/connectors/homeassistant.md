@@ -121,6 +121,7 @@ Claude will use the Home Assistant connector to query or control the appropriate
 | `access_token` | string | Yes | A Long-Lived Access Token generated from your Home Assistant user profile |
 | `entity_filter` | string | No | A comma-separated list of entity-id prefixes to restrict which entities are tracked (e.g., `light.,switch.,climate.`). When omitted, all entities are tracked. |
 | `poll_interval_seconds` | string | No | Seconds between entity-state polls. Defaults to `"60"`. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `states`, `control`, `discovery`, `events`. |
 
 ## Capabilities
 
@@ -135,13 +136,22 @@ The Home Assistant connector supports the following capabilities:
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-### What Claude can do with Home Assistant
+### AI Actions (Action Gateway)
 
-- **Query state** -- Ask about the current state of any entity (lights, sensors, switches, climate, etc.)
+While a Home Assistant connector is running, every AI session gets two MCP tools:
+
+- **`homeassistant_actions`** — discovery. Returns the action catalog (13 actions: entity states and history, turn on/off/toggle, set values by domain, arbitrary service calls, service/config discovery, template rendering, event firing, persistent notifications), each with its input schema, filtered by this install's `enabled_action_categories`.
+- **`homeassistant_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Home Assistant REST API.
+
+`call_service` is the escape hatch for HA's hundreds of domain services — the AI discovers them at runtime with `list_services`, so nothing needs a code change to become controllable. The install's `entity_filter` still applies to state listings, and the access token's own permissions bound what the AI can reach.
+
+What that lets Claude do:
+
+- **Query state** -- Ask about the current state and history of any entity (lights, sensors, switches, climate, etc.)
 - **Control devices** -- Turn devices on/off, set brightness, change temperature, lock/unlock
-- **Trigger automations** -- Execute Home Assistant automations and scripts
+- **Trigger automations** -- Execute Home Assistant automations, scripts, and scenes via `call_service`
 - **Monitor sensors** -- Read temperature, humidity, motion, door/window sensors
-- **Scene control** -- Activate predefined Home Assistant scenes
+- **Inspect the instance** -- Render templates, list services, read the HA config
 
 ## Troubleshooting
 

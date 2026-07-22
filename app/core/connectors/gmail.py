@@ -8,7 +8,6 @@ from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.connectors.base import (
-    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -19,9 +18,9 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerCallback,
     TriggerDef,
-    ToolDef,
     chunk_text,
 )
+from app.core.connectors import gmail_actions
 
 logger = logging.getLogger(__name__)
 
@@ -78,39 +77,16 @@ class GmailConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_email",
-            name="Send Email",
-            description="Send an email",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "to": {"type": "string"},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                },
-                "required": ["to", "subject", "body"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see gmail_actions.py), exposed through
+    # the gmail_actions/gmail_invoke gateway tool pair. The legacy send_email
+    # action id is preserved for existing automations.
+    ACTIONS = gmail_actions.GMAIL_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="gmail_send",
-            name="Gmail Send",
-            description="Send an email via Gmail",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "to": {"type": "string"},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                },
-                "required": ["to", "subject", "body"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # gmail_send tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -626,41 +602,25 @@ class GmailConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    def _send_email_message(self, to: str, subject: str, body: str) -> Dict[str, Any]:
-        """Build and send an email via the Gmail API.  Returns the API response."""
-        mime_msg = MIMEText(body)
-        mime_msg["To"] = to
-        mime_msg["From"] = self._email_address
-        mime_msg["Subject"] = subject
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see gmail_actions.py)."""
+        return await gmail_actions.execute(self, action_id, params, context)
 
-        raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode("ascii")
-        return self._service.users().messages().send(
-            userId="me", body={"raw": raw}
-        ).execute()
-
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a Gmail action by ID."""
-        if self._service is None:
-            return {"success": False, "error": "Not connected"}
-
-        if action_id == "send_email":
-            to = params.get("to")
-            subject = params.get("subject")
-            body = params.get("body")
-            if not to or not subject or body is None:
-                return {"success": False, "error": "to, subject, and body are required"}
-            try:
-                result = self._send_email_message(to, subject, body)
-                return {
-                    "success": True,
-                    "message_id": result.get("id", ""),
-                    "thread_id": result.get("threadId", ""),
-                }
-            except Exception as exc:
-                logger.exception("GmailConnector %s send_email failed", self.connector_id)
-                return {"success": False, "error": str(exc)}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "GMAIL TOOLS: Call gmail_actions to discover what you can do "
+            "(send/reply/draft email, search and read mail, manage labels, "
+            "mark read/unread, archive, trash/untrash) with each action's "
+            "input schema, then call gmail_invoke with {action, params} to "
+            "act. Use Gmail query syntax with search_messages (e.g. "
+            "'from:alice is:unread newer_than:7d'). trash_message is "
+            "reversible via untrash_message; nothing permanently deletes mail."
+        )
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a Gmail tool call by routing to the appropriate action."""

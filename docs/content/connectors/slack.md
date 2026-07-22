@@ -122,6 +122,8 @@ The bot must be invited to channels before it can read or send messages there:
 | `app_token` | string | Yes | The App-Level Token (starts with `xapp-`). Used exclusively for establishing the Socket Mode WebSocket connection. Must have the `connections:write` scope. |
 | `allowed_channel_ids` | array of strings | No | List of Slack channel IDs the bot is allowed to respond in. If empty, the bot responds in all channels it has been invited to. Channel IDs start with `C` (public) or `G` (private). |
 | `command_prefix` | string | No | If set, only messages that start with this prefix are processed. If empty, the bot processes all messages in allowed channels. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `pins`, `channels`, `users`, `files`, `workspace`. |
+| `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, channel archiving). Default: prompts are required. |
 
 ## Capabilities
 
@@ -137,6 +139,19 @@ The Slack connector supports the following capabilities:
 | Buttons | Yes | Permission prompts are sent as Block Kit messages with Approve / Deny buttons |
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split. Slack has a hard limit of 40,000 characters but recommends keeping messages under 4,000 for readability.
+
+## AI Actions (Action Gateway)
+
+Sessions bound to a Slack channel get two MCP tools instead of one tool per feature:
+
+- **`slack_actions`** — discovery. Returns the action catalog (~21 actions: send/read/edit/delete/schedule messages, threads, reactions, pins, channel management, user lookup, file upload, workspace info), each with its input schema and the OAuth scope it needs. The catalog is filtered by this install's `enabled_action_categories`.
+- **`slack_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+Safety rails:
+
+- Message-level actions only work in the session's bound channel and the connector's `allowed_channel_ids`.
+- Actions tagged **destructive** (`delete_message`, `archive_channel`) post an in-channel Block Kit **Approve/Deny** prompt and only run after a human clicks Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+- Slack enforces OAuth scopes itself: an action whose scope is missing from the bot token fails with `missing_scope` — add the scope under **OAuth & Permissions** and reinstall the app to light it up.
 
 ## Troubleshooting
 

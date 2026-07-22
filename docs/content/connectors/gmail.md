@@ -130,6 +130,7 @@ Try these in an AI Shuffle chat:
 | `labels` | string | No | Comma-separated Gmail label IDs to poll. Defaults to `INBOX`. |
 | `max_results` | string | No | Maximum number of messages to fetch per poll. Defaults to `10`. |
 | `poll_interval_seconds` | string | No | Seconds between inbox polls. Defaults to `60`. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `compose`, `read`, `organize`. |
 
 ## Capabilities
 
@@ -150,9 +151,21 @@ The Gmail connector reports the following capabilities:
 
 The connector does not subscribe to push notifications. Instead, after activation it runs a background loop that **polls Gmail for unread messages** every `poll_interval_seconds` (default 60). On each poll it lists up to `max_results` unread messages across the configured `labels` (default `INBOX`), and any message it has not seen before is surfaced as a new incoming message and as an `email_received` trigger.
 
+### AI Actions (Action Gateway)
+
+While a Gmail connector is running, every AI session gets two MCP tools:
+
+- **`gmail_actions`** — discovery. Returns the action catalog (15 actions: send/reply/draft email, search with Gmail query syntax, list and read messages, profile info, label management, mark read/unread, archive, trash/untrash), each with its input schema, filtered by this install's `enabled_action_categories`.
+- **`gmail_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Gmail API.
+
+Nothing in the catalog permanently deletes mail: `trash_message` moves a message to Trash (reversible with `untrash_message`; Gmail purges Trash after ~30 days), and there is no hard-delete action at all.
+
 ### What Claude can do with Gmail
 
 - **Receive emails** -- New unread messages in the watched labels are picked up on each poll and delivered to Claude with the sender, subject, snippet, body, and labels.
+- **Send, reply, and draft** -- Compose new mail, reply within threads, or leave drafts for human review.
+- **Search and read** -- Full Gmail query syntax (`from:alice is:unread newer_than:7d`) plus full-body reads of individual messages.
+- **Organize** -- Create and apply labels, mark read/unread, archive, and trash/untrash messages.
 - **Send email** -- Compose and send a new plain-text email with a `to`, `subject`, and `body`.
 - **Reply in-thread** -- Reply to a received message; the connector sets the proper threading headers so the reply stays in the original Gmail conversation.
 

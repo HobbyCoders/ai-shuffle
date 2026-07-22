@@ -445,6 +445,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "app_token", "label": "App Token (xapp-...)", "type": "password", "required": True},
                 {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False},
                 {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, pins, channels, users, files, workspace"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, channel archiving)"},
             ],
         },
         {
@@ -529,6 +533,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "access_token", "label": "Long-Lived Access Token", "type": "password", "required": True, "description": "Generate in HA: Profile > Long-Lived Access Tokens"},
                 {"key": "entity_filter", "label": "Entity Filter", "type": "text", "required": False, "placeholder": "light.,switch.,climate.", "description": "Comma-separated entity prefixes to monitor"},
                 {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): states, control, discovery, events"},
             ],
         },
         {
@@ -541,6 +547,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "refresh_token", "label": "OAuth Refresh Token", "type": "password", "required": True, "description": "From OAuth2 authorization flow"},
                 {"key": "labels", "label": "Gmail Labels", "type": "text", "required": False, "placeholder": "INBOX", "description": "Comma-separated labels to watch"},
                 {"key": "max_results", "label": "Max Results per Poll", "type": "text", "required": False, "placeholder": "10"},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): compose, read, organize"},
                 {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
             ],
         },

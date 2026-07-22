@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.connectors.base import (
-    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -21,9 +20,9 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerCallback,
     TriggerDef,
-    ToolDef,
     chunk_text,
 )
+from app.core.connectors import homeassistant_actions
 
 logger = logging.getLogger(__name__)
 
@@ -68,63 +67,16 @@ class HomeAssistantConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="call_service",
-            name="Call Service",
-            description="Call a Home Assistant service",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "domain": {"type": "string"},
-                    "service": {"type": "string"},
-                    "entity_id": {"type": "string"},
-                    "data": {"type": "object"},
-                },
-                "required": ["domain", "service"],
-            },
-        ),
-        ActionDef(
-            id="toggle_entity",
-            name="Toggle Entity",
-            description="Toggle an entity on/off",
-            input_schema={
-                "type": "object",
-                "properties": {"entity_id": {"type": "string"}},
-                "required": ["entity_id"],
-            },
-        ),
-        ActionDef(
-            id="get_states",
-            name="Get States",
-            description="Get states of all entities",
-        ),
-    ]
+    # Full declarative action catalog (see homeassistant_actions.py), exposed
+    # through the homeassistant_actions/homeassistant_invoke gateway tool pair.
+    # Legacy action ids (call_service, toggle_entity, get_states) are preserved.
+    ACTIONS = homeassistant_actions.HOMEASSISTANT_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="homeassistant_control",
-            name="Home Assistant Control",
-            description=(
-                "Control Home Assistant smart home devices — call services, "
-                "toggle entities, and get current states"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "enum": ["call_service", "toggle", "get_states"],
-                    },
-                    "entity_id": {"type": "string"},
-                    "domain": {"type": "string"},
-                    "service": {"type": "string"},
-                    "data": {"type": "object"},
-                },
-                "required": ["command"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # homeassistant_control tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -750,54 +702,25 @@ class HomeAssistantConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a Home Assistant action by ID."""
-        if self._http_client is None:
-            return {"success": False, "error": "Not connected"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see homeassistant_actions.py)."""
+        return await homeassistant_actions.execute(self, action_id, params, context)
 
-        if action_id == "call_service":
-            domain = params.get("domain")
-            service = params.get("service")
-            if not domain or not service:
-                return {"success": False, "error": "domain and service are required"}
-            payload: Dict[str, Any] = {}
-            if "entity_id" in params:
-                payload["entity_id"] = params["entity_id"]
-            if "data" in params and isinstance(params["data"], dict):
-                payload.update(params["data"])
-            resp = await self._api_post(f"/api/services/{domain}/{service}", data=payload)
-            if 200 <= resp.status_code < 300:
-                return {"success": True, "domain": domain, "service": service}
-            return {"success": False, "error": f"HA returned {resp.status_code}: {resp.text[:200]}"}
-
-        if action_id == "toggle_entity":
-            entity_id = params.get("entity_id")
-            if not entity_id:
-                return {"success": False, "error": "entity_id is required"}
-            resp = await self._api_post(
-                "/api/services/homeassistant/toggle",
-                data={"entity_id": entity_id},
-            )
-            if 200 <= resp.status_code < 300:
-                return {"success": True, "entity_id": entity_id, "action": "toggled"}
-            return {"success": False, "error": f"HA returned {resp.status_code}: {resp.text[:200]}"}
-
-        if action_id == "get_states":
-            resp = await self._api_get("/api/states")
-            if resp.status_code != 200:
-                return {"success": False, "error": f"HA returned {resp.status_code}"}
-            entities = []
-            for entity in resp.json():
-                eid = entity.get("entity_id", "")
-                if self._matches_filter(eid):
-                    entities.append({
-                        "entity_id": eid,
-                        "state": entity.get("state", ""),
-                        "friendly_name": entity.get("attributes", {}).get("friendly_name", eid),
-                    })
-            return {"success": True, "entities": entities}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "HOME ASSISTANT TOOLS: Call homeassistant_actions to discover what "
+            "you can do (read entity states and history, turn devices on/off, "
+            "set values, call any HA service, render templates, fire events, "
+            "create notifications) with each action's input schema, then call "
+            "homeassistant_invoke with {action, params} to act. Use get_states "
+            "to find entity IDs before controlling devices, and call_service "
+            "with list_services for anything without a dedicated action."
+        )
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a Home Assistant tool call by routing to the appropriate action."""
