@@ -20,15 +20,21 @@ are populated by the (later) device-code enrollment flow + refresh worker.
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.api.auth import require_admin
 from app.api.settings_crypto import mask_api_key
-from app.core import codex_oauth, encryption, model_catalog_presets
+from app.core import (
+    codex_oauth,
+    codex_rate_limit_resets,
+    codex_token_refresh,
+    encryption,
+    model_catalog_presets,
+)
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -126,6 +132,44 @@ class CodexDevicePollResponse(BaseModel):
     public row)."""
     status: str
     provider: Optional[ModelProviderResponse] = None
+
+
+class CodexResetCreditResponse(BaseModel):
+    """Public, normalized view of one ChatGPT/Codex reset credit."""
+
+    id: str
+    reset_type: Literal["codex_rate_limits", "unknown"]
+    status: Literal["available", "redeeming", "redeemed", "unknown"]
+    granted_at: int
+    expires_at: Optional[int] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+class CodexResetCreditsResponse(BaseModel):
+    available_count: int
+    credits: List[CodexResetCreditResponse]
+
+
+class CodexConsumeResetCreditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credit_id: str
+    idempotency_key: str
+
+    @field_validator("credit_id", "idempotency_key")
+    @classmethod
+    def _must_be_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class CodexConsumeResetCreditResponse(BaseModel):
+    outcome: Literal[
+        "reset", "nothing_to_reset", "no_credit", "already_redeemed"
+    ]
+    windows_reset: int
 
 
 # ============================================================================
@@ -569,6 +613,159 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
             detail=f"Could not fetch models from the provider upstream: {e}",
         )
     return FetchModelsResponse(source="upstream", models=models)
+
+
+# ============================================================================
+# Codex / ChatGPT-subscription rate-limit reset credits
+# ============================================================================
+
+_CODEX_RESET_UPSTREAM_DETAIL = (
+    "The ChatGPT/Codex reset-credit service is temporarily unavailable."
+)
+_CODEX_RESET_RECONNECT_DETAIL = (
+    "Reconnect the ChatGPT/Codex provider before using reset credits."
+)
+
+
+def _codex_reset_credentials(provider_id: str) -> Tuple[str, Optional[str]]:
+    """Load and decrypt one Codex access token for an immediate request."""
+    provider = db.get_model_provider(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Model provider not found",
+        )
+    if not (
+        provider.get("auth_mode") == "chatgpt"
+        or provider.get("provider_type") == "chatgpt"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rate-limit reset credits require a ChatGPT/Codex provider.",
+        )
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin before using "
+                   "reset credits.",
+        )
+
+    stored = db.get_codex_tokens(provider_id)
+    if (
+        not stored
+        or stored.get("needs_reauth")
+        or not stored.get("codex_access_token")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        )
+    try:
+        access_token = encryption.decrypt_value(stored["codex_access_token"])
+    except Exception as exc:  # noqa: BLE001 - never expose credential failures
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        ) from exc
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        )
+    return access_token, stored.get("codex_account_id")
+
+
+async def _codex_reset_request_with_refresh(provider_id: str, request_call):
+    """Run one reset-credit request, refreshing and retrying once on a first 401."""
+    from app.core.http_client import get_http_client
+
+    client = get_http_client()
+    access_token, account_id = _codex_reset_credentials(provider_id)
+    try:
+        return await request_call(access_token, account_id, client)
+    except codex_rate_limit_resets.CodexResetCreditsError as exc:
+        if not exc.is_unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=_CODEX_RESET_UPSTREAM_DETAIL,
+            ) from exc
+
+    try:
+        refreshed = await codex_token_refresh.refresh_on_401_once(
+            provider_id,
+            stale_access_token=access_token,
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 - refresh internals remain private
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        ) from exc
+    if not refreshed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        )
+
+    try:
+        access_token, account_id = _codex_reset_credentials(provider_id)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CODEX_RESET_RECONNECT_DETAIL,
+        ) from exc
+    try:
+        return await request_call(access_token, account_id, client)
+    except codex_rate_limit_resets.CodexResetCreditsError as exc:
+        if exc.is_unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_CODEX_RESET_RECONNECT_DETAIL,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_CODEX_RESET_UPSTREAM_DETAIL,
+        ) from exc
+
+
+@router.get(
+    "/{provider_id}/codex/rate-limit-reset-credits",
+    response_model=CodexResetCreditsResponse,
+)
+async def codex_rate_limit_reset_credits(
+    provider_id: str, token: str = Depends(require_admin)
+):
+    """Return the provider's normalized banked reset-credit inventory."""
+
+    async def _request(access_token, account_id, client):
+        return await codex_rate_limit_resets.get_reset_credits(
+            access_token, account_id, client=client
+        )
+
+    return await _codex_reset_request_with_refresh(provider_id, _request)
+
+
+@router.post(
+    "/{provider_id}/codex/rate-limit-reset-credits/consume",
+    response_model=CodexConsumeResetCreditResponse,
+)
+async def codex_consume_rate_limit_reset_credit(
+    provider_id: str,
+    body: CodexConsumeResetCreditRequest,
+    token: str = Depends(require_admin),
+):
+    """Consume a specific banked reset credit with an idempotency key."""
+
+    async def _request(access_token, account_id, client):
+        return await codex_rate_limit_resets.consume_reset_credit(
+            access_token,
+            account_id,
+            credit_id=body.credit_id,
+            idempotency_key=body.idempotency_key,
+            client=client,
+        )
+
+    return await _codex_reset_request_with_refresh(provider_id, _request)
 
 
 # ============================================================================

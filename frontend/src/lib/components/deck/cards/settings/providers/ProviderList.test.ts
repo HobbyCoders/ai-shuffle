@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	createModelProvider: vi.fn(),
 	deleteModelProvider: vi.fn(),
+	listCodexRateLimitResetCredits: vi.fn(),
+	consumeCodexRateLimitResetCredit: vi.fn(),
 	codexDeviceStart: vi.fn(),
 	codexDevicePoll: vi.fn(),
 	hydrateModelRegistry: vi.fn()
@@ -37,6 +39,8 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		listModelProviders: mocks.listModelProviders,
 		createModelProvider: mocks.createModelProvider,
 		deleteModelProvider: mocks.deleteModelProvider,
+		listCodexRateLimitResetCredits: mocks.listCodexRateLimitResetCredits,
+		consumeCodexRateLimitResetCredit: mocks.consumeCodexRateLimitResetCredit,
 		codexDeviceStart: mocks.codexDeviceStart,
 		codexDevicePoll: mocks.codexDevicePoll
 	};
@@ -76,6 +80,7 @@ function chatgptProvider(partial: Partial<ModelProvider> = {}): ModelProvider {
 beforeEach(() => {
 	Object.values(mocks).forEach((m) => m.mockReset());
 	mocks.hydrateModelRegistry.mockResolvedValue(undefined);
+	mocks.listCodexRateLimitResetCredits.mockResolvedValue({ available_count: 0, credits: [] });
 	mocks.codexDeviceStart.mockResolvedValue({
 		user_code: 'ABCD-1234',
 		verification_uri: 'https://example.test/verify'
@@ -123,6 +128,63 @@ describe('ProviderList — ChatGPT row reconnect', () => {
 
 		const { getByRole } = render(ProviderList);
 		expect(getByRole('button', { name: 'Manage models' })).toBeTruthy();
+	});
+});
+
+describe('ProviderList — banked resets action', () => {
+	it('shows only for connected canonical and legacy ChatGPT rows', async () => {
+		mocks.listModelProviders.mockResolvedValue({
+			providers: [
+				chatgptProvider({
+					id: 'canonical',
+					name: 'Canonical ChatGPT',
+					provider_type: 'chatgpt',
+					auth_mode: null,
+					needs_reauth: false
+				}),
+				chatgptProvider({ id: 'legacy', name: 'Legacy ChatGPT', needs_reauth: false }),
+				chatgptProvider({
+					id: 'disconnected',
+					name: 'Disconnected ChatGPT',
+					codex_access_token_set: false,
+					needs_reauth: false
+				}),
+				chatgptProvider({ id: 'reconnect', name: 'Reconnect ChatGPT', needs_reauth: true }),
+				chatgptProvider({
+					id: 'openai',
+					name: 'OpenAI gateway',
+					provider_type: 'openai',
+					auth_mode: null,
+					needs_reauth: false
+				})
+			]
+		});
+		await providers.loadProviders();
+
+		const { getAllByRole } = render(ProviderList);
+		expect(getAllByRole('button', { name: 'Banked resets' })).toHaveLength(2);
+	});
+
+	it('opens the clicked provider and restores focus to its exact opener', async () => {
+		mocks.listModelProviders.mockResolvedValue({
+			providers: [
+				chatgptProvider({ id: 'first', name: 'First ChatGPT', needs_reauth: false }),
+				chatgptProvider({ id: 'second', name: 'Second ChatGPT', needs_reauth: false })
+			]
+		});
+		await providers.loadProviders();
+
+		const { getAllByRole, getByRole } = render(ProviderList);
+		const openers = getAllByRole('button', { name: 'Banked resets' });
+		await fireEvent.click(openers[1]);
+
+		await waitFor(() =>
+			expect(mocks.listCodexRateLimitResetCredits).toHaveBeenCalledWith('second')
+		);
+		expect(getByRole('dialog', { name: 'Banked resets' })).toBeTruthy();
+
+		await fireEvent.click(getByRole('button', { name: 'Close' }));
+		await waitFor(() => expect(document.activeElement).toBe(openers[1]));
 	});
 });
 

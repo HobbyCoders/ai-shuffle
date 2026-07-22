@@ -14,7 +14,7 @@
 	 * "Manage models" and "Sign in" are rendered as buttons wired to no-op
 	 * callbacks in this chunk — Chunks 5/6/7 wire the modal/drawer behind them.
 	 */
-	import { Server, Pencil, Trash2, SlidersHorizontal, LogIn } from 'lucide-svelte';
+	import { Server, Pencil, Trash2, SlidersHorizontal, LogIn, RotateCcw } from 'lucide-svelte';
 
 	type Tone = 'ok' | 'warn' | 'off';
 
@@ -33,6 +33,8 @@
 
 		/** "Manage models" — no-op in this chunk (Chunk 7 wires the drawer). */
 		onManageModels?: () => void;
+		/** Open the connected ChatGPT provider's banked reset inventory. */
+		onBankedResets?: (opener: HTMLButtonElement) => void;
 		/** "Sign in" / "Reconnect" — no-op in this chunk (Chunk 5/6 wires it). */
 		onSignIn?: () => void;
 		signInLabel?: string;
@@ -55,6 +57,7 @@
 		meta,
 		highlight = false,
 		onManageModels,
+		onBankedResets,
 		onSignIn,
 		signInLabel = 'Sign in',
 		onEdit,
@@ -96,6 +99,16 @@
 			{#if onManageModels}
 				<button type="button" class="ed-btn acct-sm" onclick={onManageModels}>
 					<SlidersHorizontal />Manage models
+				</button>
+			{/if}
+
+			{#if onBankedResets}
+				<button
+					type="button"
+					class="ed-btn acct-sm"
+					onclick={(event) => onBankedResets?.(event.currentTarget)}
+				>
+					<RotateCcw />Banked resets
 				</button>
 			{/if}
 

@@ -27,7 +27,7 @@
 	 * only the row model + transient view state (which row is expanded / editing /
 	 * confirming delete).
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
@@ -37,6 +37,7 @@
 	import ClaudeApiKeyRow from './ClaudeApiKeyRow.svelte';
 	import ProviderEditForm from './ProviderEditForm.svelte';
 	import ManageModelsDrawer from './ManageModelsDrawer.svelte';
+	import BankedResetsDialog from './BankedResetsDialog.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 
@@ -78,6 +79,10 @@
 	let reconnectBusy = $state(false);
 	// True while the Claude sign-in flow has an operation in flight — guards close.
 	let claudeSignInBusy = $state(false);
+	// Connected ChatGPT provider whose banked reset inventory is open, plus the
+	// exact row button that must regain focus after the dialog unmounts.
+	let bankedResetsProvider = $state<ModelProvider | null>(null);
+	let bankedResetsOpener = $state<HTMLButtonElement | null>(null);
 
 	// Fullscreen at handheld widths for the reconnect modal (mirrors AddProviderModal).
 	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
@@ -114,6 +119,19 @@
 	}
 	function handleClaudeSignInKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') closeClaudeSignIn();
+	}
+
+	function openBankedResets(provider: ModelProvider, opener: HTMLButtonElement) {
+		bankedResetsProvider = provider;
+		bankedResetsOpener = opener;
+	}
+
+	async function closeBankedResets() {
+		const opener = bankedResetsOpener;
+		bankedResetsProvider = null;
+		bankedResetsOpener = null;
+		await tick();
+		opener?.focus();
 	}
 
 	// Token present but expired/invalid: the credential exists (so
@@ -308,6 +326,9 @@
 					highlight={!!p.codex_access_token_set && !p.needs_reauth}
 					meta={providerMeta(p, kind)}
 					onManageModels={() => (manageModelsId = p.id)}
+					onBankedResets={p.codex_access_token_set && !p.needs_reauth
+						? (opener) => openBankedResets(p, opener)
+						: undefined}
 					onSignIn={() => (reconnectId = p.id)}
 					signInLabel={p.needs_reauth ? 'Reconnect' : 'Sign in'}
 					onRemove={() => armDelete(p.id)}
@@ -346,6 +367,10 @@
 		</li>
 	{/each}
 </ul>
+
+{#if bankedResetsProvider}
+	<BankedResetsDialog provider={bankedResetsProvider} onClose={closeBankedResets} />
+{/if}
 
 {#if reconnectId !== null}
 	<!-- Reconnect ChatGPT: hosts ChatGptDeviceFlow in reconnect mode against the

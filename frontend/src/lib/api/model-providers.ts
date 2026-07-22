@@ -176,3 +176,54 @@ export async function codexDevicePoll(id: string): Promise<CodexDevicePoll> {
 export async function codexClearReauth(id: string): Promise<ModelProvider> {
 	return api.post(`/model-providers/${id}/codex/clear-reauth`);
 }
+
+// ============================================================================
+// Codex / ChatGPT-subscription banked rate-limit resets
+// ============================================================================
+
+export type CodexRateLimitResetType = 'codex_rate_limits' | 'unknown';
+export type CodexRateLimitResetStatus = 'available' | 'redeeming' | 'redeemed' | 'unknown';
+
+export interface CodexRateLimitResetCredit {
+	id: string;
+	reset_type: CodexRateLimitResetType;
+	status: CodexRateLimitResetStatus;
+	/** Unix seconds. */
+	granted_at: number;
+	/** Unix seconds, or null when the upstream response exposes no expiration. */
+	expires_at: number | null;
+	title: string | null;
+	description: string | null;
+}
+
+export interface CodexRateLimitResetCreditsResponse {
+	available_count: number;
+	credits: CodexRateLimitResetCredit[];
+}
+
+export interface ConsumeCodexRateLimitResetCreditRequest {
+	credit_id: string;
+	idempotency_key: string;
+}
+
+export interface ConsumeCodexRateLimitResetCreditResponse {
+	outcome: 'reset' | 'nothing_to_reset' | 'no_credit' | 'already_redeemed';
+	/** Number of eligible Codex windows reset; normalized by the backend. */
+	windows_reset: number;
+}
+
+export async function listCodexRateLimitResetCredits(
+	providerId: string
+): Promise<CodexRateLimitResetCreditsResponse> {
+	return api.get(`/model-providers/${providerId}/codex/rate-limit-reset-credits`);
+}
+
+export async function consumeCodexRateLimitResetCredit(
+	providerId: string,
+	body: ConsumeCodexRateLimitResetCreditRequest
+): Promise<ConsumeCodexRateLimitResetCreditResponse> {
+	return api.post(
+		`/model-providers/${providerId}/codex/rate-limit-reset-credits/consume`,
+		body
+	);
+}
