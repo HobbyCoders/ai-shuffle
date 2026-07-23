@@ -69,13 +69,13 @@ def test_inherit_empty_model_defaults_to_200k(tmp_path):
 
 
 @pytest.mark.parametrize("model", ["fable", "opus", "sonnet", "claude-opus-4-8", ""])
-def test_disable_path_pins_auto_compact_window(model, tmp_path):
-    """Disabling 1M also pins the auto-compact window to 200k so the CLI's
-    ``source:"env"`` branch caps the trigger regardless of how it derives the
-    model's max window."""
+def test_disable_path_leaves_auto_compact_unset(model, tmp_path):
+    """Native sessions no longer pin a hardcoded auto-compact window — the CLI
+    recognizes real ``claude-*`` ids and derives the per-model window itself
+    (a universal 200k pin is wrong now that models carry different windows)."""
     env = _env_for_model(model, tmp_path)
     assert env[DISABLE_KEY] == "1"
-    assert env[AUTO_COMPACT_KEY] == "200000"
+    assert AUTO_COMPACT_KEY not in env
 
 
 @pytest.mark.parametrize("model", ["fable[1m]", "opus[1m]", "claude-opus-4-8[1m]"])
@@ -87,7 +87,7 @@ def test_1m_enabled_leaves_auto_compact_unset(model, tmp_path):
 
 
 def test_preexisting_auto_compact_window_preserved(tmp_path):
-    """A profile/user-supplied window (PR #523 preset) wins over our default."""
+    """A profile/user-supplied window (PR #523 preset) passes through untouched."""
     env = _env_for_model(
         "fable", tmp_path, base_env={AUTO_COMPACT_KEY: "350000"}
     )

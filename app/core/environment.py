@@ -409,18 +409,13 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
 
     env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
 
-    # Belt-and-suspenders for the auto-compact threshold. The CLI's auto-compact
-    # window is clamped to the model's *maximum* context window; whether that
-    # max correctly drops to 200k under DISABLE_1M has varied across bundled CLI
-    # versions, so a native-1M model can end up auto-compacting off the 1M
-    # window even though ``/context`` reports 200k — the session then blows well
-    # past 200k before compaction fires. Pinning ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
-    # to the effective 200k window forces the CLI's ``source:"env"`` branch, which
-    # caps the trigger at 200k regardless of how the max window was derived (this
-    # is exactly the user's proven manual workaround, now automatic). We never
-    # clobber an existing value — a profile/user-supplied
-    # ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` (exposed as a profile preset) wins.
-    env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")
+    # NOTE: we deliberately do NOT pin ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` here.
+    # Native model ids are real ``claude-*`` ids the CLI recognizes, so it
+    # derives the correct per-model auto-compact window itself; a hardcoded
+    # universal pin (the old 200000) forces every model onto one compaction
+    # threshold, which is wrong now that models/providers carry different
+    # context windows. A profile/user-supplied value (exposed as a profile
+    # preset) still flows through env untouched.
 
 
 def is_gateway_servable(provider: Optional[Dict[str, Any]]) -> bool:
@@ -640,9 +635,10 @@ def apply_provider_env(
       ``apply_context_window_env``: ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` for
       an app ``[1m]`` model, else ``"1"``) and — for non-``[1m]`` models —
       ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` pinned to the provider's
-      ``context_window`` (clamped ≥100k) or ``200000`` when the row leaves it
-      NULL. This stops the CLI self-deriving an auto-compact window off an
-      unrecognized (foreign/translated) model id and autocompacting immediately.
+      ``context_window`` EXACTLY, and only when the row sets one. No hardcoded
+      universal value: a NULL ``context_window`` leaves the auto-compact window
+      to the CLI (multi-provider rows carry different windows, so forcing one
+      threshold on all of them is wrong).
       Additionally, ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` is pinned to the
       provider's TRUE ``context_window`` (unclamped, only when the row sets
       one) so the CLI's own believed MAX window matches the provider instead
@@ -849,13 +845,15 @@ def apply_provider_env(
         env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0")
     else:
         env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1")
-        # Pin the auto-compact trigger. Prefer the provider's advertised
-        # context_window, clamped ≥100k so a tiny advertised window can't undercut
-        # a usable working context; fall back to 200000 — the CLI's own
-        # third-party-base-URL default window — when the row leaves
-        # context_window NULL, so the CLI never self-derives.
-        pin = str(max(int(context_window), 100000)) if context_window else "200000"
-        env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", pin)
+        # Pin the auto-compact trigger ONLY when the provider row advertises a
+        # context_window, and to that EXACT value — no ≥100k floor (inflating a
+        # small real window would delay compaction past the point where requests
+        # already overflow upstream) and no hardcoded 200000 fallback (forcing
+        # one universal compaction threshold is wrong across providers with
+        # different windows; when the row leaves context_window NULL the CLI's
+        # own third-party-base-URL default applies).
+        if context_window:
+            env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", str(int(context_window)))
 
         # The CLI's own max-context-window resolver hardcodes 200000 for any
         # model id that doesn't start with "claude-" (which every
@@ -863,12 +861,10 @@ def apply_provider_env(
         # is set — and it clamps CLAUDE_CODE_AUTO_COMPACT_WINDOW to whatever it
         # believes that max is. So without this key, a >200k provider
         # context_window is silently truncated back to 200k and near-window
-        # requests die with "Prompt is too long". Unlike the auto-compact pin
-        # above, this is the TRUE window: deliberately NOT clamped ≥100k
-        # (inflating a small real window would just push genuinely-over-window
-        # requests upstream to fail there instead), and deliberately left unset
-        # when context_window is NULL (the CLI's own 200k default is correct
-        # in that case).
+        # requests die with "Prompt is too long". Like the auto-compact pin
+        # above, this is the TRUE window — never clamped or defaulted — and
+        # deliberately left unset when context_window is NULL (the CLI's own
+        # 200k default is correct in that case).
         if context_window:
             env.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", str(int(context_window)))
             # Even with the true window pinned above, the CLI's pre-flight

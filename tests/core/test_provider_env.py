@@ -111,14 +111,17 @@ class TestApplyProviderEnv:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # forced wins
         assert env["FOO"] == "bar"             # non-conflicting extra_env kept
 
-    def test_context_window_clamped_to_100k(self, mock_db):
+    def test_small_context_window_pinned_exactly(self, mock_db):
+        """The auto-compact pin is the provider's EXACT window — no ≥100k floor
+        (inflating a small real window would delay compaction past the point
+        where requests already overflow upstream)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=50000)
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
-        assert env[AUTO_COMPACT_KEY] == "100000"  # 50k clamped up to 100k
+        assert env[AUTO_COMPACT_KEY] == "50000"
 
-    def test_context_window_above_floor_preserved(self, mock_db):
+    def test_large_context_window_pinned_exactly(self, mock_db):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=400000)
@@ -137,15 +140,14 @@ class TestApplyProviderEnv:
         assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
 
     def test_max_context_tokens_not_clamped_to_100k_floor(self, mock_db):
-        """Unlike CLAUDE_CODE_AUTO_COMPACT_WINDOW, the max-context pin is the TRUE
-        window and must NOT be clamped up to 100k — inflating a small real window
-        would just push genuinely-over-window requests upstream instead."""
+        """Both pins carry the provider's TRUE window — never clamped up to a
+        universal floor."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=64000)
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
         assert env[MAX_CONTEXT_TOKENS_KEY] == "64000"
-        assert env[AUTO_COMPACT_KEY] == "100000"  # auto-compact pin IS clamped
+        assert env[AUTO_COMPACT_KEY] == "64000"
 
     def test_blocking_limit_override_lifts_local_estimator_ceiling(self, mock_db):
         """FIX: the CLI's local "Prompt is too long" guard estimates ~3
@@ -207,19 +209,20 @@ class TestApplyProviderEnv:
         env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
         assert MAX_CONTEXT_TOKENS_KEY not in env
 
-    def test_null_context_window_pins_default_200k(self, mock_db):
-        """FIX: a provider row with context_window NULL must still pin the
-        auto-compact window to 200000 (the CLI's third-party-base-URL default)
-        so the CLI never self-derives a window off an unrecognized model id."""
+    def test_null_context_window_leaves_auto_compact_unset(self, mock_db):
+        """A provider row with context_window NULL leaves the auto-compact
+        window to the CLI — no hardcoded universal 200000 fallback (forcing one
+        compaction threshold across providers with different windows is wrong;
+        the CLI's own third-party-base-URL default applies)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=None)
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
-        assert env[AUTO_COMPACT_KEY] == "200000"
+        assert AUTO_COMPACT_KEY not in env
 
-    def test_null_context_window_auto_compact_preset_wins(self, mock_db):
-        """setdefault semantics: a pre-set value survives even on the NULL
-        context_window fallback."""
+    def test_null_context_window_auto_compact_preset_survives(self, mock_db):
+        """A pre-set value (profile preset / extra_env) passes through untouched
+        on a NULL context_window row."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=None)
@@ -230,8 +233,8 @@ class TestApplyProviderEnv:
 
     def test_disable_1m_set_for_codex_mode_provider(self, mock_db):
         """A translated (codex/chatgpt-mode) provider with a foreign model id gets
-        DISABLE_1M="1" and the default 200k pin — the exact autocompact-on-spawn
-        bug this fix addresses."""
+        DISABLE_1M="1"; with no context_window on the row, the auto-compact
+        window is left to the CLI (no hardcoded universal pin)."""
         from app.core.translator_gateway import routing
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
@@ -243,7 +246,7 @@ class TestApplyProviderEnv:
         )
         env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
         assert env[DISABLE_1M_KEY] == "1"
-        assert env[AUTO_COMPACT_KEY] == "200000"
+        assert AUTO_COMPACT_KEY not in env
 
     def test_1m_model_allows_wide_window_no_auto_compact_pin(self, mock_db):
         """An app [1m]-opted model keeps the wide window (DISABLE_1M="0") and does
@@ -306,8 +309,7 @@ class TestApplyProviderEnv:
 
     def test_auto_compact_window_preset_wins(self, mock_db):
         """FIX 4: a pre-set CLAUDE_CODE_AUTO_COMPACT_WINDOW (profile preset) wins
-        over the provider context_window — parity with the native path's
-        setdefault."""
+        over the provider context_window (setdefault semantics)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=400000)

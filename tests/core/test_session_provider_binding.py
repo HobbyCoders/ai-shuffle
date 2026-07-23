@@ -114,12 +114,11 @@ class TestSpawnResolvesFromBinding:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # binding won
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Provider path now unconditionally pins the context window (parity with
-        # the native apply_context_window_env): a non-[1m] model forces the 200k
-        # guard on, and — the provider row carries no context_window — the
-        # auto-compact trigger falls back to 200000.
+        # Provider path pins the 1M gate (non-[1m] model → 200k guard on) but —
+        # the provider row carries no context_window — leaves the auto-compact
+        # window to the CLI (no hardcoded universal pin).
         assert env[DISABLE_1M_KEY] == "1"
-        assert env[AUTO_COMPACT_KEY] == "200000"
+        assert AUTO_COMPACT_KEY not in env
 
     def test_null_binding_is_native_even_if_profile_has_provider(
         self, mock_db, tmp_path
@@ -186,10 +185,10 @@ class TestGenerationBinding:
         assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
         assert env[AUTH_TOKEN_KEY] == "gw-secret"
         assert env[API_KEY] == ""
-        # Provider path now pins the context window unconditionally: non-[1m]
-        # model → 200k guard on, and no context_window on the row → 200000.
+        # Provider path pins the 1M gate (non-[1m] model → 200k guard on); no
+        # context_window on the row → auto-compact window left to the CLI.
         assert env[DISABLE_1M_KEY] == "1"
-        assert env[AUTO_COMPACT_KEY] == "200000"
+        assert AUTO_COMPACT_KEY not in env
 
     def test_explicit_none_binding_keeps_native(self, mock_db):
         """An explicit None binding keeps the call native even though the profile

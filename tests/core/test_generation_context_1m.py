@@ -57,11 +57,12 @@ def test_generation_default_model_forces_200k():
 
 
 @pytest.mark.parametrize("model", ["fable", "opus", "sonnet", "claude-opus-4-8"])
-def test_generation_disable_path_pins_auto_compact_window(model):
-    """Disabling 1M for generation also pins the 200k auto-compact window."""
+def test_generation_disable_path_leaves_auto_compact_unset(model):
+    """Disabling 1M no longer pins a hardcoded auto-compact window — the CLI
+    derives the per-model window for native ``claude-*`` ids itself."""
     opts = _build({"model": model})
     assert opts.env[DISABLE_KEY] == "1"
-    assert opts.env[AUTO_COMPACT_KEY] == "200000"
+    assert AUTO_COMPACT_KEY not in opts.env
 
 
 @pytest.mark.parametrize("model", ["fable[1m]", "opus[1m]", "claude-opus-4-8[1m]"])
@@ -73,7 +74,7 @@ def test_generation_1m_leaves_auto_compact_unset(model):
 
 
 def test_generation_preexisting_auto_compact_window_preserved():
-    """A profile-supplied auto-compact window wins over our 200k default."""
+    """A profile-supplied auto-compact window passes through untouched."""
     opts = _build({"model": "fable", "env": {AUTO_COMPACT_KEY: "275000"}})
     assert opts.env[DISABLE_KEY] == "1"
     assert opts.env[AUTO_COMPACT_KEY] == "275000"

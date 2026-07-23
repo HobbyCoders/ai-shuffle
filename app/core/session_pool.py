@@ -41,10 +41,11 @@ logger = logging.getLogger(__name__)
 #   * OVERLAY keys (small/fast + subagent model, output/compaction tuning,
 #     upstream-mitigation flags) are only meaningful for a PROVIDER (gateway)
 #     session; comparing them on a NATIVE session wrongly forces a respawn.
-#     Concretely: a native [1m]-boundary model switch flips
-#     CLAUDE_CODE_AUTO_COMPACT_WINDOW between "200000" and absent, which must
-#     stay a hot-swap (respawning kills every background subagent). So overlay
-#     keys are compared ONLY when either side is a provider session.
+#     Concretely: native sessions no longer emit CLAUDE_CODE_AUTO_COMPACT_WINDOW
+#     at all (the CLI derives per-model windows), but a profile-preset value can
+#     still appear/disappear across native model switches, which must stay a
+#     hot-swap (respawning kills every background subagent). So overlay keys are
+#     compared ONLY when either side is a provider session.
 PROVIDER_IDENTITY_ENV_KEYS = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -82,9 +83,9 @@ def provider_env_requires_reconnect(
     Identity keys (base URL / auth) are always compared. Overlay keys are
     compared ONLY when either side is a provider (gateway) session — detected by
     KEY PRESENCE of ``ANTHROPIC_BASE_URL`` (presence, not truthiness), since a
-    provider overlay always sets it. This keeps native [1m]-boundary model
-    switches — which flip ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` between "200000"
-    and absent — as hot-swaps rather than subagent-killing respawns.
+    provider overlay always sets it. This keeps native model switches — where
+    overlay-key values (e.g. a profile-preset ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``)
+    can appear or disappear — as hot-swaps rather than subagent-killing respawns.
 
     Logs the differing key NAME only, never its value (provider env carries the
     decrypted auth token).
