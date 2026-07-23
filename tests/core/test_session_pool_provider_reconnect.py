@@ -111,6 +111,24 @@ def test_provider_auto_compact_flip_forces_reconnect():
     assert requires_reconnect(state, new) is True
 
 
+def test_max_context_tokens_delta_forces_reconnect_for_provider_session():
+    """CLAUDE_CODE_MAX_CONTEXT_TOKENS differing between old/new env on a
+    provider session (ANTHROPIC_BASE_URL present) requires a reconnect — a
+    provider context_window edit must respawn to take effect."""
+    base = "https://gateway.example.com"
+    state = _make_state({"ANTHROPIC_BASE_URL": base, "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "200000"})
+    new = _new_options({"ANTHROPIC_BASE_URL": base, "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "272000"})
+    assert requires_reconnect(state, new) is True
+
+
+def test_max_context_tokens_delta_is_hotswap_for_native_session():
+    """The same CLAUDE_CODE_MAX_CONTEXT_TOKENS delta with no ANTHROPIC_BASE_URL
+    on either side (native session) is a hot-swap, not a reconnect."""
+    state = _make_state({"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "200000"})
+    new = _new_options({"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "272000"})
+    assert requires_reconnect(state, new) is False
+
+
 def test_identity_key_change_always_reconnects_even_native():
     """FIX 1: an identity-key change reconnects regardless of provider-ness."""
     state = _make_state({"ANTHROPIC_AUTH_TOKEN": "old"})

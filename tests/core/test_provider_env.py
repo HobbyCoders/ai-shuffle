@@ -36,6 +36,7 @@ SMALL_FAST_KEY = "ANTHROPIC_SMALL_FAST_MODEL"
 SUBAGENT_KEY = "CLAUDE_CODE_SUBAGENT_MODEL"
 DISABLE_1M_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
 AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+MAX_CONTEXT_TOKENS_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 MAX_OUTPUT_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 TRANSLATED_MAIN_KEY = "AIH_GATEWAY_TRANSLATED_MAIN"
 MITIGATION_KEYS = (
@@ -123,6 +124,88 @@ class TestApplyProviderEnv:
         _mk_provider(db, context_window=400000)
         env = apply_provider_env({}, "op", "openai/gpt-5.6")
         assert env[AUTO_COMPACT_KEY] == "400000"
+
+    def test_max_context_tokens_pinned_to_true_window(self, mock_db):
+        """FIX: CLAUDE_CODE_MAX_CONTEXT_TOKENS is pinned to the provider's TRUE
+        context_window so the CLI's believed MAX window matches the provider —
+        otherwise it clamps CLAUDE_CODE_AUTO_COMPACT_WINDOW to its own 200k
+        default for any non-claude-* model id."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_max_context_tokens_not_clamped_to_100k_floor(self, mock_db):
+        """Unlike CLAUDE_CODE_AUTO_COMPACT_WINDOW, the max-context pin is the TRUE
+        window and must NOT be clamped up to 100k — inflating a small real window
+        would just push genuinely-over-window requests upstream instead."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=64000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "64000"
+        assert env[AUTO_COMPACT_KEY] == "100000"  # auto-compact pin IS clamped
+
+    def test_blocking_limit_override_lifts_local_estimator_ceiling(self, mock_db):
+        """FIX: the CLI's local "Prompt is too long" guard estimates ~3
+        chars/token (vs o200k's ~4 for prose), so turns that really fit the
+        provider window get hard-blocked locally — and the same ceiling blocks
+        the reactive-compaction rescue request. CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+        is pinned to 2x the true window so oversize protection defers to the
+        gateway's accurate tiktoken guard."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "544000"
+
+    def test_blocking_limit_override_absent_when_context_window_null(self, mock_db):
+        """No true window known → leave the CLI's own blocking behavior alone."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE" not in env
+
+    def test_blocking_limit_override_preset_wins(self, mock_db):
+        """setdefault semantics: extra_env/profile preset survives."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env(
+            {"CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE": "123456"}, "op", "openai/gpt-5.6"
+        )
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "123456"
+
+    def test_max_context_tokens_absent_when_context_window_null(self, mock_db):
+        """A NULL context_window row leaves CLAUDE_CODE_MAX_CONTEXT_TOKENS unset —
+        the CLI's own 200k default is correct in that case."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert MAX_CONTEXT_TOKENS_KEY not in env
+
+    def test_max_context_tokens_preset_wins(self, mock_db):
+        """setdefault semantics: a pre-existing value (extra_env/profile preset)
+        survives over the provider's context_window."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env(
+            {MAX_CONTEXT_TOKENS_KEY: "999999"}, "op", "openai/gpt-5.6"
+        )
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "999999"
+
+    def test_max_context_tokens_absent_for_1m_model(self, mock_db):
+        """An app [1m]-opted model skips the whole non-1m else-branch, so
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS is never set for it."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
+        assert MAX_CONTEXT_TOKENS_KEY not in env
 
     def test_null_context_window_pins_default_200k(self, mock_db):
         """FIX: a provider row with context_window NULL must still pin the
