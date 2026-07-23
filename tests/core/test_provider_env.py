@@ -200,14 +200,30 @@ class TestApplyProviderEnv:
         )
         assert env[MAX_CONTEXT_TOKENS_KEY] == "999999"
 
-    def test_max_context_tokens_absent_for_1m_model(self, mock_db):
-        """An app [1m]-opted model skips the whole non-1m else-branch, so
-        CLAUDE_CODE_MAX_CONTEXT_TOKENS is never set for it."""
+    def test_row_context_window_overrides_1m_suffix(self, mock_db):
+        """The provider row's context_window is AUTHORITATIVE: a sub-1M row
+        clamps even an app [1m]-suffixed model id (the suffix is a
+        Claude-native-picker decoration, not provider config)."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=272000)
         env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
-        assert MAX_CONTEXT_TOKENS_KEY not in env
+        assert env[DISABLE_1M_KEY] == "1"
+        assert env[AUTO_COMPACT_KEY] == "272000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_row_1m_context_window_enables_wide_window(self, mock_db):
+        """A row advertising a ≥1M window gets the wide window WITHOUT any [1m]
+        suffix — previously impossible (the gate universally forced 200k on
+        provider sessions) — and all pins carry the exact row value."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=1_000_000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "2000000"
 
     def test_null_context_window_leaves_auto_compact_unset(self, mock_db):
         """A provider row with context_window NULL leaves the auto-compact

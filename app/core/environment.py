@@ -631,21 +631,19 @@ def apply_provider_env(
       ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``,
       ``CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK``)
     - optional ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
-    - context-window safety pins (ALL provider modes) mirroring the native
-      ``apply_context_window_env``: ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` for
-      an app ``[1m]`` model, else ``"1"``) and — for non-``[1m]`` models —
-      ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` pinned to the provider's
-      ``context_window`` EXACTLY, and only when the row sets one. No hardcoded
-      universal value: a NULL ``context_window`` leaves the auto-compact window
-      to the CLI (multi-provider rows carry different windows, so forcing one
-      threshold on all of them is wrong).
-      Additionally, ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` is pinned to the
-      provider's TRUE ``context_window`` (unclamped, only when the row sets
-      one) so the CLI's own believed MAX window matches the provider instead
-      of its 200k default for any non-``claude-*`` model id — otherwise the
-      CLI clamps ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` down to that wrong 200k
-      belief and a >200k provider window silently truncates, killing
-      near-window requests with "Prompt is too long".
+    - context-window vars (ALL provider modes), driven by the provider row's
+      ``context_window`` when set — the row is AUTHORITATIVE, the app's
+      Claude-specific ``[1m]`` suffix does not override it:
+      ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` (``"0"`` iff the window is ≥1M),
+      ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` and ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
+      pinned to the EXACT window (no clamps, no hardcoded fallback — the
+      max-context pin stops the CLI's 200k belief for non-``claude-*`` ids from
+      truncating a larger window into "Prompt is too long"), and
+      ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` at 2x the window. A NULL
+      ``context_window`` sets only the 1M gate — from the app's ``[1m]``
+      opt-in, mirroring the native ``apply_context_window_env`` (inert for
+      foreign ids, protects claude-* ids on anthropic rows) — and leaves every
+      other window var to the CLI's own defaults.
       All use ``setdefault`` so an explicit profile/user/extra_env value wins.
     - ``AIH_GATEWAY_TRANSLATED_MAIN=1`` — set IFF the MAIN provider is translated
       (openai/chatgpt ``provider_type`` or ``chatgpt`` ``auth_mode``); consumed by
@@ -839,21 +837,25 @@ def apply_provider_env(
     # provider session compacts/errors near 200k despite a larger
     # context_window, check that file first.
     context_window = provider.get("context_window")
-    if has_1m_context(model):
-        # 1M explicitly opted in — allow the wide window and DON'T pin
-        # auto-compaction (parity with apply_context_window_env's early return).
-        env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0")
-    else:
-        env.setdefault("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1")
-        # Pin the auto-compact trigger ONLY when the provider row advertises a
-        # context_window, and to that EXACT value — no ≥100k floor (inflating a
-        # small real window would delay compaction past the point where requests
-        # already overflow upstream) and no hardcoded 200000 fallback (forcing
-        # one universal compaction threshold is wrong across providers with
-        # different windows; when the row leaves context_window NULL the CLI's
-        # own third-party-base-URL default applies).
-        if context_window:
-            env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", str(int(context_window)))
+    if context_window:
+        # The provider row advertises a context_window — that value is
+        # AUTHORITATIVE for every window var, including the 1M gate. The app's
+        # ``[1m]`` model-id suffix is a Claude-native-picker decoration and must
+        # not override explicit provider config: a row with a ≥1M window gets the
+        # wide window whether or not the id carries the suffix (previously
+        # impossible — the gate universally forced 200k on provider sessions),
+        # and a row with a smaller window clamps a ``[1m]`` id back down.
+        cw = int(context_window)
+        env.setdefault(
+            "CLAUDE_CODE_DISABLE_1M_CONTEXT", "0" if cw >= 1_000_000 else "1"
+        )
+
+        # Pin the auto-compact trigger to the row's EXACT window — no ≥100k
+        # floor (inflating a small real window would delay compaction past the
+        # point where requests already overflow upstream) and no hardcoded
+        # fallback (forcing one universal compaction threshold is wrong across
+        # providers with different windows).
+        env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", str(cw))
 
         # The CLI's own max-context-window resolver hardcodes 200000 for any
         # model id that doesn't start with "claude-" (which every
@@ -862,28 +864,33 @@ def apply_provider_env(
         # believes that max is. So without this key, a >200k provider
         # context_window is silently truncated back to 200k and near-window
         # requests die with "Prompt is too long". Like the auto-compact pin
-        # above, this is the TRUE window — never clamped or defaulted — and
-        # deliberately left unset when context_window is NULL (the CLI's own
-        # 200k default is correct in that case).
-        if context_window:
-            env.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", str(int(context_window)))
-            # Even with the true window pinned above, the CLI's pre-flight
-            # "Prompt is too long" guard uses a conservative local token
-            # estimator (~3 chars/token vs o200k's ~4 for prose), so a turn
-            # that REALLY fits the provider window can overshoot the local
-            # estimate by ~33% and be hard-blocked before any request is sent
-            # (observed: the bundled ``claude-api`` skill's ~800k-char doc
-            # injection ≈ 200k real tokens estimated as ~280k). The same
-            # ceiling also blocks the reactive-compaction request itself, so
-            # autocompact can't rescue the turn either. Lift the local ceiling
-            # to 2x the window: the translator gateway runs an ACCURATE
-            # tiktoken guard on every request and 400s cleanly before
-            # upstream, so the local estimate adds no protection here — it
-            # only misfires. Autocompaction thresholds are unaffected (they
-            # key off CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
-            env.setdefault(
-                "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(int(context_window) * 2)
-            )
+        # above, this is the TRUE window — never clamped or defaulted.
+        env.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", str(cw))
+        # Even with the true window pinned above, the CLI's pre-flight
+        # "Prompt is too long" guard uses a conservative local token
+        # estimator (~3 chars/token vs o200k's ~4 for prose), so a turn
+        # that REALLY fits the provider window can overshoot the local
+        # estimate by ~33% and be hard-blocked before any request is sent
+        # (observed: the bundled ``claude-api`` skill's ~800k-char doc
+        # injection ≈ 200k real tokens estimated as ~280k). The same
+        # ceiling also blocks the reactive-compaction request itself, so
+        # autocompact can't rescue the turn either. Lift the local ceiling
+        # to 2x the window: the translator gateway runs an ACCURATE
+        # tiktoken guard on every request and 400s cleanly before
+        # upstream, so the local estimate adds no protection here — it
+        # only misfires. Autocompaction thresholds are unaffected (they
+        # key off CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
+        env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
+    else:
+        # No advertised window — fall back to the app's Claude-specific ``[1m]``
+        # opt-in gate (parity with the native path's apply_context_window_env).
+        # This is inert for foreign/translated model ids (the CLI's 1M logic
+        # only applies to claude-* models) but still protects claude-* ids
+        # served through anthropic-type rows from silently running at 1M, and
+        # leaves every window var to the CLI's own defaults otherwise.
+        env.setdefault(
+            "CLAUDE_CODE_DISABLE_1M_CONTEXT", "0" if has_1m_context(model) else "1"
+        )
 
     # R4: point the small/fast model at something the gateway knows. Fall back to
     # a STABLE provider-scoped value (never the per-turn `model`): a within-provider
