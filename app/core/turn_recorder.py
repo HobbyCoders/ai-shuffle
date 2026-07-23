@@ -686,6 +686,9 @@ class TurnRecorder:
                 )
                 if k in metadata
             }
+            # usage is an open dict in the contract, so per-model usage rides here to stay durable in session_events under postgres_only.
+            if metadata.get("model_usage"):
+                usage_summary["model_usage"] = metadata["model_usage"]
             # Phase 2 A5 amendment (plan §1.6(1)): carry the pump's API error
             # status into the terminal payload — a usage-limit 429 turn
             # otherwise settles as a normal completion with api_error_status
@@ -700,13 +703,19 @@ class TurnRecorder:
             events.append(self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),
+                terminal_reason=metadata.get("terminal_reason"),
                 usage=usage_summary,
                 extra_payload=api_error,
             ))
             self._terminal_recorded = True
         elif etype == "interrupted":
             events.extend(self._flush_pending_usage())
-            events.append(self._event(contract.TurnAborted, reason="interrupt"))
+            interrupt_meta = event.get("metadata") or {}
+            events.append(self._event(
+                contract.TurnAborted,
+                reason="interrupt",
+                terminal_reason=interrupt_meta.get("terminal_reason"),
+            ))
             self._terminal_recorded = True
         elif etype == "error":
             events.extend(self._flush_pending_usage())

@@ -78,6 +78,38 @@ describe('turn lifecycle', () => {
 		expect(s.usage).toEqual({ context_used: 42 });
 	});
 
+	it('turn.completed(terminal_reason=max_turns) appends a neutral info card', () => {
+		// SDK 0.2.126: a turn that hit the configured max-turns ceiling surfaces
+		// terminal_reason='max_turns' → a neutral (info, not error) system card.
+		const s = fold([
+			ev('turn.started'),
+			ev('assistant.text_delta', { text: 'partial answer' }),
+			ev('turn.completed', { terminal_reason: 'max_turns' }),
+		]);
+		const card = s.messages[s.messages.length - 1];
+		expect(card.role).toBe('system');
+		expect(card.systemSubtype).toBe('info');
+		expect(card.content).toContain('Turn limit reached');
+		expect(card.content).toContain('Send a message to continue');
+	});
+
+	it('turn.completed without max_turns appends no info card', () => {
+		const s = fold([
+			ev('turn.started'),
+			ev('assistant.text_delta', { text: 'done' }),
+			ev('turn.completed', { terminal_reason: 'completed' }),
+		]);
+		expect(s.messages.some((m) => m.role === 'system')).toBe(false);
+	});
+
+	it('replaying a max_turns turn.completed does not duplicate the info card', () => {
+		const evt = ev('turn.completed', { id: 'tc-mt', terminal_reason: 'max_turns' });
+		const s1 = reduce(reduce(initialState(), ev('turn.started')), evt);
+		const s2 = reduce(s1, evt); // fold the same event again (replay)
+		const cards = s2.messages.filter((m) => m.systemSubtype === 'info');
+		expect(cards).toHaveLength(1);
+	});
+
 	it('turn.aborted(interrupt) errors a running tool card', () => {
 		const s = fold([
 			ev('turn.started'),

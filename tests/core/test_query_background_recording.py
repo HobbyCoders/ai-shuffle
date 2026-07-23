@@ -47,6 +47,10 @@ def _result_message(session_id: str = "sdk-1") -> ResultMessage:
         total_cost_usd=0.01,
         usage={"input_tokens": 10, "output_tokens": 5},
         result="done",
+        # SDK 0.2.126: terminal_reason + typed per-model usage now thread
+        # through result metadata (query_background ResultMessage block).
+        terminal_reason="completed",
+        model_usage={"claude": {"provider": "firstParty"}},
     )
 
 
@@ -206,6 +210,15 @@ async def test_background_turn_records_full_event_sequence(mock_db):
     completed = rows[-1]["payload"]
     assert completed["usage"]["tokens_in"] == 10
     assert completed["usage"]["tokens_out"] == 5
+    # SDK 0.2.126: terminal_reason threads onto the turn.completed payload.
+    assert completed["terminal_reason"] == "completed"
+
+    # ...and the raw ResultMessage metadata (terminal_reason + typed
+    # model_usage) reaches the durable turn-persist seam for future per-model
+    # cost display.
+    persist_meta = persist_results.await_args.kwargs["metadata"]
+    assert persist_meta["terminal_reason"] == "completed"
+    assert persist_meta["model_usage"] == {"claude": {"provider": "firstParty"}}
 
     # Every event this turn appended was FENCED by the claimed run lease...
     run_ids = {r["run_id"] for r in rows}

@@ -557,13 +557,13 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			return next;
 		}
 
-		case 'turn.completed':
+		case 'turn.completed': {
 			// turn.completed fires unconditionally when the pump drains — background
 			// work may still remain, in which case the park gate emits turn.parked
 			// right after. Speculatively settle any still-'running' subagent card /
 			// task summary that missed its terminal event (#609 self-heal); a
 			// following turn.parked reverts that settle. See settleStaleBackgroundWork.
-			return settleStaleBackgroundWork(
+			const completed = settleStaleBackgroundWork(
 				closeOpen({
 					...state,
 					isStreaming: false,
@@ -574,6 +574,37 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					usage: obj(event.usage) ?? state.usage,
 				})
 			);
+			// SDK 0.2.126: a turn that stopped because it hit the configured
+			// max-turns ceiling carries terminal_reason='max_turns'. Surface a
+			// neutral (non-error) informational system card so the user knows the
+			// response was truncated by the turn limit rather than finishing
+			// naturally. Mirrors the turn.aborted error branch's appendMessage
+			// mechanism, but with the gray 'info' subtype; systemData.content
+			// feeds SystemMessage's default (neutral) renderer. The duplicate
+			// guard defends against the same event folding twice on replay.
+			if (str(event.terminal_reason) === 'max_turns') {
+				const text =
+					'Turn limit reached — the response stopped after hitting the ' +
+					'configured maximum turns. Send a message to continue.';
+				const last = completed.messages[completed.messages.length - 1];
+				const duplicate =
+					last?.role === 'system' &&
+					last.systemSubtype === 'info' &&
+					last.content === text;
+				if (!duplicate) {
+					return appendMessage(completed, {
+						id: event.id,
+						role: 'system',
+						type: 'system',
+						content: text,
+						systemSubtype: 'info',
+						systemData: { content: text },
+						timestamp: createdAt || undefined,
+					}, seq);
+				}
+			}
+			return completed;
+		}
 
 		case 'turn.aborted': {
 			const reason = str(event.reason);

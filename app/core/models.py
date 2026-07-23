@@ -476,6 +476,7 @@ class QueryMetadata(BaseModel):
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
     num_turns: Optional[int] = None
+    terminal_reason: Optional[str] = None
 
 
 class QueryResponse(BaseModel):

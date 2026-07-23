@@ -42,6 +42,7 @@ class TurnParked(EventBase):
 class TurnCompleted(EventBase):
     type: Literal["turn.completed"] = "turn.completed"
     stop_reason: str | None = None
+    terminal_reason: str | None = None
     usage: dict = Field(default_factory=dict)
 
 
@@ -53,6 +54,7 @@ class TurnUsage(EventBase):
 class TurnAborted(EventBase):
     type: Literal["turn.aborted"] = "turn.aborted"
     reason: str | None = None
+    terminal_reason: str | None = None
 
 
 class MessageUser(EventBase):

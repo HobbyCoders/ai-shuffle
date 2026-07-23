@@ -1035,6 +1035,9 @@ async def execute_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # SDK 0.2.126: terminal reason + typed per-model usage pass-through
+                metadata["terminal_reason"] = getattr(message, "terminal_reason", None)
+                metadata["model_usage"] = getattr(message, "model_usage", None)
                 # Surface SDK-reported errors (added in SDK 0.1.51)
                 result_errors = getattr(message, 'errors', None)
                 if result_errors:
@@ -1687,6 +1690,9 @@ async def stream_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # SDK 0.2.126: terminal reason + typed per-model usage pass-through
+                metadata["terminal_reason"] = getattr(message, "terminal_reason", None)
+                metadata["model_usage"] = getattr(message, "model_usage", None)
                 # Surface SDK-reported errors (added in SDK 0.1.51)
                 result_errors = getattr(message, 'errors', None)
                 if result_errors:
@@ -1711,7 +1717,7 @@ async def stream_query(
     except asyncio.CancelledError:
         interrupted = True
         logger.debug(f"Query interrupted for session {session_id}")
-        yield {"type": "interrupted", "message": "Query was interrupted"}
+        yield {"type": "interrupted", "message": "Query was interrupted", "metadata": {"terminal_reason": metadata.get("terminal_reason")}}
 
     except (Exception, BaseExceptionGroup) as e:
         # Unwrap ExceptionGroup from SDK's anyio.TaskGroup (Python 3.11+)
@@ -3618,6 +3624,9 @@ async def _stream_to_websocket_impl(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # SDK 0.2.126: terminal reason + typed per-model usage pass-through
+                metadata["terminal_reason"] = getattr(message, "terminal_reason", None)
+                metadata["model_usage"] = getattr(message, "model_usage", None)
                 # Surface SDK-reported errors (added in SDK 0.1.51)
                 result_errors = getattr(message, 'errors', None)
                 if result_errors:
@@ -3798,7 +3807,8 @@ async def _stream_to_websocket_impl(
         yield {
             "type": "interrupted",
             "session_id": session_id,
-            "message": "Query was interrupted"
+            "message": "Query was interrupted",
+            "metadata": {"terminal_reason": metadata.get("terminal_reason")}
         }
     else:
         yield {

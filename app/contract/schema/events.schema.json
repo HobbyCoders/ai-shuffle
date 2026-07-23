@@ -2265,6 +2265,18 @@
           "title": "Session Id",
           "type": "string"
         },
+        "terminal_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal Reason"
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -2347,6 +2359,18 @@
           ],
           "default": null,
           "title": "Stop Reason"
+        },
+        "terminal_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal Reason"
         },
         "turn_id": {
           "anyOf": [

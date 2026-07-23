@@ -449,16 +449,36 @@ async def test_done_maps_to_turn_completed_with_usage_summary(mock_db):
         "metadata": {
             "stop_reason": "end_turn", "tokens_in": 5, "tokens_out": 7,
             "total_cost_usd": 0.01, "duration_ms": 1200, "num_turns": 1,
+            "terminal_reason": "completed",
             "last_assistant_uuid": "not-a-usage-key",
         },
     })
     row = _rows()[-1]
     assert row["event_type"] == "turn.completed"
     assert row["payload"]["stop_reason"] == "end_turn"
+    # SDK 0.2.126: terminal_reason threads through the done metadata into the
+    # turn.completed contract payload.
+    assert row["payload"]["terminal_reason"] == "completed"
     assert row["payload"]["usage"] == {
         "tokens_in": 5, "tokens_out": 7, "total_cost_usd": 0.01,
         "duration_ms": 1200, "num_turns": 1,
     }
+    await rec.close()
+
+
+async def test_done_max_turns_carries_terminal_reason(mock_db):
+    # A turn that stopped on the max-turns ceiling surfaces
+    # terminal_reason='max_turns'; it must reach the turn.completed payload so
+    # the frontend can render its "turn limit reached" hint.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {"stop_reason": "end_turn", "terminal_reason": "max_turns"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert row["payload"]["terminal_reason"] == "max_turns"
     await rec.close()
 
 
@@ -498,6 +518,47 @@ async def test_done_without_api_error_has_no_error_keys(mock_db):
     await rec.close()
 
 
+async def test_done_carries_model_usage_in_usage_payload(mock_db):
+    # Per-model usage rides on the turn.completed usage dict (open in the
+    # contract) so it stays durable in session_events under postgres_only,
+    # where the session_store final-row metadata path is gated off.
+    _mk_session()
+    rec = await _recorder()
+    model_usage = {
+        "claude-fable-5": {
+            "inputTokens": 10, "outputTokens": 5, "provider": "firstParty",
+        },
+    }
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {
+            "stop_reason": "end_turn", "tokens_in": 5,
+            "model_usage": model_usage,
+        },
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert row["payload"]["usage"]["model_usage"] == model_usage
+    await rec.close()
+
+
+async def test_done_without_model_usage_omits_key(mock_db):
+    # model_usage None/absent must not leak an empty key into the usage dict.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "done", "session_id": SID,
+        "metadata": {
+            "stop_reason": "end_turn", "tokens_in": 5,
+            "model_usage": None,
+        },
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.completed"
+    assert "model_usage" not in row["payload"]["usage"]
+    await rec.close()
+
+
 async def test_interrupted_maps_to_turn_aborted_interrupt(mock_db):
     _mk_session()
     rec = await _recorder()
@@ -505,6 +566,23 @@ async def test_interrupted_maps_to_turn_aborted_interrupt(mock_db):
     row = _rows()[-1]
     assert row["event_type"] == "turn.aborted"
     assert row["payload"]["reason"] == "interrupt"
+    await rec.close()
+
+
+async def test_interrupted_carries_terminal_reason_from_metadata(mock_db):
+    # SDK 0.2.126: the interrupted frame now carries the SDK terminal_reason in
+    # its metadata (e.g. aborted_streaming/aborted_tools); the turn.aborted
+    # contract payload must reflect it.
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "interrupted", "session_id": SID,
+        "metadata": {"terminal_reason": "aborted_streaming"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "turn.aborted"
+    assert row["payload"]["reason"] == "interrupt"
+    assert row["payload"]["terminal_reason"] == "aborted_streaming"
     await rec.close()
 
 
