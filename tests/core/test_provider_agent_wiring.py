@@ -111,6 +111,40 @@ def test_sessionless_build_is_skipped(monkeypatch):
     assert _SERVER_KEY not in _servers(opts)
 
 
+def test_worker_cannot_ask_user_questions(monkeypatch):
+    """Ruling A3: a worker's ``AskUserQuestion`` would stall against the
+    question TTL (approvals are redirected to the parent, questions are not),
+    so the tool is stripped from worker sessions instead."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "provider_agent_enabled", True)
+    pa.register_worker_session("worker-1")
+
+    with _stubbed_server():
+        opts = _build(session_id="worker-1")
+
+    assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
+
+
+def test_non_worker_session_keeps_ask_user_question(monkeypatch):
+    """The exclusion is worker-scoped — an ordinary session is untouched."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "provider_agent_enabled", True)
+
+    with _stubbed_server():
+        opts = _build(session_id="parent-1")
+
+    assert qo.WORKER_DISALLOWED_TOOL not in (opts.disallowed_tools or [])
+
+    # ...and so is a build with the feature off entirely.
+    monkeypatch.setattr(settings, "provider_agent_enabled", False)
+    with _stubbed_server():
+        opts_off = _build(session_id="parent-1")
+
+    assert qo.WORKER_DISALLOWED_TOOL not in (opts_off.disallowed_tools or [])
+
+
 def test_server_factory_failure_does_not_break_the_build(monkeypatch):
     """A broken factory must degrade to "no ProviderAgent", never a failed spawn."""
     from app.core.config import settings

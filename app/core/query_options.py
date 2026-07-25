@@ -54,6 +54,11 @@ from app.core.environment import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+# The CLI's interactive question tool, blocked for ProviderAgent worker
+# sessions (ruling A3, 2026-07-25 — workers cannot ask user questions).
+WORKER_DISALLOWED_TOOL = "AskUserQuestion"
+
+
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
@@ -698,7 +703,20 @@ def build_options_from_profile(
     if settings.provider_agent_enabled and session_id:
         try:
             from app.core.provider_agent import is_provider_agent_worker
-            if not is_provider_agent_worker(session_id):
+            if is_provider_agent_worker(session_id):
+                # Ruling A3 (2026-07-25): a worker must not be able to ask the
+                # human anything. Worker tool APPROVALS are redirected to the
+                # parent, but ``AskUserQuestion`` is a different interaction
+                # kind with its own handler/TTL and is NOT redirected — a
+                # worker that asked would simply stall until
+                # ``user_question_timeout_seconds`` expired. Redirection was
+                # deliberately not built; the tool is removed instead, riding
+                # the same nesting-guard signal (in-process set OR persisted
+                # worker turn source) so it survives resume and cross-runner
+                # placement exactly like the ProviderAgent omission above.
+                if WORKER_DISALLOWED_TOOL not in disallowed_tools:
+                    disallowed_tools = [*disallowed_tools, WORKER_DISALLOWED_TOOL]
+            else:
                 from app.mcp.provider_agent_sdk import get_provider_agent_tool_names
                 mcp_allowed_tools.extend(get_provider_agent_tool_names())
         except Exception:

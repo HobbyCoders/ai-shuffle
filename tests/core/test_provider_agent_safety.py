@@ -601,6 +601,31 @@ class TestNestingGuardWiring:
         servers = opts.mcp_servers if isinstance(opts.mcp_servers, dict) else {}
         assert "provider-agent" not in servers
 
+    def test_ask_user_question_is_stripped_from_a_cross_runner_worker(self, db, monkeypatch):
+        """Ruling A3: the question exclusion rides the SAME guard, so it holds
+        for a resumed worker whose turn is claimed by another runner (nothing
+        in this process registered the id)."""
+        from app.core.config import settings
+        from app.db import runs as runs_db
+        import app.core.query_options as qo
+
+        monkeypatch.setattr(settings, "provider_agent_enabled", True)
+        turn = turns_db.enqueue_turn("worker-q", pa.WORKER_TURN_SOURCE, prompt="x")
+        run = runs_db.claim_run("worker-q", "runner-b", 60)
+        turns_db.start_turn(turn["id"], run["id"], "runner-b")
+
+        with patch("app.mcp.provider_agent_sdk.create_provider_agent_server",
+                   return_value=MagicMock()), \
+                patch.object(qo, "get_security_instructions", return_value=""):
+            opts, _ = qo.build_options_from_profile(
+                profile={"id": "t", "config": {"model": "opus",
+                                               "tools_preset": "claude_code"}},
+                session_id="worker-q",
+            )
+
+        assert pa.is_worker_session("worker-q") is False
+        assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
+
     async def test_the_tool_handler_refuses_a_cross_runner_worker(self, db, monkeypatch):
         from app.core.config import settings
         from app.db import runs as runs_db
