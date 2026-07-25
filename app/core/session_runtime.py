@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.core.config import settings
+from app.core.permission_handler import permission_handler
 from app.core.turn_recorder import (
     TurnRecorder,
     record_interrupting,
@@ -785,6 +786,21 @@ class SessionRuntime:
             await record_interrupting(sid, mode)  # turn.interrupting event
         except Exception:
             logger.debug("SessionRuntime: record_interrupting failed for %s", sid, exc_info=True)
+
+        # Stop must also release anything BLOCKED ON THE USER. A pending
+        # tool-approval prompt is awaited inside a DETACHED SDK task sitting in
+        # ``interaction_wait.await_interaction``; the SDK-level interrupt below
+        # cannot reach it, so without this the session keeps a live waiter (and
+        # a prompt on screen) until the 5-minute TTL sweeps it — the turn looks
+        # unstoppable. ``cancel_all_requests`` is the ONE correct unblock: it
+        # flips each pending row via ``interactions.cancel_interaction`` and
+        # then ``notify_changed``-es the session's waiters.
+        try:
+            await permission_handler.cancel_all_requests(sid)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: cancel_all_requests failed for %s", sid, exc_info=True
+            )
 
         try:
             from app.core.query_session_lifecycle import interrupt_session

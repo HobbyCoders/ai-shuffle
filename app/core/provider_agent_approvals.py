@@ -364,3 +364,93 @@ async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
             route.parent_session_id, route.worker_session_id,
         )
         return PermissionResultDeny(message=ROUTE_FAILURE_MESSAGE)
+
+
+# ---------------------------------------------------------------------------
+# Teardown: sweeping a killed worker's prompts off the parent
+# ---------------------------------------------------------------------------
+
+def worker_id_of(row: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The worker session id a pending-interaction row was redirected FROM.
+
+    ``None`` for an ordinary (non-worker) prompt. Reads the same
+    ``payload.provider_agent`` tag :meth:`WorkerApprovalRoute.as_payload` writes
+    and ``permission_handler._build_permission_payload`` persists.
+    """
+    payload = (row or {}).get("payload")
+    if not isinstance(payload, dict):
+        return None
+    tag = payload.get("provider_agent")
+    if not isinstance(tag, dict):
+        return None
+    worker = tag.get("worker_session_id")
+    return worker if isinstance(worker, str) and worker else None
+
+
+def cancel_worker_prompts(worker_session_id: str, parent_session_id: str) -> int:
+    """Cancel a killed worker's still-pending prompts on its PARENT. Never raises.
+
+    Worker approvals live on the parent's session id (that is the whole point of
+    this module), so killing the worker's session does NOT touch them: the row
+    stays pending on a surface the user is still looking at, for a prompt whose
+    asker no longer exists, until the 5-minute TTL sweeps it. Worse, the worker's
+    ``await_interaction`` waiter runs in a DETACHED SDK task that only the row
+    flipping out of ``pending`` can unblock.
+
+    Selection is by the ``payload.provider_agent.worker_session_id`` tag rather
+    than by the route registry, deliberately: routes are never unregistered (the
+    registry is bounded and self-trimming — see ``_ROUTES``), so a lookup there
+    would tell us nothing about which ROWS belong to this worker, and a sibling
+    worker prompting the same parent must be left strictly alone.
+
+    ONE ``notify_changed`` for the whole sweep: it wakes every waiter registered
+    on the parent and each re-reads its own row, so per-row notifies would be
+    pure duplicate work.
+
+    Returns the number of rows actually cancelled (0 when there were none).
+    """
+    if not worker_session_id or not parent_session_id:
+        return 0
+
+    from app.core import interaction_wait
+    from app.core.permission_handler import PERMISSION_KIND
+    from app.db import interactions
+
+    try:
+        rows = interactions.get_pending_interactions(parent_session_id)
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.warning(
+            "ProviderAgent approvals: pending-prompt read failed for parent %s",
+            parent_session_id, exc_info=True,
+        )
+        return 0
+
+    cancelled = 0
+    for row in rows:
+        if row.get("kind") != PERMISSION_KIND:
+            continue
+        if worker_id_of(row) != worker_session_id:
+            continue
+        try:
+            if interactions.cancel_interaction(row["id"]):
+                cancelled += 1
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "ProviderAgent approvals: cancel failed for interaction %s",
+                row.get("id"), exc_info=True,
+            )
+
+    if cancelled:
+        try:
+            interaction_wait.notify_changed(parent_session_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "ProviderAgent approvals: notify_changed failed for parent %s",
+                parent_session_id, exc_info=True,
+            )
+        logger.info(
+            "ProviderAgent approvals: cancelled %d pending prompt(s) of worker %s "
+            "on parent %s",
+            cancelled, worker_session_id, parent_session_id,
+        )
+    return cancelled

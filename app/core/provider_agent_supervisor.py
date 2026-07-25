@@ -63,6 +63,13 @@ TURN_END_SUMMARY = "Parent turn ended — worker stopped"
 STOP_ALL_REASON = "user_stopped_all"
 STOP_ALL_SUMMARY = "Stopped by user (stop all workers)"
 
+#: ``reason`` stamped on a worker killed because its provider's circuit breaker
+#: opened mid-flight (``provider_agent.dispatch_worker``'s rate-limit fail-fast).
+#: Distinct from both of the above so the terminal row says WHY: the worker was
+#: neither a turn-end casualty nor a user stop, it was refused upstream.
+RATE_LIMITED_REASON = "provider_rate_limited"
+RATE_LIMITED_SUMMARY = "Provider rate limited — worker stopped"
+
 #: Usage keys we sum for attribution. Anything else in a ``turn.completed``
 #: usage payload is carried through untouched on the per-worker row but is not
 #: aggregated (the contract calls ``usage`` an open dict).
@@ -102,6 +109,12 @@ class WorkerRecord:
     #: Latched by teardown so the dispatcher's own ``finally`` does not
     #: re-settle the card or re-complete the registry row.
     torn_down: bool = False
+    #: WHY teardown ran (:data:`TURN_END_REASON` / :data:`STOP_ALL_REASON` /
+    #: :data:`RATE_LIMITED_REASON`), latched beside ``torn_down``. Read by
+    #: ``provider_agent.dispatch_worker`` to fail the worker's outcome with a
+    #: message that says what actually happened instead of the default success
+    #: it would otherwise derive from an empty event log.
+    torn_down_reason: Optional[str] = None
 
 
 # parent_session_id -> {worker_session_id: WorkerRecord}
@@ -378,6 +391,104 @@ async def _note_parent(parent_session_id: str, message: str, count: int, reason:
         )
 
 
+async def _cancel_worker_prompts(record: WorkerRecord) -> None:
+    """Sweep this worker's still-pending approval prompts off its PARENT.
+
+    A worker's prompts are RAISED ON THE PARENT's session id (P3-A3), so killing
+    the worker's own session leaves them pending on a surface the user is still
+    watching, asked by a worker that no longer exists — and the worker's waiter
+    sits in a detached SDK task that only the row leaving ``pending`` unblocks.
+    The parent id comes off the record rather than the approval-route registry:
+    routes are never unregistered, so they identify no rows.
+
+    Off-loop (``to_thread``) because this is DB work on the ``_finalize`` hot
+    path, and best-effort like every other teardown leg.
+    """
+    try:
+        from app.core import provider_agent_approvals
+
+        await asyncio.to_thread(
+            provider_agent_approvals.cancel_worker_prompts,
+            record.worker_session_id,
+            record.parent_session_id,
+        )
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.debug(
+            "ProviderAgent supervisor: prompt sweep failed for worker %s",
+            record.worker_session_id, exc_info=True,
+        )
+
+
+async def teardown_worker(
+    record: WorkerRecord,
+    *,
+    reason: str,
+    summary: str,
+    preview: str,
+) -> Dict[str, Any]:
+    """Kill ONE live worker, end to end. Never raises.
+
+    The single per-worker teardown every kill path goes through — turn-end
+    reap, the stop-all control, and ``dispatch_worker``'s rate-limit fail-fast —
+    so a worker stopped for ANY reason settles its card, drops its registry row
+    and clears its park-gate residue identically.
+
+    Order is deliberate: settle the card, THEN kill the session, THEN sweep the
+    parent-keyed prompts, THEN complete the registry row, THEN purge the
+    park-gate residue. The registry drop is what clears the ``/live`` spinner
+    overlay, so the card must already be settled by the time it happens (same
+    rule ``dispatch_worker``'s ``finally`` follows).
+    """
+    parent_session_id = record.parent_session_id
+    record.torn_down = True
+    record.torn_down_reason = reason
+    await _settle_card(record, preview, summary)
+
+    outcome = await _kill_worker_session(record.worker_session_id)
+    await _cancel_worker_prompts(record)
+
+    try:
+        from app.core.task_registry import task_registry
+
+        task_registry.complete_task(
+            parent_session_id,
+            record.task_id,
+            "killed",
+            summary=summary,
+            reason=reason,
+            # Suppress the per-task terminal chip: uncapped fan-out (P12)
+            # would otherwise surface one chip per worker in a burst. The
+            # single coalesced note the caller emits replaces them.
+            notify=False,
+        )
+    except TypeError:
+        # A task_registry without the ``notify`` kwarg (older worker in the
+        # mixed-version cluster): completing the row still matters far more
+        # than the chip suppression.
+        try:
+            from app.core.task_registry import task_registry as _registry
+
+            _registry.complete_task(
+                parent_session_id, record.task_id, "killed",
+                summary=summary, reason=reason,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("ProviderAgent supervisor: complete_task failed", exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("ProviderAgent supervisor: complete_task failed", exc_info=True)
+
+    _purge_park_gate_residue(parent_session_id, record)
+    unregister_worker(parent_session_id, record.worker_session_id)
+
+    return {
+        "workerSessionId": record.worker_session_id,
+        "taskId": record.task_id,
+        "provider": record.provider_id,
+        "model": record.model_id,
+        "outcome": outcome,
+    }
+
+
 async def _teardown(
     parent_session_id: str,
     *,
@@ -386,65 +497,16 @@ async def _teardown(
     preview: str,
     note: Optional[str],
 ) -> List[Dict[str, Any]]:
-    """Kill every live worker of ``parent_session_id``. Never raises.
-
-    Order per worker is deliberate: settle the card, THEN kill the session,
-    THEN complete the registry row, THEN purge the park-gate residue. The
-    registry drop is what clears the ``/live`` spinner overlay, so the card must
-    already be settled by the time it happens (same rule
-    ``dispatch_worker``'s ``finally`` follows).
-    """
+    """Kill every live worker of ``parent_session_id``. Never raises."""
     records = live_workers(parent_session_id)
     if not records:
         return []
 
     results: List[Dict[str, Any]] = []
     for record in records:
-        record.torn_down = True
-        await _settle_card(record, preview, summary)
-
-        outcome = await _kill_worker_session(record.worker_session_id)
-
-        try:
-            from app.core.task_registry import task_registry
-
-            task_registry.complete_task(
-                parent_session_id,
-                record.task_id,
-                "killed",
-                summary=summary,
-                reason=reason,
-                # Suppress the per-task terminal chip: uncapped fan-out (P12)
-                # would otherwise surface one chip per worker in a burst. The
-                # single coalesced note below replaces them.
-                notify=False,
-            )
-        except TypeError:
-            # A task_registry without the ``notify`` kwarg (older worker in the
-            # mixed-version cluster): completing the row still matters far more
-            # than the chip suppression.
-            try:
-                from app.core.task_registry import task_registry as _registry
-
-                _registry.complete_task(
-                    parent_session_id, record.task_id, "killed",
-                    summary=summary, reason=reason,
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("ProviderAgent supervisor: complete_task failed", exc_info=True)
-        except Exception:  # noqa: BLE001
-            logger.debug("ProviderAgent supervisor: complete_task failed", exc_info=True)
-
-        _purge_park_gate_residue(parent_session_id, record)
-        unregister_worker(parent_session_id, record.worker_session_id)
-
-        results.append({
-            "workerSessionId": record.worker_session_id,
-            "taskId": record.task_id,
-            "provider": record.provider_id,
-            "model": record.model_id,
-            "outcome": outcome,
-        })
+        results.append(await teardown_worker(
+            record, reason=reason, summary=summary, preview=preview,
+        ))
 
     logger.info(
         "ProviderAgent: tore down %d worker(s) for session %s (reason=%s)",

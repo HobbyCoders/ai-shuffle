@@ -412,6 +412,82 @@ async def test_interrupt_escalation_keep_drains_without_deadlock(mock_db):
     assert runs_db.get_active_run("s9") is None
 
 
+async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):
+    """Stop must also release whatever is blocked ON THE USER.
+
+    A pending tool-approval prompt is awaited inside a DETACHED SDK task sitting
+    in ``interaction_wait.await_interaction``; the SDK-level interrupt cannot
+    reach it, so cancelling the durable rows is the only unblock — and it has to
+    happen BEFORE the SDK signal, or the escalation clock runs against a session
+    that is still waiting on a human.
+    """
+    turn = turns_db.enqueue_turn("s9d", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn("s9d", "stop")
+    turns_db.settle_turn(turn["id"], "aborted", "racer")
+
+    order = []
+    cancel = AsyncMock(side_effect=lambda sid: order.append(("cancel", sid)) or 2)
+    signal = AsyncMock(side_effect=lambda sid: order.append(("sdk", sid)))
+
+    with patch("app.core.session_runtime._should_evict_after_escalation", return_value=False), \
+            patch("app.core.session_runtime.record_interrupting", new=AsyncMock()), \
+            patch("app.core.query_session_lifecycle.interrupt_session", new=signal), \
+            patch.object(
+                session_runtime.permission_handler, "cancel_all_requests", new=cancel
+            ):
+        await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
+
+    cancel.assert_awaited_once_with("s9d")
+    assert order == [("cancel", "s9d"), ("sdk", "s9d")]
+
+
+async def test_interrupt_survives_a_failing_prompt_cancel(mock_db):
+    """A cancel failure must never break the interrupt path."""
+    turn = turns_db.enqueue_turn("s9e", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn("s9e", "stop")
+    turns_db.settle_turn(turn["id"], "aborted", "racer")
+
+    signal = AsyncMock()
+    with _interrupt_env(evict=False), \
+            patch("app.core.query_session_lifecycle.interrupt_session", new=signal), \
+            patch.object(
+                session_runtime.permission_handler, "cancel_all_requests",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ):
+        state = await session_runtime.SessionRuntime(turn).interrupt(
+            escalation_timeout=0.02
+        )
+
+    assert state == "aborted"
+    signal.assert_awaited_once_with("s9e")
+
+
+async def test_interrupt_cancels_the_durable_prompt_row(mock_db, monkeypatch):
+    """End to end against the real handler: the pending row leaves ``pending``,
+    which is what actually releases the detached waiter."""
+    from app.core.config import settings as app_settings
+    from app.db import interactions
+
+    monkeypatch.setattr(app_settings, "v2_placement", True)
+
+    turn = turns_db.enqueue_turn("s9f", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn("s9f", "stop")
+    turns_db.settle_turn(turn["id"], "aborted", "racer")
+
+    row = interactions.create_interaction(
+        "s9f", "permission",
+        {"request_id": "r-1", "tool_name": "Bash", "tool_input": {}}, 300,
+    )
+
+    with _interrupt_env(evict=False):
+        await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
+
+    assert interactions.get_interaction(row["id"])["state"] == "cancelled"
+
+
 async def test_interrupt_escalation_keep_noop_when_turn_already_settled(mock_db):
     """Escalation-keep race: the turn settled while interrupt() was deciding —
     escalate_to_draining no-ops and interrupt() reports the real state."""

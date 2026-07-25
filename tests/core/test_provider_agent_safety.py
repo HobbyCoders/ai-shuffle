@@ -876,6 +876,132 @@ class TestStopAll:
         assert sup.live_workers(PARENT) == []
 
 
+class TestKilledWorkersReleaseTheirPrompts:
+    """A killed worker's approval prompts live on the PARENT's session id, so
+    killing the worker's own session does not touch them: without the sweep they
+    stay on the user's screen — asked by a worker that no longer exists — until
+    the 5-minute TTL, and the worker's detached waiter stays blocked."""
+
+    @staticmethod
+    def _worker_prompt(worker_session_id, request_id):
+        from app.db import interactions
+
+        return interactions.create_interaction(
+            PARENT, "permission",
+            {
+                "request_id": request_id,
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "provider_agent": {
+                    "worker_session_id": worker_session_id,
+                    "parent_session_id": PARENT,
+                    "label": "reviewer",
+                },
+            },
+            300,
+        )
+
+    @staticmethod
+    def _state(interaction_id):
+        from app.db import interactions
+
+        return interactions.get_interaction(interaction_id)["state"]
+
+    async def test_turn_end_teardown_sweeps_the_prompts(self, db, monkeypatch):
+        from app.core import interaction_wait
+
+        monkeypatch.setattr(interaction_wait, "notify_changed", lambda sid: None)
+        turn = turns_db.enqueue_turn(PARENT, "user", prompt="hi")
+        _register_worker("w1")
+        _register_worker("w2")
+        mine = self._worker_prompt("w1", "r-1")
+        sibling = self._worker_prompt("w2", "r-2")
+
+        with _runtime_env(), _kill_spies():
+            await session_runtime.SessionRuntime(turn).execute()
+
+        # Both workers died at turn end, so both prompts go — but each through
+        # its OWN teardown, which is what keeps a surviving sibling's prompt
+        # alive on any other kill path.
+        assert self._state(mine["id"]) == "cancelled"
+        assert self._state(sibling["id"]) == "cancelled"
+
+    async def test_stop_all_sweeps_the_prompts(self, db, monkeypatch):
+        from app.core import interaction_wait
+
+        monkeypatch.setattr(interaction_wait, "notify_changed", lambda sid: None)
+        _register_worker("w1")
+        row = self._worker_prompt("w1", "r-1")
+
+        with _kill_spies():
+            await sup.stop_all_workers(PARENT)
+
+        assert self._state(row["id"]) == "cancelled"
+
+    async def test_a_surviving_workers_prompt_is_left_alone(self, db, monkeypatch):
+        """Only the worker being killed loses its prompts."""
+        from app.core import interaction_wait
+
+        monkeypatch.setattr(interaction_wait, "notify_changed", lambda sid: None)
+        doomed = _register_worker("w1")
+        _register_worker("w2")
+        mine = self._worker_prompt("w1", "r-1")
+        sibling = self._worker_prompt("w2", "r-2")
+
+        with _kill_spies():
+            await sup.teardown_worker(
+                doomed, reason=sup.STOP_ALL_REASON, summary="s", preview="p",
+            )
+
+        assert self._state(mine["id"]) == "cancelled"
+        assert self._state(sibling["id"]) == "pending"
+
+    async def test_a_sweep_failure_never_breaks_the_teardown(self, db, monkeypatch):
+        from app.core import provider_agent_approvals as approvals
+
+        def _boom(worker, parent):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(approvals, "cancel_worker_prompts", _boom)
+        _register_worker("w1")
+
+        with _kill_spies():
+            result = await sup.stop_all_workers(PARENT)
+
+        assert result["stopped"] == 1
+        assert task_registry.get_task(PARENT, "w1")["status"] == "killed"
+
+
+class TestTeardownReasonIsLatched:
+    """``torn_down_reason`` is what lets ``dispatch_worker`` say WHY a worker
+    failed instead of deriving a false success from an empty event log."""
+
+    async def test_turn_end_latches_the_turn_end_reason(self, db):
+        turn = turns_db.enqueue_turn(PARENT, "user", prompt="hi")
+        record = _register_worker("w1")
+
+        with _runtime_env(), _kill_spies():
+            await session_runtime.SessionRuntime(turn).execute()
+
+        assert record.torn_down is True
+        assert record.torn_down_reason == sup.TURN_END_REASON
+
+    async def test_stop_all_latches_the_stop_all_reason(self, db):
+        record = _register_worker("w1")
+
+        with _kill_spies():
+            await sup.stop_all_workers(PARENT)
+
+        assert record.torn_down is True
+        assert record.torn_down_reason == sup.STOP_ALL_REASON
+
+    async def test_an_untouched_worker_has_no_reason(self, db):
+        record = _register_worker("w1")
+
+        assert record.torn_down is False
+        assert record.torn_down_reason is None
+
+
 class TestAttribution:
 
     def test_usage_is_grouped_by_provider(self):

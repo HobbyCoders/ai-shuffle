@@ -390,7 +390,13 @@ def dispatch_env(monkeypatch):
 
     monkeypatch.setattr(db, "create_session", _create_session)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: "/repo/feat-x")
-    monkeypatch.setattr(pa, "final_turn_outcome", lambda sid: {"usage": {"tokens_in": 5}, "error": None, "interrupted": False})
+    monkeypatch.setattr(
+        pa, "final_turn_outcome",
+        lambda sid: {
+            "usage": {"tokens_in": 5}, "error": None, "interrupted": False,
+            "terminal_found": True,
+        },
+    )
     monkeypatch.setattr(pa, "final_assistant_text", lambda sid: "the worker's report")
 
     class _Env:
@@ -575,6 +581,288 @@ class TestDispatchWorker:
             if r["status"] == "killed"
         ]
         assert killed
+        task_registry.clear_session("parent-1")
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed outcomes + rate-limit fail-fast
+# ---------------------------------------------------------------------------
+
+class TestFinalTurnOutcomeTerminalMarker:
+    """``terminal_found`` is what distinguishes "finished with no usage" from
+    "we know nothing about this worker" — the two states the rest of the dict
+    renders identically."""
+
+    def test_no_events_reports_no_terminal(self, monkeypatch):
+        monkeypatch.setattr(pa, "_load_session_events", lambda sid: [])
+
+        outcome = pa.final_turn_outcome("w")
+
+        assert outcome["terminal_found"] is False
+        # Additive only — every pre-existing key keeps its meaning.
+        assert outcome["usage"] == {} and outcome["error"] is None
+        assert outcome["interrupted"] is False
+
+    def test_a_terminal_event_reports_terminal(self, monkeypatch):
+        monkeypatch.setattr(pa, "_load_session_events", lambda sid: [
+            {"event_type": "turn.completed", "payload": {"usage": {"tokens_in": 3}}},
+        ])
+
+        outcome = pa.final_turn_outcome("w")
+
+        assert outcome["terminal_found"] is True
+        assert outcome["usage"] == {"tokens_in": 3}
+
+    def test_a_parked_turn_is_still_a_terminal_event(self, monkeypatch):
+        monkeypatch.setattr(pa, "_load_session_events", lambda sid: [
+            {"event_type": "turn.parked", "payload": {}},
+        ])
+
+        assert pa.final_turn_outcome("w")["terminal_found"] is True
+
+
+class TestDispatchWorkerFailsClosed:
+
+    def _latch(self, reason):
+        """Latch the supervisor record exactly the way ``teardown_worker`` does,
+        from inside the wait — i.e. while the outcome is still unresolved."""
+        from app.core import provider_agent_supervisor as sup
+
+        def _on_wait(worker_session_id):
+            record = sup.get_worker("parent-1", worker_session_id)
+            assert record is not None
+            record.torn_down = True
+            record.torn_down_reason = reason
+
+        return _on_wait
+
+    def test_a_stop_all_teardown_fails_the_outcome(self, dispatch_env):
+        from app.core import provider_agent_supervisor as sup
+
+        dispatch_env.tm.on_wait = self._latch(sup.STOP_ALL_REASON)
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert "stop-all" in outcome.error
+        assert outcome.session_id in outcome.error
+        assert outcome.report == ""
+        sup.reset()
+
+    def test_a_turn_end_teardown_fails_the_outcome(self, dispatch_env):
+        from app.core import provider_agent_supervisor as sup
+
+        dispatch_env.tm.on_wait = self._latch(sup.TURN_END_REASON)
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert "turn end" in outcome.error
+        sup.reset()
+
+    def test_a_torn_down_worker_never_reads_the_event_log(self, dispatch_env, monkeypatch):
+        """The short-circuit is the point: a killed worker has no terminal event,
+        and deriving an outcome from that log is what produced a false SUCCESS."""
+        from app.core import provider_agent_supervisor as sup
+
+        def _boom(sid):
+            raise AssertionError("final_turn_outcome must not run for a torn-down worker")
+
+        monkeypatch.setattr(pa, "final_turn_outcome", _boom)
+        dispatch_env.tm.on_wait = self._latch(sup.STOP_ALL_REASON)
+
+        assert not _dispatch().ok
+        sup.reset()
+
+    def test_a_timed_out_worker_that_was_torn_down_reports_the_teardown(
+        self, dispatch_env
+    ):
+        from app.core import provider_agent_supervisor as sup
+
+        dispatch_env.tm.idle = False
+        dispatch_env.tm.on_wait = self._latch(sup.STOP_ALL_REASON)
+
+        outcome = _dispatch(timeout_seconds=5)
+
+        assert not outcome.ok
+        assert "stop-all" in outcome.error
+        assert "did not finish within" not in outcome.error
+        sup.reset()
+
+    def test_no_terminal_event_fails_with_the_turns_row(self, dispatch_env, monkeypatch):
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": None, "interrupted": False,
+                "terminal_found": False,
+            },
+        )
+        monkeypatch.setattr(
+            turns_db, "get_turn",
+            lambda tid: {"id": tid, "state": "aborted", "stop_reason": "lease_reaped",
+                         "error": "runner died"},
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert "no terminal turn event" in outcome.error
+        assert "state=aborted" in outcome.error
+        assert "stop_reason=lease_reaped" in outcome.error
+        assert "runner died" in outcome.error
+
+    def test_no_terminal_event_still_fails_when_the_turns_row_is_unreadable(
+        self, dispatch_env, monkeypatch
+    ):
+        from app.db import turns as turns_db
+
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": None, "interrupted": False,
+                "terminal_found": False,
+            },
+        )
+
+        def _boom(tid):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(turns_db, "get_turn", _boom)
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        assert "no terminal turn event" in outcome.error
+
+
+class TestDispatchWorkerRateLimitFailFast:
+    """A worker whose provider is refusing everything must die in seconds, not
+    at the (minutes-long) worker timeout."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_breaker(self):
+        from app.core.translator_gateway import circuit_breaker
+
+        circuit_breaker.reset()
+        yield
+        circuit_breaker.reset()
+
+    @staticmethod
+    def _hanging_wait(monkeypatch):
+        from app.core import turn_manager as tm_mod
+
+        async def _never_idle(session_id, timeout=300.0):
+            await asyncio.sleep(timeout)
+            return False
+
+        monkeypatch.setattr(tm_mod, "wait_session_idle", _never_idle)
+
+    def test_a_tripped_breaker_kills_the_worker_and_fails_fast(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.core import provider_agent_supervisor as sup
+        from app.core.task_registry import task_registry
+        from app.core.translator_gateway import circuit_breaker
+
+        monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+        self._hanging_wait(monkeypatch)
+        circuit_breaker.record_rate_limited("prov-openai", "120")
+
+        pool = MagicMock(name="session_pool")
+        pool.remove_broken = AsyncMock(return_value=object())
+        with patch("app.core.session_pool.get_session_pool", return_value=pool):
+            outcome = _dispatch(timeout_seconds=600)
+
+        assert not outcome.ok
+        assert "prov-openai" in outcome.error
+        assert "rate limited" in outcome.error
+        assert "circuit breaker open" in outcome.error
+
+        # Killed through the supervisor's OWN per-worker teardown: the session
+        # is evicted, the registry row is terminal with the rate-limit reason,
+        # and the card is settled.
+        pool.remove_broken.assert_awaited_once_with(outcome.session_id)
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["status"] == "killed"
+        assert record["reason"] == sup.RATE_LIMITED_REASON
+        assert sup.live_workers("parent-1") == []
+
+        types = [e["event_type"] for e in _parent_events()]
+        assert "subagent.completed" in types
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        assert settle["payload"]["state"] == "killed"
+
+        task_registry.clear_session("parent-1")
+        sup.reset()
+
+    def test_the_workers_prompts_are_swept_off_the_parent(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        """The kill path must cancel the parent-keyed approval rows too."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.core import provider_agent_supervisor as sup
+        from app.core.task_registry import task_registry
+        from app.core.translator_gateway import circuit_breaker
+
+        swept = []
+        monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+        self._hanging_wait(monkeypatch)
+        from app.core import provider_agent_approvals as approvals
+
+        monkeypatch.setattr(
+            approvals, "cancel_worker_prompts",
+            lambda worker, parent: swept.append((worker, parent)) or 1,
+        )
+        circuit_breaker.record_rate_limited("prov-openai", "120")
+
+        pool = MagicMock(name="session_pool")
+        pool.remove_broken = AsyncMock(return_value=object())
+        with patch("app.core.session_pool.get_session_pool", return_value=pool):
+            outcome = _dispatch(timeout_seconds=600)
+
+        assert swept == [(outcome.session_id, "parent-1")]
+        task_registry.clear_session("parent-1")
+        sup.reset()
+
+    def test_an_untripped_breaker_preserves_the_timeout_semantics(
+        self, dispatch_env, monkeypatch
+    ):
+        """The breaker never trips → byte-identical behaviour to before: one
+        ``wait_session_idle`` with the SAME overall timeout, and the ordinary
+        timeout failure when it lapses."""
+        from app.core import turn_manager as tm_mod
+        from app.core.task_registry import task_registry
+
+        seen = []
+
+        async def _wait(session_id, timeout=300.0):
+            seen.append(timeout)
+            return False
+
+        monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+        monkeypatch.setattr(tm_mod, "wait_session_idle", _wait)
+
+        outcome = _dispatch(timeout_seconds=42)
+
+        assert seen == [42.0]
+        assert not outcome.ok
+        assert "did not finish within 42s" in outcome.error
+        task_registry.clear_session("parent-1")
+
+    def test_another_providers_trip_is_ignored(self, dispatch_env, monkeypatch):
+        from app.core.task_registry import task_registry
+        from app.core.translator_gateway import circuit_breaker
+
+        circuit_breaker.record_rate_limited("prov-someone-else", "120")
+
+        outcome = _dispatch()
+
+        assert outcome.ok
         task_registry.clear_session("parent-1")
 
 

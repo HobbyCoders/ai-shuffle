@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -64,11 +65,21 @@ def _bearer_token(request: Request) -> Optional[str]:
     return None
 
 
-def _anthropic_error(status_code: int, err_type: str, message: str) -> JSONResponse:
-    """An Anthropic-shaped error response (``{"type":"error","error":{...}}``)."""
+def _anthropic_error(
+    status_code: int,
+    err_type: str,
+    message: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> JSONResponse:
+    """An Anthropic-shaped error response (``{"type":"error","error":{...}}``).
+
+    ``headers`` is additive and optional — every existing call site is
+    byte-identical without it.
+    """
     return JSONResponse(
         status_code=status_code,
         content={"type": "error", "error": {"type": err_type, "message": message}},
+        headers=headers or None,
     )
 
 
@@ -400,6 +411,15 @@ def _circuit_breaker_refusal(provider_id: str, stream: bool):
     the SAME two paths a real upstream 429 takes — an Anthropic-shaped JSON error
     for a buffered request, a terminal SSE ``error`` frame for a streaming one —
     so nothing downstream needs a new error channel.
+
+    The buffered refusal carries a real ``Retry-After`` (the cooldown remaining,
+    ceil'd to whole seconds, floor 1) so a client that honours the header backs
+    off for exactly as long as the breaker is actually open instead of retrying
+    straight back into it — the retry loop lives in the CLI, so this header is
+    the only thing this response can say to it. The STREAMING refusal is
+    deliberately header-less: it is an HTTP **200** carrying an SSE error frame
+    (that is how a real upstream 429 renders once a stream has been opened), and
+    a ``Retry-After`` on a 200 is meaningless to a client.
     """
     trip = circuit_breaker.check(provider_id)
     if trip is None:
@@ -414,7 +434,13 @@ def _circuit_breaker_refusal(provider_id: str, stream: bool):
         return StreamingResponse(
             _single_error_sse(exc), media_type="text/event-stream"
         )
-    return _anthropic_error(exc.status_code, _err_type(exc.status_code), exc.message)
+    retry_after = max(1, math.ceil(trip.remaining_seconds()))
+    return _anthropic_error(
+        exc.status_code,
+        _err_type(exc.status_code),
+        exc.message,
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 @router.post("/v1/messages/count_tokens")

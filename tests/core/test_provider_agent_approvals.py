@@ -591,6 +591,127 @@ class TestDeliveryToParent:
 
 
 # ---------------------------------------------------------------------------
+# Killing a worker sweeps ITS prompts off the parent (and nothing else)
+# ---------------------------------------------------------------------------
+
+def _raise_worker_prompt(worker_session_id, request_id):
+    """A pending permission row on the PARENT, tagged with a worker — the exact
+    shape ``redirect_kwargs`` + ``_build_permission_payload`` persist."""
+    return interactions.create_interaction(
+        PARENT,
+        "permission",
+        {
+            "request_id": request_id,
+            "profile_id": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "provider_agent": {
+                "worker_session_id": worker_session_id,
+                "parent_session_id": PARENT,
+                "label": "reviewer",
+            },
+        },
+        300,
+    )
+
+
+def _raise_plain_prompt(request_id="r-plain"):
+    """An ordinary (untagged) pending permission row on the parent."""
+    return interactions.create_interaction(
+        PARENT,
+        "permission",
+        {
+            "request_id": request_id,
+            "profile_id": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        },
+        300,
+    )
+
+
+def _state(interaction_id):
+    return interactions.get_interaction(interaction_id)["state"]
+
+
+class TestCancelWorkerPrompts:
+    """A killed worker's prompts must not outlive it on the parent's screen —
+    and a SIBLING worker's must not be collateral damage."""
+
+    def test_only_the_target_workers_rows_are_cancelled(self, mock_db, monkeypatch):
+        notified = []
+        monkeypatch.setattr(
+            approvals_wait_module(), "notify_changed", notified.append
+        )
+
+        mine_1 = _raise_worker_prompt(WORKER_A, "r-a1")
+        mine_2 = _raise_worker_prompt(WORKER_A, "r-a2")
+        sibling = _raise_worker_prompt(WORKER_B, "r-b1")
+        plain = _raise_plain_prompt()
+
+        count = approvals.cancel_worker_prompts(WORKER_A, PARENT)
+
+        assert count == 2
+        assert _state(mine_1["id"]) == "cancelled"
+        assert _state(mine_2["id"]) == "cancelled"
+        # The sibling worker and the parent's own prompt are untouched.
+        assert _state(sibling["id"]) == "pending"
+        assert _state(plain["id"]) == "pending"
+        # ONE notify for the whole sweep — it wakes every waiter on the parent.
+        assert notified == [PARENT]
+
+    def test_nothing_to_cancel_is_a_silent_noop(self, mock_db, monkeypatch):
+        notified = []
+        monkeypatch.setattr(
+            approvals_wait_module(), "notify_changed", notified.append
+        )
+        plain = _raise_plain_prompt()
+
+        assert approvals.cancel_worker_prompts(WORKER_A, PARENT) == 0
+        assert _state(plain["id"]) == "pending"
+        assert notified == []
+
+    def test_missing_ids_are_a_noop(self, mock_db):
+        assert approvals.cancel_worker_prompts("", PARENT) == 0
+        assert approvals.cancel_worker_prompts(WORKER_A, "") == 0
+
+    def test_a_db_failure_never_raises(self, mock_db, monkeypatch):
+        _raise_worker_prompt(WORKER_A, "r-a1")
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(interactions, "get_pending_interactions", _boom)
+        assert approvals.cancel_worker_prompts(WORKER_A, PARENT) == 0
+
+    def test_a_route_registry_entry_is_not_required(self, mock_db, monkeypatch):
+        """Routes are never unregistered, so they identify no ROWS — the sweep
+        must work off the payload tag alone."""
+        monkeypatch.setattr(approvals_wait_module(), "notify_changed", lambda sid: None)
+        approvals.reset_routes()
+        row = _raise_worker_prompt(WORKER_A, "r-a1")
+
+        assert approvals.cancel_worker_prompts(WORKER_A, PARENT) == 1
+        assert _state(row["id"]) == "cancelled"
+
+    def test_worker_id_of_reads_the_tag(self):
+        assert approvals.worker_id_of(
+            {"payload": {"provider_agent": {"worker_session_id": WORKER_A}}}
+        ) == WORKER_A
+        assert approvals.worker_id_of({"payload": {}}) is None
+        assert approvals.worker_id_of({"payload": None}) is None
+        assert approvals.worker_id_of({}) is None
+        assert approvals.worker_id_of(None) is None
+
+
+def approvals_wait_module():
+    """The ``interaction_wait`` module object ``cancel_worker_prompts`` imports."""
+    from app.core import interaction_wait as iw
+
+    return iw
+
+
+# ---------------------------------------------------------------------------
 # dispatch_worker registers the route
 # ---------------------------------------------------------------------------
 
@@ -619,7 +740,10 @@ class TestDispatchWiring:
         monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: None)
         monkeypatch.setattr(
             pa, "final_turn_outcome",
-            lambda sid: {"usage": {}, "error": None, "interrupted": False},
+            lambda sid: {
+                "usage": {}, "error": None, "interrupted": False,
+                "terminal_found": True,
+            },
         )
         monkeypatch.setattr(pa, "final_assistant_text", lambda sid: "done")
 

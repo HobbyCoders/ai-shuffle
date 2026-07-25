@@ -52,12 +52,15 @@ no report store. The tool result carries a BOUNDED summary plus the worker's
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from app.core.translator_gateway import circuit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,12 @@ WORKER_TURN_SOURCE = "provider_agent"
 #: full transcript lives in the worker session; only this much rides the tool
 #: result, so uncapped fan-out cannot dominate the parent's context window.
 MAX_REPORT_CHARS = 2000
+
+#: How often :func:`dispatch_worker` re-checks the provider's circuit breaker
+#: while waiting for a worker to go idle. Short enough that a rate-limited
+#: worker dies in seconds rather than at the (minutes-long) worker timeout,
+#: long enough that the check itself — one lock-guarded dict lookup — is free.
+WAIT_SLICE_SECONDS = 2.0
 
 # Validation result codes — stable identifiers the API layer maps onto its own
 # error messages. Never render these to a user directly.
@@ -481,6 +490,13 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     Mirrors ``AutomationManager._final_turn_outcome``: ``turn.completed`` →
     usage; ``turn.aborted`` with ``reason == 'interrupt'`` → interrupted; any
     other abort → error; ``turn.parked`` / no terminal event → clean and empty.
+
+    ``terminal_found`` says whether a terminal event existed AT ALL. It is the
+    difference between "the worker finished cleanly with no usage" and "we know
+    nothing about this worker" — two states the rest of the dict renders
+    identically, which is how a worker whose log was never written used to
+    resolve as a SUCCESS. Callers that only care about the derived outcome may
+    keep ignoring it; :func:`dispatch_worker` fails closed on it.
     """
     events = _load_session_events(session_id)
     terminal = None
@@ -488,7 +504,12 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
         if ev.get("event_type") in ("turn.completed", "turn.aborted", "turn.parked"):
             terminal = ev
             break
-    result: Dict[str, Any] = {"usage": {}, "error": None, "interrupted": False}
+    result: Dict[str, Any] = {
+        "usage": {},
+        "error": None,
+        "interrupted": False,
+        "terminal_found": terminal is not None,
+    }
     if terminal is None:
         return result
     etype = terminal.get("event_type")
@@ -566,6 +587,99 @@ def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     except Exception:  # noqa: BLE001 — best-effort inheritance
         logger.debug("ProviderAgent: parent cwd resolution failed", exc_info=True)
         return None
+
+
+async def _await_worker_idle(
+    worker_session_id: str, provider_id: str, timeout: float
+) -> Tuple[bool, bool]:
+    """Wait for a worker to go idle, bailing out early if its provider trips.
+
+    Returns ``(idle, rate_limited)``.
+
+    The wait is the SAME single ``wait_session_idle(timeout=timeout)`` call as
+    before — identical timeout semantics — but it is now observed in
+    :data:`WAIT_SLICE_SECONDS` slices so the provider's circuit breaker can be
+    re-read between them. Without this a worker whose provider is already
+    refusing every request sits there burning the full (default 10-minute)
+    worker timeout while the CLI inside it retries into a closed door: exactly
+    the 2026-07-22 storm's shape, one level down.
+
+    SCOPE LIMITATION (accepted until P3-B): the breaker is in-process state, and
+    a worker turn claimed by ANOTHER runner trips THAT runner's breaker, which
+    is invisible here — such a worker still fails only at the timeout. The
+    gateway-side refusal still protects the quota either way; this is purely
+    about how fast the parent hears about it. A shared/persisted breaker (P3-G)
+    closes the gap.
+    """
+    from app.core import turn_manager
+
+    waiter = asyncio.ensure_future(
+        turn_manager.wait_session_idle(worker_session_id, timeout=timeout)
+    )
+    try:
+        while True:
+            done, _pending = await asyncio.wait({waiter}, timeout=WAIT_SLICE_SECONDS)
+            if done:
+                return bool(waiter.result()), False
+            if circuit_breaker.is_tripped(provider_id):
+                return False, True
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+            with contextlib.suppress(BaseException):
+                await waiter
+
+
+def _torn_down_error(reason: Optional[str], worker_session_id: str) -> str:
+    """The failure message for a worker the supervisor killed underneath us."""
+    from app.core import provider_agent_supervisor as sup
+
+    if reason == sup.STOP_ALL_REASON:
+        head = "The worker was stopped (stop-all) before it finished."
+    elif reason == sup.TURN_END_REASON:
+        head = "The worker was torn down at parent turn end before it finished."
+    elif reason == sup.RATE_LIMITED_REASON:
+        head = (
+            "The worker was stopped because its provider is rate limited "
+            "(circuit breaker open)."
+        )
+    else:
+        head = "The worker was stopped before it finished."
+    return f"{head} Its partial transcript is in session {worker_session_id}."
+
+
+def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> str:
+    """The failure message for a worker that left NO terminal turn event.
+
+    Fail-closed (this is the point): an empty event log used to derive a clean
+    empty success, so a worker whose turn never ran — never claimed, killed
+    before recording, or writing to a log this process cannot read — reported
+    back to the parent as if it had done the job. The durable ``turns`` row is
+    the second opinion; when even that is unreadable the outcome is still a
+    failure, just a less specific one.
+    """
+    detail = ""
+    if turn_id:
+        try:
+            from app.db import turns as turns_db
+
+            row = turns_db.get_turn(turn_id)
+            if row is not None:
+                parts = [f"turn state={row.get('state')}"]
+                if row.get("stop_reason"):
+                    parts.append(f"stop_reason={row.get('stop_reason')}")
+                if row.get("error"):
+                    parts.append(f"error={row.get('error')}")
+                detail = f" ({', '.join(parts)})"
+        except Exception:  # noqa: BLE001 — the failure verdict stands regardless
+            logger.debug(
+                "ProviderAgent: turns row read failed for worker %s",
+                worker_session_id, exc_info=True,
+            )
+    return (
+        f"The worker produced no terminal turn event{detail}, so its result "
+        f"cannot be trusted. Its session is {worker_session_id}."
+    )
 
 
 async def dispatch_worker(
@@ -720,6 +834,9 @@ async def dispatch_worker(
     status = "error"
     preview: Optional[str] = None
     cancelled = False
+    #: The worker's turn id, once submitted — the second opinion consulted when
+    #: the event log carries no terminal event.
+    worker_turn_id: Optional[str] = None
     #: Authoritative usage for attribution, filled from the worker's terminal
     #: turn on every path that has one (the feed's live capture is a bonus, not
     #: the source of truth).
@@ -728,7 +845,7 @@ async def dispatch_worker(
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
         await feed.started()
-        turn_manager.submit(
+        worker_turn_id = turn_manager.submit(
             worker_session_id,
             WORKER_TURN_SOURCE,
             prompt=prompt,
@@ -742,7 +859,53 @@ async def dispatch_worker(
         # existing once the turn is submitted.
         feed.start_following()
 
-        idle = await turn_manager.wait_session_idle(worker_session_id, timeout=timeout)
+        idle, rate_limited = await _await_worker_idle(
+            worker_session_id, provider_id, timeout
+        )
+
+        # torn_down FIRST, on every branch: the supervisor may have killed this
+        # worker while we waited (turn end, stop-all), and a killed worker's
+        # event log has no terminal event — which the outcome reader would
+        # otherwise render as a clean success and report to the parent as a
+        # finished job. The latch is the authoritative answer to "did this
+        # worker actually get to run".
+        if supervised.torn_down:
+            error = _torn_down_error(supervised.torn_down_reason, worker_session_id)
+            preview = error
+            status = "killed"
+            return WorkerOutcome(
+                ok=False, session_id=worker_session_id, error=error,
+            )
+
+        if rate_limited:
+            # Fail fast rather than at the timeout: the provider is refusing
+            # everything install-wide, so the worker cannot make progress. Kill
+            # it through the supervisor's own per-worker teardown so the card,
+            # the registry row and the park-gate residue settle exactly as they
+            # do for a turn-end or stop-all kill.
+            error = (
+                f"Provider '{provider_id}' is rate limited (circuit breaker "
+                f"open); worker stopped. Its partial transcript is in session "
+                f"{worker_session_id}."
+            )
+            preview = error
+            status = "killed"
+            try:
+                await provider_agent_supervisor.teardown_worker(
+                    supervised,
+                    reason=provider_agent_supervisor.RATE_LIMITED_REASON,
+                    summary=provider_agent_supervisor.RATE_LIMITED_SUMMARY,
+                    preview=error,
+                )
+            except Exception:  # noqa: BLE001 — the failure verdict stands
+                logger.exception(
+                    "ProviderAgent: rate-limit teardown failed for worker %s",
+                    worker_session_id,
+                )
+            return WorkerOutcome(
+                ok=False, session_id=worker_session_id, error=error,
+            )
+
         if not idle:
             try:
                 turn_manager.interrupt(worker_session_id, "stop")
@@ -777,6 +940,18 @@ async def dispatch_worker(
                 ok=False,
                 session_id=worker_session_id,
                 error="The worker session was interrupted before it finished.",
+                usage=outcome["usage"],
+            )
+        if not outcome.get("terminal_found"):
+            # No terminal turn event at all — see _no_terminal_event_error. The
+            # session went idle without ever recording an outcome, which is a
+            # failure we cannot describe, never a success.
+            error = _no_terminal_event_error(worker_session_id, worker_turn_id)
+            preview = error
+            return WorkerOutcome(
+                ok=False,
+                session_id=worker_session_id,
+                error=error,
                 usage=outcome["usage"],
             )
 

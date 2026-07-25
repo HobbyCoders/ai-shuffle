@@ -549,6 +549,67 @@ class TestRouterRefusal:
         assert counters["upstream"] == 0
         assert counters["provider_loads"] == 0
 
+    async def test_buffered_refusal_carries_a_real_retry_after(self, monkeypatch):
+        """The retry loop lives in the CLI, so the header is the only thing this
+        response can say to it: back off for as long as the breaker is open."""
+        await self._no_upstream(monkeypatch)
+        token = routing.mint_session_token("sess-cb", PROVIDER)
+        circuit_breaker.record_rate_limited(PROVIDER, "120")
+
+        async with await _gateway_client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "gpt-5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+
+        assert resp.status_code == 429
+        retry_after = resp.headers["retry-after"]
+        assert retry_after.isdigit()
+        # The cooldown remaining, ceil'd — never 0 (a 0 would mean "retry now").
+        assert 100 <= int(retry_after) <= 120
+
+    async def test_retry_after_rounds_up_and_never_says_zero(self, monkeypatch):
+        """A window with milliseconds left must not render as ``Retry-After: 0``
+        — that reads as "retry now", straight back into the open breaker."""
+        from app.core.translator_gateway import router as gw_router
+
+        now = time.time()
+        trip = circuit_breaker.BreakerTrip(
+            provider_id=PROVIDER, tripped_at=now, until=now + 0.01
+        )
+        monkeypatch.setattr(gw_router.circuit_breaker, "check", lambda pid: trip)
+
+        resp = gw_router._circuit_breaker_refusal(PROVIDER, False)
+
+        assert resp.status_code == 429
+        assert resp.headers["retry-after"] == "1"
+
+    async def test_streaming_refusal_carries_no_retry_after(self, monkeypatch):
+        """The streaming refusal is an HTTP 200 with an SSE error frame, so a
+        ``Retry-After`` on it would be meaningless — deliberately absent."""
+        await self._no_upstream(monkeypatch)
+        token = routing.mint_session_token("sess-cb", PROVIDER)
+        circuit_breaker.record_rate_limited(PROVIDER, "120")
+
+        async with await _gateway_client() as c:
+            resp = await c.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "model": "gpt-5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert resp.status_code == 200
+        assert "retry-after" not in resp.headers
+
     async def test_streaming_request_refused_with_sse_error_frame(self, monkeypatch):
         counters = await self._no_upstream(monkeypatch)
         token = routing.mint_session_token("sess-cb", PROVIDER)
