@@ -45,6 +45,16 @@ Four constraints shape the design; each is load-bearing:
    observation point that works in every placement, needs no new plumbing, and
    cannot perturb the thing it watches.
 
+That poll is CONSOLIDATED PER PARENT SESSION (P3-A4), not per worker. Ruling
+P12 forbids capping worker fan-out, so a per-worker poller at
+``POLL_INTERVAL_SECONDS`` meant twenty workers = ~13 DB reads/second through
+the sync-executor pool purely to mirror progress — and this repo has a
+documented history of ``PoolError`` bursts when executor count outruns pool
+max. :class:`WorkerFeedGroup` runs ONE loop per parent and batches every one of
+that parent's workers into a single :func:`app.db.session_events.get_events_multi`
+call, turning N queries per interval into 1. Per-worker bounds, coalescing and
+frame shapes are untouched: the group only changes WHO issues the read.
+
 Volume is bounded on three axes (a chatty worker must not flood the parent's
 log): total frames, total forwarded text, and per-frame size. When a cap is
 reached a single "progress capped" note is forwarded and the tap goes quiet —
@@ -168,7 +178,7 @@ class WorkerFeed:
         self._capped = False
         self._started = False
         self._completed = False
-        self._follow_task: Optional[asyncio.Task] = None
+        self._group: Optional["WorkerFeedGroup"] = None
 
     # -- properties used by tests / diagnostics ---------------------------
 
@@ -179,6 +189,16 @@ class WorkerFeed:
     @property
     def capped(self) -> bool:
         return self._capped
+
+    @property
+    def cursor(self) -> int:
+        """Highest worker ``seq`` already forwarded (the tail cursor)."""
+        return self._cursor
+
+    @property
+    def wants_rows(self) -> bool:
+        """False once this feed is capped or settled — nothing more to forward."""
+        return not self._capped and not self._completed
 
     # -- emit -------------------------------------------------------------
 
@@ -284,20 +304,28 @@ class WorkerFeed:
     # -- observation ------------------------------------------------------
 
     async def _read_new_rows(self) -> List[Dict[str, Any]]:
-        """Read worker rows past the cursor (bounded). Never raises."""
+        """Read worker rows past the cursor (bounded). Never raises.
+
+        Pages with a LOCAL cursor and never advances ``self._cursor`` —
+        :meth:`forward` is the sole cursor writer, so a read that fails halfway
+        through paging cannot leave the cursor past rows that were never
+        forwarded, and a concurrent group tick cannot lose rows to a cursor this
+        method moved.
+        """
         from app.db import session_events as session_events_db
 
         rows: List[Dict[str, Any]] = []
+        cursor = self._cursor
         try:
             for _ in range(MAX_DRAIN_BATCHES):
                 batch = await asyncio.to_thread(
                     session_events_db.get_events,
-                    self.worker_session_id, self._cursor, DRAIN_BATCH,
+                    self.worker_session_id, cursor, DRAIN_BATCH,
                 )
                 if not batch:
                     break
                 rows.extend(batch)
-                self._cursor = batch[-1].get("seq") or self._cursor
+                cursor = batch[-1].get("seq") or cursor
                 if len(batch) < DRAIN_BATCH:
                     break
         except asyncio.CancelledError:
@@ -310,18 +338,38 @@ class WorkerFeed:
         return rows
 
     async def drain(self) -> int:
-        """Forward everything new in the worker's log. Returns frames emitted.
+        """Read this worker's new rows and forward them. Returns frames emitted.
+
+        The self-reading path: used for the final drain and by any caller
+        without a group. While a :class:`WorkerFeedGroup` is following, the
+        group does the reading and calls :meth:`forward` directly.
+        """
+        if not self.wants_rows:
+            return 0
+        return await self.forward(await self._read_new_rows())
+
+    async def forward(self, rows: List[Dict[str, Any]]) -> int:
+        """Forward already-read worker rows to the parent. Returns frames emitted.
 
         Assistant text is COALESCED: all consecutive text rows collapse into one
         ``subagent_chunk`` frame, flushed when a tool row interrupts them or at
-        the end of the drain. That is what keeps a token-streaming worker from
+        the end of the batch. That is what keeps a token-streaming worker from
         writing one parent row per delta.
+
+        Rows at or below the cursor are dropped BEFORE any await, and the cursor
+        advances in the same synchronous step, so a row can never be forwarded
+        twice even if a group tick and a self-drain overlap.
         """
-        if self._capped or self._completed:
+        if not self.wants_rows:
             return 0
-        rows = await self._read_new_rows()
+        rows = [r for r in (rows or []) if (r.get("seq") or 0) > self._cursor]
         if not rows:
             return 0
+        self._cursor = max(
+            (r.get("seq") or 0) for r in rows
+        ) or self._cursor
+
+        self._capture_usage(rows)
 
         emitted = 0
         pending_text: List[str] = []
@@ -404,6 +452,30 @@ class WorkerFeed:
         emitted += await _flush_text()
         return emitted
 
+    def _capture_usage(self, rows: List[Dict[str, Any]]) -> None:
+        """Mirror a worker's ``turn.completed`` usage onto its supervisor record.
+
+        This is what makes per-turn worker spend visible WHILE the parent turn
+        runs (plan §2 C.4) rather than only once the tool call returns.
+        ``dispatch_worker`` still records the authoritative final numbers, and
+        the supervisor merges rather than accumulates, so seeing the same
+        snapshot twice cannot double-count. Purely additive: never raises, and a
+        miss only costs live precision.
+        """
+        try:
+            from app.core import provider_agent_supervisor
+
+            for row in rows:
+                if row.get("event_type") != "turn.completed":
+                    continue
+                usage = (row.get("payload") or {}).get("usage")
+                if isinstance(usage, dict) and usage:
+                    provider_agent_supervisor.record_usage(
+                        self.parent_session_id, self.worker_session_id, usage
+                    )
+        except Exception:  # noqa: BLE001
+            logger.debug("ProviderAgent feed: usage capture failed", exc_info=True)
+
     async def _cap(self) -> None:
         """Latch the cap and forward exactly ONE explanatory note."""
         if self._capped:
@@ -418,47 +490,29 @@ class WorkerFeed:
     # -- follow lifecycle -------------------------------------------------
 
     def start_following(self) -> None:
-        """Spawn the background poll task (idempotent, never raises).
+        """Join this parent's SHARED poll loop (idempotent, never raises).
 
-        Safe to call with no running loop (returns quietly) so a caller in a
-        synchronous context degrades to "no live progress" rather than failing.
+        There is one loop per PARENT session, not per worker — see the module
+        docstring. Safe to call with no running loop (returns quietly) so a
+        caller in a synchronous context degrades to "no live progress" rather
+        than failing.
         """
-        if self._follow_task is not None:
+        if self._group is not None:
             return
-        try:
-            self._follow_task = asyncio.get_running_loop().create_task(
-                self._follow_loop()
-            )
-        except RuntimeError:
-            logger.debug("ProviderAgent feed: no running loop; not following")
-
-    async def _follow_loop(self) -> None:
-        while True:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            try:
-                await self.drain()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "ProviderAgent feed: drain tick failed for %s",
-                    self.worker_session_id, exc_info=True,
-                )
+        self._group = join_feed_group(self.parent_session_id, self)
 
     async def stop_following(self, *, final_drain: bool = True) -> None:
-        """Cancel the poll task and (optionally) drain once more.
+        """Leave the shared poll loop and (optionally) drain once more.
 
         The final drain is what makes the card show the worker's LAST tool call
-        and closing text: the worker typically finishes between two ticks.
+        and closing text: the worker typically finishes between two ticks. It is
+        a SELF read — the group may already have stopped — and any rows the
+        group's last tick already forwarded are filtered by the cursor.
         Never raises.
         """
-        task, self._follow_task = self._follow_task, None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        group, self._group = self._group, None
+        if group is not None:
+            await group.remove(self)
         if final_drain:
             try:
                 await self.drain()
@@ -467,6 +521,172 @@ class WorkerFeed:
                     "ProviderAgent feed: final drain failed for %s",
                     self.worker_session_id, exc_info=True,
                 )
+
+
+# ---------------------------------------------------------------------------
+# One poller per PARENT TURN (P3-A4)
+# ---------------------------------------------------------------------------
+
+#: parent_session_id -> the single live group for that parent.
+_GROUPS: Dict[str, "WorkerFeedGroup"] = {}
+
+
+class WorkerFeedGroup:
+    """The shared poll loop for every ProviderAgent worker of ONE parent.
+
+    Replaces the per-worker loop. Each tick issues ONE
+    :func:`app.db.session_events.get_events_multi` covering every member's
+    cursor, then hands each member its own rows through
+    :meth:`WorkerFeed.forward`. Per-worker bounds are preserved exactly: a
+    member still takes at most ``DRAIN_BATCH`` rows per inner batch and at most
+    ``MAX_DRAIN_BATCHES`` batches per tick, and its frame/text caps and text
+    coalescing are entirely unchanged (they live in ``forward``).
+
+    The group starts when its first member joins and stops when its last member
+    leaves, so an idle parent runs no loop at all.
+    """
+
+    def __init__(self, parent_session_id: str) -> None:
+        self.parent_session_id = parent_session_id
+        self._feeds: "Dict[str, WorkerFeed]" = {}
+        self._task: Optional[asyncio.Task] = None
+
+    @property
+    def size(self) -> int:
+        return len(self._feeds)
+
+    def add(self, feed: WorkerFeed) -> None:
+        """Add a member, starting the loop if this is the first one."""
+        self._feeds[feed.worker_session_id] = feed
+        if self._task is None:
+            try:
+                self._task = asyncio.get_running_loop().create_task(self._loop())
+            except RuntimeError:
+                logger.debug("ProviderAgent feed: no running loop; not following")
+
+    async def remove(self, feed: WorkerFeed) -> None:
+        """Drop a member, stopping (and awaiting) the loop when the last leaves."""
+        self._feeds.pop(feed.worker_session_id, None)
+        if self._feeds:
+            return
+        _GROUPS.pop(self.parent_session_id, None)
+        task, self._task = self._task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _loop(self) -> None:
+        while True:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "ProviderAgent feed: group tick failed for %s",
+                    self.parent_session_id, exc_info=True,
+                )
+
+    async def _read_batches(
+        self, feeds: "List[WorkerFeed]"
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Read new rows for every member. Returns ``{session_id: rows}``.
+
+        Loops at most ``MAX_DRAIN_BATCHES`` times, re-querying ONLY the sessions
+        whose previous slice came back full — so the common case (nothing much
+        happened) is exactly ONE query for the whole parent, and the worst case
+        matches what a single worker cost before.
+        """
+        from app.db import session_events as session_events_db
+
+        pending: Dict[str, int] = {f.worker_session_id: f.cursor for f in feeds}
+        buffers: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            for _ in range(MAX_DRAIN_BATCHES):
+                if not pending:
+                    break
+                rows = await asyncio.to_thread(
+                    session_events_db.get_events_multi,
+                    dict(pending), DRAIN_BATCH * len(pending),
+                )
+                if not rows:
+                    break
+                grouped: Dict[str, List[Dict[str, Any]]] = {}
+                for row in rows:
+                    sid = row.get("session_id")
+                    if sid in pending:
+                        grouped.setdefault(sid, []).append(row)
+                pending = {}
+                for sid, session_rows in grouped.items():
+                    # Per-worker slice cap — the same DRAIN_BATCH the per-worker
+                    # poller applied. A full slice means more may be waiting, so
+                    # that session (and only it) is re-queried next round.
+                    session_rows = session_rows[:DRAIN_BATCH]
+                    buffers.setdefault(sid, []).extend(session_rows)
+                    if len(session_rows) == DRAIN_BATCH:
+                        last = session_rows[-1].get("seq")
+                        if last:
+                            pending[sid] = last
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "ProviderAgent feed: batched worker log read failed for %s",
+                self.parent_session_id, exc_info=True,
+            )
+        return buffers
+
+    async def tick(self) -> int:
+        """One batched read + forward for every live member. Returns frames emitted."""
+        feeds = [f for f in list(self._feeds.values()) if f.wants_rows]
+        if not feeds:
+            return 0
+        buffers = await self._read_batches(feeds)
+        if not buffers:
+            return 0
+        emitted = 0
+        for feed in feeds:
+            rows = buffers.get(feed.worker_session_id)
+            if not rows:
+                continue
+            try:
+                emitted += await feed.forward(rows)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "ProviderAgent feed: forward failed for %s",
+                    feed.worker_session_id, exc_info=True,
+                )
+        return emitted
+
+
+def join_feed_group(parent_session_id: str, feed: WorkerFeed) -> WorkerFeedGroup:
+    """Add ``feed`` to its parent's group, creating the group on first use."""
+    group = _GROUPS.get(parent_session_id)
+    if group is None:
+        group = WorkerFeedGroup(parent_session_id)
+        _GROUPS[parent_session_id] = group
+    group.add(feed)
+    return group
+
+
+def get_feed_group(parent_session_id: str) -> Optional[WorkerFeedGroup]:
+    """The live group for a parent, or ``None`` (tests / diagnostics)."""
+    return _GROUPS.get(parent_session_id)
+
+
+def reset_feed_groups() -> None:
+    """Drop every group without awaiting its loop (tests only)."""
+    for group in list(_GROUPS.values()):
+        task = group._task
+        if task is not None and not task.done():
+            task.cancel()
+    _GROUPS.clear()
 
 
 async def emit_shielded(coro: Any) -> None:

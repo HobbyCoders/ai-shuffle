@@ -127,7 +127,7 @@ def build_provider_agent_tool(
             MAX_REPORT_CHARS,
             default_model_for_provider,
             dispatch_worker,
-            is_worker_session,
+            is_provider_agent_worker,
             resolve_provider_instance,
             validate_provider_model,
         )
@@ -138,7 +138,10 @@ def build_provider_agent_tool(
             return _err("ProviderAgent is disabled on this install.")
         if not session_id or not profile_id:
             return _err("ProviderAgent requires an active session context.")
-        if is_worker_session(session_id):
+        # Persisted turn source ORed with the in-process set: a worker running
+        # on another runner is not in this process's set, so the set alone
+        # would let cross-runner recursion through (P3-A4).
+        if is_provider_agent_worker(session_id):
             return _err(
                 "A ProviderAgent worker may not dispatch another worker "
                 "(one nesting level only)."

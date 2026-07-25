@@ -232,6 +232,51 @@ def get_events(
     return rows
 
 
+def get_events_multi(
+    cursors: Dict[str, int], limit: int = 500
+) -> List[Dict[str, Any]]:
+    """Tail SEVERAL sessions in ONE query, each from its own ``seq`` cursor.
+
+    ``cursors`` maps ``session_id -> from_seq``; a row is returned when its
+    session is in the map and its ``seq`` exceeds THAT session's cursor. Rows
+    come back ordered by ``seq`` then ``session_id``, and ``limit`` is a GLOBAL
+    row cap the caller sizes for the whole batch.
+
+    Exists for the ProviderAgent worker feed (multi-provider phase 3, P3-A4).
+    Ruling P12 forbids a cap on worker fan-out, and the feed originally ran one
+    poller per worker at 1.5s — twenty workers meant ~13 reads/second through
+    the sync-executor pool purely to mirror progress, against a codebase with a
+    documented history of ``PoolError`` bursts when executor count outruns pool
+    max. One query per parent turn replaces N.
+
+    Ordering by ``seq`` first (not ``session_id``) is deliberate: ``seq`` is
+    per-session and every worker starts near 1, so a global ``LIMIT`` is shared
+    roughly evenly instead of being consumed by whichever session sorts first.
+
+    An empty ``cursors`` yields ``[]`` without touching the DB.
+    """
+    if not cursors:
+        return []
+    clauses = " OR ".join(["(session_id = %s AND seq > %s)"] * len(cursors))
+    params: List[Any] = []
+    for session_id, from_seq in cursors.items():
+        params.append(session_id)
+        params.append(int(from_seq or 0))
+    params.append(int(limit))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, session_id, seq, run_id, turn_id, event_type, payload, "
+            "command_id, created_at FROM session_events "
+            f"WHERE {clauses} ORDER BY seq ASC, session_id ASC LIMIT %s",
+            tuple(params),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    for row in rows:
+        row["payload"] = _parse_payload(row.get("payload"))
+    return rows
+
+
 def has_subagent_started(session_id: str, task_id: str) -> bool:
     """True if a ``subagent.started`` event for ``task_id`` exists in the log.
 

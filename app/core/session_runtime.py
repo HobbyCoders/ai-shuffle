@@ -660,6 +660,30 @@ class SessionRuntime:
         except Exception:
             logger.debug("SessionRuntime: persist_turn_end_state failed for %s", sid, exc_info=True)
 
+        # Turn-lifetime binding for ProviderAgent workers (multi-provider phase
+        # 3, plan §2 C.4). This is the ONLY teardown in the runtime and it is
+        # deliberately NARROW: it can only see workers that
+        # ``provider_agent.dispatch_worker`` itself registered, so ordinary
+        # CLI-native background sub-agents are untouched and the park gate below
+        # keeps parking them exactly as before (RULING 2026-07-25 — that parking
+        # is a feature, not a bug).
+        #
+        # Placed HERE, after the durable end-of-turn state is persisted and
+        # BEFORE the park-gate read, because every normal, aborted and crashed
+        # turn end funnels through this method — and because teardown must be
+        # reflected in what the park gate then reads (a worker killed here must
+        # not park the turn it just died with). Never raises: a teardown failure
+        # must not change how the turn settles.
+        try:
+            from app.core import provider_agent_supervisor
+
+            await provider_agent_supervisor.teardown_workers(sid)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: ProviderAgent worker teardown failed for %s",
+                sid, exc_info=True,
+            )
+
         # Park gate — exactly the legacy predicate (chat_ws_handler :4461-4462).
         bg_work: List[Dict[str, Any]] = []
         bg_launches: set = set()

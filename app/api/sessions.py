@@ -1087,6 +1087,18 @@ async def get_live_session(
     if session_meta:
         result["session_meta"] = session_meta
 
+    # Live ProviderAgent worker attribution (multi-provider phase 3, plan §2
+    # C.4): per-turn worker token/spend grouped by the worker's PROVIDER, while
+    # the turn is still running. Attached ONLY when workers are actually live,
+    # so the pinned /live wire shape is unchanged for every ordinary session.
+    try:
+        from app.core import provider_agent_supervisor
+
+        if provider_agent_supervisor.has_live_workers(session_id):
+            result["providerWorkers"] = provider_agent_supervisor.attribution(session_id)
+    except Exception:
+        logger.debug("provider worker attribution failed", exc_info=True)
+
     return result
 
 
@@ -1279,6 +1291,51 @@ async def stop_session_background_task(
     async with api_error_handler("stop background task"):
         result = await stop_session_task(session_id, task_id)
         return {"session_id": session_id, "task_id": task_id, **result}
+
+
+@router.get("/{session_id}/provider-workers")
+async def list_provider_workers(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Live ProviderAgent workers for a session, with per-provider attribution.
+
+    The read side of plan §2 C.4's "live attribution + stop-all": worker
+    token/spend attributed to the worker's provider, visible WHILE the parent
+    turn runs rather than only once every tool call has returned. Returns
+    ``{"workers": [], "providers": {}, "totals": {...}}`` when nothing is live.
+    """
+    await require_session(request, session_id)
+
+    from app.core import provider_agent_supervisor
+
+    async with api_error_handler("list provider workers"):
+        return {"session_id": session_id, **provider_agent_supervisor.attribution(session_id)}
+
+
+@router.post("/{session_id}/provider-workers/stop")
+async def stop_provider_workers(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Stop EVERY live ProviderAgent worker for this session — the stop-all control.
+
+    Kills each worker's SESSION and subprocess tree, not just its registry row:
+    the 2026-07-22 forensics showed registry rows going terminal while 35 child
+    processes kept issuing upstream requests. Settles each worker's card and
+    leaves ONE coalesced note rather than a chip per worker (fan-out is uncapped
+    by ruling P12). Idempotent — stopping when nothing is live returns
+    ``stopped: 0``.
+    """
+    await require_session(request, session_id)
+
+    from app.core import provider_agent_supervisor
+
+    async with api_error_handler("stop provider workers"):
+        result = await provider_agent_supervisor.stop_all_workers(session_id)
+        return {"session_id": session_id, **result}
 
 
 @router.get("/{session_id}/subagents")

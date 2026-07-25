@@ -637,6 +637,39 @@ class TaskRegistry:
             return set()
         return set(self._background_launches.get(session_id, set()))
 
+    def discard_background_launch(self, session_id: str, tool_use_id: str) -> bool:
+        """Forget ONE launch id from the cumulative background-launch sets.
+
+        The only surgical way to undo an entry in ``_background_launches`` /
+        ``_subagent_background_launches``. Both sets are deliberately CUMULATIVE
+        — never reset per turn, cleared only by ``clear_session`` — and the
+        ``_finalize`` park gate ORs the first of them
+        (``app/core/session_runtime.py:674``), so any id left behind parks the
+        turn that dropped it AND every later turn.
+
+        That is exactly the trap ProviderAgent worker teardown has to avoid
+        (multi-provider phase 3, plan §2 C.4): the worker is gone, but its
+        launch id would keep the session parked forever. Discarding ONLY the
+        torn-down worker's own id leaves ordinary CLI-native subagent launches
+        untouched, so their parking — a deliberate feature — is unchanged.
+
+        Returns True iff an id was actually removed from either set. Defensive:
+        missing ids and unknown sessions are no-ops.
+        """
+        if not session_id or not tool_use_id:
+            return False
+        removed = False
+        for store in (self._background_launches, self._subagent_background_launches):
+            bucket = store.get(session_id)
+            if bucket is None:
+                continue
+            if tool_use_id in bucket:
+                bucket.discard(tool_use_id)
+                removed = True
+            if not bucket:
+                store.pop(session_id, None)
+        return removed
+
     def start_task(
         self,
         session_id: str,
@@ -740,6 +773,7 @@ class TaskRegistry:
         *,
         summary: Optional[str] = None,
         reason: Optional[str] = None,
+        notify: bool = True,
     ) -> None:
         """Set a terminal status on a task. No-op if the task is unknown.
 
@@ -762,6 +796,16 @@ class TaskRegistry:
         once per task (``mark_terminal_notified``). Fired AFTER the record and
         retention snapshot are final so the callback sees the attributed wire
         shape. Fully defensive: a raising callback is swallowed.
+
+        ``notify=False`` suppresses that chip for THIS transition only. Its one
+        caller is ProviderAgent worker teardown
+        (:mod:`app.core.provider_agent_supervisor`), where fan-out is uncapped
+        by ruling P12: a wide turn ending would otherwise fire one durable chip
+        per killed worker in a single burst. Teardown emits ONE coalesced note
+        instead. The terminal record, the retention snapshot and the durable
+        mirror are all still written — only the chip is skipped, and the
+        one-shot ``mark_terminal_notified`` latch is deliberately left UNSET so
+        a genuine later surfacing of the same task is still possible.
         """
         record = self._tasks.get(session_id, {}).get(task_id)
         if record is None:
@@ -783,7 +827,8 @@ class TaskRegistry:
         bucket[task_id] = {"task": to_wire(record), "recorded_at": now, "ttl": ttl}
 
         if (
-            status in _FAILURE_STATUSES
+            notify
+            and status in _FAILURE_STATUSES
             and self._terminal_notification_callback is not None
             and self.is_own_background_task(session_id, task_id)
             and self.mark_terminal_notified(session_id, task_id)

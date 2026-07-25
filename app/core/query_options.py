@@ -697,8 +697,8 @@ def build_options_from_profile(
     # itself is registered under the same two gates further down.
     if settings.provider_agent_enabled and session_id:
         try:
-            from app.core.provider_agent import is_worker_session
-            if not is_worker_session(session_id):
+            from app.core.provider_agent import is_provider_agent_worker
+            if not is_provider_agent_worker(session_id):
                 from app.mcp.provider_agent_sdk import get_provider_agent_tool_names
                 mcp_allowed_tools.extend(get_provider_agent_tool_names())
         except Exception:
@@ -828,10 +828,14 @@ def build_options_from_profile(
     # Register the ProviderAgent server (cross-provider workers, P3-A) when the
     # feature flag is on. Skipped for worker sessions so a worker can never
     # dispatch a worker (P14) — the tool re-checks the same gate at call time.
+    # The gate is ``is_provider_agent_worker``: the PERSISTED turn source
+    # (cluster-safe, survives restarts) ORed with the in-process set, because a
+    # worker whose turn is claimed by another runner is absent from this
+    # process's set and would otherwise be offered the tool.
     if settings.provider_agent_enabled and session_id:
         try:
-            from app.core.provider_agent import is_worker_session
-            if is_worker_session(session_id):
+            from app.core.provider_agent import is_provider_agent_worker
+            if is_provider_agent_worker(session_id):
                 logger.debug(
                     "ProviderAgent MCP server skipped for worker session %s", session_id
                 )

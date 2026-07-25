@@ -120,6 +120,56 @@ def reset_worker_sessions() -> None:
     _WORKER_SESSION_IDS.clear()
 
 
+def is_worker_turn(session_id: Optional[str]) -> bool:
+    """True iff ``session_id``'s CURRENT turn is a ProviderAgent worker turn.
+
+    The cluster-safe half of the nesting guard, and the one that actually
+    decides (P3-A4). :func:`is_worker_session` above is a process-local set, so
+    under V2 placement a worker whose turn is claimed by a DIFFERENT runner is
+    simply absent from that runner's set — and that runner would happily offer
+    the worker the very tool it was dispatched by, making cross-runner
+    recursion possible. It also empties on restart.
+
+    The signal used instead is already persisted and needs no schema change:
+    ``dispatch_worker`` submits the worker's turn with
+    ``source=WORKER_TURN_SOURCE``, and ``turns.enqueue_turn`` writes ``source``
+    to the row (``app/db/turns.py:137/145``). A live turn carrying that source
+    IS a worker turn, on any runner, across restarts.
+
+    Deliberately reads the LIVE turn only (``running``/``interrupting``/
+    ``draining``) rather than the session's history: a worker session a human
+    later resumes and types into is running a ``user`` turn at that point and is
+    no longer acting as a worker, so it correctly gets the tool back.
+
+    Fails CLOSED-ish by design: an unreadable turns table returns ``False``
+    here, and the caller ORs this with :func:`is_worker_session`, so the
+    in-process set still covers the same-runner case that a DB outage would
+    otherwise open up.
+    """
+    if not session_id:
+        return False
+    try:
+        from app.db import turns as turns_db
+
+        turn = turns_db.get_live_turn(session_id)
+    except Exception:  # noqa: BLE001 — the in-process set is the fallback
+        logger.debug("ProviderAgent: live-turn read failed for %s", session_id, exc_info=True)
+        return False
+    return bool(turn) and (turn.get("source") == WORKER_TURN_SOURCE)
+
+
+def is_provider_agent_worker(session_id: Optional[str]) -> bool:
+    """The nesting guard callers should use (ruling P14 — one level only).
+
+    ORs the persistent, cluster-safe :func:`is_worker_turn` with the
+    process-local :func:`is_worker_session` set. Either alone has a hole; the
+    union has neither: the persisted turn source covers other runners and
+    restarts, and the in-process set covers the window before the worker's turn
+    row goes live.
+    """
+    return is_worker_session(session_id) or is_worker_turn(session_id)
+
+
 def worker_timeout_seconds() -> float:
     """The configured per-worker ceiling, clamped to something sane."""
     from app.core.config import settings
@@ -550,7 +600,7 @@ async def dispatch_worker(
     rules. Forwarding is strictly best-effort — it can degrade the card, never
     the worker.
     """
-    from app.core import turn_manager
+    from app.core import provider_agent_supervisor, turn_manager
     from app.core.provider_agent_feed import WorkerFeed, emit_shielded
     from app.core.task_registry import task_registry
     from app.db import database
@@ -626,9 +676,32 @@ async def dispatch_worker(
         prompt=prompt,
     )
 
+    # Turn-lifetime safety (P3-A4). The supervisor is the ONLY thing that knows
+    # this worker exists as a worker, and it is what ``SessionRuntime._finalize``
+    # consults to guarantee no worker outlives its parent turn. It also carries
+    # the per-provider attribution and backs the stop-all control. Registered
+    # BEFORE the turn is submitted so a teardown racing the submit still finds
+    # (and kills) it.
+    supervised = provider_agent_supervisor.register_worker(
+        provider_agent_supervisor.WorkerRecord(
+            parent_session_id=parent_session_id,
+            worker_session_id=worker_session_id,
+            task_id=worker_session_id,
+            tool_use_id=tool_use_id or worker_session_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            label=label,
+            feed=feed,
+        )
+    )
+
     status = "error"
     preview: Optional[str] = None
     cancelled = False
+    #: Authoritative usage for attribution, filled from the worker's terminal
+    #: turn on every path that has one (the feed's live capture is a bonus, not
+    #: the source of truth).
+    usage_seen: Dict[str, Any] = {}
     try:
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
@@ -667,6 +740,7 @@ async def dispatch_worker(
             )
 
         outcome = final_turn_outcome(worker_session_id)
+        usage_seen = outcome["usage"] if isinstance(outcome["usage"], dict) else {}
         if outcome["error"]:
             preview = str(outcome["error"])
             return WorkerOutcome(
@@ -714,24 +788,41 @@ async def dispatch_worker(
             error=f"Worker dispatch failed: {exc}",
         )
     finally:
-        # Terminal frames FIRST: the registry drop below is what clears the
-        # ``/live`` spinner overlay, and the card must already be settled by
-        # then. On the cancellation path the final drain is skipped (the loop
-        # is tearing down) and the completed frame is SHIELDED — the reducer
-        # settles stale cards only on turn.completed, never on turn.aborted,
-        # so a lost terminal frame would leave a permanently spinning card.
-        try:
-            await feed.stop_following(final_drain=not cancelled)
-        except BaseException:  # noqa: BLE001 — teardown must not mask the outcome
-            logger.debug("ProviderAgent: feed teardown failed", exc_info=True)
-        # ``status`` is the registry vocabulary (completed/error/killed), which
-        # is also the reducer's terminal set for the settle frame.
-        await emit_shielded(feed.completed(
-            status,
-            result_preview=preview,
-            summary=f"{provider_id} · {model_id}",
-        ))
-        try:
-            task_registry.complete_task(parent_session_id, worker_session_id, status)
-        except Exception:  # noqa: BLE001
-            logger.exception("ProviderAgent: registry completion failed")
+        # Turn-end teardown may have already settled this worker (card, registry
+        # row, park-gate purge and process kill). Repeating any of that would
+        # re-emit a terminal frame and re-complete a row that is already
+        # terminal, so the latch wins and this block only unregisters.
+        if supervised.torn_down:
+            provider_agent_supervisor.unregister_worker(
+                parent_session_id, worker_session_id
+            )
+        else:
+            # Terminal frames FIRST: the registry drop below is what clears the
+            # ``/live`` spinner overlay, and the card must already be settled by
+            # then. On the cancellation path the final drain is skipped (the loop
+            # is tearing down) and the completed frame is SHIELDED — the reducer
+            # settles stale cards only on turn.completed, never on turn.aborted,
+            # so a lost terminal frame would leave a permanently spinning card.
+            try:
+                await feed.stop_following(final_drain=not cancelled)
+            except BaseException:  # noqa: BLE001 — teardown must not mask the outcome
+                logger.debug("ProviderAgent: feed teardown failed", exc_info=True)
+            # ``status`` is the registry vocabulary (completed/error/killed), which
+            # is also the reducer's terminal set for the settle frame.
+            await emit_shielded(feed.completed(
+                status,
+                result_preview=preview,
+                summary=f"{provider_id} · {model_id}",
+            ))
+            try:
+                task_registry.complete_task(parent_session_id, worker_session_id, status)
+            except Exception:  # noqa: BLE001
+                logger.exception("ProviderAgent: registry completion failed")
+            # Attribution: the authoritative per-provider numbers, recorded
+            # while the record is still live so the parent's turn can read them.
+            provider_agent_supervisor.record_usage(
+                parent_session_id, worker_session_id, usage_seen
+            )
+            provider_agent_supervisor.unregister_worker(
+                parent_session_id, worker_session_id
+            )
