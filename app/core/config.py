@@ -315,6 +315,25 @@ class Settings(BaseSettings):
     # field name automatically).
     preserve_background_on_interrupt: bool = False
 
+    # Cross-provider ProviderAgent workers (multi-provider phase 3, chunk P3-A).
+    # When ON, every non-worker session gets an in-process SDK MCP server
+    # exposing ONE tool, ``ProviderAgent``, which dispatches a task to a SEPARATE
+    # session bound to a DIFFERENT model provider and returns that worker's
+    # report. The Claude main stays fully native (no subscription token ever
+    # reaches the translator gateway — ruling P1/F1); the two halves are
+    # different processes, so the one-base-URL constraint does not apply.
+    # OFF by default: the safety work this capability needs (turn-lifetime
+    # teardown, per-provider circuit breaker, permission routing) lands in later
+    # chunks, so the tool must not reach the model until then. Set via
+    # PROVIDER_AGENT_ENABLED (BaseSettings reads env vars by field name).
+    provider_agent_enabled: bool = False
+
+    # Hard ceiling, in seconds, on a single ProviderAgent worker. When the
+    # worker session has not gone idle by then the tool interrupts it and
+    # returns a FAILED result — the parent turn must never hang on a worker
+    # (phase-3 plan §2 C.6). Set via PROVIDER_AGENT_TIMEOUT_SECONDS.
+    provider_agent_timeout_seconds: int = 900
+
     # Auto-continue an autonomous turn cut at the autocompact boundary. The
     # bundled CLI ends the agentic loop when the NEXT turn would cross the
     # autocompact threshold and DEFERS compaction to the start of the next

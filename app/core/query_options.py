@@ -691,6 +691,19 @@ def build_options_from_profile(
     from app.mcp.builtin_tools import get_builtin_tool_names
     mcp_allowed_tools.extend(get_builtin_tool_names())
 
+    # ProviderAgent cross-provider workers (multi-provider phase 3, P3-A).
+    # Flag-gated OFF by default, and never offered to a session that IS a
+    # ProviderAgent worker — one nesting level only (ruling P14). The server
+    # itself is registered under the same two gates further down.
+    if settings.provider_agent_enabled and session_id:
+        try:
+            from app.core.provider_agent import is_worker_session
+            if not is_worker_session(session_id):
+                from app.mcp.provider_agent_sdk import get_provider_agent_tool_names
+                mcp_allowed_tools.extend(get_provider_agent_tool_names())
+        except Exception:
+            logger.exception("Failed to add ProviderAgent tools to allowed_tools")
+
     # Built-in/managed MCP servers (e.g. the headless browser server) are
     # passed via mcp_servers (loaded through McpService inside
     # _build_mcp_servers_dict). Their tool names must be explicitly allowed —
@@ -811,6 +824,28 @@ def build_options_from_profile(
             logger.debug("Builtin bridge MCP server registered")
     except Exception:
         logger.exception("Failed to create builtin bridge MCP server")
+
+    # Register the ProviderAgent server (cross-provider workers, P3-A) when the
+    # feature flag is on. Skipped for worker sessions so a worker can never
+    # dispatch a worker (P14) — the tool re-checks the same gate at call time.
+    if settings.provider_agent_enabled and session_id:
+        try:
+            from app.core.provider_agent import is_worker_session
+            if is_worker_session(session_id):
+                logger.debug(
+                    "ProviderAgent MCP server skipped for worker session %s", session_id
+                )
+            else:
+                from app.mcp.provider_agent_sdk import create_provider_agent_server
+                pa_srv = create_provider_agent_server(
+                    session_id=session_id,
+                    profile_id=profile.get("id"),
+                )
+                if pa_srv:
+                    mcp_servers_dict["provider-agent"] = pa_srv
+                    logger.debug("ProviderAgent MCP server registered")
+        except Exception:
+            logger.exception("Failed to create ProviderAgent MCP server")
 
     # Register the computer-use server (host desktop control) when enabled and
     # the host supports it. computer_use_enabled was already validated against

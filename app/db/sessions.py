@@ -407,6 +407,7 @@ def create_session(
     automation_id: Optional[str] = None,
     *,
     is_active: bool = False,
+    provider_id: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -428,6 +429,12 @@ def create_session(
         automation_id: Automation that created this session (NULL = user/API session)
         is_active: Whether the session starts in the Active group (user-initiated
             sessions are created active; imported/background ones are not)
+        provider_id: Explicit model_providers binding for this session. When
+            supplied it WINS over the profile-derived value below — the caller
+            is binding the session to a provider the profile knows nothing
+            about (ProviderAgent cross-provider workers, phase-3 chunk P3-A).
+            ``None`` (or "") keeps the pre-existing profile-derived behaviour
+            exactly.
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
@@ -440,19 +447,26 @@ def create_session(
     # never reroutes a live session. NULL = native Claude (gateway bypass, F1);
     # a native profile (no config.provider) and an unresolvable profile both
     # stay NULL.
-    provider_id = None
-    try:
-        from app.db.profiles import get_profile
-        _profile = get_profile(profile_id)
-        if _profile:
-            provider_id = (_profile.get("config") or {}).get("provider") or None
-    except Exception:  # noqa: BLE001 — binding is best-effort; NULL = native
-        provider_id = None
+    #
+    # An EXPLICIT ``provider_id`` argument short-circuits that resolution and
+    # wins (P3-A): a ProviderAgent worker session is bound to the provider the
+    # tool call named, not to whatever its (inherited) profile happens to
+    # configure. With no argument the code below is byte-identical to the
+    # pre-parameter behaviour.
+    resolved_provider_id = (provider_id or "").strip() or None
+    if resolved_provider_id is None:
+        try:
+            from app.db.profiles import get_profile
+            _profile = get_profile(profile_id)
+            if _profile:
+                resolved_provider_id = (_profile.get("config") or {}).get("provider") or None
+        except Exception:  # noqa: BLE001 — binding is best-effort; NULL = native
+            resolved_provider_id = None
     _ph = ph()
     _phs17 = ", ".join([_ph] * 17)
     sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, v2_stream, created_at, updated_at, provider_id)
                VALUES ({_phs17})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, provider_id)
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)

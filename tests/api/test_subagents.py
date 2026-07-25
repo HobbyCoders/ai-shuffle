@@ -1464,3 +1464,90 @@ class TestSubagentModelValidation:
             )
             assert response.status_code == 200
             mock_db.get_model_provider.assert_not_called()
+
+
+class TestSubagentModelValidationMessageParity:
+    """Pin the EXACT 400 detail strings across the P3-A refactor.
+
+    ``_validate_subagent_model`` now delegates its provider/model rules to the
+    framework-free ``app.core.provider_agent.validate_provider_model`` so the
+    ProviderAgent tool shares one implementation. That refactor is required to be
+    externally invisible: same status code, same wording, byte for byte. These
+    literals are copied from the pre-refactor implementation — if a future change
+    to the shared validator's phrasing leaks into this endpoint, these fail.
+    """
+
+    def _detail(self, model, provider_row):
+        """Run the validator directly and return the raised 400's detail."""
+        from app.api.subagents import _validate_subagent_model
+
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_model_provider.return_value = provider_row
+            with pytest.raises(HTTPException) as exc:
+                _validate_subagent_model(model)
+        assert exc.value.status_code == 400
+        return exc.value.detail
+
+    def test_missing_provider_message(self):
+        assert self._detail("prov:ghost:gpt-4o", None) == (
+            "The provider 'ghost' does not exist."
+        )
+
+    def test_disabled_provider_message(self):
+        assert self._detail(
+            "prov:prov-openai:gpt-4o", _provider_row(enabled=False)
+        ) == (
+            "The provider 'My OpenAI' is disabled; enable it or pick a "
+            "different provider."
+        )
+
+    def test_non_servable_provider_message(self):
+        """The one message the shared validator does NOT own — subagent-specific
+        vocabulary, so the endpoint formats it itself."""
+        assert self._detail(
+            "prov:prov-openai:gpt-4o", _provider_row(provider_type="openrouter")
+        ) == (
+            "A provider-pinned subagent model requires an OpenAI-, ChatGPT-, or "
+            "Anthropic-API-type provider (the model routes through the translator "
+            "gateway); provider 'My OpenAI' cannot serve subagent models."
+        )
+
+    def test_model_not_curated_message(self):
+        assert self._detail(
+            "prov:prov-openai:gpt-nope", _provider_row(model_ids=("gpt-4o",))
+        ) == (
+            "Model 'gpt-nope' is not in provider 'My OpenAI''s curated model list."
+        )
+
+    def test_malformed_composite_message(self):
+        from app.api.subagents import _validate_subagent_model
+
+        with patch("app.api.subagents.database") as mock_db:
+            with pytest.raises(HTTPException) as exc:
+                _validate_subagent_model("prov:onlypid")
+            mock_db.get_model_provider.assert_not_called()
+        assert exc.value.detail == (
+            "Invalid provider model reference 'prov:onlypid': expected the form "
+            "'prov:<provider-id>:<model-id>'."
+        )
+
+    def test_provider_row_is_fetched_once_and_handed_to_the_validator(self):
+        """The endpoint keeps ownership of the DB call (one lookup, unchanged
+        signature) and passes the row down, so the shared validator never issues
+        a second query."""
+        from app.api.subagents import _validate_subagent_model
+        from app.core.provider_agent import validate_provider_model
+
+        with patch("app.api.subagents.database") as mock_db:
+            mock_db.get_model_provider.return_value = _provider_row()
+            with patch(
+                "app.api.subagents.validate_provider_model",
+                wraps=validate_provider_model,
+            ) as spy:
+                _validate_subagent_model("prov:prov-openai:gpt-4o")
+
+        mock_db.get_model_provider.assert_called_once_with(
+            "prov-openai", include_token=False
+        )
+        assert spy.call_count == 1
+        assert spy.call_args.kwargs["provider_row"] == _provider_row()

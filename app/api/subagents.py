@@ -2,7 +2,6 @@
 Global Subagent management API routes
 """
 
-import json
 from typing import List, Optional
 from datetime import datetime
 
@@ -11,7 +10,10 @@ from pydantic import BaseModel, Field
 
 from app.db import database
 from app.api.auth import require_auth, require_admin
-from app.core.environment import is_gateway_servable
+from app.core.provider_agent import (
+    PROVIDER_NOT_SERVABLE,
+    validate_provider_model,
+)
 
 router = APIRouter(prefix="/api/v1/subagents", tags=["Subagents"])
 
@@ -111,6 +113,12 @@ def _validate_subagent_model(model: Optional[str]) -> None:
     profile-dependent and unknowable at subagent-edit time; that gate lives at
     spawn as a silent leg-drop (see docs/SUBAGENT_MODEL_CONFIG_PLAN.md §S4).
 
+    The provider/model rules themselves live in
+    :func:`app.core.provider_agent.validate_provider_model` (framework-free, so
+    the ProviderAgent tool shares ONE implementation); this function only owns
+    the composite's SHAPE and the translation of a validation ``code`` into the
+    HTTP error this endpoint has always raised.
+
     Raises HTTP 400 on an invalid composite. No-op for inherit/Claude shapes.
     """
     if model is None or not model.strip():
@@ -127,56 +135,25 @@ def _validate_subagent_model(model: Optional[str]) -> None:
                 f"'prov:<provider-id>:<model-id>'."
             ),
         )
+    # The row is fetched HERE (not inside the validator) so this endpoint keeps
+    # its exact database call surface; the validator is handed the result,
+    # including a ``None`` meaning "looked, does not exist".
     row = database.get_model_provider(pid, include_token=False)
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"The provider '{pid}' does not exist.",
+    result = validate_provider_model(pid, mid, provider_row=row)
+    if result.ok:
+        return
+    if result.code == PROVIDER_NOT_SERVABLE:
+        # Subagent-specific vocabulary — the shared validator's wording is
+        # provider-generic, and this endpoint's message must not change.
+        detail = (
+            f"A provider-pinned subagent model requires an OpenAI-, ChatGPT-, "
+            f"or Anthropic-API-type provider (the model routes through the "
+            f"translator gateway); provider '{result.provider_label}' cannot "
+            f"serve subagent models."
         )
-    if not row.get("enabled"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"The provider '{row.get('name') or pid}' is disabled; enable it "
-                f"or pick a different provider."
-            ),
-        )
-    if not is_gateway_servable(row):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"A provider-pinned subagent model requires an OpenAI-, ChatGPT-, "
-                f"or Anthropic-API-type provider (the model routes through the "
-                f"translator gateway); provider '{row.get('name') or pid}' cannot "
-                f"serve subagent models."
-            ),
-        )
-    # Curated model ids — parsed the same defensive way as
-    # app.core.environment._first_curated_model_id (``models_json`` may be a
-    # parsed list of {id, label} dicts, a raw JSON string, or absent), but
-    # collecting ALL ids. An absent/empty/unparseable list means no composite
-    # can validate.
-    models = row.get("models_json")
-    if isinstance(models, str):
-        try:
-            models = json.loads(models)
-        except Exception:
-            models = None
-    curated_ids = set()
-    if isinstance(models, list):
-        for entry in models:
-            if isinstance(entry, dict):
-                entry_id = entry.get("id")
-                if isinstance(entry_id, str) and entry_id:
-                    curated_ids.add(entry_id)
-    if mid not in curated_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Model '{mid}' is not in provider "
-                f"'{row.get('name') or pid}''s curated model list."
-            ),
-        )
+    else:
+        detail = result.reason
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
 
 @router.get("", response_model=List[SubagentResponse])
