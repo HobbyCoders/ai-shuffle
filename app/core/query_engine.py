@@ -2155,10 +2155,22 @@ async def _stream_to_websocket_impl(
                     indicator so a backgrounded session blocked on approval is just
                     as discoverable as one blocked on a question. Clears the
                     indicator whether the prompt is answered, deferred, or the query
-                    is cancelled (session closed)."""
+                    is cancelled (session closed).
+
+                    P3-A3: ``route_permission`` is a pass-through for every
+                    ordinary session — it calls the SAME
+                    ``permission_handler.request_permission`` with the SAME
+                    kwargs. It diverges only when THIS session was minted as a
+                    ProviderAgent worker, in which case the prompt is raised on
+                    (and answerable from) the PARENT session's UI, tagged with the
+                    worker's label. See ``app/core/provider_agent_approvals``."""
+                    from app.core import provider_agent_approvals
+
                     await _bump_attention(1, "permission")
                     try:
-                        return await permission_handler.request_permission(**kwargs)
+                        return await provider_agent_approvals.route_permission(
+                            kwargs, permission_handler.request_permission
+                        )
                     finally:
                         await _bump_attention(-1, "permission")
 

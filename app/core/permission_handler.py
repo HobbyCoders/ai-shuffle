@@ -68,6 +68,13 @@ class PermissionRequest:
     decision_reason: Optional[str] = None
     blocked_path: Optional[str] = None
 
+    # P3-A3: set ONLY when this prompt was raised by a ProviderAgent worker and
+    # redirected onto its parent's session (see app/core/provider_agent_approvals).
+    # Carries the asking worker's label + session id so the UI can tag it. None
+    # on every ordinary permission request, and omitted from payloads/events when
+    # None, so the non-worker path is unchanged.
+    provider_agent: Optional[Dict[str, Any]] = None
+
     # Request lifecycle state: "pending" | "deferred"
     state: str = "pending"
 
@@ -167,6 +174,7 @@ class PermissionHandler:
         description: Optional[str] = None,
         decision_reason: Optional[str] = None,
         blocked_path: Optional[str] = None,
+        provider_agent: Optional[Dict[str, Any]] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
@@ -190,6 +198,10 @@ class PermissionHandler:
             description: SDK 0.1.81 ToolPermissionContext.description
             decision_reason: SDK 0.1.81 ToolPermissionContext.decision_reason
             blocked_path: SDK 0.1.81 ToolPermissionContext.blocked_path
+            provider_agent: P3-A3 worker tag ({worker_session_id, label, ...})
+                when this prompt was raised by a ProviderAgent worker and
+                redirected onto its parent's session. None otherwise, and then
+                invisible in every payload and WS event.
 
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
@@ -209,6 +221,7 @@ class PermissionHandler:
                 description=description,
                 decision_reason=decision_reason,
                 blocked_path=blocked_path,
+                provider_agent=provider_agent,
             )
 
         # Check saved rules first
@@ -234,6 +247,7 @@ class PermissionHandler:
             description=description,
             decision_reason=decision_reason,
             blocked_path=blocked_path,
+            provider_agent=provider_agent,
         )
 
         async with self._lock:
@@ -325,6 +339,7 @@ class PermissionHandler:
         description: Optional[str],
         decision_reason: Optional[str],
         blocked_path: Optional[str],
+        provider_agent: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Assemble the JSONB payload persisted on a permission interaction row.
 
@@ -332,6 +347,10 @@ class PermissionHandler:
         ``request_id`` (matched Python-side, Q4-3), the rule-match keys
         (``profile_id``/``tool_name``/``tool_input``), and the SDK enrichment
         fields. ``profile_id`` is internal-only and never surfaced in a WS event.
+
+        ``provider_agent`` (P3-A3) rides the SAME ``is not None`` guard as every
+        enrichment field, so an ordinary prompt's payload is byte-identical to
+        what it was before that parameter existed.
         """
         payload: Dict[str, Any] = {
             "request_id": request_id,
@@ -347,6 +366,7 @@ class PermissionHandler:
             ("description", description),
             ("decision_reason", decision_reason),
             ("blocked_path", blocked_path),
+            ("provider_agent", provider_agent),
         ):
             if value is not None:
                 payload[key] = value
@@ -393,6 +413,8 @@ class PermissionHandler:
             "description",
             "decision_reason",
             "blocked_path",
+            # P3-A3 worker tag — present only on a redirected worker prompt.
+            "provider_agent",
         ):
             if payload.get(key) is not None:
                 d[key] = payload[key]
@@ -413,6 +435,7 @@ class PermissionHandler:
         description: Optional[str] = None,
         decision_reason: Optional[str] = None,
         blocked_path: Optional[str] = None,
+        provider_agent: Optional[Dict[str, Any]] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """Table-backed request_permission (V2 Phase 4)."""
         from app.core import interaction_wait
@@ -431,7 +454,7 @@ class PermissionHandler:
         payload = self._build_permission_payload(
             request_id, profile_id, tool_name, tool_input, tool_use_id,
             agent_id, title, display_name, description, decision_reason,
-            blocked_path,
+            blocked_path, provider_agent,
         )
         row = await asyncio.to_thread(
             interactions.create_interaction,
@@ -458,6 +481,7 @@ class PermissionHandler:
             description=description,
             decision_reason=decision_reason,
             blocked_path=blocked_path,
+            provider_agent=provider_agent,
         )
         await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -805,6 +829,7 @@ class PermissionHandler:
                     description=payload.get("description"),
                     decision_reason=payload.get("decision_reason"),
                     blocked_path=payload.get("blocked_path"),
+                    provider_agent=payload.get("provider_agent"),
                 )
                 await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -860,6 +885,11 @@ class PermissionHandler:
             permission_event["decision_reason"] = request.decision_reason
         if request.blocked_path is not None:
             permission_event["blocked_path"] = request.blocked_path
+        # P3-A3: structured worker tag, present ONLY on a ProviderAgent worker's
+        # prompt redirected onto its parent. Absent on every ordinary request, so
+        # the legacy event shape is unchanged.
+        if request.provider_agent is not None:
+            permission_event["provider_agent"] = request.provider_agent
         await broadcast_func(permission_event)
 
     async def respond(
@@ -1114,6 +1144,8 @@ class PermissionHandler:
             d["decision_reason"] = req.decision_reason
         if req.blocked_path is not None:
             d["blocked_path"] = req.blocked_path
+        if req.provider_agent is not None:
+            d["provider_agent"] = req.provider_agent
         return d
 
     async def requeue_deferred(

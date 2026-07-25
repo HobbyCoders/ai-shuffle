@@ -34,8 +34,13 @@ Scope notes (deliberate — later chunks own these):
   the parent's log as the ``subagent.started`` / ``subagent.progress`` /
   ``subagent.completed`` triple, which is what makes the existing subagent card
   render. The worker's own log is read-only to that tap.
-* NO permission/approval routing (chunk A3).
-* NO turn-end teardown, stop-all or per-provider circuit breaker (chunk A4).
+* Permission/approval routing (chunk A3) lives in
+  :mod:`app.core.provider_agent_approvals`: ``dispatch_worker`` registers the
+  worker's approval route so the worker's tool-approval prompts are raised on —
+  and answered from — the PARENT session's UI, tagged with the worker's label.
+* Turn-lifetime teardown, stop-all and attribution (chunk A4) live in
+  :mod:`app.core.provider_agent_supervisor`; the per-provider circuit
+  breaker lives in the translator gateway.
 * The whole capability is gated on ``settings.provider_agent_enabled``, which
   is OFF by default until that safety work lands.
 
@@ -643,6 +648,23 @@ async def dispatch_worker(
     # Mark BEFORE the turn starts: the worker must never be offered the tool it
     # was itself dispatched by (one nesting level only, P14).
     register_worker_session(worker_session_id)
+
+    # --- chunk A3: approval routing (ONE contiguous region) ----------------
+    # The worker's tool-approval prompts surface on the PARENT's UI, tagged with
+    # this worker's label (plan §2 C.3). Registered HERE, before submit, because
+    # the worker's very first tool call can race the submit call's return. The
+    # registry is bounded and self-trimming, so there is no unregister to pair
+    # with this — see app/core/provider_agent_approvals.
+    from app.core import provider_agent_approvals
+
+    provider_agent_approvals.register_route(
+        worker_session_id=worker_session_id,
+        parent_session_id=parent_session_id,
+        label=title,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
+    # --- end chunk A3 -------------------------------------------------------
 
     overrides: Dict[str, Any] = {"provider": provider_id, "model": model_id}
     cwd = _parent_cwd(parent_row)

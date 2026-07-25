@@ -658,6 +658,31 @@ class SyncEngine:
             source_device_id=source_device_id,
         )
 
+    async def broadcast_user_permission(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Fan a permission frame out to every one of a user's devices.
+
+        Exists for the same reason as ``broadcast_user_question``: the per-query
+        origin socket only reaches the tab that owns the query. A ProviderAgent
+        worker's approval is redirected onto its PARENT's session (P3-A3,
+        ``app/core/provider_agent_approvals``) whose owning tab may be closed,
+        headless, or on another device — so the frame is fanned user-wide and the
+        frontend routes it by the ``session_id`` the payload already carries
+        (deduping by ``request_id``).
+
+        Ordinary permission prompts do NOT use this path; they keep riding the
+        origin socket exactly as before.
+        """
+        await self._broadcast_user_message(
+            user_id,
+            payload,
+            source_device_id=source_device_id,
+        )
+
     async def broadcast_user_session_created(
         self,
         user_id: str,
