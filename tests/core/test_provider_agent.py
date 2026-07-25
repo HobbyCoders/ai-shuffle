@@ -576,3 +576,198 @@ class TestDispatchWorker:
         ]
         assert killed
         task_registry.clear_session("parent-1")
+
+
+# ---------------------------------------------------------------------------
+# Parent-feed forwarding (chunk P3-A2)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def feed_db():
+    """Real (SQLite-shimmed) event log so forwarded rows can be read back."""
+    from tests.pg_shim import new_sqlite_connection, route_db_to
+
+    conn = new_sqlite_connection()
+    with route_db_to(conn):
+        yield conn
+    conn.close()
+
+
+def _parent_events():
+    from app.db import session_events as se
+
+    return se.get_events("parent-1")
+
+
+class TestDispatchWorkerParentFeed:
+    """``dispatch_worker`` must make the EXISTING subagent card render.
+
+    The card is built from contract events, not from the task registry
+    (reducer.ts:996/:1026/:1094), so these assert the events — and the ONE join
+    key that ties the card, the ``/live`` spinner overlay and the terminal
+    settle together.
+    """
+
+    def test_the_event_triple_lands_on_the_parent(self, dispatch_env, feed_db):
+        from app.core.task_registry import task_registry
+        from app.db import session_events as se
+
+        outcome = _dispatch(label="reviewer")
+        worker = outcome.session_id
+
+        types = [e["event_type"] for e in _parent_events()]
+        assert types[0] == "subagent.started"
+        assert "subagent.completed" in types
+        assert types[-1] == "task.updated"
+        assert se.get_events(worker) == []  # nothing written to the worker log
+
+        for row in _parent_events():
+            assert row["payload"]["task_id"] == worker
+        task_registry.clear_session("parent-1")
+
+    def test_one_join_key_across_card_registry_and_settle(self, dispatch_env, feed_db):
+        """card.toolId == registry.task_id == registry.tool_use_id.
+
+        The `/live` overlay matches ``activeTasks[].toolUseId`` against the
+        card's ``toolId`` (SubagentMessage.svelte:37-44), and the terminal
+        ``task.updated`` settle joins the same way (reducer.ts:1203) — a
+        registry entry with no ``tool_use_id`` could never settle its card.
+        """
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+        worker = outcome.session_id
+
+        record = task_registry.get_task("parent-1", worker)
+        assert record["id"] == worker
+        # `/live` serves this as activeTasks[].toolUseId — the card join key.
+        assert record["toolUseId"] == worker
+        assert task_registry.get_task_tool_use_id("parent-1", worker) == worker
+
+        started = _parent_events()[0]
+        assert started["event_type"] == "subagent.started"
+        assert started["payload"]["task_id"] == worker
+
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        assert settle["payload"]["tool_use_id"] == worker
+        assert settle["payload"]["state"] == "completed"
+        task_registry.clear_session("parent-1")
+
+    def test_an_explicit_tool_use_id_still_wins(self, dispatch_env, feed_db):
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch(tool_use_id="toolu_abc")
+
+        record = task_registry.get_task("parent-1", outcome.session_id)
+        assert record["toolUseId"] == "toolu_abc"
+        task_registry.clear_session("parent-1")
+
+    def test_worker_progress_is_summarised_onto_the_parent(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        """A worker that produces tool activity renders children on the card."""
+        from app.core.task_registry import task_registry
+        from app.db import session_events as se
+
+        def _submit(session_id, source, **kwargs):
+            se.append_events(session_id, [
+                {"type": "assistant.text_delta", "payload": {"text": "working"}},
+                {"type": "tool.use", "payload": {
+                    "tool_use_id": "t1", "name": "Read", "input": {"file_path": "/a"},
+                }},
+                {"type": "tool.result", "payload": {
+                    "tool_use_id": "t1", "is_error": False, "content_preview": "body",
+                }},
+            ])
+            return "turn-1"
+
+        from app.core import turn_manager as tm_mod
+        monkeypatch.setattr(tm_mod, "submit", _submit)
+
+        outcome = _dispatch()
+
+        kinds = [
+            e["payload"]["kind"] for e in _parent_events()
+            if e["event_type"] == "subagent.progress"
+        ]
+        assert kinds == ["chunk", "tool_use", "tool_result"]
+        # The worker's own log keeps its three rows, untouched.
+        assert len(se.get_events(outcome.session_id)) == 3
+        task_registry.clear_session("parent-1")
+
+    def test_the_card_settles_even_when_the_parent_turn_is_cancelled(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        """Cancellation is the case with no reducer safety net.
+
+        ``settleStaleBackgroundWork`` speculatively settles running cards on
+        ``turn.completed`` only — ``turn.aborted`` (reducer.ts:609) does not
+        touch subagent cards — so the terminal frame MUST land here or the card
+        spins forever on replay.
+        """
+        from app.core.task_registry import task_registry
+
+        async def _cancelled(session_id, timeout=300.0):
+            raise asyncio.CancelledError()
+
+        from app.core import turn_manager as tm_mod
+        monkeypatch.setattr(tm_mod, "wait_session_idle", _cancelled)
+
+        async def _run():
+            with pytest.raises(asyncio.CancelledError):
+                await pa.dispatch_worker(
+                    parent_session_id="parent-1",
+                    profile_id="default",
+                    provider_id="prov-openai",
+                    model_id="gpt-5.5",
+                    prompt="do the thing",
+                )
+            # Let the shielded terminal append finish.
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+        asyncio.run(_run())
+
+        types = [e["event_type"] for e in _parent_events()]
+        assert "subagent.started" in types
+        assert "subagent.completed" in types
+        done = [
+            e for e in _parent_events() if e["event_type"] == "subagent.completed"
+        ][0]
+        assert done["payload"]["status"] == "failed"
+        settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][0]
+        assert settle["payload"]["state"] == "killed"
+        assert settle["payload"]["tool_use_id"] == done["payload"]["task_id"]
+        task_registry.clear_session("parent-1")
+
+    def test_a_failed_worker_settles_the_card_as_an_error(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        from app.core.task_registry import task_registry
+
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": "provider rate limited", "interrupted": False,
+            },
+        )
+
+        outcome = _dispatch()
+
+        assert not outcome.ok
+        done = [
+            e for e in _parent_events() if e["event_type"] == "subagent.completed"
+        ][0]
+        assert done["payload"]["status"] == "failed"
+        assert done["payload"]["result_preview"] == "provider rate limited"
+        task_registry.clear_session("parent-1")
+
+    def test_forwarding_failure_never_breaks_the_dispatch(self, dispatch_env):
+        """No DB routed at all — the worker still returns its report."""
+        from app.core.task_registry import task_registry
+
+        outcome = _dispatch()
+
+        assert outcome.ok
+        assert outcome.report == "the worker's report"
+        task_registry.clear_session("parent-1")

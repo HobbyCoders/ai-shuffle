@@ -28,8 +28,12 @@ SDK — so it is unit-testable on its own and reusable by the API layer:
 
 Scope notes (deliberate — later chunks own these):
 
-* NO parent-session event forwarding / ``subagent.*`` contract events (chunk
-  A2), so no worker card renders yet.
+* Parent-session event forwarding (chunk A2) lives in
+  :mod:`app.core.provider_agent_feed`: ``dispatch_worker`` drives a
+  ``WorkerFeed`` that mirrors a BOUNDED summary of the worker's progress onto
+  the parent's log as the ``subagent.started`` / ``subagent.progress`` /
+  ``subagent.completed`` triple, which is what makes the existing subagent card
+  render. The worker's own log is read-only to that tap.
 * NO permission/approval routing (chunk A3).
 * NO turn-end teardown, stop-all or per-provider circuit breaker (chunk A4).
 * The whole capability is gated on ``settings.provider_agent_enabled``, which
@@ -539,8 +543,15 @@ async def dispatch_worker(
     NEVER hangs the caller: the wait is bounded by ``timeout_seconds`` (default
     ``settings.provider_agent_timeout_seconds``) and every failure path returns
     a :class:`WorkerOutcome` with ``ok=False``.
+
+    Progress is forwarded to the PARENT's event feed by
+    :class:`app.core.provider_agent_feed.WorkerFeed` so the existing subagent
+    card renders the worker live; see that module for the fencing/bounding
+    rules. Forwarding is strictly best-effort — it can degrade the card, never
+    the worker.
     """
     from app.core import turn_manager
+    from app.core.provider_agent_feed import WorkerFeed, emit_shielded
     from app.core.task_registry import task_registry
     from app.db import database
 
@@ -590,17 +601,38 @@ async def dispatch_worker(
 
     timeout = float(timeout_seconds) if timeout_seconds else worker_timeout_seconds()
 
+    # ONE join key for the whole surface: the worker's session id is the
+    # registry task id, the registry's ``tool_use_id`` AND the ``task_id`` on
+    # every forwarded subagent.* event. The frontend joins the ``/live`` spinner
+    # overlay and the terminal task-settle to the card through ``tool_use_id``
+    # (SubagentMessage.svelte:37-44, reducer.ts:1203), so a registry entry with
+    # no tool_use_id — as shipped by P3-A1 — could never settle its card.
     task_registry.start_task(
         parent_session_id,
         worker_session_id,
         "agent",
         title,
         summary=f"{provider_id} · {model_id}",
-        tool_use_id=tool_use_id,
+        tool_use_id=tool_use_id or worker_session_id,
+    )
+
+    feed = WorkerFeed(
+        parent_session_id=parent_session_id,
+        worker_session_id=worker_session_id,
+        task_id=worker_session_id,
+        label=label,
+        provider_id=provider_id,
+        model_id=model_id,
+        prompt=prompt,
     )
 
     status = "error"
+    preview: Optional[str] = None
+    cancelled = False
     try:
+        # Emit the card BEFORE the turn is submitted so a submit failure still
+        # renders as a failed worker rather than as silence.
+        await feed.started()
         turn_manager.submit(
             worker_session_id,
             WORKER_TURN_SOURCE,
@@ -611,12 +643,19 @@ async def dispatch_worker(
             overrides=overrides,
         )
 
+        # Tail the worker's durable log from here on — its rows only start
+        # existing once the turn is submitted.
+        feed.start_following()
+
         idle = await turn_manager.wait_session_idle(worker_session_id, timeout=timeout)
         if not idle:
             try:
                 turn_manager.interrupt(worker_session_id, "stop")
             except Exception:  # noqa: BLE001 — the timeout result stands regardless
                 logger.exception("ProviderAgent: interrupt of timed-out worker failed")
+            preview = (
+                f"The worker did not finish within {int(timeout)}s and was stopped."
+            )
             return WorkerOutcome(
                 ok=False,
                 session_id=worker_session_id,
@@ -629,6 +668,7 @@ async def dispatch_worker(
 
         outcome = final_turn_outcome(worker_session_id)
         if outcome["error"]:
+            preview = str(outcome["error"])
             return WorkerOutcome(
                 ok=False,
                 session_id=worker_session_id,
@@ -636,6 +676,7 @@ async def dispatch_worker(
                 usage=outcome["usage"],
             )
         if outcome["interrupted"]:
+            preview = "The worker session was interrupted before it finished."
             return WorkerOutcome(
                 ok=False,
                 session_id=worker_session_id,
@@ -645,6 +686,7 @@ async def dispatch_worker(
 
         report, truncated = bound_report(final_assistant_text(worker_session_id))
         status = "completed"
+        preview = report
         return WorkerOutcome(
             ok=True,
             session_id=worker_session_id,
@@ -656,6 +698,8 @@ async def dispatch_worker(
         # The parent's SDK client is going away (eviction / interrupt). Stop the
         # worker rather than leaving it running against a parent that is gone.
         status = "killed"
+        cancelled = True
+        preview = "The parent turn ended before the worker finished."
         try:
             turn_manager.interrupt(worker_session_id, "stop")
         except Exception:  # noqa: BLE001
@@ -663,12 +707,30 @@ async def dispatch_worker(
         raise
     except Exception as exc:  # noqa: BLE001 — a tool call must never propagate
         logger.exception("ProviderAgent: worker dispatch failed")
+        preview = f"Worker dispatch failed: {exc}"
         return WorkerOutcome(
             ok=False,
             session_id=worker_session_id,
             error=f"Worker dispatch failed: {exc}",
         )
     finally:
+        # Terminal frames FIRST: the registry drop below is what clears the
+        # ``/live`` spinner overlay, and the card must already be settled by
+        # then. On the cancellation path the final drain is skipped (the loop
+        # is tearing down) and the completed frame is SHIELDED — the reducer
+        # settles stale cards only on turn.completed, never on turn.aborted,
+        # so a lost terminal frame would leave a permanently spinning card.
+        try:
+            await feed.stop_following(final_drain=not cancelled)
+        except BaseException:  # noqa: BLE001 — teardown must not mask the outcome
+            logger.debug("ProviderAgent: feed teardown failed", exc_info=True)
+        # ``status`` is the registry vocabulary (completed/error/killed), which
+        # is also the reducer's terminal set for the settle frame.
+        await emit_shielded(feed.completed(
+            status,
+            result_preview=preview,
+            summary=f"{provider_id} · {model_id}",
+        ))
         try:
             task_registry.complete_task(parent_session_id, worker_session_id, status)
         except Exception:  # noqa: BLE001
