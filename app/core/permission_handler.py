@@ -890,7 +890,62 @@ class PermissionHandler:
         # the legacy event shape is unchanged.
         if request.provider_agent is not None:
             permission_event["provider_agent"] = request.provider_agent
-        await broadcast_func(permission_event)
+
+        # ── Delivery leg 1: the origin socket that owns this query ───────────
+        # Best-effort: a dead/closing socket must never propagate out of here.
+        # Before P3-A4 this call was bare, so an origin-socket failure aborted
+        # the whole broadcast — and (worse) left the caller's flow half-done
+        # while a redirected ProviderAgent worker prompt, whose delivery is
+        # already two-legged and individually swallowed, sailed through. That
+        # asymmetry is what this block removes.
+        try:
+            await broadcast_func(permission_event)
+        except Exception:  # noqa: BLE001 — delivery is best-effort
+            logger.warning(
+                "Permission prompt origin broadcast failed (session=%s request=%s)",
+                request.session_id, request.request_id, exc_info=True,
+            )
+
+        # ── Delivery leg 2: user-wide device fan-out ─────────────────────────
+        # Mirrors ``provider_agent_approvals.deliver_to_parent``: the origin
+        # socket only reaches the tab that owns the query, which may be closed,
+        # headless, or on another device. The frame carries its own session_id
+        # and request_id, so the frontend routes and dedupes it.
+        user_id = await self._resolve_user_id(request.session_id)
+        if user_id:
+            try:
+                from app.core.sync_engine import sync_engine
+
+                await sync_engine.broadcast_user_permission(user_id, permission_event)
+            except Exception:  # noqa: BLE001 — delivery is best-effort
+                logger.warning(
+                    "Permission prompt device fan-out failed (session=%s request=%s)",
+                    request.session_id, request.request_id, exc_info=True,
+                )
+
+    async def _resolve_user_id(self, session_id: str) -> Optional[str]:
+        """Owning user for a session, keyed exactly as the sync engine registers.
+
+        ``sync_engine._user_connections`` is keyed by the value /ws/chat computes
+        at connect time — ``api_user_id or "admin"`` (app/api/websocket.py) — so
+        the session row's ``api_user_id`` maps to it with the same fallback (the
+        identical mapping already used by ``app/core/streaming_status.py``).
+        Returns ``None`` when the row is missing or the lookup fails; leg 2 is
+        then simply skipped, exactly as it is for an unknown user.
+        """
+        try:
+            from app.db import sessions as sessions_db
+
+            row = await asyncio.to_thread(sessions_db.get_session, session_id)
+        except Exception:  # noqa: BLE001 — fan-out is best-effort
+            logger.warning(
+                "Permission prompt user lookup failed (session=%s)",
+                session_id, exc_info=True,
+            )
+            return None
+        if not row:
+            return None
+        return row.get("api_user_id") or "admin"
 
     async def respond(
         self,

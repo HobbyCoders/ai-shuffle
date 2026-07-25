@@ -130,3 +130,37 @@ def test_provider_id_is_keyword_only(mock_db):
     param = sig.parameters["provider_id"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
     assert param.default is None
+
+
+# ---------------------------------------------------------------------------
+# The API response model surfaces it
+# ---------------------------------------------------------------------------
+
+def test_session_response_model_carries_provider_id(mock_db):
+    """A bound row survives serialization through the ``Session`` response model.
+
+    Without the field on the model FastAPI silently strips it, so no client can
+    tell a provider-bound session from a native one.
+    """
+    from app.core.models import Session
+
+    _make_profile("p-resp", {"model": "sonnet"})
+    row = database.get_session(_new_session("p-resp", provider_id="prov-codex"))
+
+    model = Session.model_validate(row)
+
+    assert model.provider_id == "prov-codex"
+    assert model.model_dump()["provider_id"] == "prov-codex"
+
+
+def test_session_response_model_provider_id_defaults_to_none(mock_db):
+    """A native session serializes the field as NULL, not as a missing key."""
+    from app.core.models import Session
+
+    _make_profile("p-resp-native", {"model": "sonnet"})
+    row = database.get_session(_new_session("p-resp-native"))
+
+    dumped = Session.model_validate(row).model_dump()
+
+    assert "provider_id" in dumped
+    assert dumped["provider_id"] is None

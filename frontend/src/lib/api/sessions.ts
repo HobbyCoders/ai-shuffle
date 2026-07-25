@@ -64,6 +64,7 @@ export interface Session {
 	project_v2_id?: string | null;  // Origin-keyed project (install-independent)
 	origin?: string | null;  // Grouping token (git:… / manual:… / local:<id>)
 	automation_id?: string | null;  // Set when an automation run created this session
+	provider_id?: string | null;  // Bound model provider (null = native Claude)
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 }
 

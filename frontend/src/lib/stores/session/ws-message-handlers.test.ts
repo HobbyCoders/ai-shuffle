@@ -831,6 +831,65 @@ describe('ws-message-handlers', () => {
 			expect(deps.update).not.toHaveBeenCalled();
 			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
 		});
+
+		it('ignores the duplicate that arrives on the user-wide fan-out leg', () => {
+			// The server now delivers every prompt twice by design: once on the
+			// origin socket and once on the user-wide device fan-out (both legs are
+			// best-effort, so neither can be dropped). The echo must not double the
+			// modal queue or fire a second "waiting for response" notification.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [];
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					state.pendingPermissions = result.pendingPermissions ?? state.pendingPermissions;
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			const frame = {
+				type: 'permission_request',
+				session_id: 'session-1',
+				request_id: 'perm-dup',
+				tool_name: 'Bash',
+				tool_input: { command: 'ls' },
+			};
+			handlers.handleMessage({ ...frame });
+			handlers.handleMessage({ ...frame });
+
+			expect(state.pendingPermissions.length).toBe(1);
+			expect(deps.update).toHaveBeenCalledTimes(1);
+			expect(deps.onNotifyWaitingForResponse).toHaveBeenCalledTimes(1);
+		});
+
+		it('still queues a genuinely different request for the same session', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [];
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					state.pendingPermissions = result.pendingPermissions ?? state.pendingPermissions;
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'permission_request', session_id: 'session-1',
+				request_id: 'perm-a', tool_name: 'Bash', tool_input: { command: 'ls' },
+			});
+			handlers.handleMessage({
+				type: 'permission_request', session_id: 'session-1',
+				request_id: 'perm-b', tool_name: 'Write', tool_input: { file_path: '/tmp/x' },
+			});
+
+			expect(state.pendingPermissions.map(p => p.request_id)).toEqual(['perm-a', 'perm-b']);
+		});
 	});
 
 	describe('pending_permissions handler (reconnect replay)', () => {

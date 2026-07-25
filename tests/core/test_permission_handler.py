@@ -1587,3 +1587,122 @@ class TestEnrichmentFields:
 
             await handler.cancel_request("req-partial", "session-1")
             await task
+
+
+# =============================================================================
+# Two-leg permission delivery
+# =============================================================================
+
+class TestPermissionBroadcastLegs:
+    """``_broadcast_permission_request`` must deliver over BOTH legs.
+
+    A plain prompt used to ride the origin socket alone (one bare await), while a
+    redirected ProviderAgent worker prompt got the origin socket AND a user-wide
+    device fan-out, each independently swallowed. That asymmetry is removed: both
+    legs always run, and neither can abort the other or raise at the caller.
+    """
+
+    @pytest.fixture
+    def handler(self):
+        return PermissionHandler()
+
+    @pytest.fixture
+    def request_obj(self):
+        return PermissionRequest(
+            request_id="req-legs",
+            session_id="session-legs",
+            profile_id="profile-1",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+        )
+
+    @staticmethod
+    def _session_row(api_user_id):
+        return {"id": "session-legs", "api_user_id": api_user_id}
+
+    @pytest.mark.asyncio
+    async def test_fans_out_user_wide_with_resolved_user_id(self, handler, request_obj):
+        """Leg 2 fires with the session owner's user id and the SAME event."""
+        origin = AsyncMock()
+        fanout = AsyncMock()
+        from app.core import sync_engine as se
+
+        with patch.object(se.sync_engine, "broadcast_user_permission", fanout), \
+             patch("app.db.sessions.get_session", return_value=self._session_row("user-7")):
+            await handler._broadcast_permission_request(request_obj, 1, origin)
+
+        origin.assert_awaited_once()
+        fanout.assert_awaited_once()
+        assert fanout.await_args.args[0] == "user-7"
+        # Byte-identical event down both legs (the frontend dedupes by request_id).
+        assert fanout.await_args.args[1] is origin.await_args.args[0]
+        assert fanout.await_args.args[1]["type"] == "permission_request"
+        assert fanout.await_args.args[1]["request_id"] == "req-legs"
+
+    @pytest.mark.asyncio
+    async def test_null_api_user_maps_to_admin(self, handler, request_obj):
+        """An admin-owned session has a NULL ``api_user_id``; /ws/chat registers
+        those devices under the literal "admin", so the fan-out must match."""
+        fanout = AsyncMock()
+        from app.core import sync_engine as se
+
+        with patch.object(se.sync_engine, "broadcast_user_permission", fanout), \
+             patch("app.db.sessions.get_session", return_value=self._session_row(None)):
+            await handler._broadcast_permission_request(request_obj, 1, AsyncMock())
+
+        assert fanout.await_args.args[0] == "admin"
+
+    @pytest.mark.asyncio
+    async def test_origin_failure_does_not_block_fanout_or_raise(self, handler, request_obj):
+        """The regression this fixes: a dead origin socket used to abort delivery.
+
+        Leg 2 must still run, and the caller must never see the exception.
+        """
+        origin = AsyncMock(side_effect=RuntimeError("socket gone"))
+        fanout = AsyncMock()
+        from app.core import sync_engine as se
+
+        with patch.object(se.sync_engine, "broadcast_user_permission", fanout), \
+             patch("app.db.sessions.get_session", return_value=self._session_row("user-7")):
+            await handler._broadcast_permission_request(request_obj, 1, origin)
+
+        origin.assert_awaited_once()
+        fanout.assert_awaited_once()
+        assert fanout.await_args.args[0] == "user-7"
+
+    @pytest.mark.asyncio
+    async def test_fanout_failure_is_swallowed(self, handler, request_obj):
+        """Delivery is best-effort; the durable interaction row is the truth."""
+        origin = AsyncMock()
+        from app.core import sync_engine as se
+
+        with patch.object(
+            se.sync_engine, "broadcast_user_permission",
+            AsyncMock(side_effect=RuntimeError("fanout gone")),
+        ), patch("app.db.sessions.get_session", return_value=self._session_row("user-7")):
+            await handler._broadcast_permission_request(request_obj, 1, origin)
+
+        origin.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_session_skips_fanout(self, handler, request_obj):
+        """No row (or a blown-up lookup) → leg 2 is skipped, leg 1 still runs."""
+        origin = AsyncMock()
+        fanout = AsyncMock()
+        from app.core import sync_engine as se
+
+        with patch.object(se.sync_engine, "broadcast_user_permission", fanout), \
+             patch("app.db.sessions.get_session", side_effect=RuntimeError("db down")):
+            await handler._broadcast_permission_request(request_obj, 1, origin)
+
+        origin.assert_awaited_once()
+        fanout.assert_not_awaited()
+
+        origin2 = AsyncMock()
+        fanout.reset_mock()
+        with patch.object(se.sync_engine, "broadcast_user_permission", fanout), \
+             patch("app.db.sessions.get_session", return_value=None):
+            await handler._broadcast_permission_request(request_obj, 1, origin2)
+
+        origin2.assert_awaited_once()
+        fanout.assert_not_awaited()

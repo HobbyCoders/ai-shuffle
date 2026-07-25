@@ -858,6 +858,15 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					blocked_path: data.blocked_path as string | undefined,
 				} as PermissionRequestType;
 
+				// The same prompt now arrives twice by design: once on the origin
+				// socket that owns the query and once on the user-wide device
+				// fan-out (both legs are best-effort, so neither can be dropped).
+				// Ignore the echo — re-appending would double the modal queue and
+				// fire a second "waiting for response" notification.
+				if (getState().pendingPermissions.some(p => p.request_id === request.request_id)) {
+					break;
+				}
+
 				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('permission', { toolName: request.tool_name });
 				update(s => ({

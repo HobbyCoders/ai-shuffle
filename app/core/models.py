@@ -364,6 +364,11 @@ class Session(SessionBase):
     # Automation sessions run headless (no live watch surface), so the sessions
     # list badges them to differentiate from interactive chats.
     automation_id: Optional[str] = None
+    # Multi-provider provenance — the provider this session is bound to (NULL =
+    # native Claude). Persisted on the row since v66; surfaced on the response
+    # model so clients can tell a ProviderAgent-bound session from a native one
+    # without a second round-trip.
+    provider_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     # Cross-install (cluster) annotation — populated by the API enrichment layer
