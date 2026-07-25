@@ -374,6 +374,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Per-provider circuit breaker at the translator gateway. The first upstream
+    # HTTP 429 for a provider trips the breaker for that provider INSTALL-WIDE:
+    # every subsequent gateway request routed to it is refused without touching
+    # the network until a time-based cooldown elapses. Motivation: the 2026-07-22
+    # rate-limit storm (3,172 upstream POSTs in ~11 minutes, 1,750 of them 429s,
+    # all after the parent turn had ended) came from retry loops INSIDE the CLI
+    # processes, so the gateway is the only chokepoint that can stop it. The
+    # breaker only ever REFUSES — it never reroutes or fails over (ruling P10).
+    # ON by default: this is a safety feature. Set
+    # PROVIDER_CIRCUIT_BREAKER_ENABLED=false to restore the previous behavior
+    # exactly. See app.core.translator_gateway.circuit_breaker.
+    provider_circuit_breaker_enabled: bool = True
+    # Cooldown applied when the upstream 429 carries no usable Retry-After.
+    provider_circuit_breaker_cooldown_seconds: int = 60
+    # Hard ceiling on any cooldown, including one derived from Retry-After, so a
+    # hostile or malformed header cannot lock a provider out indefinitely.
+    provider_circuit_breaker_max_cooldown_seconds: int = 300
+
     # V2 projects cutover (Phase 3) is COMPLETE. Project/checkout resolution keys
     # unconditionally off the origin-keyed ``projects_v2`` + per-runner
     # ``checkouts`` tables (seeded by the v60 collapse migration) for any session

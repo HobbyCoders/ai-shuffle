@@ -18,6 +18,12 @@ per-model leg map (Chunk F) extends without touching the endpoints.
 
 Security: unknown/missing token → 401 in the Anthropic error shape. No token,
 key, or account id is ever logged.
+
+Rate limits: ``POST /v1/messages`` pre-flights the per-provider circuit breaker
+(:mod:`app.core.translator_gateway.circuit_breaker`) before dispatching. Once an
+upstream 429 has tripped a provider, every gateway request routed to it is
+refused install-wide, without a DB read or an upstream call, until the cooldown
+elapses. The breaker only ever REFUSES — it never reroutes (ruling P10).
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.core.translator_gateway import routing, upstream
+from app.core.translator_gateway import circuit_breaker, routing, upstream
 from app.core.translator_gateway.anthropic_to_responses import translate_request
 from app.core.translator_gateway.events import (
     FinalReasoningItem,
@@ -273,6 +279,14 @@ async def create_message(request: Request):
     # requested model, so every step below is byte-identical to pre-Chunk-F.
     leg = resolve_leg_model(binding, requested_model)
 
+    # ── Circuit-breaker pre-flight (install-wide, per provider). Placed here,
+    # after leg resolution (so it names the provider that would actually serve
+    # this request) and BEFORE _load_provider, so a refusal costs neither a DB
+    # read, a credential decrypt, nor an upstream socket.
+    refusal = _circuit_breaker_refusal(leg.provider_id, stream)
+    if refusal is not None:
+        return refusal
+
     provider = await _load_provider(leg.provider_id)
     if not provider:
         return _anthropic_error(
@@ -366,6 +380,41 @@ def upstream_error_sse(exc: "upstream.UpstreamError") -> bytes:
     return _sse_frame(
         {"type": "error", "error": {"type": _err_type(exc.status_code), "message": exc.message}}
     )
+
+
+async def _single_error_sse(exc: "upstream.UpstreamError") -> AsyncIterator[bytes]:
+    """A one-frame SSE body carrying ``exc`` — the streaming rendering of an
+    upstream error that happened before any bytes were produced."""
+    yield upstream_error_sse(exc)
+
+
+def _circuit_breaker_refusal(provider_id: str, stream: bool):
+    """Refuse this request if ``provider_id``'s circuit breaker is open.
+
+    Returns a response when the breaker is OPEN, else ``None`` (proceed).
+
+    This is the pre-flight the 2026-07-22 rate-limit storm needed: the retry loop
+    lives inside the CLI processes, so the only place that can stop the traffic is
+    here, BEFORE any credential is decrypted or any socket is opened. The
+    refusal is a normal :class:`upstream.UpstreamError` (429) rendered through
+    the SAME two paths a real upstream 429 takes — an Anthropic-shaped JSON error
+    for a buffered request, a terminal SSE ``error`` frame for a streaming one —
+    so nothing downstream needs a new error channel.
+    """
+    trip = circuit_breaker.check(provider_id)
+    if trip is None:
+        return None
+    exc = upstream.UpstreamError(429, circuit_breaker.refusal_message(trip))
+    logger.warning(
+        "gateway refusing request: provider %s circuit breaker open for another %.0fs",
+        provider_id,
+        trip.remaining_seconds(),
+    )
+    if stream:
+        return StreamingResponse(
+            _single_error_sse(exc), media_type="text/event-stream"
+        )
+    return _anthropic_error(exc.status_code, _err_type(exc.status_code), exc.message)
 
 
 @router.post("/v1/messages/count_tokens")

@@ -21,6 +21,12 @@ or printed (not even truncated), and request headers (``Authorization`` /
 error *bodies* are the upstream's own JSON and are surfaced trimmed and
 header-free via :func:`_summarize_error_body`.
 
+Rate limits (2026-07-22 storm): every >=400 branch below routes an upstream HTTP
+**429** — and only a 429 — into
+:mod:`app.core.translator_gateway.circuit_breaker`, which then refuses further
+gateway requests to that provider install-wide until a cooldown elapses. The
+Codex 401 token-rotation retry above is deliberately untouched by that hook.
+
 The Responses SSE is parsed into ``(event_name, payload)`` tuples and handed to
 the pure stage-1 translator; the translation itself lives in ``router.py`` so
 this module stays a thin, testable network boundary.
@@ -34,6 +40,7 @@ from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
 from app.core import encryption
 from app.core.http_client import get_http_client
+from app.core.translator_gateway import circuit_breaker
 
 # ─── Upstream endpoints & identity ───────────────────────────────────────────
 # Codex backend (ChatGPT subscription) — the working request template is the
@@ -282,6 +289,26 @@ def _summarize_error_body(body: Any) -> str:
     return text.strip().replace("\r", " ").replace("\n", " ")[:500]
 
 
+def _note_rate_limit(provider_id: str, status_code: int, headers: Any) -> None:
+    """Trip the per-provider circuit breaker when the upstream returns HTTP 429.
+
+    ONLY 429 trips it. A 401 stays on the Codex token-rotation retry path
+    (untouched), and 5xx is a transient upstream fault, not a quota signal.
+    ``Retry-After`` (delta-seconds or HTTP-date) is passed through and honoured
+    by the breaker, capped by ``provider_circuit_breaker_max_cooldown_seconds``.
+
+    Never raises: recording is a side channel and must not replace the
+    ``UpstreamError`` the caller is about to raise.
+    """
+    if status_code != 429:
+        return
+    try:
+        retry_after = headers.get("retry-after") if headers is not None else None
+        circuit_breaker.record_rate_limited(provider_id, retry_after)
+    except Exception:  # noqa: BLE001 — breaker bookkeeping must never mask the error
+        pass
+
+
 # ─── Streaming: Codex / OpenAI Responses SSE ─────────────────────────────────
 
 async def stream_responses_events(
@@ -334,6 +361,7 @@ async def stream_responses_events(
                 )
             if resp.status_code >= 400:
                 body = await resp.aread()
+                _note_rate_limit(provider_id, resp.status_code, resp.headers)
                 raise UpstreamError(resp.status_code, _summarize_error_body(body))
             if mode == "codex":
                 try:
@@ -367,6 +395,7 @@ async def anthropic_passthrough_stream(
     ) as resp:
         if resp.status_code >= 400:
             body = await resp.aread()
+            _note_rate_limit(provider_id, resp.status_code, resp.headers)
             raise UpstreamError(resp.status_code, _summarize_error_body(body))
         async for chunk in resp.aiter_raw():
             yield chunk
@@ -388,5 +417,6 @@ async def anthropic_passthrough_json(
         timeout=_BUFFERED_TIMEOUT,
     )
     if resp.status_code >= 400:
+        _note_rate_limit(provider_id, resp.status_code, resp.headers)
         raise UpstreamError(resp.status_code, _summarize_error_body(resp.content))
     return resp.json()
