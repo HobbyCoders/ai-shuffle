@@ -2,9 +2,9 @@
 
 Three gates decide whether the tool ever reaches the model:
 
-  1. ``settings.provider_agent_enabled`` — OFF by default; the safety chunk that
-     permits turning it on has not landed, so a default build must expose
-     NOTHING (no allowed-tool entry, no registered server).
+  1. ``settings.provider_agent_enabled`` — ON by default since the flag flip
+     (2026-07-25); an install that sets ``PROVIDER_AGENT_ENABLED=false`` must
+     expose NOTHING (no allowed-tool entry, no registered server).
   2. a real ``session_id`` — the server needs a parent to bind workers to.
   3. the parent must not itself be a ProviderAgent worker — one nesting level
      only (ruling P14).
@@ -58,11 +58,25 @@ def _servers(opts):
     return opts.mcp_servers if isinstance(opts.mcp_servers, dict) else {}
 
 
-def test_flag_off_by_default_exposes_nothing():
-    """The default build must not allow-list the tool or register the server."""
+def test_flag_on_by_default_exposes_the_tool():
+    """The default build allow-lists the tool and registers the server."""
     from app.core.config import settings
 
-    assert settings.provider_agent_enabled is False
+    assert settings.provider_agent_enabled is True
+
+    with _stubbed_server():
+        opts = _build(session_id="parent-1")
+
+    assert _PA_TOOLS.issubset(set(opts.allowed_tools or []))
+    assert _SERVER_KEY in _servers(opts)
+
+
+def test_flag_off_exposes_nothing(monkeypatch):
+    """An install that disables the flag must not allow-list the tool or
+    register the server."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "provider_agent_enabled", False)
 
     with _stubbed_server():
         opts = _build(session_id="parent-1")

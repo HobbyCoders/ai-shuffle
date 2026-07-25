@@ -322,11 +322,13 @@ class Settings(BaseSettings):
     # report. The Claude main stays fully native (no subscription token ever
     # reaches the translator gateway — ruling P1/F1); the two halves are
     # different processes, so the one-base-URL constraint does not apply.
-    # OFF by default: the safety work this capability needs (turn-lifetime
-    # teardown, per-provider circuit breaker, permission routing) lands in later
-    # chunks, so the tool must not reach the model until then. Set via
-    # PROVIDER_AGENT_ENABLED (BaseSettings reads env vars by field name).
-    provider_agent_enabled: bool = False
+    # ON by default: the safety work this capability needed (turn-lifetime
+    # teardown, per-provider circuit breaker, permission/approval routing,
+    # rate-limit fail-fast, worker AskUserQuestion exclusion) has all landed and
+    # was E2E-verified 2026-07-25 — see the phase-3 plan §9.6 rulings 1–6.
+    # Disable with PROVIDER_AGENT_ENABLED=false (BaseSettings reads env vars by
+    # field name).
+    provider_agent_enabled: bool = True
 
     # Hard ceiling, in seconds, on a single ProviderAgent worker. When the
     # worker session has not gone idle by then the tool interrupts it and
