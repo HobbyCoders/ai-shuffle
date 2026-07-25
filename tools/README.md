@@ -326,3 +326,11 @@ export async function myTool(input: MyToolInput): Promise<MyToolResponse> {
 
 - **Voice Synthesis**: Text-to-speech using ElevenLabs or similar
 - **Music Generation**: AI music/audio creation
+
+## Operator-only dev harnesses (not shipped, not chat tools)
+
+- **`stub_upstream/`** — a loopback fake vendor that speaks the OpenAI-Responses
+  SSE the translator gateway expects, so provider work can be verified
+  end-to-end without spending a token at any real vendor. Python, excluded from
+  the Docker build context, never imported by `app/`. See
+  [`stub_upstream/README.md`](stub_upstream/README.md).

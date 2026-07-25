@@ -40,6 +40,10 @@ ENV/
 .coverage
 htmlcov/
 tests/
+# Local stub upstream: operator-only dev harness. It depends on tests/ (excluded
+# above) and must never be shipped in an image.
+tools/stub_upstream/
+.stub-upstream-ca/
 
 # OS
 .DS_Store

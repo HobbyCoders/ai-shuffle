@@ -118,3 +118,7 @@ docs/REWRITE_PLAN.md
 # Unraid lab local manifest (per-install, do not commit)
 scripts/unraid-lab/lab_manifest.jsonl
 /scripts/unraid-lab
+
+# Local stub upstream (tools/stub_upstream) — throwaway MITM CA + request log
+.stub-upstream-ca/
+stub-requests.jsonl
