@@ -579,7 +579,7 @@ class TestEndpoints:
         async def _fake_provider(provider_id):
             return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             assert mode == "codex"
             return _async_source(_canned_text_turn())
 
@@ -613,7 +613,7 @@ class TestEndpoints:
                 "auth_mode": "chatgpt", "context_window": 5,
             }
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             streamed.append(provider_id)
             return _async_source(_canned_text_turn())
 
@@ -645,7 +645,7 @@ class TestEndpoints:
                 "auth_mode": "chatgpt", "context_window": 200000,
             }
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             return _async_source(_canned_text_turn())
 
         monkeypatch.setattr("app.core.translator_gateway.router._load_provider", _fake_provider)
@@ -669,7 +669,7 @@ class TestEndpoints:
         async def _fake_provider(provider_id):
             return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             return _async_source(_canned_text_turn())
 
         monkeypatch.setattr("app.core.translator_gateway.router._load_provider", _fake_provider)
@@ -706,7 +706,7 @@ class TestLegDispatch:
             loaded.append(provider_id)
             return {"id": provider_id, "provider_type": "chatgpt", "auth_mode": "chatgpt"}
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             streamed.append(provider_id)
             return _async_source(_canned_text_turn())
 
@@ -804,7 +804,7 @@ class TestLegDispatch:
                 "usage": {"input_tokens": 3, "output_tokens": 2},
             }
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             assert mode == "codex"
             codex_calls.append(provider_id)
             return _async_source(_canned_text_turn())

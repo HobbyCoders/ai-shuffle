@@ -346,7 +346,10 @@ async def create_message(request: Request):
 
     if stream:
         event_source = upstream.stream_responses_events(
-            provider_id=leg.provider_id, mode=mode, responses_body=responses_body
+            provider_id=leg.provider_id,
+            mode=mode,
+            responses_body=responses_body,
+            session_id=binding.session_id,
         )
         return StreamingResponse(
             anthropic_sse_from_events(event_source, request_model=requested_model),
@@ -357,7 +360,10 @@ async def create_message(request: Request):
     try:
         translator = ResponsesToAnthropicTranslator(request_model=requested_model)
         async for name, payload in upstream.stream_responses_events(
-            provider_id=leg.provider_id, mode=mode, responses_body=responses_body
+            provider_id=leg.provider_id,
+            mode=mode,
+            responses_body=responses_body,
+            session_id=binding.session_id,
         ):
             translator.push(name, payload)
     except upstream.UpstreamError as exc:

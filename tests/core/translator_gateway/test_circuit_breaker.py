@@ -509,7 +509,7 @@ class TestRouterRefusal:
     async def _no_upstream(self, monkeypatch) -> Dict[str, int]:
         counters = {"upstream": 0, "provider_loads": 0}
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             counters["upstream"] += 1
             return _never_called_source()
 
@@ -651,7 +651,7 @@ class TestRouterRefusal:
             if False:  # pragma: no cover - empty async generator
                 yield "", {}
 
-        def _fake_stream(*, provider_id, mode, responses_body, client=None):
+        def _fake_stream(*, provider_id, mode, responses_body, session_id=None, client=None):
             return _source()
 
         monkeypatch.setattr(upstream, "stream_responses_events", _fake_stream)

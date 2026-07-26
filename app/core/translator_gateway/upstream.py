@@ -57,6 +57,12 @@ CODEX_USER_AGENT = "codex_cli_rs/1.0.0"
 CODEX_ORIGINATOR = "codex_cli_rs"
 CODEX_OPENAI_BETA = "responses=experimental"
 
+# Fixed namespace for deriving a stable Codex ``session_id`` header from a
+# gateway session id (see :func:`codex_session_uuid`). Must never change: it is
+# what makes the derived UUID stable across process restarts, and therefore what
+# keeps the upstream prompt cache warm for a resumed session.
+_CODEX_SESSION_NAMESPACE = uuid.UUID("a3dc91aa-1208-4fd9-b963-5cb9e0ba0b2b")
+
 # Streaming reads can be long; the shared 30s client timeout would cut a slow
 # reasoning turn off mid-stream. Disable the read timeout for the streaming POST
 # (connect/write still bounded by the client default).
@@ -142,14 +148,49 @@ async def _codex_auth(provider_id: str) -> Tuple[str, Optional[str]]:
     return access, stored.get("codex_account_id")
 
 
-def _codex_headers(access_token: str, account_id: Optional[str]) -> Dict[str, str]:
-    """Build the Codex request headers (fresh per-request ``session_id`` uuid)."""
+def codex_session_uuid(session_id: Optional[str]) -> str:
+    """Derive the Codex ``session_id`` header value for a gateway session.
+
+    The Codex backend keys **prompt-cache affinity** on this header (see
+    docs/CODEX_SPIKE_FINDINGS.md "Working request template"): a request that
+    reuses the previous request's ``session_id`` can read the warm prefix cache,
+    while a fresh value makes every turn cache-cold and reprocesses the whole
+    context at full cost. So it MUST be stable for the lifetime of a gateway
+    session and distinct between sessions.
+
+    The header is documented as a UUID, but a gateway ``session_id`` is an
+    arbitrary caller-supplied string, so it is folded into a deterministic UUIDv5
+    under a fixed namespace: same session → same UUID for the whole process
+    lifetime (and across restarts), different sessions → different UUIDs, and the
+    app's internal session id is never sent upstream verbatim.
+
+    ``None``/empty (no session bound to this request) falls back to a fresh
+    per-request uuid4 — the pre-fix behavior, cache-cold but always valid.
+    """
+    if not session_id:
+        return str(uuid.uuid4())
+    return str(uuid.uuid5(_CODEX_SESSION_NAMESPACE, str(session_id)))
+
+
+def _codex_headers(
+    access_token: str,
+    account_id: Optional[str],
+    session_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build the Codex request headers.
+
+    ``session_id`` is the gateway session this request belongs to (the
+    :class:`~app.core.translator_gateway.routing.RouteBinding` session id). It is
+    folded into a stable ``session_id`` header by :func:`codex_session_uuid` so
+    every request in a session hits the same Codex prompt cache. ``None`` falls
+    back to a fresh per-request uuid.
+    """
     return {
         "Authorization": f"Bearer {access_token}",
         "chatgpt-account-id": account_id or "",
         "OpenAI-Beta": CODEX_OPENAI_BETA,
         "originator": CODEX_ORIGINATOR,
-        "session_id": str(uuid.uuid4()),
+        "session_id": codex_session_uuid(session_id),
         "Accept": "text/event-stream",
         "Content-Type": "application/json",
         "User-Agent": CODEX_USER_AGENT,
@@ -316,12 +357,19 @@ async def stream_responses_events(
     provider_id: str,
     mode: str,
     responses_body: Dict[str, Any],
+    session_id: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> AsyncIterator[Tuple[str, Dict[str, Any]]]:
     """POST a Responses request and yield parsed ``(event, payload)`` SSE tuples.
 
     ``mode`` is ``codex`` or ``openai``. On a Codex 401 this refreshes ONCE (Chunk
     B) and retries once; any other >=400 raises :class:`UpstreamError`.
+
+    ``session_id`` is the gateway session this request belongs to (the caller's
+    :class:`~app.core.translator_gateway.routing.RouteBinding` session id). In
+    ``codex`` mode it becomes a stable ``session_id`` header so consecutive turns
+    of one session share an upstream prompt cache; ``None`` falls back to a fresh
+    per-request uuid. Ignored in ``openai`` mode (no such header).
     """
     if mode not in ("codex", "openai"):
         raise UpstreamError(500, f"stream_responses_events: bad mode {mode!r}")
@@ -332,7 +380,7 @@ async def stream_responses_events(
     while True:
         if mode == "codex":
             access, account_id = await _codex_auth(provider_id)
-            headers = _codex_headers(access, account_id)
+            headers = _codex_headers(access, account_id, session_id)
             stale_access: Optional[str] = access
         else:
             headers = _openai_headers(await _openai_key(provider_id))
