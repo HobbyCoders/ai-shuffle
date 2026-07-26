@@ -59,6 +59,31 @@ logger = logging.getLogger(__name__)
 WORKER_DISALLOWED_TOOL = "AskUserQuestion"
 
 
+# The CLI ships a bundled ``claude-api`` skill (Anthropic SDK reference docs).
+# Invoking it injects ~595K chars / ~142K tokens of documentation in one shot,
+# which is fine on a native Claude session but catastrophic on a gateway-routed
+# NON-Claude session: its trigger text is broad ("the prompt names Claude in any
+# form"), so a GPT-class model fires it constantly and blows the turn's context
+# (see the ``CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE`` note in
+# ``app/core/environment.py`` — the same injection is what forced that override
+# to exist). The skill is also useless there: those sessions are not writing
+# Anthropic SDK code, they are being SERVED by a translator gateway.
+#
+# Mechanism: a ``Skill(<name>)`` deny rule. Verified against the pinned
+# claude-agent-sdk (0.2.126) and its bundled CLI:
+#   - ``ClaudeAgentOptions.disallowed_tools`` → ``--disallowedTools`` (SDK
+#     ``_internal/transport/subprocess_cli.py``);
+#   - ``--disallowedTools`` entries are parsed as ``ToolName(ruleContent)`` and
+#     land in the session's deny rules;
+#   - the CLI's ``Skill`` tool ``checkPermissions`` walks the deny rules for tool
+#     name ``Skill`` and matches each rule's content against the skill name,
+#     returning ``{behavior: "deny", message: "Skill execution blocked by
+#     permission rules"}`` on a hit. (The same specifier form the SDK itself
+#     emits for its ``skills`` option, which maps each entry to
+#     ``Skill(<name>)`` in ``allowedTools``.)
+NON_CLAUDE_DISALLOWED_SKILL = "Skill(claude-api)"
+
+
 # Back-compat aliases for tool names that were renamed. Applied at config-read
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
@@ -620,6 +645,13 @@ def build_options_from_profile(
     # never be stamped verbatim into frontmatter. ``honored_legs`` defaults to
     # ``()`` so ``apply_provider_env`` gets an empty map on the native path.
     honored_legs = ()
+    # True only for a gateway-routed session whose MAIN model is NOT a Claude
+    # model. Reuses the existing provider-shape signal (``SubagentLegPlan
+    # .main_serves_claude_ids`` = the main provider row's ``provider_type ==
+    # "anthropic"``) rather than sniffing model-id prefixes: a native session
+    # (no binding) and an anthropic-type provider row both serve real ``claude-*``
+    # ids and stay False. Consumed by the ``claude-api`` skill exclusion below.
+    is_non_claude_provider_session = False
     if provider_id:
         main_provider_row = database.get_model_provider(
             provider_id, include_token=False
@@ -631,6 +663,7 @@ def build_options_from_profile(
             enabled_subagents=enabled_subagents,
         )
         honored_legs = plan.honored_legs
+        is_non_claude_provider_session = not plan.main_serves_claude_ids
         honored_leg_models = {mid for mid, _pid, _acct in plan.honored_legs}
         for agent_id, agent_def in (agents_dict or {}).items():
             agent_def.model = resolve_subagent_frontmatter_model(
@@ -662,6 +695,19 @@ def build_options_from_profile(
     tools_preset = config.get("tools_preset")  # "claude_code" preset
     allowed_tools = _apply_legacy_tool_aliases(config.get("allowed_tools") or [])
     disallowed_tools = _apply_legacy_tool_aliases(config.get("disallowed_tools") or [])
+
+    # Block the bundled ``claude-api`` skill on every non-Claude provider session
+    # (see NON_CLAUDE_DISALLOWED_SKILL). This sits here — on the shared
+    # ``disallowed_tools`` list built from the profile — rather than in the
+    # ProviderAgent branch below, so it covers BOTH a non-Claude main session and
+    # a non-Claude ProviderAgent worker: a worker is an ordinary session with its
+    # own provider binding, so it flows through this same build. Claude sessions
+    # (native, or an anthropic-type provider row) are untouched.
+    if (
+        is_non_claude_provider_session
+        and NON_CLAUDE_DISALLOWED_SKILL not in disallowed_tools
+    ):
+        disallowed_tools = [*disallowed_tools, NON_CLAUDE_DISALLOWED_SKILL]
 
     # Determine tools parameter for SDK
     # New SDK way: use 'tools' param with list or preset dict
