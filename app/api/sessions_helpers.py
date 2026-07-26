@@ -8,7 +8,7 @@ re-exported from sessions.py for backward compatibility.
 from typing import List, Optional
 
 from fastapi import HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import time
 
@@ -111,6 +111,31 @@ class AdoptSessionResponse(BaseModel):
     # the local clone the session was rebound onto, when a sibling was used.
     warning: Optional[str] = None
     local_project_id: Optional[str] = None
+
+
+class MoveSessionRequest(BaseModel):
+    """Request body for the push-direction 'Move to device' action.
+
+    ``target_instance_id`` is the install id (``installs.id`` /
+    ``sessions.instance_id``) that should own the session from here on.
+    """
+    target_instance_id: str = Field(..., min_length=1)
+
+
+class MoveSessionResponse(BaseModel):
+    """Response for the cross-device 'Move to device' action.
+
+    ``moved`` is True when ownership was re-pointed to the target; False when the
+    session already belonged to it (a no-op). ``instance_id`` is the owner AFTER
+    the call. ``pending_live_run`` is True when a turn was still streaming on the
+    OLD owner at move time — that turn finishes there and only later turns follow
+    the new pin (placement is consulted at turn start only).
+    """
+    session_id: str
+    instance_id: str
+    moved: bool
+    status: str
+    pending_live_run: bool = False
 
 
 class CreateWorktreeSessionRequest(BaseModel):

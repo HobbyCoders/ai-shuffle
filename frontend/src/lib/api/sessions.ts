@@ -140,6 +140,18 @@ export interface AdoptSessionResponse {
 	local_project_id?: string | null;
 }
 
+export interface MoveSessionResponse {
+	session_id: string;
+	/** The owning install AFTER the call. */
+	instance_id: string;
+	/** True when ownership was re-pointed; false when the target already owned it. */
+	moved: boolean;
+	status: string;
+	/** True when a turn was still running on the old owner — it finishes there
+	 *  and only later turns follow the new device. */
+	pending_live_run?: boolean;
+}
+
 // ============================================================================
 // Session API Functions
 // ============================================================================
@@ -239,6 +251,23 @@ export async function forkSession(sessionId: string, messageIndex?: number): Pro
  */
 export async function adoptSession(sessionId: string): Promise<AdoptSessionResponse> {
 	return api.post<AdoptSessionResponse>(`/sessions/${sessionId}/adopt`, {});
+}
+
+/**
+ * Push a session's future turns to another device ("Move to device…") — the
+ * mirror of `adoptSession`, drivable from any install. No-ops server-side when
+ * the target already owns it. Rejects with 404 for an unknown device and 409
+ * when the target is offline or the session's project isn't checked out there.
+ * A live turn does NOT block the move: it finishes on the current owner and the
+ * response comes back with `pending_live_run: true`.
+ */
+export async function moveSessionToDevice(
+	sessionId: string,
+	targetInstanceId: string
+): Promise<MoveSessionResponse> {
+	return api.post<MoveSessionResponse>(`/sessions/${sessionId}/move`, {
+		target_instance_id: targetInstanceId
+	});
 }
 
 // ============================================================================

@@ -685,6 +685,11 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     is deliberately NEVER written (OD-9 amendment). ``updated_at`` IS bumped so
     the adopted session surfaces at the top of the board on the new device.
     Returns the updated row, or ``None`` if no such session exists.
+
+    The push-direction ``POST /sessions/{id}/move`` ("Move to device…") issues
+    the SAME write with a peer's install id instead of the local one — the
+    ownership + placement dual-write is identical whichever direction the user
+    drives it from.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()

@@ -90,6 +90,8 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     ForkSessionRequest,
     ForkSessionResponse,
     AdoptSessionResponse,
+    MoveSessionRequest,
+    MoveSessionResponse,
     CreateWorktreeSessionRequest,
     WorktreeSessionResponse,
 )
@@ -255,6 +257,164 @@ async def adopt_session_endpoint(
         instance_id=me,
         adopted=True,
         status="adopted",
+    )
+
+
+# ============================================================================
+# Cross-device move ("Move to device…")
+# ============================================================================
+
+@router.post("/{session_id}/move", response_model=MoveSessionResponse)
+async def move_session_endpoint(
+    request: Request,
+    session_id: str,
+    body: MoveSessionRequest,
+    token: str = Depends(require_auth),
+):
+    """Send this session's future turns to another device — the PUSH-direction
+    counterpart of ``/adopt``.
+
+    Adopt is a pull ("resume THIS session HERE"); move is a push ("run this
+    session THERE from now on"), so it can be driven from any device without
+    sitting at the destination. Mechanically it is the same single write: the
+    shared-DB ``adopt_session`` dual-write re-points the legacy ``instance_id``
+    owner AND the canonical ``placement = {"where": "runner:<target>"}`` pin, so
+    every reader (board filters, relay routing, the placement resolver) agrees on
+    the new owner immediately.
+
+    Semantics:
+      * Target already owns it → no-op, ``moved=False`` / ``already_there``.
+      * Unknown target install → 404; target offline (or capability-incapable)
+        → 409, since a pin to an unreachable runner just strands the session.
+      * Session carries a project whose checkout is not materialized on the
+        target → 409, mirroring adopt's base-checkout gate: an unchecked-out
+        target would fail on the first send.
+      * **Actively streaming → NOT refused** (unlike adopt). The placement gate
+        runs only at TURN START, so flipping the pin mid-run is safe: the live
+        turn keeps its lease and finishes on the current owner, and only turns
+        queued after it are claimed by the new one. This deliberate
+        "queue the move" semantic is reported back as ``pending_live_run=True``
+        so the UI can say "after the current turn finishes".
+    """
+    session = await require_session(request, session_id)
+
+    target = (body.target_instance_id or "").strip()
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="target_instance_id is required",
+        )
+
+    # Already pinned there — nothing to write.
+    if target == (session.get("instance_id") or ""):
+        return MoveSessionResponse(
+            session_id=session_id,
+            instance_id=target,
+            moved=False,
+            status="already_there",
+        )
+
+    install = await run_sync(database.get_install, target)
+    if not install:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown device: {target}",
+        )
+
+    device = (install or {}).get("device_name") or target
+
+    # Online + capability check, with NO checkout filter — the same validation
+    # `resolve_placement` applies to an explicit `runner:<id>` pin (A10).
+    from app.core.placement import capable_runners
+
+    if target not in await run_sync(capable_runners, None, {}):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"{device} is offline. Bring it online or pick another device."
+            ),
+        )
+
+    # Project checkout gate — the destination must actually have the project
+    # materialized, or the first send there dies on a path that doesn't exist.
+    # The project_v2 identity is origin-keyed and install-independent, so the
+    # same resolver adopt uses (`resolve_project_v2`, which self-heals a NULL
+    # `project_v2_id` off the legacy `project_id`) gives the id to filter on.
+    # Projectless sessions impose no checkout requirement and skip this.
+    # Fails OPEN on any non-409 error — a preflight bug must never make a
+    # movable session impossible to move.
+    if session.get("project_v2_id") or session.get("project_id"):
+        from app.core import project_resolver
+
+        try:
+            project_v2_id = session.get("project_v2_id")
+            if not project_v2_id:
+                resolved = await run_sync(
+                    project_resolver.resolve_project_v2, session
+                )
+                project_v2_id = (resolved or {}).get("id")
+            if project_v2_id and target not in await run_sync(
+                capable_runners, project_v2_id, {}
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"This session's project isn't checked out on {device} "
+                        "yet. Open the project there once (or clone it), then "
+                        "try again."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
+            logger.warning(
+                "Move preflight errored for session %s; proceeding fail-open",
+                session_id,
+                exc_info=True,
+            )
+
+    # NOT a refusal — an advisory. Placement is consulted only at turn start, so
+    # a live turn finishes on the CURRENT owner under its existing lease and the
+    # new pin takes effect from the next queued turn ("queue the move").
+    from app.core import streaming_status
+
+    pending = streaming_status.has_active_run(session_id)
+
+    owner = session.get("instance_id")
+    updated = await run_sync(database.adopt_session, session_id, target)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    # Wake the target's claim loop now instead of on its next 5s poll. Purely a
+    # latency optimization — the poll is the correctness backstop, so a NOTIFY
+    # failure must never fail the move.
+    try:
+        from app.core.turn_claim import notify_turns_changed
+
+        await run_sync(notify_turns_changed, session_id)
+    except Exception:  # noqa: BLE001 — best-effort wake
+        logger.warning(
+            "Move NOTIFY failed for session %s (poll will pick it up)",
+            session_id,
+            exc_info=True,
+        )
+
+    logger.info(
+        "Moved session %s from install %s -> %s (pending_live_run=%s)",
+        session_id,
+        owner,
+        target,
+        pending,
+    )
+    return MoveSessionResponse(
+        session_id=session_id,
+        instance_id=target,
+        moved=True,
+        status="moved",
+        pending_live_run=pending,
     )
 
 

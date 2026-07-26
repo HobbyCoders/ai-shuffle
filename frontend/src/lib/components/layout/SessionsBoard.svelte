@@ -12,13 +12,14 @@
 	 * Built on the app's theme tokens.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Plus, X, CircleDot, Undo2, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil } from 'lucide-svelte';
+	import { Plus, X, CircleDot, Undo2, FolderClosed, MessageSquare, ChevronRight, ChevronDown, GitBranch, GitFork, Play, Monitor, MonitorOff, Link2, Unlink, Check, CalendarClock, Trash2, Pencil, ArrowRightLeft } from 'lucide-svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import { browser } from '$app/environment';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
-	import { forkSession, adoptSession, api } from '$lib/api/client';
+	import { forkSession, adoptSession, moveSessionToDevice, api } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
+	import { listInstalls, type Install } from '$lib/api/installs';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { toast } from '$lib/stores/toast';
 
@@ -355,6 +356,9 @@
 			deviceMenuOpen = false;
 			linkMenuOpen = false;
 			actionsOpenId = null;
+			// Never yank the picker out from under an in-flight move — the toast
+			// still has to land against the row the user chose.
+			if (!moveBusy) closeMovePicker();
 			disarmDeleteConfirm();
 		}
 	}
@@ -439,6 +443,90 @@
 		} catch (e) {
 			const detail = (e as { detail?: string } | null)?.detail;
 			toast.push(detail || 'Could not resume this session here', { tone: 'error' });
+		}
+	}
+
+	// --- "Move to device…" (push-direction counterpart of Resume here) --------
+	// Resume here PULLS a session onto this install; Move PUSHES it onto another
+	// one, so it works from whichever device the user happens to be holding.
+	// All state is parent-owned: exactly one picker is open at a time (by session
+	// id), so rows stay presentational and a second row can't open its own copy.
+	let movePickerId = $state<string | null>(null);
+	let moveDevices = $state<Install[]>([]);
+	let moveSelfId = $state<string | null>(null);
+	let moveLoading = $state(false);
+	let moveError = $state<string | null>(null);
+	let moveBusy = $state(false);
+
+	// The session whose picker is open, re-read from the store so a refresh in
+	// flight can't leave the panel holding a stale row.
+	const movePickerSession = $derived(
+		movePickerId ? ($sessions.find((s) => s.id === movePickerId) ?? null) : null
+	);
+
+	// Candidate destinations: ONLINE devices from the cluster registry, minus the
+	// session's current owner (moving a session to where it already lives is a
+	// server-side no-op, so don't offer it). The registry — not `deviceOptions`,
+	// which only knows devices that already have sessions on this board — is the
+	// source, so a fresh install with no sessions yet is still a valid target.
+	const moveTargets = $derived.by((): Install[] => {
+		const sess = movePickerSession;
+		if (!sess) return [];
+		const owner = sess.instance_id || moveSelfId || '';
+		return moveDevices.filter((d) => d.online && d.id !== owner);
+	});
+
+	async function openMovePicker(e: MouseEvent | KeyboardEvent, s: Session) {
+		e.stopPropagation();
+		actionsOpenId = null;
+		movePickerId = s.id;
+		moveError = null;
+		moveLoading = true;
+		try {
+			const res = await listInstalls();
+			moveDevices = res.installs;
+			moveSelfId = res.self_instance_id;
+		} catch {
+			moveDevices = [];
+			moveError = 'Could not load devices';
+		} finally {
+			moveLoading = false;
+		}
+	}
+
+	function closeMovePicker() {
+		movePickerId = null;
+		moveError = null;
+	}
+
+	// Re-point the session's owner (and its placement pin) at the chosen device.
+	// A live turn does NOT block this server-side — it finishes on the current
+	// owner and only later turns follow the new pin, which the response reports
+	// back as `pending_live_run` so the toast can say so.
+	async function chooseMoveTarget(d: Install) {
+		const s = movePickerSession;
+		if (!s || moveBusy) return;
+		moveBusy = true;
+		const name = d.device_name || d.id;
+		try {
+			const res = await moveSessionToDevice(s.id, d.id);
+			closeMovePicker();
+			await appData.loadSessions();
+			if (res?.moved === false) {
+				toast.push(`Already on ${name}`, { tone: 'info' });
+			} else {
+				toast.push(
+					res?.pending_live_run
+						? `Will continue on ${name} after the current turn finishes`
+						: `Will continue on ${name}`,
+					{ tone: 'success' }
+				);
+			}
+		} catch (e) {
+			const detail = (e as { detail?: string } | null)?.detail;
+			toast.push(detail || 'Could not move this session', { tone: 'error' });
+		} finally {
+			moveBusy = false;
 		}
 	}
 
@@ -839,6 +927,52 @@
 	</div>
 </div>
 
+<!-- "Move to device…" picker. A small centered panel rather than an in-row
+     popover: `.row-list` clips its overflow, so an absolutely positioned menu
+     inside a row would be cut off (and on touch the row's rail is itself a
+     floating tray). Backdrop follows the app's modal pattern (cover button for
+     click-away); rows reuse the header dropdown's `.filter-item` styling. -->
+{#if movePickerSession}
+	<div class="move-backdrop" role="dialog" aria-modal="true" aria-label="Move session to another device">
+		<button
+			class="move-backdrop-btn"
+			onclick={() => { if (!moveBusy) closeMovePicker(); }}
+			tabindex="-1"
+			aria-label="Close device picker"
+		></button>
+		<div class="move-panel">
+			<div class="move-head">
+				<span class="move-title">Move to device</span>
+				<button class="move-close" onclick={closeMovePicker} aria-label="Close">
+					<X size={14} strokeWidth={2} />
+				</button>
+			</div>
+			<p class="move-sub">
+				Future turns of "{movePickerSession.title || 'Untitled'}" run on the device you pick.
+			</p>
+			{#if moveLoading}
+				<p class="move-note">Loading devices…</p>
+			{:else if moveError}
+				<p class="move-note">{moveError}</p>
+			{:else if moveTargets.length === 0}
+				<p class="move-note">No other device is online right now.</p>
+			{:else}
+				{#each moveTargets as d (d.id)}
+					<button
+						class="filter-item"
+						disabled={moveBusy}
+						onclick={() => chooseMoveTarget(d)}
+					>
+						<Monitor size={13} strokeWidth={1.6} />
+						<span class="filter-item-name">{d.device_name || d.id}</span>
+						{#if d.platform}<span class="filter-tag">{d.platform}</span>{/if}
+					</button>
+				{/each}
+			{/if}
+		</div>
+	</div>
+{/if}
+
 {#snippet sessionRow(session: Session, showProject: boolean)}
 	<!-- Armed = the clear confirm is showing OR its request is in flight. While
 	     armed, the rail freezes: every non-confirm action is inert and the icons
@@ -997,6 +1131,19 @@
 					<Play size={13} strokeWidth={1.6} />
 				</button>
 			{/if}
+			<!-- Push-direction sibling of Resume here: hand the session's future
+			     turns to another device. Rendered for LOCAL rows too (that's the
+			     common case — send my work to the big machine), and it rides the
+			     same rail, so it collapses behind the ⋮ on touch/narrow for free. -->
+			<button
+				class="row-action"
+				title="Move to device…"
+				aria-label="Move session to another device"
+				disabled={isArmed}
+				onclick={(e) => openMovePicker(e, session)}
+			>
+				<ArrowRightLeft size={13} strokeWidth={1.6} />
+			</button>
 			<button
 				class="row-action"
 				title="Rename session"
@@ -1123,6 +1270,70 @@
 	.filter-item :global(svg) { flex-shrink: 0; color: var(--muted-foreground); }
 	.filter-item.active :global(svg) { color: var(--primary); }
 	.filter-item-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.filter-item:disabled { opacity: 0.55; cursor: default; }
+
+	/* "Move to device…" picker — same popover tokens as .filter-menu, floated as
+	   a centered panel so `.row-list`'s overflow clip can't cut it off. */
+	.move-backdrop {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+	}
+	.move-backdrop-btn {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		background: color-mix(in oklch, var(--background) 70%, transparent);
+		backdrop-filter: blur(4px);
+		border: none;
+		cursor: default;
+		padding: 0;
+	}
+	.move-panel {
+		position: relative;
+		z-index: 1;
+		width: min(340px, calc(100vw - 32px));
+		max-height: min(60vh, 480px);
+		overflow-y: auto;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		box-shadow: var(--shadow-l);
+		padding: 10px;
+		animation: filter-menu-in 0.15s ease;
+	}
+	.move-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 0; }
+	.move-title { flex: 1 1 auto; font-size: 0.85rem; font-weight: 600; color: var(--foreground); }
+	.move-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		flex-shrink: 0;
+		background: transparent;
+		border: none;
+		border-radius: 6px;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: color 120ms ease, background-color 120ms ease;
+	}
+	.move-close:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.move-sub {
+		margin: 4px 4px 8px;
+		font-size: 0.72rem;
+		line-height: 1.35;
+		color: var(--muted-foreground);
+	}
+	.move-note { margin: 8px 4px; font-size: 0.75rem; color: var(--muted-foreground); }
+
+	@media (prefers-reduced-motion: reduce) {
+		.move-panel { animation: none; }
+	}
 	.filter-tag {
 		font-size: 0.625rem;
 		font-weight: 600;
