@@ -60,11 +60,13 @@ def test_ai_tools_result_serializes_datetime():
     assert body["created_at"].startswith("2026-03-04T05:06:07")
 
 
-def test_connector_tools_result_serializes_datetime():
-    """connector_tools_sdk._tool_result shares the same bare-json.dumps failure class."""
-    from app.mcp.connector_tools_sdk import _tool_result
+def test_connector_gateway_ok_serializes_datetime():
+    """connector_gateway_sdk._ok shares the same bare-json.dumps failure class as
+    the deleted connector_tools_sdk._tool_result (legacy per-capability tool layer,
+    superseded by the action gateway — #750)."""
+    from app.mcp.connector_gateway_sdk import _ok
 
     dt = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
-    body = _decode(_tool_result({"success": True, "updated_at": dt}))
+    body = _decode(_ok({"updated_at": dt}))
     assert body["success"] is True
     assert body["updated_at"].startswith("2026-03-04T05:06:07")

@@ -191,16 +191,6 @@ def _build_mcp_servers_dict_with_ai_tools(
         except Exception as e:
             logger.warning(f"Failed to create AI tools SDK MCP server: {e}")
 
-    # Add connector tools SDK MCP server if any connectors with tools are active
-    try:
-        from app.mcp.connector_tools_sdk import create_connector_tools_server
-        connector_server = create_connector_tools_server()
-        if connector_server:
-            mcp_servers["connector-tools"] = connector_server
-            logger.debug("Added in-process SDK MCP server for connector-tools")
-    except Exception as e:
-        logger.warning(f"Failed to create connector tools SDK MCP server: {e}")
-
     if mcp_servers:
         return mcp_servers
 
