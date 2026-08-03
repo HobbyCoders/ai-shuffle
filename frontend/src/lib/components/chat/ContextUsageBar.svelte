@@ -5,8 +5,8 @@
 	 * limits) into ONE glass pill + ONE popover.
 	 *
 	 * The pill is a single circular progress ring (context-window fraction),
-	 * coloured by the severity of MAX(context %, resolved five-hour %). No inline
-	 * text — the percentage rides on the button's aria-label. It is ALWAYS visible.
+	 * coloured by the current chat's context severity. No inline text — the
+	 * percentage rides on the button's aria-label. It is ALWAYS visible.
 	 *
 	 * The popover is a wide, compact panel. It stacks, top → bottom:
 	 *   1. Context window — a collapsible header (persisted in localStorage under
@@ -336,12 +336,7 @@
 	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
 	const items = $derived.by<WindowItem[]>(() => (resolvedBucket ? itemsFor(resolvedBucket) : []));
 
-	// Five-hour % of the resolved install (null when unknown) — feeds the ring
-	// severity alongside the context percent.
-	const fiveHourPct = $derived<number | null>(items.find((it) => it.type === 'five_hour')?.pct ?? null);
-	const ringSeverity = $derived<UsageSeverity>(
-		usageSeverity(Math.max(contextPercent, fiveHourPct ?? 0))
-	);
+	const ringSeverity = $derived<UsageSeverity>(usageSeverity(contextPercent));
 
 	// ── Resolved-install header (device label) ────────────────────────────
 	// The Claude section header always renders (ChatGPT-provider parity): a fixed

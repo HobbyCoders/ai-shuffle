@@ -397,6 +397,32 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelector('.ctx-pct')?.textContent).toContain('90%');
 	});
 
+	it('colors the toolbar ring from chat context, not account plan usage', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [{ type: 'five_hour', utilization: 98, resets_at: future() }],
+		});
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			contextUsed: 10_000,
+			totalTokensIn: 10_000,
+		});
+
+		const { container } = render(ContextUsageBar);
+		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
+		const ring = container.querySelector('svg.usage-ring') as SVGElement;
+
+		expect(ring).not.toBeNull();
+		expect(ring.classList.contains('warning')).toBe(false);
+		expect(ring.classList.contains('danger')).toBe(false);
+		expect(pill.getAttribute('aria-label')).toMatch(/22% of context window used/);
+
+		await openPopover(container);
+		const planPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
+		expect(planPct.textContent).toBe('98%');
+		expect(planPct.classList.contains('danger')).toBe(true);
+	});
+
 	it('shows the effective model as a trailing muted row inside the expanded breakdown', async () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
