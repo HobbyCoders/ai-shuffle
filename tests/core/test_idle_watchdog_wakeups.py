@@ -270,6 +270,124 @@ async def test_watchdog_cooldown_blocks_immediate_renudge(mock_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# #793: usage-aware re-nudge latch + lifetime cap
+# ---------------------------------------------------------------------------
+
+def _clock(monkeypatch, wakeup_service, start=1_000.0):
+    """Patch wakeup_service's monotonic clock; returns a setter for "now"."""
+    state = {"now": start}
+    monkeypatch.setattr(wakeup_service.time, "monotonic", lambda: state["now"])
+    return state
+
+
+async def test_watchdog_holds_when_no_decrease_after_cooldown(mock_db, monkeypatch, caplog):
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-no-decrease"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(session_id=sid, data=_usage(190_000))  # 95%
+
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+    clock = _clock(monkeypatch, wakeup_service)
+
+    first = await wakeup_service.scan_once()
+    assert first == [sid]
+
+    # cooldown elapses but the persisted fraction never dropped (deferred
+    # compaction that never landed) — same 95% snapshot.
+    clock["now"] += wakeup_service.settings.idle_watchdog_cooldown_seconds + 1
+
+    with caplog.at_level("INFO", logger="app.core.wakeup_service"):
+        second = await wakeup_service.scan_once()
+
+    assert second == []
+    assert len(scheduled) == 1
+    assert any(
+        "no decrease observed" in r.message for r in caplog.records
+    )
+
+
+async def test_watchdog_rearms_after_decrease_and_cooldown(mock_db, monkeypatch):
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-decrease"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(session_id=sid, data=_usage(190_000))  # 95%
+
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+    clock = _clock(monkeypatch, wakeup_service)
+
+    first = await wakeup_service.scan_once()
+    assert first == [sid]
+
+    # cooldown elapses AND compaction visibly landed — fraction dropped by
+    # more than the 0.02 epsilon (95% -> 90%).
+    clock["now"] += wakeup_service.settings.idle_watchdog_cooldown_seconds + 1
+    database.set_session_context_usage(session_id=sid, data=_usage(180_000))  # 90%
+
+    second = await wakeup_service.scan_once()
+
+    assert second == [sid]
+    assert len(scheduled) == 2
+
+
+async def test_watchdog_lifetime_cap_mutes_after_three(mock_db, monkeypatch, caplog):
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-cap"
+    database.create_session(session_id=sid, profile_id="default")
+    # 95% -> 92% -> 89% -> 86%: each step clears both cooldown and the 0.02
+    # decrease gate while staying above the 85% fraction_gate.
+    fractions = [190_000, 184_000, 178_000, 172_000]
+    database.set_session_context_usage(session_id=sid, data=_usage(fractions[0]))
+
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+    clock = _clock(monkeypatch, wakeup_service)
+
+    results = []
+    with caplog.at_level("INFO", logger="app.core.wakeup_service"):
+        for i, total in enumerate(fractions):
+            if i > 0:
+                clock["now"] += wakeup_service.settings.idle_watchdog_cooldown_seconds + 1
+                database.set_session_context_usage(session_id=sid, data=_usage(total))
+            results.append(await wakeup_service.scan_once())
+
+    # first three sweeps each land a nudge (lifetime cap == 3); the fourth
+    # (also off cooldown, also decreased) is muted and skipped.
+    assert results == [[sid], [sid], [sid], []]
+    assert len(scheduled) == 3
+
+    latch = wakeup_service._watchdog_cooldown[sid]
+    assert latch.count == 3
+    assert latch.muted is True
+
+    cap_logs = [r for r in caplog.records if "lifetime nudge cap" in r.message]
+    assert len(cap_logs) == 1
+    assert "muting" in cap_logs[0].message
+
+
+# ---------------------------------------------------------------------------
 # auto-continue latch: fail-closed fallback paths (#557 interplay)
 # ---------------------------------------------------------------------------
 

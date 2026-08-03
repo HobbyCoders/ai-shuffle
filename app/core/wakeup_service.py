@@ -30,6 +30,7 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -58,11 +59,39 @@ _REHYDRATE_STAGGER_CAP_SECONDS = 60.0
 # Live references to in-flight wake timer tasks (asyncio keeps only weak refs).
 _timers: "set[asyncio.Task]" = set()
 
-# In-memory per-session cooldown for the watchdog: session_id -> monotonic ts of
-# the last nudge armed. Bounds re-nudging a session whose compaction did not drop
-# it back under the fraction. Reset on process restart (at most one extra nudge
-# per session after a restart — acceptable for a backstop).
-_watchdog_cooldown: "dict[str, float]" = {}
+@dataclass
+class _WatchdogLatch:
+    """Per-session watchdog state, latched at the moment a nudge is armed.
+
+    ``fraction`` is the persisted usage fraction that triggered the nudge — a
+    later sweep only re-arms once the CURRENT fraction has visibly dropped
+    below it (compaction landed), not merely once the cooldown has elapsed.
+    ``count`` tracks lifetime nudges for this session (this process only);
+    once it hits :data:`_WATCHDOG_LIFETIME_CAP` the session is ``muted`` and
+    never re-nudged again until process restart.
+    """
+
+    monotonic_ts: float
+    fraction: float
+    count: int = 0
+    muted: bool = False
+
+
+# In-memory per-session latch for the watchdog: session_id -> _WatchdogLatch.
+# Bounds re-nudging a session whose compaction did not drop it back under the
+# fraction (rate AND count). Reset on process restart (at most one extra
+# nudge cycle per session after a restart — acceptable for a backstop).
+_watchdog_cooldown: "dict[str, _WatchdogLatch]" = {}
+
+# Required drop (as a fraction, e.g. 0.02 == 2 percentage points) between the
+# fraction latched at the last nudge and the current persisted fraction
+# before a session is eligible to be re-nudged. Guards against re-nudging a
+# session whose compaction was deferred and never actually landed (#793).
+_WATCHDOG_DECREASE_EPSILON = 0.02
+
+# Max nudges armed for a single session over this process's lifetime. A
+# session that hits this cap is muted rather than nudged forever (#793).
+_WATCHDOG_LIFETIME_CAP = 3
 
 _watchdog_task: "Optional[asyncio.Task]" = None
 
@@ -197,11 +226,30 @@ async def rehydrate_pending() -> int:
 # Idle-at-edge watchdog
 # ---------------------------------------------------------------------------
 
-def _cooldown_active(session_id: str, now_monotonic: float) -> bool:
-    last = _watchdog_cooldown.get(session_id)
-    if last is None:
+def _watchdog_eligible(session_id: str, frac: float, now_monotonic: float) -> bool:
+    """True if ``session_id`` may be nudged again given the latched state.
+
+    A previously-nudged session is only eligible once BOTH: the cooldown has
+    elapsed, AND the current fraction has dropped at least
+    :data:`_WATCHDOG_DECREASE_EPSILON` below the fraction latched at the last
+    nudge (compaction visibly landed). A muted session (lifetime cap reached)
+    is never eligible again.
+    """
+    latch = _watchdog_cooldown.get(session_id)
+    if latch is None:
+        return True
+    if latch.muted:
         return False
-    return (now_monotonic - last) < settings.idle_watchdog_cooldown_seconds
+    if (now_monotonic - latch.monotonic_ts) < settings.idle_watchdog_cooldown_seconds:
+        return False
+    if frac > latch.fraction - _WATCHDOG_DECREASE_EPSILON:
+        logger.info(
+            "idle-watchdog: session %s still at %.1f%% after nudge (no decrease "
+            "observed) — holding",
+            session_id, frac * 100.0,
+        )
+        return False
+    return True
 
 
 async def scan_once() -> List[str]:
@@ -209,8 +257,10 @@ async def scan_once() -> List[str]:
 
     For each structurally-eligible candidate (idle, active, snapshot present, no
     live turn, no pending wakeup — :func:`db.wakeups.idle_edge_candidates`) that
-    is over the configured context fraction and off cooldown, arm ONE synthetic
-    nudge through the durable wakeup machinery.
+    is over the configured context fraction, off cooldown, has visibly dropped
+    fraction since its last nudge (or was never nudged), and has not hit its
+    lifetime nudge cap, arm ONE synthetic nudge through the durable wakeup
+    machinery.
     """
     from app.core import compact_continue
 
@@ -229,11 +279,11 @@ async def scan_once() -> List[str]:
         session_id = cand.get("id")
         if not session_id:
             continue
-        if _cooldown_active(session_id, now_monotonic):
-            continue
         usage = compact_continue._persisted_usage(session_id)
         frac = compact_continue.usage_fraction(usage)
         if frac is None or frac < fraction_gate:
+            continue
+        if not _watchdog_eligible(session_id, frac, now_monotonic):
             continue
         logger.info(
             "idle-watchdog: session %s idle at %.1f%% context (>= %.0f%%) — "
@@ -255,7 +305,18 @@ async def scan_once() -> List[str]:
                 "idle-watchdog: failed to arm nudge for session %s", session_id
             )
             continue
-        _watchdog_cooldown[session_id] = now_monotonic
+        prev_count = _watchdog_cooldown.get(session_id)
+        count = (prev_count.count if prev_count else 0) + 1
+        muted = count >= _WATCHDOG_LIFETIME_CAP
+        _watchdog_cooldown[session_id] = _WatchdogLatch(
+            monotonic_ts=now_monotonic, fraction=frac, count=count, muted=muted,
+        )
+        if muted:
+            logger.info(
+                "idle-watchdog: session %s reached lifetime nudge cap (%d) — "
+                "muting",
+                session_id, _WATCHDOG_LIFETIME_CAP,
+            )
         nudged.append(session_id)
     return nudged
 
