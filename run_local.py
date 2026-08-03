@@ -27,6 +27,7 @@ import argparse
 import webbrowser
 import time
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -436,6 +437,113 @@ def run_setup():
     return True
 
 
+def _get_data_dir_for_supervisor(env: dict) -> Path:
+    """Best-effort mirror of ``app.core.platform.get_app_data_dir()``.
+
+    run_local.py launches the child under the project ``venv``, but this
+    launcher process itself runs on the system Python (no pydantic/app
+    imports available), so the app's real data-dir resolver can't be
+    called directly. Docker deployments don't go through this launcher at
+    all (entrypoint.sh runs uvicorn directly there), so only the native
+    branches need mirroring. ``DATA_DIR`` overrides both, matching
+    ``Settings.data_dir``.
+    """
+    override = env.get("DATA_DIR")
+    if override:
+        return Path(override)
+    if sys.platform == "win32":
+        userprofile = env.get("USERPROFILE")
+        base = Path(userprofile) if userprofile else Path.home()
+        return base / ".ai-shuffle"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "ai-shuffle"
+    return Path.home() / ".local" / "share" / "ai-shuffle"
+
+
+def _get_instance_id_for_supervisor(env: dict, data_dir: Path, port: int) -> str:
+    """Best-effort mirror of ``Settings.effective_instance_id`` for log placement.
+
+    Priority matches app/core/config.py: an explicit ``INSTANCE_ID`` env var,
+    then the ``.instance_id`` file the app itself persists into its data dir,
+    then a port-scoped fallback so concurrent debug instances at least don't
+    collide with each other.
+    """
+    explicit = env.get("INSTANCE_ID")
+    if explicit and explicit.strip():
+        return explicit.strip()
+    id_file = data_dir / ".instance_id"
+    try:
+        if id_file.exists():
+            stored = id_file.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+    except OSError:
+        pass
+    return f"local-{port}"
+
+
+def get_supervisor_log_path(env: dict, port: int) -> Path:
+    """Where this launcher records child exit events, alongside the app's own logs.
+
+    Reuses the same ``<data_dir>/logs/<instance_id>/`` directory
+    ``app.core.file_logging`` writes ``app.log``/``fatal.log`` into, so a
+    post-mortem only has one directory to check regardless of whether the
+    app itself got to log anything before dying.
+    """
+    data_dir = _get_data_dir_for_supervisor(env)
+    instance_id = _get_instance_id_for_supervisor(env, data_dir, port)
+    return data_dir / "logs" / instance_id / "supervisor.log"
+
+
+def format_child_exit_line(exit_code, started_at: str, ended_at: str, uptime_s: float) -> str:
+    """Render the exit-notice line shared by the console and supervisor.log.
+
+    A zero exit is a clean stop. Anything else — including a negative code
+    (POSIX: killed by signal ``-N``) or a huge unsigned value (Windows:
+    access violation / TerminateProcess) — is flagged as an unexpected death
+    so a scan of supervisor.log finds it without cross-referencing app.log
+    (issue #587: the app process died overnight with nothing in app.log at
+    all, so the exit record has to live independently of the app's own logs).
+    """
+    if exit_code == 0:
+        return (
+            f"{ended_at} child exited cleanly (exit=0), started {started_at}, "
+            f"uptime={uptime_s:.1f}s"
+        )
+    return (
+        f"{ended_at} child died unexpectedly (exit={exit_code}), "
+        f"started {started_at}, uptime={uptime_s:.1f}s — no auto-respawn "
+        f"configured; this launcher is exiting"
+    )
+
+
+def log_child_exit(env: dict, port: int, exit_code, started_at: str, ended_at: str,
+                    uptime_s: float) -> str:
+    """Print + durably persist the child's exit so it survives a closed terminal.
+
+    This runs *after* ``subprocess.run()`` returns — the child has already
+    exited by then, so it cannot itself catch a silent external kill
+    (SIGKILL / OOM-kill / TerminateProcess never leave anything for the
+    victim process to observe). What it fixes is the OTHER half of #587:
+    even when nothing could be caught, the fact and timestamp of the death
+    must not be lost the moment the launching terminal is closed or the
+    machine goes back to sleep. Writing to disk is best-effort — a failure
+    here must never mask the real exit status, so it only warns.
+    """
+    line = format_child_exit_line(exit_code, started_at, ended_at, uptime_s)
+    print_status(line, "success" if exit_code == 0 else "error")
+
+    try:
+        log_path = get_supervisor_log_path(env, port)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print_status(f"Could not write supervisor.log ({e}) — see console only", "warning")
+
+    return line
+
+
 def start_server(host: str, port: int, open_browser: bool):
     """Start the AI Hub server"""
     print(f"\n{Colors.BOLD}Starting AI Hub...{Colors.END}")
@@ -473,10 +581,23 @@ def start_server(host: str, port: int, open_browser: bool):
         import threading
         threading.Thread(target=open_browser_delayed, daemon=True).start()
 
+    started_at = datetime.now(timezone.utc).isoformat()
+    start_monotonic = time.monotonic()
     try:
-        subprocess.run([
+        result = subprocess.run([
             str(venv_python), "-m", "app.main"
         ], cwd=str(project_root), env=env)
+        # Child has exited (whether cleanly or not) — log the exit code and
+        # timestamp BEFORE doing anything else, so if a respawn loop is ever
+        # added here later it can never race ahead of this record. There is
+        # deliberately no auto-respawn today (see DO-NOT-add-heavyweight-
+        # monitoring note in issue #587) — this is diagnostic instrumentation,
+        # not resilience.
+        log_child_exit(
+            env, port, result.returncode, started_at,
+            datetime.now(timezone.utc).isoformat(),
+            time.monotonic() - start_monotonic,
+        )
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}Server stopped.{Colors.END}")
 
