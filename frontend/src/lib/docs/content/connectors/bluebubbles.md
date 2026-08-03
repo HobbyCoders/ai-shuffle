@@ -136,6 +136,17 @@ The BlueBubbles connector supports the following capabilities:
 
 **Message length limit:** 4,000 characters per message. Longer messages are automatically split.
 
+## AI Actions (Action Gateway)
+
+Sessions bound to a BlueBubbles chat get two MCP tools instead of one tool per feature:
+
+- **`bluebubbles_actions`** — discovery. Returns the action catalog (6 actions: send message, send tapback reaction, list chats, get chat info, rename chat, leave chat), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`bluebubbles_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+Safety rails:
+
+- The **destructive** action (`leave_chat`) refuses to run against the session's bound chat, and otherwise asks the user to reply **'approve' or 'deny'** in-chat before running (2-minute timeout denies) — BlueBubbles has no interactive button surface. Set `auto_approve_destructive: true` to skip the prompt.
+
 ## Troubleshooting
 
 ### BlueBubbles server won't start

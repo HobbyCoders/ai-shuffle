@@ -102,6 +102,8 @@ With privacy mode disabled, the bot receives all messages in group chats. If you
 | `bot_token` | string | Yes | The bot token obtained from @BotFather. Format: `<numeric_id>:<alphanumeric_string>`. |
 | `allowed_chat_ids` | array of integers | No | List of Telegram chat IDs the bot is allowed to respond in. If empty or omitted, the bot responds in all chats. Private chats have positive IDs; groups have negative IDs. |
 | `welcome_message` | string | No | Optional message to greet users. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `pins`, `polls`, `media`, `chat`, `moderation`. |
+| `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, bans, unpinning, leaving a chat). Default: prompts are required. |
 
 ## Capabilities
 
@@ -117,6 +119,19 @@ The Telegram connector supports the following capabilities:
 | Threads | No | Telegram does not have a native thread model (topic groups are handled as separate chats) |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split into multiple messages.
+
+## AI Actions (Action Gateway)
+
+Sessions bound to a Telegram chat get two MCP tools instead of one tool per feature:
+
+- **`telegram_actions`** — discovery. Returns the action catalog (19 actions: send/edit/delete/forward messages, reactions, pin/unpin, polls, photos/documents, chat info, chat title/description, member bans), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`telegram_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+Safety rails:
+
+- Message-level actions only work in the session's bound chat and the connector's `allowed_chat_ids`.
+- Actions tagged **destructive** (`delete_message`, `unpin_all_messages`, `ban_chat_member`, `leave_chat`) post an in-channel **Approve/Deny** inline-keyboard prompt and only run after a human taps Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+- Group-admin actions (chat title/description, bans, leaving) require the bot to actually be an admin in that chat; Telegram's Bot API rejects the call otherwise and the error is surfaced verbatim.
 
 ## Troubleshooting
 

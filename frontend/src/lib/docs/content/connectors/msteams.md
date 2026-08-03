@@ -170,6 +170,18 @@ The Microsoft Teams connector supports the following capabilities:
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split.
 
+## AI Actions (Action Gateway)
+
+Sessions bound to a Teams conversation get two MCP tools instead of one tool per feature:
+
+- **`msteams_actions`** — discovery. Returns the action catalog (6 actions: send message, send Adaptive Card, update message, delete message, typing indicator, list conversation members), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`msteams_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+Safety rails:
+
+- All actions are proactive Bot Framework calls, so they only work in a conversation the bot has already received an inbound message in (the connector caches the `ConversationReference` from the last inbound activity).
+- The **destructive** action (`delete_message`) posts an in-channel Adaptive Card **Approve/Deny** prompt and only runs after a human clicks Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+
 ## Troubleshooting
 
 ### Bot does not respond to messages in Teams

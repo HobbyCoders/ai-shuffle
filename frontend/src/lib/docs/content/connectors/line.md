@@ -119,6 +119,18 @@ The LINE connector supports the following capabilities:
 
 **Message Length Limit:** 5,000 characters per text message. Messages exceeding this limit are automatically split into multiple text messages. LINE also limits the number of message objects in a single API call to 5 "bubbles".
 
+## AI Actions (Action Gateway)
+
+Sessions bound to a LINE chat get two MCP tools instead of one tool per feature:
+
+- **`line_actions`** — discovery. Returns the action catalog (7 actions: send text/sticker/image messages, get user profile, get group summary, leave a group, get message quota), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`line_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+Safety rails:
+
+- Message-level actions only work on the session's bound chat and the connector's `allowed_user_ids` / `allowed_group_ids`.
+- The **destructive** action (`leave_group`) posts a Flex Message **Approve/Deny** prompt and only runs after a human taps Approve (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+
 ## Troubleshooting
 
 ### Bot does not respond to messages

@@ -96,6 +96,15 @@ The iMessage connector exposes plain text messaging only. None of the optional r
 
 The connector does not define a maximum message length, so long messages are sent as-is without automatic splitting.
 
+## AI Actions (Action Gateway)
+
+Sessions bound to an iMessage chat get two MCP tools instead of one tool per feature:
+
+- **`imessage_actions`** — discovery. Returns the action catalog (5 actions: send message, send tapback reaction, list chats, get chat info, send typing indicator), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`imessage_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches.
+
+There are no destructive actions in this catalog — the `imsg` CLI has no delete/ban-equivalent RPC — so no in-chat approval flow is needed here.
+
 ## Troubleshooting
 
 ### `imsg` CLI not found
