@@ -1,12 +1,26 @@
-"""Provider usage capture + polling (Chunks U2/U3 of the provider-usage program).
+"""Provider usage capture + polling (Chunks U2/U3 of the provider-usage program,
+plus the #757 follow-up: passive OpenAI/Anthropic API-key header capture).
 
-Two data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``:
+Four data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
+(Codex/OpenRouter) and GitHub issue #757 (OpenAI/Anthropic API-key providers):
 
 **Codex passive capture (U2).** The translator gateway's Codex upstream leg
 (``upstream.py::stream_responses_events``) receives ``x-codex-*``
 plan/rate-limit headers on every 200 response. ``capture_codex_headers``
 normalizes those headers into the shared ``provider_usage_snapshots`` row
 shape and persists them fire-and-forget, off the streaming hot path.
+
+**OpenAI passive capture (#757).** The translator gateway's OpenAI-platform
+upstream leg (same ``stream_responses_events``, ``mode == "openai"``) receives
+standard ``x-ratelimit-*`` headers on every 200 response. ``capture_openai_headers``
+follows the exact same fire-and-forget pattern as the Codex capture above,
+persisting ``provider_type="openai"``.
+
+**Anthropic passive capture (#757).** The translator gateway's Anthropic
+passthrough leg (``upstream.py::anthropic_passthrough_stream`` /
+``anthropic_passthrough_json``) receives ``anthropic-ratelimit-*`` headers on
+every successful response. ``capture_anthropic_headers`` follows the same
+pattern, persisting ``provider_type="anthropic"``.
 
 **OpenRouter poller (U3).** ``ProviderUsageMonitor`` polls every enabled
 ``openrouter`` model-provider's key-info endpoint
@@ -31,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -211,6 +226,221 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
         # Never log header values (S4) — only the exception's own message.
         logger.warning("Codex usage capture failed for provider %s: %s", provider_id, e)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI API-key passive capture (#757)
+# ---------------------------------------------------------------------------
+
+# Header allowlist — ONLY these travel into `raw`; nothing else, never a token.
+_OPENAI_HEADER_KEYS = (
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+)
+
+# Matches a Go-style duration token: "1h", "4m", "30s", "500ms" — "ms" is
+# listed before "m"/"s" so `finditer` prefers the 2-letter unit at that
+# position instead of splitting it into "m" + trailing "s".
+_DURATION_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+
+
+def _parse_openai_duration_seconds(value: Optional[str]) -> Optional[float]:
+    """Parse an OpenAI ``x-ratelimit-reset-*`` duration string to seconds.
+
+    OpenAI reports resets as a Go-style duration (``"6m0s"``, ``"1s"``,
+    ``"200ms"``, ``"1h4m0s"``), not an absolute timestamp. Returns ``None`` for
+    an empty/unparseable value rather than raising.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    matches = _DURATION_TOKEN_RE.findall(text)
+    if not matches:
+        return None
+    total = 0.0
+    unit_seconds = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    for amount, unit in matches:
+        try:
+            total += float(amount) * unit_seconds[unit]
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _openai_reset_epoch(duration: Optional[str]) -> Optional[str]:
+    """Convert an OpenAI reset-duration header into an epoch-seconds string."""
+    secs = _parse_openai_duration_seconds(duration)
+    if secs is None:
+        return None
+    return str(int(time.time() + secs))
+
+
+def normalize_openai_headers(headers: Mapping[str, str]) -> ProviderUsage:
+    """Normalize OpenAI ``x-ratelimit-*`` response headers. Pure; never raises.
+
+    Emits up to two windows — ``requests`` and ``tokens`` — each computed as
+    ``(limit - remaining) / limit * 100`` (percent of the window already used,
+    the same "utilization" semantics as the Codex/Claude windows). A window is
+    omitted when its ``limit``/``remaining`` pair is missing or the limit is
+    non-positive. OpenAI's ``/responses`` endpoint reports no dollar credits,
+    so ``credits`` and ``plan_type`` are always ``None`` here.
+    """
+    h = {k: headers.get(k) for k in _OPENAI_HEADER_KEYS if headers.get(k) is not None}
+    windows: List[Dict[str, Any]] = []
+    for prefix in ("requests", "tokens"):
+        limit = _as_float(h.get(f"x-ratelimit-limit-{prefix}"))
+        remaining = _as_float(h.get(f"x-ratelimit-remaining-{prefix}"))
+        if limit is None or remaining is None or limit <= 0:
+            continue
+        used_pct = max(0.0, min(100.0, (limit - remaining) / limit * 100.0))
+        windows.append(
+            {
+                "type": prefix,  # "requests" / "tokens"
+                "utilization": used_pct,
+                "resets_at": _openai_reset_epoch(h.get(f"x-ratelimit-reset-{prefix}")),
+            }
+        )
+    return ProviderUsage(windows=windows, credits=None, plan_type=None, raw=h)
+
+
+def capture_openai_headers(provider_id: str, headers: Mapping[str, str]) -> None:
+    """Snapshot allowlisted OpenAI headers synchronously, then persist off the loop.
+
+    Mirrors :func:`capture_codex_headers` exactly: never raises, never blocks
+    the caller, no-op if none of the allowlisted headers are present.
+    """
+    try:
+        snap = {k: headers[k] for k in _OPENAI_HEADER_KEYS if k in headers}
+        if not snap:
+            return
+        task = asyncio.create_task(_persist_openai_capture(provider_id, snap))
+    except RuntimeError:
+        return  # no running loop (sync test context)
+    except Exception:  # noqa: BLE001 — capture must never break the caller
+        return
+    _pending_capture_tasks.add(task)
+    task.add_done_callback(_pending_capture_tasks.discard)
+
+
+async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> None:
+    """Normalize + upsert a captured OpenAI header snapshot. Best-effort."""
+    try:
+        u = normalize_openai_headers(headers)
+        from app.db import database as db
+
+        await run_sync(
+            db.upsert_provider_usage_snapshot,
+            provider_id,
+            "openai",
+            u.plan_type,
+            u.windows,
+            u.credits,
+            u.raw,
+            int(time.time() * 1000),
+        )
+    except Exception as e:  # noqa: BLE001 — capture must never break a turn
+        # Never log header values (S4) — only the exception's own message.
+        logger.warning("OpenAI usage capture failed for provider %s: %s", provider_id, e)
+
+
+# ---------------------------------------------------------------------------
+# Anthropic API-key passive capture (#757)
+# ---------------------------------------------------------------------------
+
+# Header allowlist — ONLY these travel into `raw`; nothing else, never a token.
+_ANTHROPIC_HEADER_KEYS = (
+    "anthropic-ratelimit-requests-limit",
+    "anthropic-ratelimit-requests-remaining",
+    "anthropic-ratelimit-requests-reset",
+    "anthropic-ratelimit-tokens-limit",
+    "anthropic-ratelimit-tokens-remaining",
+    "anthropic-ratelimit-tokens-reset",
+    "anthropic-ratelimit-input-tokens-limit",
+    "anthropic-ratelimit-input-tokens-remaining",
+    "anthropic-ratelimit-input-tokens-reset",
+    "anthropic-ratelimit-output-tokens-limit",
+    "anthropic-ratelimit-output-tokens-remaining",
+    "anthropic-ratelimit-output-tokens-reset",
+)
+
+# window-type key (with underscores) -> header-name fragment (with hyphens).
+_ANTHROPIC_WINDOW_PREFIXES = ("requests", "tokens", "input-tokens", "output-tokens")
+
+
+def normalize_anthropic_headers(headers: Mapping[str, str]) -> ProviderUsage:
+    """Normalize Anthropic ``anthropic-ratelimit-*`` response headers. Pure; never raises.
+
+    Emits up to four windows — ``requests``, ``tokens``, ``input_tokens``,
+    ``output_tokens`` — each computed as ``(limit - remaining) / limit * 100``,
+    the same "utilization" semantics as the Codex/Claude windows. Unlike
+    OpenAI's duration-based reset, Anthropic's ``*-reset`` headers are already
+    absolute RFC 3339 timestamps, so they pass through verbatim as
+    ``resets_at``. A window is omitted when its ``limit``/``remaining`` pair is
+    missing or the limit is non-positive. The Anthropic Messages API reports no
+    dollar credits, so ``credits`` and ``plan_type`` are always ``None`` here.
+    """
+    h = {k: headers.get(k) for k in _ANTHROPIC_HEADER_KEYS if headers.get(k) is not None}
+    windows: List[Dict[str, Any]] = []
+    for prefix in _ANTHROPIC_WINDOW_PREFIXES:
+        limit = _as_float(h.get(f"anthropic-ratelimit-{prefix}-limit"))
+        remaining = _as_float(h.get(f"anthropic-ratelimit-{prefix}-remaining"))
+        if limit is None or remaining is None or limit <= 0:
+            continue
+        used_pct = max(0.0, min(100.0, (limit - remaining) / limit * 100.0))
+        windows.append(
+            {
+                "type": prefix.replace("-", "_"),  # requests / tokens / input_tokens / output_tokens
+                "utilization": used_pct,
+                "resets_at": h.get(f"anthropic-ratelimit-{prefix}-reset"),
+            }
+        )
+    return ProviderUsage(windows=windows, credits=None, plan_type=None, raw=h)
+
+
+def capture_anthropic_headers(provider_id: str, headers: Mapping[str, str]) -> None:
+    """Snapshot allowlisted Anthropic headers synchronously, then persist off the loop.
+
+    Mirrors :func:`capture_codex_headers` exactly: never raises, never blocks
+    the caller, no-op if none of the allowlisted headers are present.
+    """
+    try:
+        snap = {k: headers[k] for k in _ANTHROPIC_HEADER_KEYS if k in headers}
+        if not snap:
+            return
+        task = asyncio.create_task(_persist_anthropic_capture(provider_id, snap))
+    except RuntimeError:
+        return  # no running loop (sync test context)
+    except Exception:  # noqa: BLE001 — capture must never break the caller
+        return
+    _pending_capture_tasks.add(task)
+    task.add_done_callback(_pending_capture_tasks.discard)
+
+
+async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) -> None:
+    """Normalize + upsert a captured Anthropic header snapshot. Best-effort."""
+    try:
+        u = normalize_anthropic_headers(headers)
+        from app.db import database as db
+
+        await run_sync(
+            db.upsert_provider_usage_snapshot,
+            provider_id,
+            "anthropic",
+            u.plan_type,
+            u.windows,
+            u.credits,
+            u.raw,
+            int(time.time() * 1000),
+        )
+    except Exception as e:  # noqa: BLE001 — capture must never break a turn
+        # Never log header values (S4) — only the exception's own message.
+        logger.warning("Anthropic usage capture failed for provider %s: %s", provider_id, e)
 
 
 # ---------------------------------------------------------------------------

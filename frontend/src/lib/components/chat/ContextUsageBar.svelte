@@ -64,6 +64,7 @@
 		type UsageBucket,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
+	import { estimateSpendUsd, formatEstimateUsd } from '$lib/constants/provider-pricing';
 
 	// ── Effective model → context window (200k / 1M) ──────────────────────
 	const effectiveModel = $derived.by(() => {
@@ -313,6 +314,21 @@
 		const balance = typeof credits.balance === 'number' ? credits.balance : null;
 		if (balance != null) return `$${balance.toFixed(2)}`;
 		return null;
+	}
+
+	// Client-side estimated spend (#757) — only meaningful for the provider the
+	// ACTIVE session is actually running on (we only track this session's token
+	// counts, not a provider-wide total), and only when that provider is a
+	// priced API-key type (openai/anthropic) with a catalog match for its model.
+	// `null` → the row renders no estimate rather than a misleading `$0.00`.
+	function estimateFor(pb: { providerId: string; providerType: string | null }): number | null {
+		if (pb.providerId !== effectiveProviderId) return null;
+		return estimateSpendUsd(pb.providerType, effectiveModel, {
+			inputTokens: $activeSession.totalTokensIn ?? 0,
+			outputTokens: $activeSession.totalTokensOut ?? 0,
+			cacheCreationTokens: $activeSession.totalCacheCreationTokens ?? 0,
+			cacheReadTokens: $activeSession.totalCacheReadTokens ?? 0
+		});
 	}
 
 	const target = $derived($usageTargetInstance);
@@ -620,6 +636,10 @@
 					{#if credits}
 						<div class="row-reset">{credits}</div>
 					{/if}
+					{@const estimate = estimateFor(pb)}
+					{#if estimate != null}
+						<div class="row-reset row-estimate">est. spend {formatEstimateUsd(estimate)}</div>
+					{/if}
 				{/if}
 			{/each}
 		</div>
@@ -922,6 +942,11 @@
 	.row-reset.no-data {
 		font-style: italic;
 		opacity: 0.8;
+	}
+	/* Client-side estimated spend (#757) — italicized, same muted tone as the
+	   credits line, to read as approximate rather than a billed figure. */
+	.row-estimate {
+		font-style: italic;
 	}
 
 	/* Resolved-install header — device/account label (shown when named or remote). */

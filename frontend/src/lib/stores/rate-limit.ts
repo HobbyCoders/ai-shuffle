@@ -199,6 +199,12 @@ export const WINDOW_LABELS: Record<string, string> = {
 	day: 'Daily',
 	month: 'Monthly',
 	credit_limit: 'Credit limit',
+	// OpenAI/Anthropic API-key passive header capture (#757) — utilization is
+	// "percent of window already used", same semantics as the Claude windows.
+	requests: 'API requests',
+	tokens: 'API tokens',
+	input_tokens: 'Input tokens',
+	output_tokens: 'Output tokens',
 };
 
 // Display order for the popover / headline selection tie-breaks.
@@ -213,6 +219,10 @@ export const WINDOW_ORDER = [
 	'day',
 	'month',
 	'credit_limit',
+	'requests',
+	'tokens',
+	'input_tokens',
+	'output_tokens',
 ];
 
 export function windowLabel(type: string): string {

@@ -418,6 +418,13 @@ async def stream_responses_events(
                     provider_usage.capture_codex_headers(provider_id, resp.headers)
                 except Exception:  # noqa: BLE001 — capture must never break a turn
                     pass
+            elif mode == "openai":
+                try:
+                    from app.core import provider_usage
+
+                    provider_usage.capture_openai_headers(provider_id, resp.headers)
+                except Exception:  # noqa: BLE001 — capture must never break a turn
+                    pass
             async for event in iter_sse_events(resp.aiter_lines()):
                 yield event
             return
@@ -445,6 +452,12 @@ async def anthropic_passthrough_stream(
             body = await resp.aread()
             _note_rate_limit(provider_id, resp.status_code, resp.headers)
             raise UpstreamError(resp.status_code, _summarize_error_body(body))
+        try:
+            from app.core import provider_usage
+
+            provider_usage.capture_anthropic_headers(provider_id, resp.headers)
+        except Exception:  # noqa: BLE001 — capture must never break a turn
+            pass
         async for chunk in resp.aiter_raw():
             yield chunk
 
@@ -467,4 +480,10 @@ async def anthropic_passthrough_json(
     if resp.status_code >= 400:
         _note_rate_limit(provider_id, resp.status_code, resp.headers)
         raise UpstreamError(resp.status_code, _summarize_error_body(resp.content))
+    try:
+        from app.core import provider_usage
+
+        provider_usage.capture_anthropic_headers(provider_id, resp.headers)
+    except Exception:  # noqa: BLE001 — capture must never break a turn
+        pass
     return resp.json()
