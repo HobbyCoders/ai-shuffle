@@ -222,6 +222,22 @@ def _resolve_clone_url(origin: str) -> Optional[str]:
     return None
 
 
+def _project_self_seed_enabled(project_v2_row: Dict[str, Any]) -> bool:
+    """Whether this project permits lazy self-seed (#607, ruling 2 per-project opt-out).
+
+    Default ON: only an EXPLICIT ``projects_v2.settings.self_seed = false`` disables
+    on-demand cloning for THIS project (a missing key, ``None``, or any truthy value
+    keeps the default-ON behavior). ``projects_v2`` rows carry ``settings`` already
+    decoded to a dict by ``db.projects_v2._row``; a non-dict is treated as absent
+    (default ON) rather than raising. Explicit ``is False`` only — never an
+    ``or``-fallback chain (standing repo rule).
+    """
+    proj_settings = project_v2_row.get("settings")
+    if not isinstance(proj_settings, dict):
+        return True
+    return proj_settings.get("self_seed") is not False
+
+
 def _seed_base_checkout(
     project_v2_row: Optional[Dict[str, Any]],
     project_id: str,
@@ -231,9 +247,11 @@ def _seed_base_checkout(
 
     Called by ``_ensure_base_checkout`` only when no base checkout is materialized on
     this runner (the pinned-runner-never-cloned case). Gated behind
-    ``AI_SHUFFLE_SELF_SEED`` (``settings.self_seed_checkouts``, default ON) — when the
-    flag is falsy, NOTHING is cloned and the caller falls through to today's honest
-    "not materialized here" (``None``).
+    ``AI_SHUFFLE_SELF_SEED`` (``settings.self_seed_checkouts``, default ON) AND a
+    per-project opt-out (``projects_v2.settings.self_seed`` — an explicit ``false``
+    disables it for THIS project only, #607 ruling 2). When either gate is off,
+    NOTHING is cloned and the caller falls through to today's honest "not
+    materialized here" (``None``).
 
     The cloneable URL is recovered from legacy data via ``_resolve_clone_url``; when
     that returns ``None`` (``local:``/``manual:`` origins, no matching legacy repo, or
@@ -250,6 +268,13 @@ def _seed_base_checkout(
     if not settings.self_seed_checkouts:
         return None
     if not project_v2_row:
+        return None
+    if not _project_self_seed_enabled(project_v2_row):
+        logger.info(
+            "checkout_manager: self-seed disabled for project %s via "
+            "projects_v2.settings.self_seed=false; leaving unmaterialized",
+            project_id,
+        )
         return None
 
     origin = project_v2_row.get("origin")

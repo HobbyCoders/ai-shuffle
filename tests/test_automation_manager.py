@@ -1033,12 +1033,17 @@ class TestExecuteRunProjectResolution:
 
     @pytest.mark.asyncio
     async def test_v2_project_without_checkout_here_fails_like_missing_clone(self, manager):
+        # No checkout here AND self-seed cannot materialize one (flag/opt-out off, or
+        # no cloneable URL) -> the run fails with the missing-project error, exactly
+        # as before self-seed existed (#607).
         stack, db, submit, _wait, _int = _session_run_env()
         with stack, patch(
             "app.core.project_resolver.resolve_project_v2", return_value={"id": "pv2-A"},
         ), patch(
             "app.core.project_resolver.resolve_local_checkout", return_value=None,
-        ):
+        ), patch(
+            "app.core.checkout_manager.ensure_checkout", return_value=None,
+        ) as seed:
             db.get_project.return_value = {
                 "id": "proj-A", "name": "My Repo", "instance_id": "install-other",
             }
@@ -1046,6 +1051,7 @@ class TestExecuteRunProjectResolution:
             with pytest.raises(ValueError, match="Office PC"):
                 await manager._execute_run(self._automation(), "run-v2", "do it", {})
 
+        seed.assert_called_once()  # a self-seed WAS attempted before giving up
         submit.assert_not_called()
         db.create_session.assert_not_called()
         failed = [
@@ -1053,6 +1059,32 @@ class TestExecuteRunProjectResolution:
             if c.kwargs.get("status") == "failed"
         ]
         assert failed and "My Repo" in failed[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_v2_project_self_seeds_checkout_then_runs(self, manager):
+        # No checkout here at first, but self-seed clones the base on demand (#607):
+        # the run proceeds and binds the minted session to the project_v2.
+        stack, db, submit, _wait, _int = _session_run_env()
+        # resolve_local_checkout: absent first (drives the seed), present after.
+        rlc_returns = iter([None, {"id": "ck-1", "path": "/runner/seeded", "runner_id": "this"}])
+        with stack, patch(
+            "app.core.project_resolver.resolve_project_v2", return_value={"id": "pv2-A"},
+        ), patch(
+            "app.core.project_resolver.resolve_local_checkout",
+            side_effect=lambda *a, **k: next(rlc_returns),
+        ), patch(
+            "app.core.checkout_manager.ensure_checkout", return_value="/runner/seeded",
+        ) as seed, patch(
+            "app.core.project_resolver._persist_session_project_v2"
+        ) as persist:
+            await manager._execute_run(self._automation(), "run-v-seed", "do it", {})
+
+        seed.assert_called_once()  # self-seed materialized the base checkout
+        # The run proceeded: session minted, turn submitted, pv2 bound.
+        submit.assert_called_once()
+        assert submit.call_args.kwargs["project_id"] == "proj-A"
+        persist.assert_called_once()
+        assert persist.call_args.args[1] == "pv2-A"
 
     @pytest.mark.asyncio
     async def test_no_v2_project_fails_run_with_clear_error(self, manager):

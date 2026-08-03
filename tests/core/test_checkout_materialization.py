@@ -601,6 +601,71 @@ def test_seed_local_origin_no_clone(mock_db, workspace_root, monkeypatch):
     assert checkouts_db.list_checkouts(proj["id"]) == []
 
 
+def _seed_project_with_settings(settings):
+    """A seedable project_v2 (resolvable clone URL via legacy data) carrying the
+    given ``settings`` dict, so the per-project opt-out can be exercised."""
+    from app.core.project_links import auto_link_group_id
+
+    remote_url = "https://github.com/o/optout.git"
+    origin = auto_link_group_id(remote_url)
+    proj = projects_v2.upsert_project(origin, name="Opt Out", settings=settings)
+    _seed_legacy_project("lp-opt", "Opt Out", "/legacy/opt", link_group_id=origin)
+    _seed_git_repository_with_remote("gr-opt", "lp-opt", remote_url)
+    return proj
+
+
+def test_seed_per_project_opt_out_no_clone(mock_db, workspace_root, monkeypatch, caplog):
+    # projects_v2.settings.self_seed=false disables self-seed for THIS project even
+    # though the global flag is ON and the clone URL resolves (#607 ruling 2).
+    proj = _seed_project_with_settings({"self_seed": False})
+    calls = _mock_clone(monkeypatch)
+
+    with caplog.at_level("INFO"):
+        assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+
+    assert calls == []
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+    assert any("self-seed disabled for project" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("settings", [{}, {"self_seed": True}, {"other": 1}])
+def test_seed_per_project_default_on_still_clones(settings, mock_db, workspace_root, monkeypatch):
+    # A missing / truthy self_seed keeps the default-ON behavior — only an explicit
+    # False opts out.
+    proj = _seed_project_with_settings(settings)
+    calls = _mock_clone(monkeypatch)
+
+    path = checkout_manager.ensure_checkout(proj, runner_id=RUNNER)
+    assert path is not None
+    assert len(calls) == 1
+    assert Path(path).name == checkout_manager._BASE_DIR_NAME
+
+
+def test_seed_clone_timeout_cleans_temp_and_no_upsert(seedable, workspace_root, monkeypatch):
+    # A private repo without creds (or a too-large repo) makes the clone hit the
+    # 120s bound: clone_repo returns (False, "Clone timed out …") — a bounded-time
+    # failure, never a hang. The seed cleans up and records nothing (#607).
+    proj, _ = seedable
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def _timeout(working_dir, clone_url, timeout=120):
+        calls.append(timeout)
+        return False, f"Clone timed out after {timeout}s — the repository may be too large"
+
+    monkeypatch.setattr(git_service, "clone_repo", _timeout)
+
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
+    assert calls == [120]  # attempted once, with the bounded timeout
+
+    slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
+    if slug_dir.exists():
+        assert list(slug_dir.iterdir()) == []
+    assert not (slug_dir / checkout_manager._BASE_DIR_NAME).exists()
+    assert checkouts_db.list_checkouts(proj["id"]) == []
+
+
 def test_seed_clone_failure_cleans_temp_and_no_upsert(seedable, workspace_root, monkeypatch):
     proj, _ = seedable
     from app.core.git_service import git_service

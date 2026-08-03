@@ -568,11 +568,13 @@ class AutomationManager:
 
         When the automation's legacy ``project_id`` maps to a v2 (origin-keyed)
         project, the origin/checkout resolver — not the legacy link-group
-        heuristic — owns where the run materializes. The per-runner ``checkouts``
-        row must already exist on THIS install; a v2 project whose checkout lives
-        only on another runner is the SAME "project not runnable here" failure as a
-        legacy missing clone (``resolve_local_checkout`` is a pure lookup — it never
-        auto-materializes a foreign project, mirroring adopt's 409).
+        heuristic — owns where the run materializes. When the per-runner
+        ``checkouts`` row is absent, a lazy self-seed is attempted (#607): the run
+        is a pin to THIS install, so its base checkout is cloned on demand (behind
+        ``AI_SHUFFLE_SELF_SEED`` + the per-project opt-out). A v2 project whose
+        checkout is neither present nor seedable here (flag/opt-out off, no
+        cloneable URL, or clone failure) is the SAME "project not runnable here"
+        failure as a legacy missing clone.
         ``automations.project_id`` is left intact (hazard 7): the resolver derives
         project_v2 from it, and the legacy id keeps flowing downstream so an
         un-upgraded install can still read the row.
@@ -603,7 +605,20 @@ class AutomationManager:
 
         checkout = project_resolver.resolve_local_checkout(session_row)
         if checkout is None:
-            raise ValueError(self._missing_project_message(project_id))
+            # No checkout materialized here yet. Attempt a lazy self-seed (#607):
+            # an automation run is a pin to THIS install for this fire, so the base
+            # is cloned on demand (behind AI_SHUFFLE_SELF_SEED + the per-project
+            # opt-out) rather than spuriously failing "not on this device" for a
+            # never-cloned pinned runner. Mirrors the send/resume seam
+            # (project_resolver.resolve_cwd -> checkout_manager.ensure_checkout).
+            # When self-seed cannot run (flag/opt-out off, or no cloneable URL) it
+            # returns None and we fall through to the existing missing-project error.
+            from app.core import checkout_manager
+
+            if checkout_manager.ensure_checkout(v2_project, branch=None):
+                checkout = project_resolver.resolve_local_checkout(session_row)
+            if checkout is None:
+                raise ValueError(self._missing_project_message(project_id))
 
         logger.info(
             "Automation %s: legacy project %s resolves to v2 project %s; running in "
