@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -17,10 +18,10 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
-    ToolDef,
     TriggerDef,
     chunk_text,
 )
+from app.core.connectors import signal_actions
 
 logger = logging.getLogger(__name__)
 
@@ -68,37 +69,16 @@ class SignalConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see signal_actions.py). Exposed to
+    # the AI through the generic signal_actions/signal_invoke gateway tool
+    # pair.
+    ACTIONS = signal_actions.SIGNAL_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="signal_send",
-            name="Send a message via Signal",
-            description="Send a message via Signal",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `signal_send` tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -115,6 +95,7 @@ class SignalConnector(BaseConnector):
             **kwargs,
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -127,6 +108,26 @@ class SignalConnector(BaseConnector):
     @property
     def _account(self) -> str:
         return self.config["account"]
+
+    async def _api_get(self, path: str) -> httpx.Response:
+        """GET helper used by signal_actions.py handlers (mockable in tests)."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.get(f"{self._api_url}{path}")
+
+    async def _api_post(self, path: str, json_body: Dict[str, Any]) -> httpx.Response:
+        """POST helper used by signal_actions.py handlers (mockable in tests)."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(f"{self._api_url}{path}", json=json_body)
+
+    async def _api_put(self, path: str, json_body: Dict[str, Any]) -> httpx.Response:
+        """PUT helper used by signal_actions.py handlers (mockable in tests)."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.put(f"{self._api_url}{path}", json=json_body)
+
+    async def _api_delete(self, path: str, json_body: Dict[str, Any]) -> httpx.Response:
+        """DELETE helper used by signal_actions.py handlers (mockable in tests)."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.request("DELETE", f"{self._api_url}{path}", json=json_body)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -183,6 +184,22 @@ class SignalConnector(BaseConnector):
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
+
+    async def disconnect(self) -> None:
+        """Stop the SSE listener task."""
+        try:
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+        except Exception as exc:
+            logger.warning("Error during SignalConnector disconnect: %s", exc)
+        finally:
+            self._status = ConnectorStatus.DISCONNECTED
+            self._status_message = None
+            logger.info("SignalConnector %s disconnected", self.connector_id)
 
     async def _handle_sse_event(self, event_data: Dict[str, Any]) -> None:
         """Process a single event from the SSE stream."""
@@ -250,22 +267,27 @@ class SignalConnector(BaseConnector):
         await self._on_incoming_message(msg)
 
     def _check_permission_response(self, text: str) -> bool:
-        """Check if a text message is a reply to a permission prompt."""
+        """Check if a text message is a reply to a permission prompt or a
+        pending destructive-action approval (action gateway)."""
         text_lower = text.strip().lower()
-        # Support simple approve/deny text responses
+        approve = text_lower in ("approve", "yes", "allow", "y")
+        deny = text_lower in ("deny", "no", "reject", "n")
+        if not approve and not deny:
+            return False
+
+        # Destructive-action approvals (action gateway) take priority.
+        for request_id, fut in list(self._pending_action_approvals.items()):
+            if not fut.done():
+                fut.set_result(approve)
+            return True
+
+        # Legacy permission-prompt approvals.
         for request_id, session_id in list(self._permission_sessions.items()):
-            if text_lower in ("approve", "yes", "allow", "y"):
-                asyncio.create_task(
-                    self._on_permission_response(request_id, session_id, True)
-                )
-                del self._permission_sessions[request_id]
-                return True
-            elif text_lower in ("deny", "no", "reject", "n"):
-                asyncio.create_task(
-                    self._on_permission_response(request_id, session_id, False)
-                )
-                del self._permission_sessions[request_id]
-                return True
+            asyncio.create_task(
+                self._on_permission_response(request_id, session_id, approve)
+            )
+            del self._permission_sessions[request_id]
+            return True
         return False
 
     # ------------------------------------------------------------------
@@ -422,33 +444,79 @@ class SignalConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see signal_actions.py)."""
+        return await signal_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "signal_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "SIGNAL TOOLS: You are a Signal participant via signal-cli. Call "
+            "signal_actions to discover everything you can do here (messages, "
+            "read receipts, typing indicators, reactions, group lookups) "
+            "along with each action's input schema, then call signal_invoke "
+            "with {action, params} to act. Message and reaction actions work "
+            "on this chat and the connector's allowed numbers only. Signal "
+            "has no interactive buttons, so destructive actions (leaving a "
+            "group) ask the user to reply 'approve' or 'deny' in-chat before "
+            "running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Ask the user to reply 'approve'/'deny' for a destructive action.
+
+        Signal has no interactive buttons, so this reuses the same
+        plain-text reply mechanism as ``send_permission_prompt``.
+        """
+        if not platform_chat_id:
+            return False, "No chat available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            text = (
+                f"Destructive Action Approval\n\n"
+                f"The AI wants to run {action.name} ({action.id})\n\n"
+                f"Reply 'approve' or 'deny'"
+            )
+            resp = await self._api_post("/api/v2/send", {
+                "message": text, "number": self._account, "recipients": [platform_chat_id],
+            })
+            if resp.status_code not in (200, 201):
+                return False, f"Failed to send approval prompt ({resp.status_code})."
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run Signal action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test

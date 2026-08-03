@@ -97,6 +97,8 @@ Temporary tokens expire after 24 hours. For production use:
 | `verify_token` | string | Yes | A secret string used to verify webhook requests from Meta. Must match the value configured in the Meta app dashboard webhook settings. |
 | `app_secret` | string | No | The Meta app secret. If set, the connector validates the `X-Hub-Signature-256` header on incoming webhook requests, rejecting payloads with a missing or mismatched signature. If empty, signature verification is skipped. |
 | `allowed_phone_numbers` | array of strings | No | List of phone numbers (in international E.164 format, e.g., `+14155551234`) that the bot is allowed to communicate with. If empty, the bot responds to all incoming messages. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `templates`, `media`, `account`. |
+| `auto_approve_destructive` | string | No | Reserved for forward compatibility. The current action catalog has no destructive actions, so this has no effect today. |
 
 ## Capabilities
 
@@ -106,13 +108,26 @@ The WhatsApp connector supports the following capabilities:
 |------------|-----------|-------|
 | Typing indicator | No | The connector does not send a "typing..." indicator |
 | Read receipts | Yes | Sends read receipts (blue check marks) when messages are received and processed |
-| Reactions | No | WhatsApp Business API has limited reaction support |
+| Reactions | Yes | Available to the AI via the `send_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
 | Rich text | Yes | Supports bold (`*text*`), italic (`_text_`), strikethrough (`~text~`), and monospace (`` ```text``` ``) formatting |
 | File upload | Yes | Send images, documents, audio, video, and stickers. File size limits: 16 MB for media, 100 MB for documents |
 | Buttons | Yes | Used for interactive permission prompts, where the agent sends Approve/Deny reply buttons |
 | Threads | No | WhatsApp does not have a thread model |
 
 **Message Length Limit:** 4,096 characters per message. Messages exceeding this limit are automatically split.
+
+## AI Actions (Action Gateway)
+
+Sessions bound to a WhatsApp conversation get two MCP tools instead of one tool per feature:
+
+- **`whatsapp_actions`** — discovery. Returns the action catalog (9 actions: send message, mark read, send/remove reaction, send template, send image/document/location, get phone number info), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`whatsapp_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Meta Cloud API.
+
+Safety rails:
+
+- Message-level actions only work in the session's bound conversation and the connector's `allowed_phone_numbers`.
+- **No destructive actions exist in this catalog.** The WhatsApp Business Cloud API gives bots no bulk-delete or membership-management surface, so every current action is `safe` or `write` risk and runs immediately without an approval prompt. The `request_action_approval`/`auto_approve_destructive` machinery is implemented for forward compatibility (mirroring Telegram and Signal) but nothing in the catalog triggers it today.
+- Sending a template message still requires an approved Meta message template, and outbound free-form messages are still subject to WhatsApp's 24-hour conversation window (see Troubleshooting).
 
 ## Troubleshooting
 

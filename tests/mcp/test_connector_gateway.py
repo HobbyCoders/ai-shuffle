@@ -261,7 +261,9 @@ class TestRegistration:
         assert {t.name for t in tools} == {"discord_actions", "discord_invoke"}
 
     def test_non_gateway_connector_gets_nothing(self):
-        with _patched_db(connector_type="telegram"):
+        # webhook connectors have no action catalog and are not part of the
+        # action-gateway conversion, so they never register a tool pair.
+        with _patched_db(connector_type="webhook"):
             assert build_gateway_tools("ai-1") == []
 
     def test_no_session_gets_nothing(self):

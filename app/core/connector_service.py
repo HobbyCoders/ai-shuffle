@@ -394,6 +394,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "bot_token", "label": "Bot Token", "type": "password", "required": True},
                 {"key": "allowed_chat_ids", "label": "Allowed Chat IDs", "type": "list", "required": False},
                 {"key": "welcome_message", "label": "Welcome Message", "type": "text", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, pins, polls, media, chat, moderation"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, bans, unpinning, leaving a chat)"},
             ],
         },
         {
@@ -420,6 +424,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "access_token", "label": "Access Token", "type": "password", "required": True},
                 {"key": "verify_token", "label": "Verify Token", "type": "text", "required": True},
                 {"key": "allowed_phone_numbers", "label": "Allowed Phone Numbers", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, templates, media, account"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the in-channel Approve/Deny prompt for destructive AI actions (this catalog currently has none)"},
             ],
         },
         {
@@ -474,6 +482,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "account", "label": "Phone Number (E.164)", "type": "text", "required": True, "placeholder": "+1234567890"},
                 {"key": "api_url", "label": "API URL", "type": "text", "required": False, "placeholder": "http://127.0.0.1:8080"},
                 {"key": "allowed_numbers", "label": "Allowed Phone Numbers", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, presence, reactions, groups"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the text-based Approve/Deny prompt for destructive AI actions (leaving a group)"},
             ],
         },
         {

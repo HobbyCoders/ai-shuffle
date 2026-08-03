@@ -97,6 +97,8 @@ Replace `+15551234567` with your personal phone number. You should receive the m
 |-------|------|----------|-------------|
 | `account` | string | Yes | The phone number registered with signal-cli in international E.164 format (e.g., `+14155551234`). This is the identity of the bot on the Signal network. |
 | `api_url` | string | No | Base URL of the signal-cli REST API service. Defaults to `http://127.0.0.1:8080`. Set this if the service runs on a different host or port. |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `presence`, `reactions`, `groups`. |
+| `auto_approve_destructive` | string | No | Set to `true` to skip the text-based Approve/Deny prompt for destructive AI actions (leaving a group). Default: prompts are required. |
 | `allowed_numbers` | list | No | If set, only messages from these phone numbers (in E.164 format) are processed. Messages from any other number are ignored. |
 
 ## Capabilities
@@ -107,14 +109,27 @@ The Signal connector supports the following capabilities:
 |------------|-----------|-------|
 | Read receipts | Yes | Sends read receipts back to the sender via the REST API |
 | File upload | Yes | Send images, documents, voice notes, and other files as attachments |
-| Typing indicator | No | The connector does not send typing indicators |
-| Reactions | No | The connector does not send emoji reactions |
+| Typing indicator | Yes | Available to the AI via the `send_typing_indicator`/`stop_typing_indicator` actions (see below). Not sent automatically. |
+| Reactions | Yes | Available to the AI via the `add_reaction`/`remove_reaction` actions (see below). Not sent automatically. |
 | Rich text | No | Signal does not support text formatting in messages. All messages are sent as plain text. |
 | Buttons | No | Signal does not support interactive buttons. Permission prompts are sent as text; reply `approve` or `deny`. |
 | Threads | No | Signal does not have a thread model |
 | End-to-end encryption | Yes | All messages are end-to-end encrypted by default (this is inherent to Signal) |
 
 **Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split.
+
+## AI Actions (Action Gateway)
+
+Sessions bound to a Signal conversation get two MCP tools instead of one tool per feature:
+
+- **`signal_actions`** — discovery. Returns the action catalog (9 actions: send message, mark read, start/stop typing indicator, add/remove reaction, list groups, get group info, leave group), each with its input schema. The catalog is filtered by this install's `enabled_action_categories`.
+- **`signal_invoke`** — execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the signal-cli REST API.
+
+Safety rails:
+
+- Message-level and group-lookup actions only work in the session's bound conversation and the connector's `allowed_numbers`.
+- Signal has no interactive-button support, so the one **destructive** action (`leave_group`) is confirmed with a plain-text prompt instead of a button: the connector sends "Approve or deny? Reply with `approve` or `deny`." and only proceeds once a human replies `approve` (2-minute timeout denies). Set `auto_approve_destructive: true` to skip the prompt.
+- All other actions (messages, presence, reactions, group lookups) are `safe`/`write` risk and run immediately.
 
 ## Troubleshooting
 

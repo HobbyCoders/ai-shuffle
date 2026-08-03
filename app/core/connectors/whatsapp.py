@@ -1,7 +1,10 @@
 """WhatsAppConnector — WhatsApp integration via Meta Cloud API."""
 
+import asyncio
+import json
 import logging
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -15,10 +18,10 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
-    ToolDef,
     TriggerDef,
     chunk_text,
 )
+from app.core.connectors import whatsapp_actions
 
 logger = logging.getLogger(__name__)
 
@@ -59,37 +62,16 @@ class WhatsAppConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see whatsapp_actions.py). Exposed to
+    # the AI through the generic whatsapp_actions/whatsapp_invoke gateway
+    # tool pair.
+    ACTIONS = whatsapp_actions.WHATSAPP_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="whatsapp_send",
-            name="Send a message via WhatsApp",
-            description="Send a message via WhatsApp",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `whatsapp_send` tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -106,6 +88,7 @@ class WhatsAppConnector(BaseConnector):
             **kwargs,
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -122,6 +105,20 @@ class WhatsAppConnector(BaseConnector):
         """Return the messages endpoint URL."""
         phone_number_id = self.config["phone_number_id"]
         return f"{GRAPH_API_BASE}/{phone_number_id}/messages"
+
+    async def _api_post(self, payload: Dict[str, Any]) -> httpx.Response:
+        """POST to the messages endpoint — used by whatsapp_actions.py
+        handlers (mockable in tests)."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.post(self._messages_url(), headers=self._headers(), json=payload)
+
+    async def _api_get_phone_number(self) -> httpx.Response:
+        """GET the phone number resource — used by whatsapp_actions.py
+        handlers (mockable in tests)."""
+        phone_number_id = self.config["phone_number_id"]
+        url = f"{GRAPH_API_BASE}/{phone_number_id}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await client.get(url, headers=self._headers())
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -369,6 +366,15 @@ class WhatsAppConnector(BaseConnector):
             button_reply = interactive.get("button_reply", {})
             reply_id = button_reply.get("id", "")
 
+            if reply_id.startswith("actreq:"):
+                parts = reply_id.split(":")
+                if len(parts) == 3:
+                    _, request_id, decision = parts
+                    fut = self._pending_action_approvals.get(request_id)
+                    if fut is not None and not fut.done():
+                        fut.set_result(decision == "approve")
+                    return
+
             if reply_id.startswith("perm:"):
                 parts = reply_id.split(":")
                 if len(parts) == 3:
@@ -406,33 +412,103 @@ class WhatsAppConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see whatsapp_actions.py)."""
+        return await whatsapp_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "whatsapp_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "WHATSAPP TOOLS: You are a WhatsApp Business participant. Call "
+            "whatsapp_actions to discover everything you can do here "
+            "(messages, reactions, templates, media, account info) along "
+            "with each action's input schema, then call whatsapp_invoke "
+            "with {action, params} to act. Message actions work on this "
+            "chat and the connector's allowed phone numbers only. The "
+            "WhatsApp Business API does not expose bulk-delete or "
+            "membership-management actions to bots, so this catalog has "
+            "no destructive actions."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Post an interactive-button Approve/Deny prompt for a destructive action."""
+        if not platform_chat_id:
+            return False, "No chat available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            params_preview = json.dumps(params, default=str)[:900]
+            description = (
+                f"Destructive Action Approval\n\n"
+                f"The AI wants to run {action.name} ({action.id}).\n"
+                f"{params_preview}"
+            )
+
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": platform_chat_id,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": description},
+                    "action": {
+                        "buttons": [
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": f"actreq:{request_id}:approve",
+                                    "title": "Approve",
+                                },
+                            },
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": f"actreq:{request_id}:deny",
+                                    "title": "Deny",
+                                },
+                            },
+                        ]
+                    },
+                },
+            }
+
+            response = await self._api_post(payload)
+            if not (200 <= response.status_code < 300):
+                return False, f"Failed to send approval prompt ({response.status_code})."
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run WhatsApp action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test

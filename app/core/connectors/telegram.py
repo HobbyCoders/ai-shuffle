@@ -1,8 +1,10 @@
 """TelegramConnector — Telegram bot integration via aiogram."""
 
 import asyncio
+import json
 import logging
-from typing import Any, Dict, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     ActionDef,
@@ -14,10 +16,10 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
-    ToolDef,
     TriggerDef,
     chunk_text,
 )
+from app.core.connectors import telegram_actions
 
 logger = logging.getLogger(__name__)
 
@@ -78,37 +80,16 @@ class TelegramConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see telegram_actions.py). Exposed to
+    # the AI through the generic telegram_actions/telegram_invoke gateway
+    # tool pair.
+    ACTIONS = telegram_actions.TELEGRAM_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="telegram_send",
-            name="Send a message via Telegram",
-            description="Send a message via Telegram",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `telegram_send` tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -127,6 +108,7 @@ class TelegramConnector(BaseConnector):
         self._bot: Optional[Any] = None
         self._dp: Optional[Any] = None
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -218,6 +200,19 @@ class TelegramConnector(BaseConnector):
         """Handle inline-keyboard button presses (permission responses)."""
         try:
             data = callback_query.data or ""
+
+            # Destructive-action approval buttons (action gateway)
+            if data.startswith("actreq:"):
+                parts = data.split(":")
+                if len(parts) == 3:
+                    _, request_id, decision = parts
+                    fut = self._pending_action_approvals.get(request_id)
+                    if fut is not None and not fut.done():
+                        fut.set_result(decision == "approve")
+                    label = "Approved" if decision == "approve" else "Denied"
+                    await callback_query.answer(text=f"Action {label}")
+                return
+
             if not data.startswith("perm:"):
                 return
 
@@ -406,33 +401,94 @@ class TelegramConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see telegram_actions.py)."""
+        return await telegram_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "telegram_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "TELEGRAM TOOLS: You are a full Telegram bot participant. Call "
+            "telegram_actions to discover everything you can do here "
+            "(messages, reactions, pins, polls, media, chat info, group "
+            "moderation) along with each action's input schema, then call "
+            "telegram_invoke with {action, params} to act. Message actions "
+            "work on this chat and the connector's allowed chats only. "
+            "Group-admin actions (chat title/description, bans, leaving) "
+            "require the bot to be an admin in that chat and will fail "
+            "otherwise. Destructive actions (message deletion, bans, "
+            "leaving a chat) show the user an in-channel Approve/Deny "
+            "prompt before running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Post an inline-keyboard Approve/Deny prompt for a destructive action."""
+        if self._bot is None:
+            return False, "Telegram bot is not running."
+        if not platform_chat_id:
+            return False, "No chat available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            params_preview = json.dumps(params, default=str)[:900]
+            text = (
+                f"Destructive Action Approval\n\n"
+                f"The AI wants to run {action.name} ({action.id}).\n"
+                f"{params_preview}"
+            )
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Approve",
+                            callback_data=f"actreq:{request_id}:approve",
+                        ),
+                        InlineKeyboardButton(
+                            text="Deny",
+                            callback_data=f"actreq:{request_id}:deny",
+                        ),
+                    ]
+                ]
+            )
+            await self._bot.send_message(
+                chat_id=telegram_actions._chat_id_value(str(platform_chat_id)),
+                text=text,
+                reply_markup=keyboard,
+            )
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run Telegram action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test
