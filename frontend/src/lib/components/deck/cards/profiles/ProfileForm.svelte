@@ -366,6 +366,7 @@
 						<ModelPicker
 							allowInherit
 							providerModelsOnly
+							servableOnly
 							value={profileForm.subagent_provider ? `prov:${profileForm.subagent_provider}:${profileForm.subagent_model}` : ''}
 							onSelect={(v) => {
 								if (v.startsWith('prov:')) {

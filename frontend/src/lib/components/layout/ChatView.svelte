@@ -21,6 +21,7 @@
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import ActiveTasks from '$lib/components/chat/ActiveTasks.svelte';
+	import StopButton from '$lib/components/chat/StopButton.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -314,6 +315,24 @@
 					</div>
 				{/if}
 			</div>
+
+			{#if $activeSession.isStreaming}
+				<!-- The backdrop deliberately blocks the whole composer (see the
+				     comment above) while a permission/question prompt is open, but
+				     that traps the composer's own Stop button along with everything
+				     else — leaving no way to abort a turn the user doesn't want to
+				     grant permissions for. Rather than punch a pointer-events hole in
+				     the backdrop (which would also reopen the send box, model
+				     picker, etc.), float a second, purpose-built Stop control above
+				     it. Every other composer control stays inert as designed. -->
+				<div class="modal-stop-dock">
+					<StopButton
+						activeTasks={$activeSession.activeTasks}
+						preserveBackground={$activeSession.preserveBackgroundOnInterrupt}
+						onStop={(bg) => activeSession.stopGeneration(bg)}
+					/>
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -569,6 +588,17 @@
 		box-shadow: var(--shadow-l);
 		max-height: calc(100vh - 8rem);
 		overflow-y: auto;
+	}
+
+	/* Floats above .modal-backdrop (unpositioned) and .modal-content (z-index: 1)
+	   within the same .modal-overlay stacking context, roughly where the
+	   composer's own Stop button sits, so it reads as "the same control, still
+	   reachable" rather than a stray new affordance. */
+	.modal-stop-dock {
+		position: absolute;
+		z-index: 2;
+		right: 1.5rem;
+		bottom: 1.5rem;
 	}
 
 	@keyframes modalFadeIn {

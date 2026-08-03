@@ -156,6 +156,68 @@ describe('ws-message-handlers', () => {
 			expect(deps.wsSend).toHaveBeenCalledWith({ type: 'pong' });
 		});
 
+		it('unwraps a stream_frame envelope and routes the inner event (tool_use)', () => {
+			// The per-session sync fan-out (session_runtime.py::_default_broadcast)
+			// wraps a normal legacy WS frame under `data` and tags it
+			// `event_type: 'stream_frame'`. Pre-fix, the dispatcher's `if (eventType)`
+			// branch matched none of its cases and `return`ed, silently dropping the
+			// frame — a device watching the session via stream_frame never saw the
+			// tool_use tick (or permission_request, done, etc.) that this test guards.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_frame',
+				session_id: 'session-1',
+				data: {
+					type: 'tool_use',
+					session_id: 'session-1',
+					id: 'tool-wrapped',
+					name: 'Read',
+				},
+			});
+
+			expect(deps.internal.pendingTools.has('tool-wrapped')).toBe(true);
+		});
+
+		it('unwraps a stream_frame envelope and routes an inner permission_request', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [];
+			let updatedPermissions: unknown[] = [];
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					if (result.pendingPermissions) updatedPermissions = result.pendingPermissions as unknown[];
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				event_type: 'stream_frame',
+				session_id: 'session-1',
+				data: {
+					type: 'permission_request',
+					session_id: 'session-1',
+					request_id: 'perm-wrapped',
+					tool_name: 'Bash',
+					tool_input: { command: 'ls' },
+				},
+			});
+
+			expect(updatedPermissions.length).toBe(1);
+		});
+
+		it('ignores a stream_frame envelope with no inner payload without throwing', () => {
+			expect(() => {
+				handlers.handleMessage({ event_type: 'stream_frame', session_id: 'session-1' });
+			}).not.toThrow();
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
 		it('should handle unknown message types without throwing', () => {
 			expect(() => {
 				handlers.handleMessage({ type: 'totally_unknown_type' });

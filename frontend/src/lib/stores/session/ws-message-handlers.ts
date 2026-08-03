@@ -291,6 +291,23 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		// Handle sync events from other devices / server-originated broadcasts
 		if (eventType) {
+			// stream_frame: the per-session sync fan-out envelope
+			// (session_runtime.py::_default_broadcast / SyncEvent) sent to every
+			// OTHER device watching this session over the shared /ws/chat socket
+			// (registered via watch_session). It wraps the SAME legacy WS frame the
+			// owning device gets un-enveloped on its origin socket (tool_use,
+			// permission_request, done, error, ...) under `data`. Unwrap it and feed
+			// it back through this same dispatcher so those devices get the same
+			// tool-tracking / permission-modal / completion-notification handling
+			// instead of the frame being silently dropped. The inner frame carries
+			// its own `session_id` (stamped server-side), so every case's existing
+			// cross-session routing applies unchanged.
+			if (eventType === 'stream_frame') {
+				const inner = data.data as Record<string, unknown> | undefined;
+				if (inner) handleMessage(inner);
+				return;
+			}
+
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
 			// Scope to the active session: a late/cross-session event (e.g. a

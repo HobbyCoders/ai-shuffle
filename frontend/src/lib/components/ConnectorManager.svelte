@@ -369,8 +369,18 @@
 				...(formApiUserId ? { api_user_id: formApiUserId } : {})
 			};
 			await createConnector(data);
-			await loadData();
+			// Close the form on the create response alone — don't gate the view
+			// transition on the follow-up loadData() reload. loadData() bundles
+			// four fetches behind one Promise.all (connectors, types, events, api
+			// users); if any single one stalls — e.g. the backend is momentarily
+			// busy standing up the new connector's live bot connection — the
+			// whole bundle never settles, which left the setup view mounted
+			// frozen on "Saving..." forever even though the connector was
+			// created (a background poll elsewhere would eventually show it in
+			// the list, making it look like "the list updates" while this view
+			// stayed stuck). Refresh in the background instead.
 			cancelForm();
+			void loadData();
 		} catch (e: any) {
 			formError = e.detail || 'Failed to create connector';
 		} finally {
@@ -394,8 +404,11 @@
 				config: { ...formConfig },
 				events: formEvents
 			});
-			await loadData();
+			// Same reasoning as handleCreate: close the form on the update
+			// response alone so a slow/stalled background reload can't leave
+			// this view stuck.
 			cancelForm();
+			void loadData();
 		} catch (e: any) {
 			formError = e.detail || 'Failed to update connector';
 		} finally {

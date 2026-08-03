@@ -39,9 +39,36 @@
 		 * Claude group and the `Custom…` entry. Additive, default false.
 		 */
 		providerModelsOnly?: boolean;
+		/**
+		 * When true, hide provider-curated models whose provider can't actually
+		 * be used for this selection — mirrors the backend's gateway-servability
+		 * check (`is_gateway_servable` in `app/core/environment.py`, enforced
+		 * server-side by `_validate_subagent_leg` with an HTTP 400) so the
+		 * profile-level subagent default-leg picker never offers a model the
+		 * save would reject. Pure UX: the registry payload doesn't carry
+		 * `auth_mode`, so this checks `provider_type` only — the one edge case
+		 * that slips through (a legacy Codex row enrolled as `provider_type:
+		 * 'custom'` with `auth_mode: 'chatgpt'`, see `model_catalog_presets.py`)
+		 * is still accepted by the backend, just not offered here. Additive,
+		 * default false — the main-model picker and the subagent-editor pin
+		 * picker stay intentionally unrestricted (S7 ruling) by never setting
+		 * this prop.
+		 */
+		servableOnly?: boolean;
 	}
 
-	let { value, onSelect, id, allowInherit = false, providerModelsOnly = false }: Props = $props();
+	let {
+		value,
+		onSelect,
+		id,
+		allowInherit = false,
+		providerModelsOnly = false,
+		servableOnly = false
+	}: Props = $props();
+
+	// Provider types the translator gateway can actually serve — kept in sync
+	// by hand with `is_gateway_servable()` in `app/core/environment.py`.
+	const GATEWAY_SERVABLE_PROVIDER_TYPES = new Set(['openai', 'chatgpt', 'anthropic']);
 
 	const PIN_STORAGE_KEY = 'aihub.pinnedModels';
 	const NATIVE_GROUP = 'Claude';
@@ -93,6 +120,7 @@
 			}
 		}
 		for (const p of getProviders()) {
+			if (servableOnly && !GATEWAY_SERVABLE_PROVIDER_TYPES.has(p.provider_type)) continue;
 			for (const pm of p.models) {
 				out.push({
 					value: `prov:${p.id}:${pm.id}`,
@@ -109,6 +137,33 @@
 	let open = $state(false);
 	let query = $state('');
 	let rootEl = $state<HTMLDivElement | null>(null);
+
+	// ---- flip-or-constrain positioning --------------------------------------
+	// The panel defaults to opening below the trigger with a 340px cap, which
+	// clips on short viewports / triggers near the bottom of the page (#ModelPicker
+	// clipping fix). Measure available space each time the panel opens and either
+	// flip it above the trigger or shrink its max-height to fit, whichever side
+	// has room — mirrors the flip-or-constrain approach other poppers in this
+	// codebase use (see ControlsDock's upward-opening dropdowns).
+	const PANEL_PREFERRED_HEIGHT = 340;
+	const PANEL_MIN_HEIGHT = 160;
+	const VIEWPORT_MARGIN = 12;
+	let openUpward = $state(false);
+	let panelMaxHeight = $state(PANEL_PREFERRED_HEIGHT);
+
+	function positionPanel() {
+		if (typeof window === 'undefined' || !rootEl) return;
+		const rect = rootEl.getBoundingClientRect();
+		const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
+		const spaceAbove = rect.top - VIEWPORT_MARGIN;
+		if (spaceBelow < PANEL_MIN_HEIGHT && spaceAbove > spaceBelow) {
+			openUpward = true;
+			panelMaxHeight = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_PREFERRED_HEIGHT, spaceAbove));
+		} else {
+			openUpward = false;
+			panelMaxHeight = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_PREFERRED_HEIGHT, spaceBelow));
+		}
+	}
 
 	const filtered = $derived.by<PickerOption[]>(() => {
 		const q = query.trim().toLowerCase();
@@ -154,8 +209,14 @@
 	}
 
 	function toggleOpen() {
-		open = !open;
-		if (open) query = '';
+		const next = !open;
+		if (next) {
+			query = '';
+			// Measure before the panel mounts — rootEl still equals the trigger's
+			// own box at this point, which is exactly the anchor we need.
+			positionPanel();
+		}
+		open = next;
 	}
 
 	// Close on outside click / Escape while open.
@@ -196,7 +257,13 @@
 	</button>
 
 	{#if open}
-		<div class="mpk-panel" role="listbox" aria-label="Model">
+		<div
+			class="mpk-panel"
+			class:mpk-panel-up={openUpward}
+			style="max-height: {panelMaxHeight}px"
+			role="listbox"
+			aria-label="Model"
+		>
 			<div class="mpk-search">
 				<Search size={14} />
 				<!-- svelte-ignore a11y_autofocus -->
@@ -354,12 +421,23 @@
 		max-width: min(340px, 85vw);
 		display: flex;
 		flex-direction: column;
+		/* Ceiling only — the actual cap is the inline `max-height` computed in
+		   positionPanel() each time the panel opens, so it always fits between
+		   the trigger and whichever viewport edge it's anchored to. */
 		max-height: 340px;
 		background: var(--background);
 		border: 1px solid var(--border);
 		border-radius: 10px;
 		box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
 		overflow: hidden;
+	}
+
+	/* Flip above the trigger when there isn't enough room below (short viewport
+	   or a trigger near the bottom of the page) — set alongside the inline
+	   max-height by positionPanel(). */
+	.mpk-panel.mpk-panel-up {
+		top: auto;
+		bottom: calc(100% + 4px);
 	}
 
 	.mpk-search {
