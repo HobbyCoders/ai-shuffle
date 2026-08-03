@@ -505,6 +505,14 @@ def assemble_subagent_legs(
     honored_legs: List[LegEntry] = []
     dropped: List[Tuple[str, str]] = []
     default_leg_mid: Optional[str] = None
+    # Tracks whether the default leg was actually APPENDED to honored_legs (as
+    # opposed to only feeding session_default via the same-provider collapse
+    # below). The S5 collision logic below must only treat honored_legs[0] as
+    # the "default leg wins" entry when this is True — otherwise, in the
+    # same-provider case (no route-leg minted), honored_legs[0] would be the
+    # first per-agent composite instead, and would be wrongly given
+    # default-leg priority.
+    default_leg_in_honored = False
 
     if not main_servable:
         # A2: a non-servable main cannot host ANY gateway leg — drop the whole map.
@@ -529,12 +537,21 @@ def assemble_subagent_legs(
     if default_leg_provider and default_leg_model:
         dl_row = database.get_model_provider(default_leg_provider, include_token=False)
         if dl_row and is_gateway_servable(dl_row) and dl_row.get("enabled"):
-            acct = (
-                dl_row.get("codex_account_id")
-                if (dl_row.get("provider_type") == "chatgpt" or dl_row.get("auth_mode") == "chatgpt")
-                else None
-            )
-            honored_legs.append((default_leg_model, default_leg_provider, acct))
+            # Same-provider default leg: the main-leg fallthrough already routes
+            # a bare model id to this provider, so a separate route-leg entry
+            # would be redundant — but the profile's chosen model must still
+            # win as ``session_default`` (previously this case was collapsed
+            # upstream in ``query_options.py`` by nulling BOTH the provider and
+            # the model, which silently replaced the configured default with
+            # the main provider's small_fast/default model instead).
+            if dl_row.get("id") != (main_provider_row or {}).get("id"):
+                acct = (
+                    dl_row.get("codex_account_id")
+                    if (dl_row.get("provider_type") == "chatgpt" or dl_row.get("auth_mode") == "chatgpt")
+                    else None
+                )
+                honored_legs.append((default_leg_model, default_leg_provider, acct))
+                default_leg_in_honored = True
             default_leg_mid = default_leg_model
         else:
             dropped.append(("<profile-default-leg>", default_leg_provider))
@@ -565,7 +582,7 @@ def assemble_subagent_legs(
     # (always index 0 when present) wins for its mid, else the entry with the
     # lexicographically-smallest provider id. Exact-duplicate tuples of the winner
     # drop silently; non-exact-dup losers are named in one aggregate warning.
-    default_leg_entry = honored_legs[0] if default_leg_mid is not None else None
+    default_leg_entry = honored_legs[0] if default_leg_in_honored else None
 
     winners: Dict[str, LegEntry] = {}
     for leg in honored_legs:

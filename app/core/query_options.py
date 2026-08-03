@@ -629,12 +629,13 @@ def build_options_from_profile(
             )
             subagent_provider = None
             subagent_model = None
-        elif subagent_provider == provider_id:
-            # Same-provider subagent: the small_fast chain already routes
-            # subagents to this provider, so no separate leg is needed. Treat as
-            # inherit (skip minting a redundant leg).
-            subagent_provider = None
-            subagent_model = None
+        # NOTE: a same-provider default leg (``subagent_provider == provider_id``)
+        # is intentionally NOT nulled out here — it used to be, which silently
+        # discarded the profile's chosen default model in favor of the main
+        # provider's small_fast/default model (the bug this comment replaces).
+        # ``assemble_subagent_legs`` still skips minting a redundant route-leg
+        # for the same-provider case (main-leg fallthrough already serves it)
+        # but now correctly keeps the configured model as ``session_default``.
 
     # S3: on a PROVIDER (non-native) session, build the subagent leg-map from the
     # profile-default leg + each enabled subagent's composite, and STAMP each

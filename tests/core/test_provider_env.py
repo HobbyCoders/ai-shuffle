@@ -1085,6 +1085,36 @@ class TestSubagentFrontmatterStamping:
         assert opts.agents["unpinned"].model == "op/small"   # session default
         assert list(m.call_args.kwargs["subagent_legs"]) == [("sub/model", "sub", None)]
 
+    def test_same_provider_default_leg_stamped_not_small_fast(self, mock_db, tmp_path):
+        """Regression: a profile-level default leg on the SAME provider as main
+        (e.g. main=op/main, subagent default=op/mini, both provider "op") used to
+        be nulled out entirely upstream in query_options.py, silently replacing
+        the configured default with the provider's small_fast_model instead. The
+        chosen default model must win as the unpinned subagent's stamped model —
+        no separate route-leg is needed (main-leg fallthrough already serves the
+        same provider), so subagent_legs stays empty, but session_default must be
+        the configured "op/mini", not "op/small"."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="op", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None, small_fast_model="op/small",
+            models=[{"id": "op/main", "label": "M"}, {"id": "op/mini", "label": "Mini"}],
+        )
+        _mk_subagent(db, "unpinned", None)
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
+                "subagent_provider": "op", "subagent_model": "op/mini",
+                "enabled_agents": ["unpinned"],
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            opts = _build_options(profile)
+        assert opts.agents["unpinned"].model == "op/mini"
+        assert tuple(m.call_args.kwargs["subagent_legs"]) == ()
+
     def test_claude_alias_pin_kept_on_anthropic_main(self, mock_db, tmp_path):
         """anthropic main serves Claude ids → a Claude-alias-pinned subagent keeps
         its alias (behavior delta: anthropic-API main + `sonnet` → kept)."""

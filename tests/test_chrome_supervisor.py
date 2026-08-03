@@ -25,6 +25,16 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
+# This file drives docker/chrome-supervisor.sh (a bash script) as a real
+# subprocess and relies on os.setsid (in _run_supervisor, below) to put it in
+# its own process group so the whole tree can be killed. os.setsid doesn't
+# exist on Windows, so the whole module is POSIX-only.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX-only: drives a bash script via os.setsid"
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPO_ROOT / "docker" / "chrome-supervisor.sh"
 
