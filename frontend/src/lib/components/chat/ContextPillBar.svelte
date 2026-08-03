@@ -74,7 +74,7 @@
 			messageCount: $activeSession.messages.length,
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
-			executionMode: $activeSession.executionMode,
+			worktreeIntent: $activeSession.worktreeIntent,
 			// Reuse the git store's repo signal — a non-git project has no branches.
 			isGitRepo: $gitStatus?.is_git_repo !== false
 		})
@@ -88,7 +88,7 @@
 		computeContextBadge({
 			messageCount: $activeSession.messages.length,
 			projectName,
-			executionMode: $activeSession.executionMode,
+			isWorktree: !!($activeSession.worktreeId || $activeSession.worktreeBranch),
 			selectedWorktreeBranch: $activeSession.selectedWorktreeBranch,
 			worktreeBranch: $activeSession.worktreeBranch,
 			githubAuthenticated: $githubAuthenticated,

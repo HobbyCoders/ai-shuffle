@@ -62,7 +62,6 @@ interface LiveSnapshot {
 		worktree_id?: string | null;
 		worktree_branch?: string | null;
 		worktree_deleted?: boolean;
-		execution_mode?: string;
 	};
 }
 
@@ -72,7 +71,7 @@ export interface SessionWorktreeInfo {
 	worktreeId: string | null;
 	worktreeBranch: string;
 	worktreeDeleted: boolean;
-	executionMode: 'local' | 'worktree';
+	worktreeIntent: 'local' | 'worktree';
 }
 
 interface SessionSwitcher {
@@ -104,14 +103,17 @@ export function getPersistedProject(): string {
 }
 
 /**
- * The last execution mode (Local vs Worktree) the user toggled, persisted so it
+ * The last worktree intent (Local vs Worktree) the user toggled, persisted so it
  * survives starting a new session / page reload. Defaults to 'local'.
  *
- * This is a UI *preference* — distinct from a session's own executionMode, which
+ * This is a UI *preference* — distinct from a session's own worktreeIntent, which
  * is restored per-session from the persisted/backend session record. Only new
  * chats consult this preference.
+ *
+ * The localStorage key stays `aihub_executionMode` (unchanged) to avoid a
+ * migration — only the in-memory/property naming changed.
  */
-export function getPersistedExecutionMode(): ExecutionMode {
+export function getPersistedWorktreeIntent(): ExecutionMode {
 	if (typeof window !== 'undefined') {
 		const stored = localStorage.getItem('aihub_executionMode');
 		if (stored === 'worktree') return stored;
@@ -119,7 +121,7 @@ export function getPersistedExecutionMode(): ExecutionMode {
 	return 'local';
 }
 
-export function setPersistedExecutionMode(mode: ExecutionMode): void {
+export function setPersistedWorktreeIntent(mode: ExecutionMode): void {
 	if (typeof window !== 'undefined') {
 		localStorage.setItem('aihub_executionMode', mode);
 	}
@@ -169,7 +171,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
-			executionMode: state.executionMode,
+			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
 			worktreeBaseBranch: state.worktreeBaseBranch,
@@ -222,7 +224,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
-			executionMode: state.executionMode,
+			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
 			worktreeBaseBranch: state.worktreeBaseBranch,
@@ -427,7 +429,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? null,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
-			executionMode: ephemeral?.executionMode ?? worktreeInfo?.executionMode ?? 'local',
+			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
 			worktreeId: ephemeral?.worktreeId ?? worktreeInfo?.worktreeId ?? null,
 			worktreeBranch: ephemeral?.worktreeBranch ?? worktreeInfo?.worktreeBranch ?? '',
 			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? 'main',
@@ -506,9 +508,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (meta.worktree_id !== undefined) patch.worktreeId = meta.worktree_id;
 			if (meta.worktree_branch !== undefined && meta.worktree_branch !== null) {
 				patch.worktreeBranch = meta.worktree_branch;
-			}
-			if (meta.execution_mode !== undefined) {
-				patch.executionMode = meta.execution_mode as ExecutionMode;
 			}
 		}
 
@@ -601,7 +600,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			scrollTop: 0,
 			streamStartTime: null,
 			// Restore the user's last-toggled mode (Local/Worktree) for new chats
-			executionMode: getPersistedExecutionMode(),
+			worktreeIntent: getPersistedWorktreeIntent(),
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,

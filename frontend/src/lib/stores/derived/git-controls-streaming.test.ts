@@ -18,7 +18,7 @@ import {
 function input(overrides: Partial<GitControlsStreamingInput> = {}): GitControlsStreamingInput {
 	return {
 		activeIsStreaming: false,
-		activeExecutionMode: 'local',
+		activeIsWorktree: false,
 		activeProject: 'proj-1',
 		crossDeviceStreaming: new Map<string, CrossDeviceStreamingInfo>(),
 		...overrides
@@ -33,7 +33,7 @@ describe('computeGitControlsStreaming', () => {
 	it('locks when the active session\'s own streaming flag is set (worktree mode)', () => {
 		// The Ship It scenario: a worktree session generating must lock its controls.
 		expect(
-			computeGitControlsStreaming(input({ activeExecutionMode: 'worktree', activeIsStreaming: true }))
+			computeGitControlsStreaming(input({ activeIsWorktree: true, activeIsStreaming: true }))
 		).toBe(true);
 	});
 
@@ -46,7 +46,7 @@ describe('computeGitControlsStreaming', () => {
 		expect(
 			computeGitControlsStreaming(
 				input({
-					activeExecutionMode: 'worktree',
+					activeIsWorktree: true,
 					crossDeviceStreaming: new Map([['other', { projectId: 'proj-1', worktreeId: null }]])
 				})
 			)

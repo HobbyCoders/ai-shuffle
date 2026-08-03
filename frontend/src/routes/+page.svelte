@@ -100,7 +100,7 @@
 			worktreeId: session.worktree_id ?? null,
 			worktreeBranch: session.worktree_branch ?? session.branch ?? '',
 			worktreeDeleted: session.worktree_deleted ?? false,
-			executionMode: 'worktree' as const,
+			worktreeIntent: 'worktree' as const,
 		} : null;
 
 		const sessionTitle = session?.title || null;

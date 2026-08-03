@@ -63,7 +63,7 @@
 					`/projects/${$activeSession.project}/upload`,
 					file,
 					$activeSession.sessionId ?? undefined,
-					$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
 				);
 				results.push(result);
 			}

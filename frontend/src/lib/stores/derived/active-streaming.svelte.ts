@@ -82,7 +82,7 @@ export const gitControlsStreaming = createMultiDerived(
 		// unit-tested without the store plumbing (see git-controls-streaming.test.ts).
 		return computeGitControlsStreaming({
 			activeIsStreaming: active.isStreaming,
-			activeExecutionMode: active.executionMode,
+			activeIsWorktree: !!(active.worktreeId || active.worktreeBranch),
 			activeProject: active.project || null,
 			crossDeviceStreaming: streamingSessions.current
 		});

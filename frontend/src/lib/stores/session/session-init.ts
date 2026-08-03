@@ -146,7 +146,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						modelOverride: persisted.modelOverride ?? null,
 						permissionModeOverride: persisted.permissionModeOverride ?? null,
 						effortLevelOverride: persisted.effortLevelOverride ?? null,
-						executionMode: persisted.executionMode || 'local',
+						worktreeIntent: persisted.worktreeIntent || 'local',
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 						worktreeId: persisted.worktreeId ?? null,

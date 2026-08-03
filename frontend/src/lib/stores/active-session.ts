@@ -25,7 +25,7 @@ import { createMessageHandlers, type InternalMutableState } from './session/ws-m
 import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
-	getPersistedExecutionMode, setPersistedExecutionMode,
+	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -152,7 +152,12 @@ export interface ActiveSessionState {
 	draft: string;
 	scrollTop: number;
 	streamStartTime: number | null;
-	executionMode: ExecutionMode;
+	/** Compose-time Local/Worktree toggle intent, chosen by the user before the
+	 *  first message. No metadata source of its own (a new session has no
+	 *  worktree yet) — this is pure UI state, never derived from the session's
+	 *  worktree fields (contrast with the existing-session worktree-ness checks
+	 *  elsewhere, which read worktreeId/worktreeBranch directly). */
+	worktreeIntent: ExecutionMode;
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
@@ -198,7 +203,7 @@ export interface PersistedSession {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
-	executionMode?: ExecutionMode;
+	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
 	worktreeBaseBranch?: string;
@@ -254,7 +259,7 @@ function defaultState(): ActiveSessionState {
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
-		executionMode: getPersistedExecutionMode(),
+		worktreeIntent: getPersistedWorktreeIntent(),
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -631,7 +636,7 @@ export const activeSession = {
 	},
 
 	setProject(projectId: string) {
-		if (_state.executionMode === 'local' && _state.messages.length > 0) {
+		if (_state.worktreeIntent === 'local' && _state.messages.length > 0) {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
@@ -644,7 +649,7 @@ export const activeSession = {
 			project: projectId,
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
-			executionMode: getPersistedExecutionMode(),
+			worktreeIntent: getPersistedWorktreeIntent(),
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -704,12 +709,12 @@ export const activeSession = {
 
 	// ── Execution Mode & Worktree ───────────────────────────────────
 
-	setExecutionMode(mode: ExecutionMode) {
+	setWorktreeIntent(mode: ExecutionMode) {
 		// Remember the toggle so new sessions reopen in the same mode
-		setPersistedExecutionMode(mode);
+		setPersistedWorktreeIntent(mode);
 		_update(s => ({
 			...s,
-			executionMode: mode,
+			worktreeIntent: mode,
 		}));
 	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },

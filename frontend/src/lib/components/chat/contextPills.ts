@@ -17,8 +17,9 @@ export interface ContextBadgeInput {
 	messageCount: number;
 	/** Display name of the session's project, or null when unknown. */
 	projectName: string | null;
-	/** Session execution mode ('local' | 'worktree'). */
-	executionMode: string;
+	/** Whether the session is worktree-mode, derived from its worktree fields
+	 *  (worktreeId / worktreeBranch), not a mode flag. */
+	isWorktree: boolean;
 	/** Branch chosen for an existing worktree, if any. */
 	selectedWorktreeBranch: string | null;
 	/** Branch the worktree was/will be created on. */
@@ -64,7 +65,7 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 	const {
 		messageCount,
 		projectName,
-		executionMode,
+		isWorktree,
 		selectedWorktreeBranch,
 		worktreeBranch,
 		githubAuthenticated,
@@ -107,8 +108,7 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 	}
 
 	// The session's worktree branch (only meaningful in worktree mode).
-	const branch =
-		executionMode === 'worktree' ? selectedWorktreeBranch || worktreeBranch || null : null;
+	const branch = isWorktree ? selectedWorktreeBranch || worktreeBranch || null : null;
 
 	// When GitHub CLI is authenticated the interactive BranchSelector pill is
 	// shown instead — never both. This now includes cleaned-up worktree sessions:
@@ -132,8 +132,8 @@ export interface EmptyStateBranchInput {
 	project: string | null;
 	/** Whether GitHub CLI is authenticated (gates the branch controls). */
 	githubAuthenticated: boolean;
-	/** Session execution mode ('local' | 'worktree'). */
-	executionMode: string;
+	/** Compose-time Local/Worktree toggle intent ('local' | 'worktree'). */
+	worktreeIntent: string;
 	/**
 	 * Whether the selected project folder is a git repository. The branch pill
 	 * only makes sense for a repo; a non-git folder has no branches to pick.
@@ -157,7 +157,7 @@ export interface EmptyStateBranchInput {
  * when branch controls are available.
  */
 export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): boolean {
-	const { messageCount, project, githubAuthenticated, executionMode, isGitRepo = true } = input;
+	const { messageCount, project, githubAuthenticated, worktreeIntent, isGitRepo = true } = input;
 
 	// New-session screen only — once a chat is active the branch pill / context
 	// badge (computeContextBadge) owns this slot.
@@ -167,6 +167,6 @@ export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): bo
 	if (!isGitRepo) return false;
 	// Only local mode has a working branch to pick here. Worktree mode's branch
 	// picker lives in the ExecutionModeBar, so it doesn't show the local branch pill.
-	if (executionMode !== 'local') return false;
+	if (worktreeIntent !== 'local') return false;
 	return true;
 }

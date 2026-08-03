@@ -280,7 +280,7 @@
 		// to migrate files from main project to the new worktree directory.
 		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
 		let pendingPaths: string[] | undefined;
-		if ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) {
+		if ($activeSession.worktreeIntent === 'worktree' && !$activeSession.worktreeId) {
 			const chipPaths = editorRef?.getEditor()
 				? extractFileChips(editorRef.getEditor()!).map(c => c.fullPath).filter(Boolean)
 				: [];
@@ -438,7 +438,7 @@
 					`/projects/${$activeSession.project}/upload`,
 					file,
 					$activeSession.sessionId ?? undefined,
-					$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
 				);
 				console.debug(`[Upload] Response for "${file.name}": filename="${result.filename}", path="${result.path}"`);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
@@ -520,7 +520,7 @@
 					`/projects/${$activeSession.project}/upload`,
 					file,
 					$activeSession.sessionId ?? undefined,
-					$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
 				);
 				editorRef?.insertFileChip({
 					path: result.path,
@@ -599,7 +599,7 @@
 								bind:this={commandAutocompleteRef}
 								inputValue={inputValue}
 								projectId={$activeSession.project}
-								worktreeId={$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+								worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
 								visible={showCommandAutocomplete}
 								onSelect={handleCommandSelect}
 								onClose={() => showCommandAutocomplete = false}
@@ -610,7 +610,7 @@
 								inputValue={plainTextValue}
 								projectId={$activeSession.project}
 								profileId={$activeSession.profile}
-								worktreeId={$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+								worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
 								visible={showFileAutocomplete}
 								onSelect={handleFileSelect}
 								onClose={() => showFileAutocomplete = false}
@@ -682,7 +682,7 @@
 									type="submit"
 									class="send-btn"
 									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
-									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

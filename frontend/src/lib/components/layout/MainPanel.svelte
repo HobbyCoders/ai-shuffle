@@ -149,7 +149,7 @@
 	// live in the PageHeader now renders in the ContextPillBar above the input.
 	const activeWorktreeBranch = $derived.by(() => {
 		if (!activeTab) return undefined;
-		if (activeTab.executionMode !== 'worktree' || activeTab.messages.length === 0) return undefined;
+		if (!(activeTab.worktreeId || activeTab.worktreeBranch) || activeTab.messages.length === 0) return undefined;
 		return activeTab.selectedWorktreeBranch || activeTab.worktreeBranch || undefined;
 	});
 
@@ -175,7 +175,7 @@
 	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
 	const activeProject = $derived(activeTab?.project ?? null);
 	const activeWorktreeId = $derived(
-		activeTab?.executionMode === 'worktree' && !activeTab?.worktreeDeleted
+		(activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeTab?.worktreeDeleted
 			? (activeTab.worktreeId ?? null)
 			: null
 	);

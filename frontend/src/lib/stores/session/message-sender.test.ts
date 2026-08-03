@@ -16,7 +16,7 @@ vi.mock('$lib/api/git', () => ({
 /**
  * Regression tests for the "work in main" worktree bug.
  *
- * A worktree-intended NEW session (executionMode 'worktree', no sessionId yet)
+ * A worktree-intended NEW session (worktreeIntent 'worktree', no sessionId yet)
  * must never fall through to the plain WS query path — that path carries no
  * worktree_id, so the backend would create the session in the project's MAIN
  * checkout. This happens if a second send slips in while autoCreateWorktree is
@@ -32,7 +32,7 @@ function baseState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		project: 'proj-1',
 		messages: [],
 		isStreaming: false,
-		executionMode: 'local',
+		worktreeIntent: 'local',
 		worktreeId: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
@@ -98,10 +98,10 @@ function makeDeps(initial: ActiveSessionState) {
 
 describe('message-sender worktree send backstop', () => {
 	it('suppresses the send to main when worktree creation is still in flight', async () => {
-		// executionMode worktree, no sessionId, but an optimistic message is already
+		// worktreeIntent worktree, no sessionId, but an optimistic message is already
 		// present → autoCreateWorktree is mid-flight.
 		const { deps, wsConn, getState } = makeDeps(baseState({
-			executionMode: 'worktree',
+			worktreeIntent: 'worktree',
 			sessionId: null,
 			isCreatingWorktree: true,
 			messages: [{ id: 'user-1', role: 'user', content: 'first' } as any],
@@ -119,7 +119,7 @@ describe('message-sender worktree send backstop', () => {
 
 	it('routes a fresh worktree+auto first message to autoCreateWorktree (not main)', async () => {
 		const { deps, wsConn, autoCreateWorktree } = makeDeps(baseState({
-			executionMode: 'worktree',
+			worktreeIntent: 'worktree',
 			sessionId: null,
 			worktreeBranch: '',
 			messages: [],
@@ -136,7 +136,7 @@ describe('message-sender worktree send backstop', () => {
 
 	it('still sends a normal local first message over WS', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
-			executionMode: 'local',
+			worktreeIntent: 'local',
 			sessionId: null,
 			messages: [],
 		}));
@@ -158,7 +158,7 @@ describe('message-sender new-session adoption token (hijack fix)', () => {
 
 	it('attaches a request_id to a NEW-session query and records it on internal', async () => {
 		const { deps, wsConn, internal } = makeDeps(baseState({
-			executionMode: 'local',
+			worktreeIntent: 'local',
 			sessionId: null,
 			messages: [],
 		}));
@@ -179,7 +179,7 @@ describe('message-sender new-session adoption token (hijack fix)', () => {
 
 	it('does NOT attach a request_id to an EXISTING-session query', async () => {
 		const { deps, wsConn, internal } = makeDeps(baseState({
-			executionMode: 'local',
+			worktreeIntent: 'local',
 			sessionId: 'existing-session',
 			title: 'Existing',
 			messages: [{ id: 'user-1', role: 'user', content: 'earlier' } as any],
@@ -210,7 +210,7 @@ describe('message-sender new-session adoption token (hijack fix)', () => {
 describe('message-sender "Send now" flags the interrupt follow-up query', () => {
 	function streamingState() {
 		return baseState({
-			executionMode: 'local',
+			worktreeIntent: 'local',
 			sessionId: 'ses-1',
 			isStreaming: true,
 			title: 'Existing chat',
@@ -244,7 +244,7 @@ describe('message-sender "Send now" flags the interrupt follow-up query', () => 
 
 	it('does not flag a normal (non-interrupting) send', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
-			executionMode: 'local',
+			worktreeIntent: 'local',
 			sessionId: 'ses-1',
 			isStreaming: false,
 			title: 'Existing chat',
@@ -279,7 +279,7 @@ describe('message-sender worktreeDeleted no longer triggers a pre-send reopen', 
 
 	function deletedWorktreeState() {
 		return baseState({
-			executionMode: 'worktree',
+			worktreeIntent: 'worktree',
 			sessionId: 'ses-1', // existing session → reaches the WS query path
 			worktreeId: 'wt-1',
 			worktreeBranch: 'feat/login',

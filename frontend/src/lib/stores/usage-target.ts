@@ -28,7 +28,7 @@ import type { Session } from '$lib/api/sessions';
  * be exercised without standing up the whole store graph.
  */
 export function resolveTargetInstance(
-	active: Pick<ActiveSessionState, 'sessionId' | 'executionMode'>,
+	active: Pick<ActiveSessionState, 'sessionId'>,
 	sessionRows: Pick<Session, 'id' | 'instance_id'>[]
 ): string | null {
 	if (active.sessionId) {

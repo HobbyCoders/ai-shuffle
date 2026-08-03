@@ -22,7 +22,7 @@ function base(overrides: Partial<ContextBadgeInput> = {}): ContextBadgeInput {
 	return {
 		messageCount: 1,
 		projectName: 'my-app',
-		executionMode: 'worktree',
+		isWorktree: true,
 		selectedWorktreeBranch: null,
 		worktreeBranch: 'feat/login',
 		githubAuthenticated: true,
@@ -42,7 +42,7 @@ describe('computeContextBadge', () => {
 	it('returns null while the interactive branch pill is shown (authenticated)', () => {
 		expect(computeContextBadge(base())).toBeNull();
 		// Local mode, still authenticated → branch pill, no badge.
-		expect(computeContextBadge(base({ executionMode: 'local', worktreeBranch: null }))).toBeNull();
+		expect(computeContextBadge(base({ isWorktree: false, worktreeBranch: null }))).toBeNull();
 	});
 
 	it('returns null for a cleaned-up worktree when authenticated (branch pill takes over)', () => {
@@ -73,7 +73,7 @@ describe('computeContextBadge', () => {
 
 	it('shows project-only when unauthenticated in local mode (no branch)', () => {
 		const badge = computeContextBadge(
-			base({ githubAuthenticated: false, executionMode: 'local', worktreeBranch: null })
+			base({ githubAuthenticated: false, isWorktree: false, worktreeBranch: null })
 		);
 		expect(badge).not.toBeNull();
 		expect(badge!.branch).toBeNull();
@@ -88,13 +88,13 @@ describe('computeContextBadge', () => {
 	it('returns null when authenticated, no project/branch context exists', () => {
 		// Authenticated + live but somehow no project → branch pill territory, not a badge.
 		expect(
-			computeContextBadge(base({ executionMode: 'local', worktreeBranch: null, projectName: null }))
+			computeContextBadge(base({ isWorktree: false, worktreeBranch: null, projectName: null }))
 		).toBeNull();
 	});
 
 	it('a non-worktree (local) session never reports a worktree branch', () => {
 		const badge = computeContextBadge(
-			base({ githubAuthenticated: false, executionMode: 'local', worktreeBranch: 'feat/login' })
+			base({ githubAuthenticated: false, isWorktree: false, worktreeBranch: 'feat/login' })
 		);
 		// Branch is ignored outside worktree mode → project-only badge.
 		expect(badge!.branch).toBeNull();
@@ -188,7 +188,7 @@ function branchBase(overrides: Partial<EmptyStateBranchInput> = {}): EmptyStateB
 		messageCount: 0,
 		project: 'proj-1',
 		githubAuthenticated: true,
-		executionMode: 'local',
+		worktreeIntent: 'local',
 		...overrides
 	};
 }
@@ -199,7 +199,7 @@ describe('shouldShowEmptyStateBranchPill', () => {
 	});
 
 	it('hides in worktree mode — the ExecutionModeBar owns the branch picker there', () => {
-		expect(shouldShowEmptyStateBranchPill(branchBase({ executionMode: 'worktree' }))).toBe(false);
+		expect(shouldShowEmptyStateBranchPill(branchBase({ worktreeIntent: 'worktree' }))).toBe(false);
 	});
 
 	it('hides once a chat is active (branch pill / context badge owns that slot)', () => {

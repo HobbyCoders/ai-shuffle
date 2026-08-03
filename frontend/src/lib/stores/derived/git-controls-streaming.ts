@@ -21,8 +21,9 @@ export interface GitControlsStreamingInput {
 	/** The active session's own streaming flag — set the instant a send begins.
 	 *  Owned by the SSE-fed reducer via activeSession.isStreaming. */
 	activeIsStreaming: boolean;
-	/** The active session's execution mode ('local' | 'worktree'). */
-	activeExecutionMode: string;
+	/** Whether the active session is worktree-mode, derived from its worktree
+	 *  fields (worktreeId / worktreeBranch), not a mode flag. */
+	activeIsWorktree: boolean;
 	/** The active session's project id (empty string / null when none). */
 	activeProject: string | null;
 	/** Cross-device streaming sessions, keyed by session id (streamingSessions). */
@@ -42,7 +43,7 @@ export interface GitControlsStreamingInput {
 export function computeGitControlsStreaming(input: GitControlsStreamingInput): boolean {
 	const {
 		activeIsStreaming,
-		activeExecutionMode,
+		activeIsWorktree,
 		activeProject,
 		crossDeviceStreaming
 	} = input;
@@ -52,7 +53,7 @@ export function computeGitControlsStreaming(input: GitControlsStreamingInput): b
 
 	// Worktree-mode has an independent working directory — cross-session
 	// streaming in the same project can't touch it, so it doesn't lock controls.
-	if (activeExecutionMode === 'worktree') return false;
+	if (activeIsWorktree) return false;
 
 	// Project-mode: any non-worktree session streaming in the same project locks
 	// the controls (they share the project's main checkout).

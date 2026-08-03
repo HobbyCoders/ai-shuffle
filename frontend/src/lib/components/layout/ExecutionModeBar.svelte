@@ -53,7 +53,7 @@
 		// A non-git project can only run Local. If a stale persisted preference (or
 		// a switch from a git project) left this session in a hidden Worktree mode,
 		// fall back to Local so the toggle always has a visible active option.
-		if (!isGitRepo && untrack(() => $activeSession.executionMode) !== 'local') {
+		if (!isGitRepo && untrack(() => $activeSession.worktreeIntent) !== 'local') {
 			setMode('local');
 		}
 	});
@@ -141,17 +141,17 @@
 	// --- Functions ---
 
 	function setMode(mode: ExecutionMode) {
-		activeSession.setExecutionMode(mode);
+		activeSession.setWorktreeIntent(mode);
 	}
 
 	// --- Execution-mode dropdown ---
 	//
-	// `executionMode` is the canonical enum ('local' | 'worktree') the rest of the
+	// `worktreeIntent` is the canonical enum ('local' | 'worktree') the rest of the
 	// app dispatches on. The dropdown presents it as a base mode (Local) plus an
 	// orthogonal Worktree checkbox:
 	//   Local, no worktree → 'local'
 	//   Local + worktree   → 'worktree'
-	const worktreeOn = $derived($activeSession.executionMode === 'worktree');
+	const worktreeOn = $derived($activeSession.worktreeIntent === 'worktree');
 
 	function toggleModeDropdown() {
 		showModeDropdown = !showModeDropdown;
@@ -164,7 +164,7 @@
 	}
 
 	function toggleWorktree() {
-		activeSession.setExecutionMode(worktreeOn ? 'local' : 'worktree');
+		activeSession.setWorktreeIntent(worktreeOn ? 'local' : 'worktree');
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
 	}
 
@@ -308,7 +308,7 @@
 		</div>
 
 		<!-- Branch selector (shown when worktree mode active) -->
-		{#if $activeSession.executionMode === 'worktree'}
+		{#if $activeSession.worktreeIntent === 'worktree'}
 			<div class="branch-selector" bind:this={dropdownRef}>
 			<button
 				type="button"
@@ -449,7 +449,7 @@
 	</div>
 
 	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
-	{#if $activeSession.executionMode === 'worktree' && worktreeError}
+	{#if $activeSession.worktreeIntent === 'worktree' && worktreeError}
 		<div class="wt-error-row">
 			<Banner severity="error" message={worktreeError} dismissible onDismiss={() => { activeSession.clearWorktreeError(); }} />
 		</div>

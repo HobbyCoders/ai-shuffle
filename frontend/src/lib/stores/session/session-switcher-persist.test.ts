@@ -41,7 +41,7 @@ function minimalState(): ActiveSessionState {
 		modelOverride: null,
 		permissionModeOverride: null,
 		effortLevelOverride: null,
-		executionMode: 'local',
+		worktreeIntent: 'local',
 		worktreeId: null,
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',

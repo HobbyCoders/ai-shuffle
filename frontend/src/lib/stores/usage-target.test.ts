@@ -15,7 +15,6 @@ type Rows = Parameters<typeof resolveTargetInstance>[1];
 
 const active = (over: Partial<Active> = {}): Active => ({
 	sessionId: null,
-	executionMode: 'local',
 	...over,
 });
 

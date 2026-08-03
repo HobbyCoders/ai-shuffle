@@ -28,7 +28,7 @@
 	let { projectName = null, onClickNewBranch }: Props = $props();
 
 	// Worktree mode locks the branch to the session's worktree branch.
-	const isWorktreeMode = $derived($activeSession.executionMode === 'worktree' || $gitMode === 'worktree');
+	const isWorktreeMode = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch) || $gitMode === 'worktree');
 	const worktreeBranch = $derived(
 		$activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null
 	);
