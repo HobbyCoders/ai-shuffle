@@ -15,6 +15,13 @@ interface PWAState {
 	isOnline: boolean;
 	installPromptEvent: BeforeInstallPromptEvent | null;
 	serviceWorkerRegistration: ServiceWorkerRegistration | null;
+	/**
+	 * A newer build has activated but this tab is visible, so we deferred the
+	 * reload to avoid wiping in-progress UI (e.g. a chat composer draft). The
+	 * app surfaces a "refresh" toast; the reload also happens automatically the
+	 * next time the tab is hidden. See `handleSwUpdate` / `applyUpdate`.
+	 */
+	updateReady: boolean;
 }
 
 interface BeforeInstallPromptEvent extends Event {
@@ -31,7 +38,8 @@ let _state = $state<PWAState>({
 	isInstallable: false,
 	isOnline: browser ? navigator.onLine : true,
 	installPromptEvent: null,
-	serviceWorkerRegistration: null
+	serviceWorkerRegistration: null,
+	updateReady: false
 });
 
 // ============================================================================
@@ -40,6 +48,55 @@ let _state = $state<PWAState>({
 
 function _update(fn: (s: PWAState) => PWAState) {
 	_state = fn(untrack(() => _state));
+}
+
+// ── Service-worker update handling ──────────────────────────────────────────
+//
+// A new service worker calls skipWaiting() on install, so it activates
+// immediately and fires `controllerchange` (some builds also postMessage
+// `SW_UPDATED`). Reloading a VISIBLE tab there is destructive — it wipes the
+// user's in-progress state (e.g. the chat composer draft, which is in-memory).
+// So we only reload silently when the tab is hidden; when it's visible we mark
+// `updateReady` (surfaced as a non-blocking "refresh" toast) and defer the
+// reload until the tab next becomes hidden (or the user clicks the toast).
+
+// Guard so at most one reload ever fires, from whichever path wins.
+let _refreshing = false;
+// Guard so we register the deferred-reload visibilitychange listener once.
+let _deferredReloadArmed = false;
+
+function _reloadNow() {
+	if (_refreshing) return;
+	_refreshing = true;
+	window.location.reload();
+}
+
+function _onVisibleHiddenReload() {
+	if (document.visibilityState === 'hidden') {
+		document.removeEventListener('visibilitychange', _onVisibleHiddenReload);
+		_reloadNow();
+	}
+}
+
+function handleSwUpdate() {
+	if (!browser) return;
+
+	// User isn't looking — a silent reload is fine and least surprising.
+	if (document.visibilityState === 'hidden') {
+		_reloadNow();
+		return;
+	}
+
+	// Tab is visible: do NOT reload out from under the user. Flag it (drives the
+	// refresh toast) and arm a one-time reload for when the tab next hides.
+	if (!_state.updateReady) {
+		_update((s) => ({ ...s, updateReady: true }));
+		_notifySubscribers();
+	}
+	if (!_deferredReloadArmed) {
+		_deferredReloadArmed = true;
+		document.addEventListener('visibilitychange', _onVisibleHiddenReload);
+	}
 }
 
 function checkInstallState() {
@@ -66,23 +123,13 @@ async function registerServiceWorker() {
 
 		_update((s) => ({ ...s, serviceWorkerRegistration: registration }));
 
-		// A new service worker calls skipWaiting() on install, so it activates
-		// immediately and fires `controllerchange`; we reload silently there.
-		// No banner — manual refresh is available via the app's pull-to-refresh.
-		let refreshing = false;
-		navigator.serviceWorker.addEventListener('controllerchange', () => {
-			if (!refreshing) {
-				refreshing = true;
-				window.location.reload();
-			}
-		});
+		// Route both activation signals through the shared handler, which reloads
+		// silently only when the tab is hidden and otherwise defers (see above).
+		navigator.serviceWorker.addEventListener('controllerchange', handleSwUpdate);
 
 		navigator.serviceWorker.addEventListener('message', (event) => {
 			if (event.data?.type === 'SW_UPDATED') {
-				if (!refreshing) {
-					refreshing = true;
-					window.location.reload();
-				}
+				handleSwUpdate();
 			}
 		});
 
@@ -249,6 +296,16 @@ export const pwa = {
 
 	async registerServiceWorker() {
 		return registerServiceWorker();
+	},
+
+	/**
+	 * Reload now to apply a pending update. Called from the "refresh" toast
+	 * action when a new build is ready but the tab is visible. Guarded so it
+	 * fires at most once even if the deferred visibility reload also races it.
+	 */
+	applyUpdate() {
+		if (!browser) return;
+		_reloadNow();
 	},
 
 	async checkForUpdates() {

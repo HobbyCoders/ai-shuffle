@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
@@ -77,9 +78,12 @@ async def event_stream(session_id: str, from_seq: int = 0):
     gateway = get_gateway()
     # Subscribe FIRST so no event falls between backfill and the live tail.
     queue = gateway.subscribe(session_id)
+    start_time = time.monotonic()
+    cursor = from_seq
+    logger.info(
+        "SSE feed connected: session=%s from_seq=%s", session_id, from_seq
+    )
     try:
-        cursor = from_seq
-
         # 1. Backfill everything already persisted.
         while True:
             page = await asyncio.to_thread(get_events, session_id, cursor, _PAGE)
@@ -134,6 +138,12 @@ async def event_stream(session_id: str, from_seq: int = 0):
             "SSE event stream closed (client disconnect) for session %s", session_id
         )
     finally:
+        logger.info(
+            "SSE feed disconnected: session=%s last_seq=%s duration=%.1fs",
+            session_id,
+            cursor,
+            time.monotonic() - start_time,
+        )
         gateway.unsubscribe(session_id, queue)
 
 

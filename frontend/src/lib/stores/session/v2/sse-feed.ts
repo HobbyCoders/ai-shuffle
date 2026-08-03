@@ -46,6 +46,15 @@ export interface SseFeed {
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 15_000;
 
+// ── Idle watchdog ──────────────────────────────────────────────────────────
+// A healthy stream emits a frame or keepalive comment at least every 15s. A
+// half-open TCP connection (the peer vanished but no RST/FIN reached us) leaves
+// `reader.read()` hanging forever with no error and no `done` — the reconnect
+// loop never fires because nothing threw. The watchdog force-reconnects when no
+// bytes have arrived for well over the keepalive cadence.
+export const IDLE_TIMEOUT_MS = 45_000;
+const IDLE_WATCHDOG_TICK_MS = 10_000;
+
 // ─── Frame parser (exported for unit tests) ───────────────────────────────────
 
 export interface ParsedFrame {
@@ -134,6 +143,12 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	let controller: AbortController | null = null;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Timestamp of the last raw chunk received (frame OR keepalive comment).
+	// Reset at every connect attempt so a still-connecting stream isn't killed;
+	// updated on every `reader.read()` yield. The watchdog compares against it.
+	let lastFrameAt = Date.now();
+	let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
 	// ── Revive listeners (mirror ws-connection.ts) ──────────────────────
 	let visibilityHandler: (() => void) | null = null;
 	let onlineHandler: (() => void) | null = null;
@@ -205,10 +220,46 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		}
 	}
 
+	// ── Idle watchdog ───────────────────────────────────────────────────
+	function checkIdle(): void {
+		if (!running) return;
+		const silentMs = Date.now() - lastFrameAt;
+		if (silentMs > IDLE_TIMEOUT_MS) {
+			console.warn(
+				`[sse-feed] no frame/keepalive for ${silentMs}ms (> ${IDLE_TIMEOUT_MS}ms) — ` +
+					'forcing reconnect (suspected half-open stream)'
+			);
+			// Reset the clock so the next tick doesn't re-fire before the fresh
+			// connect lands, then force a clean reconnect through the existing
+			// revive path: aborts the half-open reader, resets backoff, and
+			// reconnects immediately at from_seq=lastSeq.
+			lastFrameAt = Date.now();
+			reviveNow();
+		}
+	}
+
+	function startWatchdog(): void {
+		if (watchdogTimer !== null) return; // exactly one watchdog per feed instance
+		if (typeof setInterval === 'undefined') return;
+		watchdogTimer = setInterval(checkIdle, IDLE_WATCHDOG_TICK_MS);
+	}
+
+	function stopWatchdog(): void {
+		if (watchdogTimer !== null) {
+			clearInterval(watchdogTimer);
+			watchdogTimer = null;
+		}
+	}
+
 	async function connect(): Promise<void> {
 		if (!running) return;
 		// If a reader is already active, don't stack another.
 		if (controller) return;
+
+		// Reset the idle clock at the START of every (re)connect attempt so a
+		// stream that is still connecting (no bytes yet) isn't instantly killed
+		// by the watchdog.
+		lastFrameAt = Date.now();
 
 		const ac = new AbortController();
 		controller = ac;
@@ -241,6 +292,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 			for (;;) {
 				const { value, done } = await reader.read();
 				if (done) break;
+				// Any raw bytes — a data frame OR a `:` keepalive comment — mean the
+				// stream is alive. Stamp BEFORE parsing so keepalives (which yield no
+				// frames) still keep the watchdog satisfied.
+				lastFrameAt = Date.now();
 				const chunk = decoder.decode(value, { stream: true });
 				const frames = parser.push(chunk);
 				for (const frame of frames) {
@@ -286,6 +341,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 	}
 
 	setupReviveListeners();
+	startWatchdog();
 	void connect();
 
 	return {
@@ -298,6 +354,7 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		stop() {
 			if (!running) return;
 			running = false;
+			stopWatchdog();
 			if (reconnectTimer !== null) {
 				clearTimeout(reconnectTimer);
 				reconnectTimer = null;

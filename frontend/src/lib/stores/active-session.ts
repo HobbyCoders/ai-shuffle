@@ -312,6 +312,55 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ─── Feed reconcile watchdog ─────────────────────────────────────────────────
+// Self-heal for a stalled transcript. The feed-controller's SSE feed is normally
+// (re)started from onConnected, the session-switcher, and the WS start /
+// session_created handlers. If none of those fire while a session stays open
+// (e.g. the feed got stopped and nothing re-armed it while the WS stayed up),
+// the transcript goes permanently stale until the user sends a message. This
+// interval notices "a session is open but its feed is not feeding" and restarts
+// the feed — the same from_seq=0 replay + `caught_up` batch fold a WS `start`
+// event uses, which repaints the full snapshot correctly.
+const FEED_RECONCILE_INTERVAL_MS = 10_000;
+let feedReconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Feed-reconcile decision (pure, exported for unit tests): the feed must be
+ * (re)started only when a session is open AND its feed is not currently feeding.
+ * Returns false for a null/empty sessionId (New Chat / cleared — never start a
+ * feed here) and for a session already being fed (healthy — nothing to do).
+ */
+export function shouldStartFeedReconcile(
+	sessionId: string | null,
+	isFeeding: (id: string) => boolean
+): boolean {
+	if (!sessionId) return false;
+	return !isFeeding(sessionId);
+}
+
+function reconcileFeed(): void {
+	const sessionId = _state.sessionId;
+	if (!shouldStartFeedReconcile(sessionId, (id) => feedController.isFeeding(id))) return;
+	console.warn(
+		`[ActiveSession] feed-reconcile: session ${sessionId} is open but its feed ` +
+		`is not feeding — restarting the SSE feed`
+	);
+	feedController.start(sessionId as string);
+}
+
+function startFeedReconcile(): void {
+	if (feedReconcileTimer !== null) return; // idempotent — never two intervals
+	if (typeof setInterval === 'undefined') return;
+	feedReconcileTimer = setInterval(reconcileFeed, FEED_RECONCILE_INTERVAL_MS);
+}
+
+function stopFeedReconcile(): void {
+	if (feedReconcileTimer !== null) {
+		clearInterval(feedReconcileTimer);
+		feedReconcileTimer = null;
+	}
+}
+
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
 const internal: InternalMutableState = {
 	pendingTools: new Set(),
@@ -336,6 +385,11 @@ const wsConn: WsConnection = createWsConnection({
 	onConnected: () => {
 		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
 		_update(s => ({ ...s, wsConnected: true, error: null }));
+
+		// Keep the feed-reconcile watchdog alive whenever we're connected. Idempotent:
+		// re-arms after a destroy()/init() cycle (disconnect() clears it) without ever
+		// creating a second interval.
+		startFeedReconcile();
 
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
@@ -423,6 +477,9 @@ const persistSession = switcher.persistSession;
 
 function disconnect() {
 	feedController.stop();
+	// Torn down here (the destroy path) so no interval outlives the store. It is
+	// re-armed by onConnected on the next init()/connect.
+	stopFeedReconcile();
 
 	internal.pendingTools.clear();
 	internal.interruptPending = false;

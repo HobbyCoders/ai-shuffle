@@ -28,6 +28,21 @@
 	let initialized = $state(false);
 	let teardownErrorHandlers: (() => void) | null = null;
 
+	// When a new build activates while THIS tab is visible, the PWA store defers
+	// the reload (so it can't wipe an in-progress composer draft) and flips
+	// `updateReady`. Surface that as a non-blocking, sticky toast whose action
+	// applies the update on demand. Fires once per pending update.
+	let updateToastShown = false;
+	$effect(() => {
+		if (pwa.current.updateReady && !updateToastShown) {
+			updateToastShown = true;
+			notify.info('A new version is ready — click to refresh', {
+				duration_ms: 0,
+				action: { label: 'Refresh', onClick: () => pwa.applyUpdate() }
+			});
+		}
+	});
+
 	// Auth poll: detects gh login/logout happening in a terminal.
 	// Auth changes are rare, so 2-minute polling is plenty.
 	// Pauses entirely when tab is hidden; checks immediately on tab return.

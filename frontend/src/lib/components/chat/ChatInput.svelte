@@ -11,6 +11,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
@@ -43,8 +44,18 @@
 
 	let { compact = false }: Props = $props();
 
+	// Resolve the draft to seed the composer with. The in-memory store draft is
+	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
+	// fall back to the per-tab sessionStorage mirror when the store is empty.
+	function resolveInitialDraft(): string {
+		const storeDraft = $activeSession.draft;
+		if (storeDraft) return storeDraft;
+		return readDraft($activeSession.sessionId) || '';
+	}
+
 	// Input state - use draft for persistence across session switches
-	let inputValue = $state($activeSession.draft || '');
+	const initialComposerDraft = resolveInitialDraft();
+	let inputValue = $state(initialComposerDraft);
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -60,13 +71,17 @@
 		return JSON.stringify(json);
 	}
 
-	// Helper to save draft immediately (used on unmount)
+	// Helper to save draft immediately (used on unmount and on send)
 	function saveDraftImmediately(value?: string) {
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 		}
-		activeSession.setDraft(value ?? getDraftJSON());
+		const val = value ?? getDraftJSON();
+		activeSession.setDraft(val);
+		// Keep the sessionStorage mirror in lockstep. On send this is called with
+		// '' which clears the persisted entry; on unmount it flushes the live text.
+		writeDraft(get(activeSession).sessionId, val);
 	}
 
 	// Save draft to store when input changes (debounced)
@@ -87,6 +102,9 @@
 			if (draftValue !== $activeSession.draft) {
 				activeSession.setDraft(draftValue);
 			}
+			// Mirror to sessionStorage so the draft survives a full page reload
+			// (e.g. a silent PWA update). Empty text clears the entry.
+			writeDraft(capturedSessionId, draftValue);
 			draftSaveTimeout = null;
 		}, 100);
 
@@ -126,10 +144,16 @@
 			// draft) guarantees the text follows the session it was typed in,
 			// even when the switch happens within the debounce window.
 			if (!messageSent && editorRef) {
-				activeSession.saveDraftForSession(prevSessionId, getDraftJSON());
+				const leavingDraft = getDraftJSON();
+				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
+				// Keep the persisted mirror aligned with the ephemeral cache so the
+				// leaving session's draft also survives a reload.
+				writeDraft(prevSessionId, leavingDraft);
 			}
 			prevSessionId = newSessionId;
-			const newDraft = $activeSession.draft || '';
+			// Prefer the in-memory draft; fall back to the sessionStorage mirror
+			// (populated across reloads) when the cache has nothing.
+			const newDraft = $activeSession.draft || readDraft(newSessionId) || '';
 			inputValue = newDraft;
 			plainTextValue = '';
 			editorRef?.setContent(newDraft);
@@ -619,7 +643,7 @@
 							<TiptapEditor
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
-								initialContent={$activeSession.draft || ''}
+								initialContent={initialComposerDraft}
 								disabled={!$claudeAuthenticated}
 								onTextChange={(text) => {
 									inputValue = text;
