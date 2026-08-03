@@ -512,6 +512,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "client_secret", "label": "Client Secret", "type": "password", "required": True},
                 {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": True, "description": "OAuth2 refresh token from authorization flow"},
                 {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "30"},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): playback, read, devices, search, queue, playlists, library"},
             ],
         },
         {
@@ -522,6 +524,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "bridge_ip", "label": "Bridge IP Address", "type": "text", "required": True, "placeholder": "192.168.1.x"},
                 {"key": "api_key", "label": "API Key (Username)", "type": "password", "required": True, "description": "Press bridge button, then generate via POST /api"},
                 {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): control, discovery"},
             ],
         },
         {

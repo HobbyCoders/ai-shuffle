@@ -6,8 +6,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from app.core.connectors import spotify_actions
 from app.core.connectors.base import (
-    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -16,7 +16,6 @@ from app.core.connectors.base import (
     OutgoingMessage,
     PermissionPrompt,
     PermissionResponseCallback,
-    ToolDef,
     TriggerCallback,
     TriggerDef,
     chunk_text,
@@ -84,116 +83,9 @@ class SpotifyConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(id="play", name="Play", description="Resume playback"),
-        ActionDef(id="pause", name="Pause", description="Pause playback"),
-        ActionDef(
-            id="play_track",
-            name="Play Track",
-            description="Play a track by search query or Spotify URI",
-            input_schema={
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-            },
-        ),
-        ActionDef(id="skip_next", name="Skip Next", description="Skip to next track"),
-        ActionDef(
-            id="skip_previous",
-            name="Skip Previous",
-            description="Skip to previous track",
-        ),
-        ActionDef(
-            id="set_volume",
-            name="Set Volume",
-            description="Set playback volume",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "volume_percent": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 100,
-                    },
-                },
-                "required": ["volume_percent"],
-            },
-        ),
-        ActionDef(
-            id="get_now_playing",
-            name="Get Now Playing",
-            description="Get currently playing track info",
-        ),
-        ActionDef(
-            id="search_tracks",
-            name="Search Tracks",
-            description="Search for tracks",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                },
-                "required": ["query"],
-            },
-        ),
-    ]
-
-    TOOLS = [
-        ToolDef(
-            id="spotify_playback",
-            name="Spotify Playback",
-            description=(
-                "Control Spotify playback — play, pause, skip, set volume, "
-                "and get current track info"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "enum": [
-                            "play",
-                            "pause",
-                            "skip_next",
-                            "skip_previous",
-                            "get_now_playing",
-                            "set_volume",
-                        ],
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Track name or Spotify URI (used with 'play' command)",
-                    },
-                    "volume_percent": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 100,
-                        "description": "Volume level (requires 'set_volume' as command value)",
-                    },
-                },
-                "required": ["command"],
-            },
-        ),
-        ToolDef(
-            id="spotify_search",
-            name="Spotify Search",
-            description="Search Spotify for tracks, artists, or albums",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 50,
-                        "default": 5,
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-    ]
+    ACTIONS = spotify_actions.SPOTIFY_ACTIONS
+    TOOLS: list = []
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -711,107 +603,38 @@ class SpotifyConnector(BaseConnector):
             "track_uri": track_uri,
         }
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named Spotify action."""
-        try:
-            if action_id == "play":
-                await self._api_put("/me/player/play")
-                return {"success": True, "message": "Playback resumed"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see spotify_actions.py)."""
+        return await spotify_actions.execute(self, action_id, params, context)
 
-            if action_id == "pause":
-                await self._api_put("/me/player/pause")
-                return {"success": True, "message": "Playback paused"}
-
-            if action_id == "play_track":
-                query = params.get("query", "")
-                if not query:
-                    return {"success": False, "error": "Missing required parameter: query"}
-                return await self._play_track_by_query(query)
-
-            if action_id == "skip_next":
-                await self._api_post("/me/player/next")
-                return {"success": True, "message": "Skipped to next track"}
-
-            if action_id == "skip_previous":
-                await self._api_post("/me/player/previous")
-                return {"success": True, "message": "Skipped to previous track"}
-
-            if action_id == "set_volume":
-                volume = params.get("volume_percent")
-                if volume is None:
-                    return {"success": False, "error": "Missing required parameter: volume_percent"}
-                volume_percent = max(0, min(100, int(volume)))
-                await self._api_put(f"/me/player/volume?volume_percent={volume_percent}")
-                return {"success": True, "message": f"Volume set to {volume_percent}%"}
-
-            if action_id == "get_now_playing":
-                return await self._get_now_playing_info()
-
-            if action_id == "search_tracks":
-                query = params.get("query", "")
-                if not query:
-                    return {"success": False, "error": "Missing required parameter: query"}
-                limit = params.get("limit", 5)
-                return await self._search_tracks_api(query, limit=int(limit))
-
-            return {"success": False, "error": f"Unknown action: {action_id}"}
-
-        except Exception as exc:
-            logger.exception("SpotifyConnector execute_action '%s' failed: %s", action_id, exc)
-            return {"success": False, "error": str(exc)}
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "SPOTIFY TOOLS: Call spotify_actions to discover what you can do "
+            "(playback control, search, queue, playlists, devices, library), "
+            "each with its input schema, then call spotify_invoke with "
+            "{action, params} to act. Playback control requires an active "
+            "Spotify Connect device — use the list_devices action to check, "
+            "and ask the user to open Spotify on a device if none are active."
+        )
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named Spotify tool call."""
-        try:
-            if tool_id == "spotify_playback":
-                command = params.get("command", "")
-                if not command:
-                    return {"success": False, "error": "Missing required parameter: command"}
+        """Legacy tool entry point — kept for back-compat with old callers."""
+        if tool_id == "spotify_playback":
+            command = params.get("command", "")
+            if not command:
+                return {"success": False, "error": "Missing required parameter: command"}
+            action_params = {k: v for k, v in params.items() if k != "command"}
+            return await self.execute_action(command, action_params)
 
-                if command == "play":
-                    query = params.get("query")
-                    if query:
-                        return await self._play_track_by_query(query)
-                    await self._api_put("/me/player/play")
-                    return {"success": True, "message": "Playback resumed"}
+        if tool_id == "spotify_search":
+            return await self.execute_action("search_tracks", params)
 
-                if command == "pause":
-                    await self._api_put("/me/player/pause")
-                    return {"success": True, "message": "Playback paused"}
-
-                if command == "skip_next":
-                    await self._api_post("/me/player/next")
-                    return {"success": True, "message": "Skipped to next track"}
-
-                if command == "skip_previous":
-                    await self._api_post("/me/player/previous")
-                    return {"success": True, "message": "Skipped to previous track"}
-
-                if command == "get_now_playing":
-                    return await self._get_now_playing_info()
-
-                if command == "set_volume":
-                    volume = params.get("volume_percent")
-                    if volume is None:
-                        return {"success": False, "error": "Missing volume_percent for set_volume command"}
-                    volume_percent = max(0, min(100, int(volume)))
-                    await self._api_put(f"/me/player/volume?volume_percent={volume_percent}")
-                    return {"success": True, "message": f"Volume set to {volume_percent}%"}
-
-                return {"success": False, "error": f"Unknown playback command: {command}"}
-
-            if tool_id == "spotify_search":
-                query = params.get("query", "")
-                if not query:
-                    return {"success": False, "error": "Missing required parameter: query"}
-                limit = params.get("limit", 5)
-                return await self._search_tracks_api(query, limit=int(limit))
-
-            return {"success": False, "error": f"Unknown tool: {tool_id}"}
-
-        except Exception as exc:
-            logger.exception("SpotifyConnector execute_tool '%s' failed: %s", tool_id, exc)
-            return {"success": False, "error": str(exc)}
+        return {"success": False, "error": f"Unknown tool: {tool_id}"}
 
     # ------------------------------------------------------------------
     # Test

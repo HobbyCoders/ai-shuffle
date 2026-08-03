@@ -108,6 +108,7 @@ Make sure Spotify is actively playing on one of your devices (open the Spotify a
 | `client_secret` | string | Yes | The Client Secret from your Spotify Developer application |
 | `refresh_token` | string | Yes | OAuth2 refresh token obtained from the authorization code flow (see step 4) |
 | `poll_interval_seconds` | string | No | Seconds between playback polling checks. Defaults to `"30"` |
+| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `playback`, `read`, `devices`, `search`, `queue`, `playlists`, `library`. |
 
 ## Capabilities
 
@@ -122,13 +123,22 @@ The Spotify connector supports the following capabilities:
 | `threads` | No | Not supported |
 | `buttons` | No | Not supported |
 
-### What Claude can do with Spotify
+### AI Actions (Action Gateway)
+
+While a Spotify connector is running, every AI session gets two MCP tools:
+
+- **`spotify_actions`** -- discovery. Returns the action catalog (21 actions across playback, read, devices, search, queue, playlists, and library), each with its input schema, filtered by this install's `enabled_action_categories`.
+- **`spotify_invoke`** -- execution. Takes `{action, params}`, validates `params` server-side, and dispatches to the Spotify Web API.
+
+Every action is `safe` or `write` risk -- Spotify has no destructive actions, since this non-messaging connector has no interactive approval surface to route them through.
+
+What that lets Claude do:
 
 - **Playback control** -- Play, pause, skip, previous, seek, set volume, toggle shuffle and repeat
 - **Search** -- Find songs, albums, artists, and playlists by name
 - **Queue management** -- Add songs to the playback queue, view upcoming tracks
 - **Now playing** -- Show the currently playing track with artist, album, and progress
-- **Library management** -- Save tracks to your library, check if tracks are saved
+- **Library management** -- Save tracks to your library, view your top tracks and artists
 - **Device control** -- List available playback devices and transfer playback between them
 - **Playlist browsing** -- List your playlists and view their contents
 
