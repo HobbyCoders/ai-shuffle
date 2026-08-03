@@ -1,12 +1,16 @@
 """LINEConnector — LINE Messaging API integration via linebot-sdk."""
 
+import asyncio
 import hashlib
 import hmac
+import json
 import logging
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from app.core.connectors import line_actions
 from app.core.connectors.base import (
     ActionDef,
     BaseConnector,
@@ -71,37 +75,15 @@ class LINEConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see line_actions.py). Exposed to the AI
+    # through the generic line_actions/line_invoke gateway tool pair.
+    ACTIONS = line_actions.LINE_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="line_send",
-            name="Send a message via LINE",
-            description="Send a message via LINE",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `line_send` tool.
+    TOOLS: List[Any] = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -118,6 +100,7 @@ class LINEConnector(BaseConnector):
             **kwargs,
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -464,6 +447,16 @@ class LINEConnector(BaseConnector):
         postback = event.get("postback", {})
         data = postback.get("data", "")
 
+        # Destructive-action approval buttons (action gateway)
+        if data.startswith("actreq:"):
+            parts = data.split(":")
+            if len(parts) == 3:
+                _, request_id, decision = parts
+                fut = self._pending_action_approvals.get(request_id)
+                if fut is not None and not fut.done():
+                    fut.set_result(decision == "approve")
+            return
+
         if not data.startswith("perm:"):
             return
 
@@ -482,33 +475,129 @@ class LINEConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see line_actions.py)."""
+        return await line_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "line_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "LINE TOOLS: Call line_actions to discover everything you can do "
+            "here (text/sticker/image messages, user profiles, group summaries, "
+            "message quota) along with each action's input schema, then call "
+            "line_invoke with {action, params} to act. Message actions only "
+            "work on the bound chat or the connector's allowed users/groups. "
+            "Destructive actions (leaving a group) post an in-channel Flex "
+            "Message Approve/Deny prompt before running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Post a Flex Message Approve/Deny prompt for a destructive action."""
+        if not platform_chat_id:
+            return False, "No chat available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            params_preview = json.dumps(params, default=str)[:500]
+            flex_contents = {
+                "type": "bubble",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "md",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "Destructive Action Approval",
+                            "weight": "bold",
+                            "size": "lg",
+                            "color": "#111111",
+                        },
+                        {
+                            "type": "text",
+                            "text": f"The AI wants to run {action.name} ({action.id}).",
+                            "size": "sm",
+                            "color": "#444444",
+                            "wrap": True,
+                        },
+                        {
+                            "type": "text",
+                            "text": params_preview,
+                            "size": "xs",
+                            "color": "#666666",
+                            "wrap": True,
+                        },
+                    ],
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#06C755",
+                            "action": {
+                                "type": "postback",
+                                "label": "Approve",
+                                "data": f"actreq:{request_id}:approve",
+                            },
+                        },
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "action": {
+                                "type": "postback",
+                                "label": "Deny",
+                                "data": f"actreq:{request_id}:deny",
+                            },
+                        },
+                    ],
+                },
+            }
+            messages = [{
+                "type": "flex",
+                "altText": f"Approval needed: {action.name}",
+                "contents": flex_contents,
+            }]
+            ok = await self._push_message(platform_chat_id, messages)
+            if not ok:
+                return False, "Failed to post the approval prompt."
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run LINE action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test

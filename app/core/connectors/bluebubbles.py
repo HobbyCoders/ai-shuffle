@@ -5,10 +5,11 @@ import json
 import logging
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from app.core.connectors import bluebubbles_actions
 from app.core.connectors.base import (
     ActionDef,
     BaseConnector,
@@ -74,37 +75,16 @@ class BlueBubblesConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see bluebubbles_actions.py). Exposed to
+    # the AI through the generic bluebubbles_actions/bluebubbles_invoke
+    # gateway tool pair.
+    ACTIONS = bluebubbles_actions.BLUEBUBBLES_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="bluebubbles_send",
-            name="Send a message via BlueBubbles",
-            description="Send a message via BlueBubbles",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `bluebubbles_send` tool.
+    TOOLS: list = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -121,6 +101,7 @@ class BlueBubblesConnector(BaseConnector):
             **kwargs,
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
         self._server_info: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
@@ -463,6 +444,19 @@ class BlueBubblesConnector(BaseConnector):
     def _check_permission_response(self, text: str) -> bool:
         """Check if text is a simple permission response."""
         text_lower = text.strip().lower()
+
+        # Destructive-action approval prompts (action gateway) take priority
+        # over the legacy tool-permission prompts.
+        for request_id, fut in list(self._pending_action_approvals.items()):
+            if fut.done():
+                continue
+            if text_lower in ("approve", "yes", "allow", "y"):
+                fut.set_result(True)
+                return True
+            elif text_lower in ("deny", "no", "reject", "n"):
+                fut.set_result(False)
+                return True
+
         for request_id, session_id in list(self._permission_sessions.items()):
             if text_lower in ("approve", "yes", "allow", "y"):
                 asyncio.create_task(
@@ -482,33 +476,72 @@ class BlueBubblesConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see bluebubbles_actions.py)."""
+        return await bluebubbles_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "bluebubbles_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "BLUEBUBBLES TOOLS: Call bluebubbles_actions to discover "
+            "everything you can do here (messages, tapback reactions, chat "
+            "listing/info/rename, leaving a chat) along with each action's "
+            "input schema, then call bluebubbles_invoke with {action, params} "
+            "to act. BlueBubbles has no interactive button surface, so "
+            "destructive actions (leaving a chat) ask the user to reply "
+            "'approve' or 'deny' in-chat before running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Ask the user to reply approve/deny for a destructive action."""
+        if not platform_chat_id:
+            return False, "No chat available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            text = (
+                f"Destructive Action Approval\n\n"
+                f"The AI wants to run {action.name} ({action.id}).\n\n"
+                f"Reply 'approve' or 'deny'"
+            )
+            outgoing = OutgoingMessage(platform_chat_id=platform_chat_id, text=text)
+            ok = await self.send_message(outgoing)
+            if not ok:
+                return False, "Failed to post the approval prompt."
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run BlueBubbles action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test

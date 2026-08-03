@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from app.core.connectors import imessage_actions
 from app.core.connectors.base import (
     ActionDef,
     BaseConnector,
@@ -172,37 +173,15 @@ class IMessageConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see imessage_actions.py). Exposed to the
+    # AI through the generic imessage_actions/imessage_invoke gateway tool pair.
+    ACTIONS = imessage_actions.IMESSAGE_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="imessage_send",
-            name="Send a message via iMessage",
-            description="Send a message via iMessage",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `imessage_send` tool.
+    TOOLS: list = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -449,33 +428,34 @@ class IMessageConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see imessage_actions.py)."""
+        return await imessage_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "imessage_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "IMESSAGE TOOLS: Call imessage_actions to discover everything you "
+            "can do here (messages, tapback reactions, chat listing/info, "
+            "typing indicator) along with each action's input schema, then "
+            "call imessage_invoke with {action, params} to act. This "
+            "connector has no destructive actions, so nothing here needs "
+            "approval."
+        )
 
     # ------------------------------------------------------------------
     # Test

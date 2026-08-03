@@ -460,6 +460,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "channel_secret", "label": "Channel Secret", "type": "password", "required": True},
                 {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": False},
                 {"key": "allowed_group_ids", "label": "Allowed Group IDs", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, users, groups, account"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the Approve/Deny prompt for destructive AI actions (leaving a group)"},
             ],
         },
         {
@@ -480,6 +484,8 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "cli_path", "label": "CLI Path", "type": "text", "required": False, "placeholder": "imsg"},
                 {"key": "service", "label": "Service", "type": "text", "required": False, "placeholder": "auto"},
                 {"key": "allowed_handles", "label": "Allowed Handles", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, chats, presence"},
             ],
         },
         {
@@ -491,6 +497,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "app_password", "label": "Client Secret", "type": "password", "required": True},
                 {"key": "tenant_id", "label": "Tenant ID", "type": "text", "required": False, "placeholder": "botframework.com"},
                 {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, presence, members"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the Adaptive Card Approve/Deny prompt for destructive AI actions (message deletion)"},
             ],
         },
         {
@@ -501,6 +511,10 @@ def get_connector_type_info() -> List[Dict]:
                 {"key": "server_url", "label": "Server URL", "type": "text", "required": True, "placeholder": "http://192.168.1.10:1234"},
                 {"key": "password", "label": "API Password", "type": "password", "required": True},
                 {"key": "allowed_handles", "label": "Allowed Handles", "type": "list", "required": False},
+                {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
+                 "description": "Restrict AI actions to these categories (empty = all): messages, reactions, chats"},
+                {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,
+                 "placeholder": "false", "description": "Set to 'true' to skip the text Approve/Deny prompt for destructive AI actions (leaving a chat)"},
             ],
         },
         {

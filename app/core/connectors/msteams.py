@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+import uuid
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -17,10 +18,10 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
-    ToolDef,
     TriggerDef,
     chunk_text,
 )
+from app.core.connectors import msteams_actions
 
 logger = logging.getLogger(__name__)
 
@@ -70,37 +71,15 @@ class MSTeamsConnector(BaseConnector):
         ),
     ]
 
-    ACTIONS = [
-        ActionDef(
-            id="send_message",
-            name="Send Message",
-            description="Send a message to a chat",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # Full declarative action catalog (see msteams_actions.py). Exposed to the
+    # AI through the generic msteams_actions/msteams_invoke gateway tool pair.
+    ACTIONS = msteams_actions.MSTEAMS_ACTIONS
 
-    TOOLS = [
-        ToolDef(
-            id="msteams_send",
-            name="Send a message via Microsoft Teams",
-            description="Send a message via Microsoft Teams",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "platform_chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform_chat_id", "text"],
-            },
-        ),
-    ]
+    # No per-tool MCP registration: the action gateway replaces the legacy
+    # globally-exposed `msteams_send` tool.
+    TOOLS: list = []
+
+    SUPPORTS_ACTION_GATEWAY = True
 
     def __init__(
         self,
@@ -119,6 +98,7 @@ class MSTeamsConnector(BaseConnector):
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
+        self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
         # conversation_id -> ConversationReference (service_url, conversation, bot, etc.)
         self._conversation_refs: Dict[str, Dict[str, Any]] = {}
 
@@ -442,6 +422,16 @@ class MSTeamsConnector(BaseConnector):
         value = activity.get("value", {})
         action_str = value.get("action", "")
 
+        # Destructive-action approval buttons (action gateway)
+        if action_str.startswith("actreq:"):
+            parts = action_str.split(":")
+            if len(parts) == 3:
+                _, request_id, decision = parts
+                fut = self._pending_action_approvals.get(request_id)
+                if fut is not None and not fut.done():
+                    fut.set_result(decision == "approve")
+            return
+
         if not action_str.startswith("perm:"):
             return
 
@@ -460,33 +450,115 @@ class MSTeamsConnector(BaseConnector):
     # Actions & Tools
     # ------------------------------------------------------------------
 
-    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named action."""
-        if action_id == "send_message":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
-        return {"success": False, "error": f"Unknown action: {action_id}"}
+    async def execute_action(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a catalog action (see msteams_actions.py)."""
+        return await msteams_actions.execute(self, action_id, params, context)
 
     async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a named tool call."""
+        """Legacy tool entry point — kept for back-compat with old callers."""
         if tool_id == "msteams_send":
-            message = OutgoingMessage(
-                platform_chat_id=params["platform_chat_id"],
-                text=params["text"],
-            )
-            success = await self.send_message(message)
-            if success:
-                return {"success": True, "message": "Message sent"}
-            return {"success": False, "error": "Failed to send message"}
-
+            return await self.execute_action("send_message", params)
         return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+    # ------------------------------------------------------------------
+    # Action gateway hooks
+    # ------------------------------------------------------------------
+
+    def get_context_instructions(self, platform_chat_id: str) -> Optional[str]:
+        return (
+            "MICROSOFT TEAMS TOOLS: Call msteams_actions to discover everything "
+            "you can do here (messages, Adaptive Cards, message edit/delete, "
+            "typing indicator, member list) along with each action's input "
+            "schema, then call msteams_invoke with {action, params} to act. "
+            "Proactive actions only work in a conversation the bot has already "
+            "received a message in. Destructive actions (message deletion) post "
+            "an in-channel Adaptive Card Approve/Deny prompt before running."
+        )
+
+    async def request_action_approval(
+        self,
+        platform_chat_id: str,
+        action: ActionDef,
+        params: Dict[str, Any],
+        timeout: float = 120.0,
+    ) -> Tuple[bool, str]:
+        """Post an Approve/Deny Adaptive Card for a destructive action."""
+        ref = self._get_ref(platform_chat_id)
+        if not ref:
+            return False, "No conversation reference available for the approval prompt."
+
+        request_id = uuid.uuid4().hex[:12]
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_action_approvals[request_id] = fut
+
+        try:
+            params_preview = json.dumps(params, default=str)[:900]
+            adaptive_card = {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Destructive Action Approval",
+                        "weight": "Bolder",
+                        "size": "Medium",
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": f"The AI wants to run **{action.name}** (`{action.id}`).",
+                        "wrap": True,
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": params_preview,
+                        "wrap": True,
+                    },
+                ],
+                "actions": [
+                    {
+                        "type": "Action.Submit",
+                        "title": "Approve",
+                        "data": {"action": f"actreq:{request_id}:approve"},
+                        "style": "positive",
+                    },
+                    {
+                        "type": "Action.Submit",
+                        "title": "Deny",
+                        "data": {"action": f"actreq:{request_id}:deny"},
+                        "style": "destructive",
+                    },
+                ],
+            }
+            activity = {
+                "type": "message",
+                "text": f"Approval needed: {action.name}",
+                "attachments": [
+                    {
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": adaptive_card,
+                    }
+                ],
+            }
+            service_url = ref.get("service_url", BF_API_URL)
+            ok = await self._send_activity(service_url, platform_chat_id, activity)
+            if not ok:
+                return False, "Failed to post the approval card."
+
+            try:
+                approved = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"No approval response within {timeout:.0f}s — action cancelled."
+            return (True, "Approved by user.") if approved else (False, "Denied by user.")
+        except Exception as exc:
+            logger.exception("Failed to run Teams action approval flow")
+            return False, f"Approval flow failed: {exc}"
+        finally:
+            self._pending_action_approvals.pop(request_id, None)
 
     # ------------------------------------------------------------------
     # Test
