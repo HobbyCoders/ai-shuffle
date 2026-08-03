@@ -857,13 +857,9 @@ def delete_session(session_id: str) -> bool:
 
 def _cleanup_working_set_ref(session_id: str) -> None:
     """Delete the session's working-set scratch ref (local + origin) on hard
-    delete. No-op unless V2 placement is on AND the row actually carries a ref,
-    so the flag-off path makes no new git calls. Swallows everything."""
+    delete. No-op unless the row actually carries a ref, so sessions without
+    one make no new git calls. Swallows everything."""
     try:
-        from app.core.config import settings
-
-        if not settings.v2_placement:
-            return
         row = get_session(session_id)
         if not row or not row.get("working_set_ref"):
             return

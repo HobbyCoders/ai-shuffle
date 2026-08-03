@@ -381,8 +381,8 @@ class Session(SessionBase):
     # V2 Q7: transient, derive-on-read (never persisted). True when a session has
     # a queued turn but NO capable runner is online to execute it — i.e. it is
     # waiting, read-only, until an owning device comes back. Derived by the API
-    # enrichment layer via ``placement.resolve_placement`` (the single oracle) and
-    # only when the ``v2_placement`` flag is ON; the model default is False.
+    # enrichment layer via ``placement.resolve_placement`` (the single oracle);
+    # the model default is False.
     degraded: bool = False
     project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
     # Folds same-repo project clones across installs into ONE sessions-board card.

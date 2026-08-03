@@ -319,7 +319,6 @@ class TestControllableAnnotation:
 
         mock_settings = MagicMock()
         mock_settings.effective_instance_id = me
-        mock_settings.v2_placement = False
         with patch("app.api.sessions_helpers.database") as mock_db, \
                 patch("app.core.config.settings", mock_settings), \
                 patch("app.db.projects_v2.list_projects_v2", return_value=[]):

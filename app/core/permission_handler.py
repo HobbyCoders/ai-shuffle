@@ -19,14 +19,13 @@ from enum import Enum
 
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
-from app.core.config import settings
 from app.db import database
 
 logger = logging.getLogger(__name__)
 
 # V2 Phase 4 (Q4): permission prompts persist as ``pending_interactions`` rows
-# of this kind under ``settings.v2_placement``, so any install answers them
-# relay-free. TTL is the durable form of the legacy 300s auto-deny (OD-2/Q4-5).
+# of this kind, so any install answers them relay-free. TTL is the durable
+# form of the legacy 300s auto-deny (OD-2/Q4-5).
 PERMISSION_KIND = "permission"
 PERMISSION_TTL_SECONDS = 300
 
@@ -206,40 +205,13 @@ class PermissionHandler:
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
         """
-        if settings.v2_placement:
-            return await self._request_permission_v2(
-                request_id=request_id,
-                session_id=session_id,
-                profile_id=profile_id,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                broadcast_func=broadcast_func,
-                tool_use_id=tool_use_id,
-                agent_id=agent_id,
-                title=title,
-                display_name=display_name,
-                description=description,
-                decision_reason=decision_reason,
-                blocked_path=blocked_path,
-                provider_agent=provider_agent,
-            )
-
-        # Check saved rules first
-        rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
-        if rule:
-            logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
-            if rule.decision == PermissionDecision.ALLOW:
-                return PermissionResultAllow(updated_input=tool_input)
-            else:
-                return PermissionResultDeny(message="Denied by saved rule")
-
-        # Create pending request
-        request = PermissionRequest(
+        return await self._request_permission_v2(
             request_id=request_id,
             session_id=session_id,
             profile_id=profile_id,
             tool_name=tool_name,
             tool_input=tool_input,
+            broadcast_func=broadcast_func,
             tool_use_id=tool_use_id,
             agent_id=agent_id,
             title=title,
@@ -250,74 +222,11 @@ class PermissionHandler:
             provider_agent=provider_agent,
         )
 
-        async with self._lock:
-            if session_id not in self._pending_requests:
-                self._pending_requests[session_id] = {}
-            self._pending_requests[session_id][request_id] = request
-
-        # Get current queue position
-        queue_position = len(self._pending_requests.get(session_id, {}))
-
-        # Broadcast permission request to frontend
-        await self._broadcast_permission_request(request, queue_position, broadcast_func)
-
-        # Notify watching mobile devices that approval is needed (best-effort,
-        # non-blocking). Fires once when the request is first queued (re-broadcast
-        # on resume goes through a different path, so no duplicate notifications).
-        try:
-            from app.services.push_notification import fire_and_forget_notify
-
-            fire_and_forget_notify(
-                title="Permission needed",
-                body=f"Approve {display_name or tool_name}?",
-                data={
-                    "type": "permission_request",
-                    "session_id": session_id,
-                    "request_id": request_id,
-                },
-            )
-        except Exception:
-            pass
-
-        logger.debug(f"Permission request queued: {request_id} for {tool_name}")
-
-        # Wait for response (with timeout)
-        try:
-            await asyncio.wait_for(request.response_event.wait(), timeout=300.0)  # 5 min timeout
-        except asyncio.TimeoutError:
-            # Remove from queue on timeout
-            async with self._lock:
-                if session_id in self._pending_requests:
-                    self._pending_requests[session_id].pop(request_id, None)
-            # Notify frontend to dismiss the modal
-            try:
-                await broadcast_func({
-                    "type": "permission_timeout",
-                    "session_id": session_id,
-                    "request_id": request_id
-                })
-            except Exception:
-                pass  # Best-effort notification
-            return PermissionResultDeny(message="Permission request timed out")
-
-        # Check if user deferred (Slice B)
-        if isinstance(request.response, _DeferSentinel):
-            return request.response
-
-        # Return the response - convert from stored dict to proper type
-        if request.response:
-            if request.response.get("behavior") == "allow":
-                return PermissionResultAllow(updated_input=request.response.get("updatedInput", tool_input))
-            else:
-                return PermissionResultDeny(message=request.response.get("message", "Permission denied"))
-        else:
-            return PermissionResultDeny(message="No response received")
-
     # ------------------------------------------------------------------
     # V2 Phase 4 (Q4) — pending_interactions-backed permission flow
     #
-    # Under ``settings.v2_placement`` the durable ``pending_interactions`` row
-    # is the single source of truth: the executing runner blocks on it via
+    # The durable ``pending_interactions`` row is the single source of truth:
+    # the executing runner blocks on it via
     # ``interaction_wait.await_interaction`` while ANY install answers it
     # directly against the shared table (no cloud_relay). The in-memory
     # ``_pending_requests`` / ``_deferred`` dicts are NOT used on this path;
@@ -976,98 +885,15 @@ class PermissionHandler:
         Returns:
             Info about resolved requests
         """
-        if settings.v2_placement:
-            return await self._respond_v2(
-                request_id=request_id,
-                session_id=session_id,
-                decision=decision,
-                remember=remember,
-                pattern=pattern,
-                broadcast_func=broadcast_func,
-                answered_by_device=answered_by_device,
-            )
-
-        async with self._lock:
-            if session_id not in self._pending_requests:
-                return {"error": "Session not found"}
-
-            request = self._pending_requests[session_id].get(request_id)
-            if not request:
-                return {"error": "Request not found"}
-
-            # Handle defer decision (Slice B)
-            if decision == "defer":
-                request.state = "deferred"
-                request.response = _DeferSentinel()
-                request.response_event.set()
-                del self._pending_requests[session_id][request_id]
-                self._deferred[session_id][request_id] = request
-
-                # Broadcast that this request moved to deferred state
-                if broadcast_func:
-                    await broadcast_func({
-                        "type": "permission_queue_update",
-                        "session_id": session_id,
-                        "resolved_ids": [request_id],
-                        "deferred_ids": [request_id],
-                        "remaining_count": len(self._pending_requests.get(session_id, {})),
-                    })
-
-                return {
-                    "resolved": True,
-                    "deferred": True,
-                    "auto_resolved_count": 0,
-                    "auto_resolved_ids": [],
-                }
-
-            # Set the response
-            if decision == "allow":
-                request.response = {"behavior": "allow", "updatedInput": request.tool_input}
-            else:
-                request.response = {"behavior": "deny", "message": "User denied permission"}
-
-            # Signal the waiting coroutine
-            request.response_event.set()
-
-            # Remove from pending
-            del self._pending_requests[session_id][request_id]
-
-            # Create rule if remembering
-            resolved_requests = []
-            if remember and remember != "none":
-                rule = PermissionRule(
-                    id=f"rule-{datetime.now().timestamp()}",
-                    session_id=session_id if remember == "session" else None,
-                    profile_id=request.profile_id if remember == "profile" else None,
-                    tool_name=request.tool_name,
-                    tool_pattern=pattern,
-                    decision=PermissionDecision(decision)
-                )
-
-                # Save rule
-                if remember == "session":
-                    if session_id not in self._session_rules:
-                        self._session_rules[session_id] = []
-                    self._session_rules[session_id].append(rule)
-                else:
-                    # Save to database for profile-level persistence
-                    database.add_permission_rule(
-                        profile_id=request.profile_id,
-                        tool_name=rule.tool_name,
-                        tool_pattern=rule.tool_pattern,
-                        decision=rule.decision.value
-                    )
-
-                # Auto-resolve matching queued requests
-                resolved_requests = await self._resolve_matching_requests(
-                    session_id, rule, broadcast_func
-                )
-
-        return {
-            "resolved": True,
-            "auto_resolved_count": len(resolved_requests),
-            "auto_resolved_ids": resolved_requests
-        }
+        return await self._respond_v2(
+            request_id=request_id,
+            session_id=session_id,
+            decision=decision,
+            remember=remember,
+            pattern=pattern,
+            broadcast_func=broadcast_func,
+            answered_by_device=answered_by_device,
+        )
 
     async def _resolve_matching_requests(
         self,
@@ -1143,37 +969,22 @@ class PermissionHandler:
 
     def get_pending_requests(self, session_id: str) -> List[Dict[str, Any]]:
         """Get all pending permission requests for a session"""
-        if settings.v2_placement:
-            return [
-                self._payload_row_to_dict(row, "pending")
-                for row in self._v2_pending_permissions(session_id)
-            ]
-
-        if session_id not in self._pending_requests:
-            return []
-
         return [
-            self._request_to_dict(req)
-            for req in self._pending_requests[session_id].values()
+            self._payload_row_to_dict(row, "pending")
+            for row in self._v2_pending_permissions(session_id)
         ]
 
     def get_deferred_requests(self, session_id: str) -> List[Dict[str, Any]]:
         """Get all deferred permission requests for a session (Slice B)"""
-        if settings.v2_placement:
-            from app.db import interactions
+        from app.db import interactions
 
-            out: List[Dict[str, Any]] = []
-            for row in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
-                answer = row.get("answer") or {}
-                if answer.get("decision") != "defer" or answer.get("requeued"):
-                    continue
-                out.append(self._payload_row_to_dict(row, "deferred"))
-            return out
-
-        return [
-            self._request_to_dict(req)
-            for req in self._deferred.get(session_id, {}).values()
-        ]
+        out: List[Dict[str, Any]] = []
+        for row in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
+            answer = row.get("answer") or {}
+            if answer.get("decision") != "defer" or answer.get("requeued"):
+                continue
+            out.append(self._payload_row_to_dict(row, "deferred"))
+        return out
 
     def _request_to_dict(self, req: "PermissionRequest") -> Dict[str, Any]:
         """Serialize a PermissionRequest to a dict for WS broadcast."""
@@ -1213,131 +1024,64 @@ class PermissionHandler:
 
         Returns the list of requeued request_ids.
         """
-        if settings.v2_placement:
-            return await self._requeue_deferred_v2(session_id, broadcast_func)
-
-        requeued_ids: List[str] = []
-
-        async with self._lock:
-            deferred_snapshot = dict(self._deferred.get(session_id, {}))
-            self._deferred[session_id].clear()
-
-            if session_id not in self._pending_requests:
-                self._pending_requests[session_id] = {}
-
-            for req_id, req in deferred_snapshot.items():
-                req.state = "pending"
-                # Reset the event so request_permission can wait again
-                req.response_event = asyncio.Event()
-                req.response = None
-                self._pending_requests[session_id][req_id] = req
-                requeued_ids.append(req_id)
-
-        # Re-broadcast each request (outside lock)
-        if broadcast_func:
-            for req_id in requeued_ids:
-                req = self._pending_requests[session_id].get(req_id)
-                if req:
-                    queue_position = len(self._pending_requests.get(session_id, {}))
-                    await self._broadcast_permission_request(req, queue_position, broadcast_func)
-
-            if requeued_ids:
-                await broadcast_func({
-                    "type": "permission_queue_update",
-                    "session_id": session_id,
-                    "requeued_ids": requeued_ids,
-                    "remaining_count": len(self._pending_requests.get(session_id, {})),
-                })
-
-        return requeued_ids
+        return await self._requeue_deferred_v2(session_id, broadcast_func)
 
     def get_queue_count(self, session_id: str) -> int:
         """Get count of pending requests for a session"""
-        if settings.v2_placement:
-            return self._v2_pending_count(session_id)
-        return len(self._pending_requests.get(session_id, {}))
+        return self._v2_pending_count(session_id)
 
     async def cancel_request(self, request_id: str, session_id: str) -> bool:
         """Cancel a pending permission request"""
-        if settings.v2_placement:
-            from app.core import interaction_wait
-            from app.db import interactions
+        from app.core import interaction_wait
+        from app.db import interactions
 
-            row = next(
-                (
-                    r
-                    for r in self._v2_pending_permissions(session_id)
-                    if (r.get("payload") or {}).get("request_id") == request_id
-                ),
-                None,
+        row = next(
+            (
+                r
+                for r in self._v2_pending_permissions(session_id)
+                if (r.get("payload") or {}).get("request_id") == request_id
+            ),
+            None,
+        )
+        if row is None:
+            return False
+        cancelled = interactions.cancel_interaction(row["id"])
+        if cancelled:
+            interaction_wait.notify_changed(session_id)
+            # Durable lifecycle event (#653): guarded cancel won → emit
+            # exactly one interaction.expired (reason="cancelled").
+            from app.core import interaction_events
+
+            await interaction_events.emit_interaction_expired(
+                session_id, row["id"], request_id, "cancelled",
             )
-            if row is None:
-                return False
-            cancelled = interactions.cancel_interaction(row["id"])
-            if cancelled:
-                interaction_wait.notify_changed(session_id)
-                # Durable lifecycle event (#653): guarded cancel won → emit
-                # exactly one interaction.expired (reason="cancelled").
-                from app.core import interaction_events
-
-                await interaction_events.emit_interaction_expired(
-                    session_id, row["id"], request_id, "cancelled",
-                )
-            return cancelled
-
-        async with self._lock:
-            if session_id not in self._pending_requests:
-                return False
-
-            request = self._pending_requests[session_id].get(request_id)
-            if not request:
-                return False
-
-            # Set denial response and signal
-            request.response = {"behavior": "deny", "message": "Request cancelled"}
-            request.response_event.set()
-            del self._pending_requests[session_id][request_id]
-
-            return True
+        return cancelled
 
     async def cancel_all_requests(self, session_id: str) -> int:
         """Cancel all pending requests for a session"""
-        if settings.v2_placement:
-            from app.core import interaction_wait
-            from app.db import interactions
+        from app.core import interaction_wait
+        from app.db import interactions
 
-            rows = self._v2_pending_permissions(session_id)
-            count = 0
-            cancelled_rows: List[tuple] = []
-            for row in rows:
-                if interactions.cancel_interaction(row["id"]):
-                    count += 1
-                    cancelled_rows.append(
-                        (row["id"], (row.get("payload") or {}).get("request_id"))
-                    )
-            if count:
-                interaction_wait.notify_changed(session_id)
-                # Durable lifecycle events (#653): one interaction.expired
-                # (reason="cancelled") per row whose guarded cancel won.
-                from app.core import interaction_events
+        rows = self._v2_pending_permissions(session_id)
+        count = 0
+        cancelled_rows: List[tuple] = []
+        for row in rows:
+            if interactions.cancel_interaction(row["id"]):
+                count += 1
+                cancelled_rows.append(
+                    (row["id"], (row.get("payload") or {}).get("request_id"))
+                )
+        if count:
+            interaction_wait.notify_changed(session_id)
+            # Durable lifecycle events (#653): one interaction.expired
+            # (reason="cancelled") per row whose guarded cancel won.
+            from app.core import interaction_events
 
-                for cancelled_interaction_id, rid in cancelled_rows:
-                    await interaction_events.emit_interaction_expired(
-                        session_id, cancelled_interaction_id, rid, "cancelled",
-                    )
-            return count
-
-        async with self._lock:
-            if session_id not in self._pending_requests:
-                return 0
-
-            count = len(self._pending_requests[session_id])
-            for request in self._pending_requests[session_id].values():
-                request.response = {"behavior": "deny", "message": "Session cancelled"}
-                request.response_event.set()
-
-            del self._pending_requests[session_id]
-            return count
+            for cancelled_interaction_id, rid in cancelled_rows:
+                await interaction_events.emit_interaction_expired(
+                    session_id, cancelled_interaction_id, rid, "cancelled",
+                )
+        return count
 
     def clear_session_rules(self, session_id: str):
         """Clear session-level rules when session ends"""

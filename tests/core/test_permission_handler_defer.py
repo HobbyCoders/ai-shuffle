@@ -13,22 +13,12 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from app.core.config import settings
 from app.core.permission_handler import (
     PermissionDecision,
     PermissionRequest,
     PermissionHandler,
     _DeferSentinel,
 )
-
-
-@pytest.fixture(autouse=True)
-def _legacy_placement(monkeypatch):
-    """This module asserts the legacy (flag-OFF) in-memory defer/requeue path.
-    The V2 Phase 4 cutover defaults ``v2_placement`` ON (the shared
-    ``pending_interactions`` adapter, covered by test_interaction_placement.py);
-    pin it OFF here so these tests exercise the legacy else-branch."""
-    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 # ---------------------------------------------------------------------------
@@ -67,77 +57,6 @@ class TestRespondDefer:
     @pytest.fixture
     def handler(self):
         return PermissionHandler()
-
-    @pytest.mark.asyncio
-    async def test_respond_defer_moves_to_deferred(self, handler):
-        """respond('defer') must move the request from pending to _deferred."""
-        req = _make_request()
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="defer",
-        )
-
-        assert result["resolved"] is True
-        assert result.get("deferred") is True
-
-        # No longer in pending
-        assert "req-1" not in handler._pending_requests.get("session-1", {})
-
-        # Now in deferred
-        assert "req-1" in handler._deferred["session-1"]
-
-        # State flag updated
-        deferred_req = handler._deferred["session-1"]["req-1"]
-        assert deferred_req.state == "deferred"
-
-    @pytest.mark.asyncio
-    async def test_respond_defer_sets_sentinel_on_response_event(self, handler):
-        """The response field must be a _DeferSentinel and event must be set."""
-        req = _make_request()
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="defer",
-        )
-
-        # The response attribute holds the sentinel (checked by request_permission)
-        assert isinstance(req.response, _DeferSentinel)
-        assert req.response_event.is_set()
-
-    @pytest.mark.asyncio
-    async def test_respond_defer_broadcasts_queue_update(self, handler):
-        """respond('defer') must broadcast a permission_queue_update with deferred_ids."""
-        req = _make_request()
-        handler._pending_requests["session-1"] = {"req-1": req}
-        mock_broadcast = AsyncMock()
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="defer",
-            broadcast_func=mock_broadcast,
-        )
-
-        mock_broadcast.assert_awaited_once()
-        payload = mock_broadcast.call_args[0][0]
-        assert payload["type"] == "permission_queue_update"
-        assert "req-1" in payload["deferred_ids"]
-        assert "req-1" in payload["resolved_ids"]
-
-    @pytest.mark.asyncio
-    async def test_respond_defer_session_not_found(self, handler):
-        """respond('defer') with unknown session returns error."""
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="unknown-session",
-            decision="defer",
-        )
-        assert result == {"error": "Session not found"}
 
     @pytest.mark.asyncio
     async def test_respond_defer_request_not_found(self, handler):
@@ -200,137 +119,19 @@ class TestRequeueDeferred:
         return PermissionHandler()
 
     @pytest.mark.asyncio
-    async def test_requeue_deferred_moves_back_to_pending(self, handler):
-        """requeue_deferred() must move all deferred entries back to _pending_requests."""
-        req = _make_request()
-        req.state = "deferred"
-        handler._deferred["session-1"]["req-1"] = req
-
-        requeued = await handler.requeue_deferred("session-1")
-
-        assert "req-1" in requeued
-        assert "req-1" in handler._pending_requests.get("session-1", {})
-        assert "req-1" not in handler._deferred.get("session-1", {})
-
-    @pytest.mark.asyncio
-    async def test_requeue_deferred_resets_state(self, handler):
-        """requeue_deferred() must reset state to 'pending' and clear response."""
-        req = _make_request()
-        req.state = "deferred"
-        req.response = _DeferSentinel()
-        handler._deferred["session-1"]["req-1"] = req
-
-        await handler.requeue_deferred("session-1")
-
-        restored = handler._pending_requests["session-1"]["req-1"]
-        assert restored.state == "pending"
-        assert restored.response is None
-        assert not restored.response_event.is_set()
-
-    @pytest.mark.asyncio
     async def test_requeue_deferred_empty_session(self, handler):
         """requeue_deferred() on a session with no deferred items returns empty list."""
         result = await handler.requeue_deferred("session-with-nothing")
         assert result == []
 
-    @pytest.mark.asyncio
-    async def test_requeue_deferred_rebroadcasts(self, handler):
-        """requeue_deferred() must re-broadcast each request."""
-        req = _make_request()
-        req.state = "deferred"
-        handler._deferred["session-1"]["req-1"] = req
-        mock_broadcast = AsyncMock()
-
-        await handler.requeue_deferred("session-1", broadcast_func=mock_broadcast)
-
-        # At minimum, permission_request event + queue_update event
-        assert mock_broadcast.await_count >= 2
-        types = [call[0][0]["type"] for call in mock_broadcast.call_args_list]
-        assert "permission_request" in types
-        assert "permission_queue_update" in types
-
-    @pytest.mark.asyncio
-    async def test_requeue_deferred_can_re_resolve(self, handler):
-        """After requeue, the request can be resolved via respond()."""
-        req = _make_request()
-        req.state = "deferred"
-        handler._deferred["session-1"]["req-1"] = req
-
-        await handler.requeue_deferred("session-1")
-
-        # Now allow it
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="allow",
-        )
-        assert result["resolved"] is True
-        pending_req = handler._pending_requests.get("session-1", {})
-        assert "req-1" not in pending_req
-
 
 # ---------------------------------------------------------------------------
 # B.7 — defer skips rule creation
+#
+# NOTE: The three tests that used to live here asserted on `_pending_requests`
+# / `_session_rules` mutation as their setup mechanism. Under the V2-only
+# collapsed handler (#603) that in-memory dict is never populated by the real
+# request path, so these tests could only "pass" by asserting on state they
+# themselves seeded directly — they never actually exercised the defer/rule
+# code path they claimed to cover. Removed rather than kept as false coverage.
 # ---------------------------------------------------------------------------
-
-class TestDeferSkipsRuleCreation:
-    @pytest.fixture
-    def handler(self):
-        return PermissionHandler()
-
-    @pytest.mark.asyncio
-    async def test_defer_skips_rule_creation_session(self, handler):
-        """respond('defer', remember='session') must not create any session rule."""
-        req = _make_request()
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="defer",
-            remember="session",
-            pattern="*",
-        )
-
-        # No session rules should have been created
-        assert len(handler._session_rules.get("session-1", [])) == 0
-
-    @pytest.mark.asyncio
-    async def test_defer_skips_rule_creation_profile(self, handler):
-        """respond('defer', remember='profile') must not call database.add_permission_rule."""
-        req = _make_request()
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        with patch("app.db.database.add_permission_rule") as mock_add:
-            await handler.respond(
-                request_id="req-1",
-                session_id="session-1",
-                decision="defer",
-                remember="profile",
-                pattern="*",
-            )
-
-        mock_add.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_defer_no_auto_resolve(self, handler):
-        """respond('defer') must not auto-resolve other pending requests."""
-        req1 = _make_request("req-1")
-        req2 = PermissionRequest(
-            request_id="req-2",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "rm -rf /"},
-        )
-        handler._pending_requests["session-1"] = {"req-1": req1, "req-2": req2}
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="defer",
-        )
-
-        # req-2 must still be pending, untouched
-        assert "req-2" in handler._pending_requests["session-1"]
-        assert not req2.response_event.is_set()

@@ -467,10 +467,7 @@ async def test_interrupt_survives_a_failing_prompt_cancel(mock_db):
 async def test_interrupt_cancels_the_durable_prompt_row(mock_db, monkeypatch):
     """End to end against the real handler: the pending row leaves ``pending``,
     which is what actually releases the detached waiter."""
-    from app.core.config import settings as app_settings
     from app.db import interactions
-
-    monkeypatch.setattr(app_settings, "v2_placement", True)
 
     turn = turns_db.enqueue_turn("s9f", "user", prompt="hi")
     turns_db.start_turn(turn["id"], None, "runner")

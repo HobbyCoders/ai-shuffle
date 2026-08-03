@@ -12,7 +12,6 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -318,45 +317,22 @@ def test_restore_local_origin_is_noop(env, ref_store):
 
 
 # ---------------------------------------------------------------------------
-# session_runtime hook flag-gating (case 10)
+# session_runtime hook invocation (case 10)
 # ---------------------------------------------------------------------------
 
-async def test_hooks_never_invoke_working_set_when_flag_off(monkeypatch):
-    """Case 10: with ``settings.v2_placement`` off, the runtime's snapshot and
-    restore hooks never touch the working_set functions."""
-    from app.core import session_runtime
-    from app.core.config import settings
-    import app.core.working_set as ws
-
-    monkeypatch.setattr(settings, "v2_placement", False)
-    snap = MagicMock(name="snapshot_out")
-    rest = MagicMock(name="restore_in")
-    monkeypatch.setattr(ws, "snapshot_out", snap)
-    monkeypatch.setattr(ws, "restore_in", rest)
-
-    rt = session_runtime.SessionRuntime({"session_id": "s", "id": "t"})
-    await rt._snapshot_working_set("s")
-    await rt._restore_working_set("s")
-
-    snap.assert_not_called()
-    rest.assert_not_called()
-
-
 async def test_hooks_invoke_working_set_when_flag_on(monkeypatch):
-    """F5 (flag-ON mirror): with ``settings.v2_placement`` on, the runtime's
-    snapshot and restore hooks call ``working_set.snapshot_out`` / ``restore_in``
-    with the expected (session_id, cwd, runner_id[, stored]) shapes. The restore
-    hook feeds the FRESHLY fetched row's ref (F1: it always re-reads the row and
-    never trusts a pre-claim value) — proven by patching ``database.get_session``
-    to return a ref distinct from any prior value and asserting the stub sees it.
-    No real git or DB runs (both seams patched)."""
+    """F5: the runtime's snapshot and restore hooks call
+    ``working_set.snapshot_out`` / ``restore_in`` with the expected
+    (session_id, cwd, runner_id[, stored]) shapes. The restore hook feeds the
+    FRESHLY fetched row's ref (F1: it always re-reads the row and never trusts
+    a pre-claim value) — proven by patching ``database.get_session`` to return
+    a ref distinct from any prior value and asserting the stub sees it. No real
+    git or DB runs (both seams patched)."""
     from app.core import session_runtime
     from app.core import project_resolver
     from app.core.config import settings
     from app.db import database as database_mod
     import app.core.working_set as ws
-
-    monkeypatch.setattr(settings, "v2_placement", True)
 
     FRESH_STORED = json.dumps(
         {"ref": REF, "sha": "freshsha", "runner_id": "runnerA"}

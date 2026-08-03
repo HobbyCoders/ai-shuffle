@@ -3,11 +3,11 @@
 Covers the pure decode/hash helpers (app/core/artifact_ingest.py) and the
 TurnRecorder ingest seam (app/core/turn_recorder.py): the ingest predicate
 hit/miss, content-address stamping onto tool.result, artifact.created emission,
-runner_id holder attribution, content-address dedup, failure isolation (a store
-error never breaks the pump), and flag-OFF byte-identical inertness.
+runner_id holder attribution, content-address dedup, and failure isolation (a
+store error never breaks the pump).
 
 The recorder is driven DIRECTLY with pump-shaped dicts (same convention as
-tests/core/test_turn_recorder.py). ``settings.v2_placement`` defaults ON.
+tests/core/test_turn_recorder.py).
 """
 
 import base64
@@ -15,7 +15,6 @@ import base64
 import pytest
 
 from app.core import artifact_ingest, artifact_store
-from app.core.config import settings
 from app.core.turn_recorder import TurnRecorder
 from app.db import artifacts as artifacts_db
 from app.db import session_events as se
@@ -232,30 +231,6 @@ async def test_ingest_store_error_is_isolated(mock_db, artifacts_dir, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# flag-OFF inertness — byte-identical legacy behavior
-# ---------------------------------------------------------------------------
-
-
-async def test_ingest_inert_when_flag_off(mock_db, artifacts_dir, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-    _mk_session()
-    rec = await _recorder()
-    payload = b"flag-off-screenshot"
-    digest = artifact_ingest.content_hash(payload)
-
-    await rec.on_event(_tool_result_event(_data_uri(payload)))
-
-    # No artifact.created event; tool.result carries the default empty list.
-    assert _types() == ["tool.result"]
-    assert _rows()[-1]["payload"]["artifact_hashes"] == []
-    await rec.close()
-
-    # No store happened.
-    assert artifacts_db.get_artifact(digest) is None
-    assert not artifacts_dir.exists() or not any(artifacts_dir.rglob("*"))
-
-
-# ---------------------------------------------------------------------------
 # subagent lane — screenshot ingested, raw data URI stripped from the log
 # ---------------------------------------------------------------------------
 
@@ -355,23 +330,3 @@ async def test_cli_wake_tool_result_ingests(mock_db, artifacts_dir):
 
     on_disk = artifacts_dir / digest[:2] / digest
     assert on_disk.read_bytes() == payload
-
-
-async def test_unfenced_ingest_inert_when_flag_off(mock_db, artifacts_dir, monkeypatch):
-    from app.core import turn_recorder as tr
-
-    monkeypatch.setattr(settings, "v2_placement", False)
-    _mk_session()
-    payload = b"flag-off-unfenced"
-    digest = artifact_ingest.content_hash(payload)
-
-    await tr.record_drained_event(
-        SID, _subagent_tool_result_event(_data_uri(payload))
-    )
-
-    assert _types() == ["subagent.progress"]
-    # Flag off: no ingest — and the raw URI is still stripped from the log.
-    inner = _rows()[-1]["payload"]["payload"]
-    assert "screenshot" not in inner
-    assert "artifact_hashes" not in inner
-    assert artifacts_db.get_artifact(digest) is None

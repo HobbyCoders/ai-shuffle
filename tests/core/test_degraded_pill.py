@@ -11,7 +11,6 @@ exception in the derivation must yield ``False`` (never a 500).
 """
 
 from app.core import placement
-from app.core.config import settings
 from app.core.placement import PlacementDecision
 from app.api.sessions_helpers import is_session_degraded
 
@@ -42,13 +41,11 @@ def _session(sid=SID):
 # ---------------------------------------------------------------------------
 
 def test_queued_and_placement_none_is_degraded(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
     monkeypatch.setattr(placement, "resolve_placement", _none)
     assert is_session_degraded(_session(), {SID}) is True
 
 
 def test_queued_and_placement_runner_is_not_degraded(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
     monkeypatch.setattr(placement, "resolve_placement", _runner)
     assert is_session_degraded(_session(), {SID}) is False
 
@@ -56,7 +53,6 @@ def test_queued_and_placement_runner_is_not_degraded(monkeypatch):
 def test_not_queued_is_not_degraded_and_never_resolves(monkeypatch):
     """A session with no queued-no-run turn (absent from the candidate set) is
     never degraded, and the resolver is never consulted for it."""
-    monkeypatch.setattr(settings, "v2_placement", True)
     called = {"n": 0}
 
     def _tracking(*_a, **_k):
@@ -69,17 +65,7 @@ def test_not_queued_is_not_degraded_and_never_resolves(monkeypatch):
     assert called["n"] == 0
 
 
-def test_flag_off_is_not_degraded_and_never_resolves(monkeypatch):
-    """Flag OFF ⇒ False AND resolve_placement is NEVER called (raising stub
-    proves the short-circuit)."""
-    monkeypatch.setattr(settings, "v2_placement", False)
-    monkeypatch.setattr(placement, "resolve_placement", _raise)
-    # Even a fully-degraded-looking candidate stays False with the flag off.
-    assert is_session_degraded(_session(), {SID}) is False
-
-
 def test_resolver_exception_fails_open_to_false(monkeypatch):
     """A resolver exception ⇒ degraded False (the caller/listing never raises)."""
-    monkeypatch.setattr(settings, "v2_placement", True)
     monkeypatch.setattr(placement, "resolve_placement", _raise)
     assert is_session_degraded(_session(), {SID}) is False

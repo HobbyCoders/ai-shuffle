@@ -68,11 +68,6 @@ def pin_runner(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def flag_on(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
-
-
-@pytest.fixture(autouse=True)
 def _clean_module_state():
     """Reset session_runtime registries/seams and drain any observer-fired
     interrupt tasks so nothing leaks between tests."""
@@ -535,16 +530,6 @@ def _sent(handler, ftype):
         for c in handler.send_json.call_args_list
         if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == ftype
     ]
-
-
-async def test_flag_off_claim_once_is_inert(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-
-    def _boom():
-        raise AssertionError("claim loop must be inert with the flag off")
-
-    monkeypatch.setattr("app.db.turns.list_claimable_sessions", _boom)
-    assert await turn_claim.claim_once() == 0
 
 
 async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(

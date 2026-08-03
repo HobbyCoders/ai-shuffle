@@ -379,26 +379,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # V2 placement cutover (Phase 4, Q3). ON by default: turn execution is
-    # governed by the sessions.placement resolver (app.core.placement) —
-    # remote-placed turns are enqueued durably and claimed by the owning
-    # runner's turn_claim loop over the shared runs lease; permissions/questions
-    # ride the durable pending_interactions table. DEPRECATED/inert-leaning since
-    # PR-B: the legacy HTTP cloud path this flag used to fall back to
-    # (cloud_relay, the cluster relay endpoints, and cloud intake) was DELETED,
-    # so turning the flag OFF no longer restores cross-runner execution — it only
-    # degrades to single-install, non-crashing behavior. Supported rollback is
-    # ``git revert`` of the PR-B deletion commit, not a flag flip. The field is
-    # retained (still consulted by the placement/permission/artifact/working-set
-    # seams whose own legacy arms are self-contained and untouched) rather than
-    # removed. Kill switch (degraded, unsupported): AI_SHUFFLE_V2_PLACEMENT=false.
-    v2_placement: bool = Field(
-        default=True,
-        validation_alias=AliasChoices(
-            "AI_SHUFFLE_V2_PLACEMENT", "V2_PLACEMENT", "v2_placement"
-        ),
-    )
-
     # Lazy self-seed of a MISSING base checkout (#607 PR-2). ON by default: when a
     # session is pinned to a runner that has never materialized the project, the
     # checkout_manager clones the project's remote on demand (recovered from legacy

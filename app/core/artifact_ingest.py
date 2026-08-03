@@ -11,9 +11,7 @@ stamps the hash onto the ``tool.result`` event + emits ``artifact.created``.
 This module holds only the pure, synchronous helpers (data-URI decode + content
 hash). The actual disk/DB store is a fire-and-forget task owned by the recorder,
 failure-isolated so an artifact-store error never affects the streaming pump or
-the turn. The whole seam is gated on ``settings.v2_placement`` (Phase-4 placement
-cutover); OFF = byte-identical legacy behavior (no store, no ``artifact_hashes``,
-no ``artifact.created``).
+the turn.
 """
 
 from __future__ import annotations

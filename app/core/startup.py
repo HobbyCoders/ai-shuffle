@@ -622,26 +622,21 @@ def install_v2_turns_wiring() -> None:
     turn_manager.register_interrupt_executor(_route_interrupt)
     logger.info("V2 turns wiring installed (scheduler + interrupt executor)")
 
-    # Cross-runner turn-claim loop (V2 Phase 4, Q3) — flag-gated. Started here
-    # (not start_background_tasks) so it is alive BEFORE the boot reconcile
-    # sweep: turns recovered on boot for sessions placed on THIS runner are
-    # claimed on the first tick instead of waiting out the reconcile's kicks.
-    # Flag OFF ⇒ the module is never imported and the legacy relay dispatch
-    # path is untouched.
-    from app.core.config import settings
+    # Cross-runner turn-claim loop (V2 Phase 4, Q3). Started here (not
+    # start_background_tasks) so it is alive BEFORE the boot reconcile sweep:
+    # turns recovered on boot for sessions placed on THIS runner are claimed
+    # on the first tick instead of waiting out the reconcile's kicks.
+    from app.core import turn_claim
 
-    if settings.v2_placement:
-        from app.core import turn_claim
+    turn_claim.start()
 
-        turn_claim.start()
+    # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
+    # loop that flips lapsed permission/question rows to ``expired`` and wakes
+    # their waiters. Belt to the in-process waiter's own local deadline
+    # (interaction_wait).
+    from app.core import interaction_sweeper
 
-        # Pending-interaction expiry sweeper (V2 Phase 4, Q4-4) — dedicated ~10s
-        # loop that flips lapsed permission/question rows to ``expired`` and
-        # wakes their waiters. Belt to the in-process waiter's own local
-        # deadline (interaction_wait). Flag OFF ⇒ never imported.
-        from app.core import interaction_sweeper
-
-        interaction_sweeper.start()
+    interaction_sweeper.start()
 
 
 # Process-wide "we are tearing down" flag. Set FIRST inside shutdown_services

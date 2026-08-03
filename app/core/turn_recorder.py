@@ -132,12 +132,10 @@ async def _ingest_screenshot_unfenced(
     recorder: stamp ``artifact_hashes`` onto the pump event, store the bytes
     (awaited — these paths are not latency-critical and have no close() drain to
     guarantee durability), and return the ``artifact.created`` row to append
-    before the translated event. Returns ``[]`` on flag-off / no screenshot;
+    before the translated event. Returns ``[]`` when there is no screenshot;
     never raises.
     """
     try:
-        if not settings.v2_placement:
-            return []
         stamped = _stamp_screenshot(event)
         if stamped is None:
             return []
@@ -743,25 +741,23 @@ class TurnRecorder:
     def _maybe_ingest_screenshot(
         self, event: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Content-address a screenshot result (flag-gated, fire-and-forget).
+        """Content-address a screenshot result (fire-and-forget).
 
         On a ``tool_result`` / ``subagent_tool_result`` pump event carrying a
         decoded screenshot data URI (browser / computer-use image results —
-        surfaced at the ``query_engine`` pump sites), and only when
-        ``settings.v2_placement`` is on, decode + hash the bytes synchronously,
-        stamp ``artifact_hashes`` onto the pump event (so ``_translate_shared``
-        carries the reference into the recorded ``tool.result`` /
-        ``subagent.progress``), schedule a fire-and-forget disk/DB store, and
-        return an ``artifact.created`` event to append in the same batch.
+        surfaced at the ``query_engine`` pump sites), decode + hash the bytes
+        synchronously, stamp ``artifact_hashes`` onto the pump event (so
+        ``_translate_shared`` carries the reference into the recorded
+        ``tool.result`` / ``subagent.progress``), schedule a fire-and-forget
+        disk/DB store, and return an ``artifact.created`` event to append in
+        the same batch.
 
-        Returns ``[]`` (a no-op) for every other event, when the flag is off, or
-        when the screenshot is not a well-formed base64 data URI. Never raises:
-        a decode/scheduling failure degrades to no ingest, never breaking the
-        pump (the recorder isolation invariant).
+        Returns ``[]`` (a no-op) for every other event, or when the screenshot
+        is not a well-formed base64 data URI. Never raises: a decode/scheduling
+        failure degrades to no ingest, never breaking the pump (the recorder
+        isolation invariant).
         """
         try:
-            if not settings.v2_placement:
-                return []
             # Stamp the content address onto the pump event so the translated
             # ToolResult / SubagentProgress append references it. Idempotent +
             # dedup-friendly.

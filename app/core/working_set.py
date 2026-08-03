@@ -8,10 +8,9 @@ commit WITHOUT touching the tree (byte-identical before/after), so a turn that
 finishes on runner A leaves its in-progress edits recoverable when the same
 session's next turn lands on runner B.
 
-Everything here is flag-gated by the CALLER (``settings.v2_placement``): when the
-flag is off the hooks in ``session_runtime`` never call in, so this module issues
-ZERO git commands. All network git commands run with ``GIT_TERMINAL_PROMPT=0`` so
-a missing credential fails fast (non-zero exit) instead of blocking on a prompt.
+Everything here is invoked by the CALLER (``session_runtime``'s push/restore
+hooks). All network git commands run with ``GIT_TERMINAL_PROMPT=0`` so a
+missing credential fails fast (non-zero exit) instead of blocking on a prompt.
 
 Scratch ref only — this module NEVER pushes a branch, and never uses
 ``git stash push``/``pop`` (those MUTATE the tree, the wrong primitive here).

@@ -1,8 +1,8 @@
 """NOTIFY-awaited pending_interactions waiter (V2 Phase 4, Q4).
 
 The v2 permission/question adapters (``permission_handler`` /
-``user_question_handler`` under ``settings.v2_placement``) persist each prompt
-as a durable ``pending_interactions`` row and then block the SDK callback in
+``user_question_handler``) persist each prompt as a durable
+``pending_interactions`` row and then block the SDK callback in
 :func:`await_interaction` until the row leaves ``pending``. The wake plumbing
 mirrors ``turn_claim``:
 

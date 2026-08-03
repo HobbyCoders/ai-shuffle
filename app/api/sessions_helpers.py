@@ -388,13 +388,10 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
     """Derive the transient V2 Q7 ``degraded`` state for one session.
 
     ``degraded`` is True IFF ALL of:
-      1. ``settings.v2_placement`` is ON — when the flag is OFF this returns
-         False WITHOUT ever importing or calling ``resolve_placement`` (so the
-         listing is byte-identical apart from the constant-default field);
-      2. the session has a QUEUED turn and no live run — i.e. its id is in
+      1. the session has a QUEUED turn and no live run — i.e. its id is in
          ``claimable_ids`` (the ``turns.list_claimable_sessions`` candidate set,
          the same source of truth the cross-runner claim loop uses);
-      3. ``resolve_placement(session_row).kind == "none"`` — no capable runner is
+      2. ``resolve_placement(session_row).kind == "none"`` — no capable runner is
          online to execute it.
 
     Single oracle: ``placement.resolve_placement`` (never raw ``installs.online``
@@ -403,12 +400,6 @@ def is_session_degraded(session_row: dict, claimable_ids: set) -> bool:
     500 on the derivation).
     """
     try:
-        from app.core.config import settings
-
-        # Flag OFF ⇒ field stays False; resolve_placement is NEVER called.
-        if not settings.v2_placement:
-            return False
-
         # Not a queued-with-no-live-run candidate ⇒ not degraded.
         if session_row.get("id") not in claimable_ids:
             return False
@@ -491,20 +482,14 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     except Exception:  # noqa: BLE001 — enrichment must never break the listing
         logger.debug("Failed to load projects_v2 for enrichment", exc_info=True)
 
-    # V2 Q7 degraded derivation. Gate the whole computation on the flag: when
-    # ``v2_placement`` is OFF we never touch the claim/placement paths, so the
-    # listing is byte-identical apart from the constant-default ``degraded``
-    # field. When ON, read the queued-with-no-live-run candidate set ONCE
-    # (batched — never a per-session query); each degraded derivation then just
-    # tests membership + resolves placement.
+    # V2 Q7 degraded derivation. Read the queued-with-no-live-run candidate set
+    # ONCE (batched — never a per-session query); each degraded derivation then
+    # just tests membership + resolves placement.
     claimable_ids: set = set()
     try:
-        from app.core.config import settings as _settings
+        from app.db.turns import list_claimable_sessions
 
-        if _settings.v2_placement:
-            from app.db.turns import list_claimable_sessions
-
-            claimable_ids = set(list_claimable_sessions())
+        claimable_ids = set(list_claimable_sessions())
     except Exception:  # noqa: BLE001 — annotation must never break the listing
         logger.debug(
             "Failed to load claimable sessions for degraded derivation",

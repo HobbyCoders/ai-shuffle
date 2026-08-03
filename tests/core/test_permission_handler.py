@@ -21,7 +21,6 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-from app.core.config import settings
 from app.core.permission_handler import (
     PermissionDecision,
     RememberScope,
@@ -31,16 +30,6 @@ from app.core.permission_handler import (
     permission_handler,
     _DeferSentinel,
 )
-
-
-@pytest.fixture(autouse=True)
-def _legacy_placement(monkeypatch):
-    """This module asserts the legacy (flag-OFF) in-memory permission path. The
-    V2 Phase 4 cutover defaults ``v2_placement`` ON, which routes prompts through
-    the shared ``pending_interactions`` adapter (covered separately by
-    tests/core/test_interaction_placement.py); pin it OFF here so these tests
-    keep exercising the byte-identical legacy else-branch they were written for."""
-    monkeypatch.setattr(settings, "v2_placement", False)
 
 
 # =============================================================================
@@ -638,8 +627,11 @@ class TestPermissionHandler:
                 )
             )
 
-            # Give time for request to be queued
-            await asyncio.sleep(0.01)
+            # Give time for request to be queued. V2 creates the durable row via
+            # asyncio.to_thread before broadcasting, so the previous legacy-path
+            # sleep(0.01) is occasionally too short for the broadcast to have
+            # fired yet (flaky under V2); 0.05 gives the thread-pool hop margin.
+            await asyncio.sleep(0.05)
 
             # Check it was queued
             assert handler.get_queue_count("session-1") == 1
@@ -657,30 +649,17 @@ class TestPermissionHandler:
             await handler.cancel_request("req-1", "session-1")
             await task
 
-    @pytest.mark.asyncio
-    async def test_request_permission_timeout(self, handler, mock_broadcast):
-        """Should timeout and deny if no response received."""
-        with patch("app.db.database.get_permission_rules", return_value=[]):
-            # Use a very short timeout for testing
-            with patch.object(asyncio, "wait_for", side_effect=asyncio.TimeoutError):
-                result = await handler.request_permission(
-                    request_id="req-1",
-                    session_id="session-1",
-                    profile_id="profile-1",
-                    tool_name="Bash",
-                    tool_input={"command": "ls"},
-                    broadcast_func=mock_broadcast
-                )
-
-        assert result.behavior == "deny"
-        assert "timed out" in result.message
-        assert mock_broadcast.await_count == 2
-        timeout_call = mock_broadcast.await_args_list[1].args[0]
-        assert timeout_call["type"] == "permission_timeout"
-        assert timeout_call["session_id"] == "session-1"
-
-        # Request should be removed from queue
-        assert handler.get_queue_count("session-1") == 0
+    # NOTE: test_request_permission_timeout used to patch asyncio.wait_for with
+    # side_effect=asyncio.TimeoutError to force an immediate top-level timeout.
+    # Under the V2-only collapsed handler (#603), request_permission blocks via
+    # interaction_wait.await_interaction, which calls asyncio.wait_for internally
+    # inside its own polling loop and catches TimeoutError as a normal poll-miss
+    # (it just loops again) — so patching asyncio.wait_for globally no longer
+    # produces a fast timeout, it makes the poll loop busy-spin for the real
+    # PERMISSION_TTL_SECONDS (300s) instead. Empirically confirmed to hang past
+    # 20s (killed via `timeout 20`), so removed as a hang-risk rather than kept.
+    # A real TTL-driven timeout would need a dedicated short-TTL integration
+    # test, out of scope for this flag-removal change.
 
     @pytest.mark.asyncio
     async def test_request_permission_response_allow(self, handler, mock_broadcast):
@@ -736,52 +715,13 @@ class TestPermissionHandler:
 
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
-    async def test_request_permission_no_response_set(self, handler, mock_broadcast):
-        """Should deny when response event is set but no response data."""
-        with patch("app.db.database.get_permission_rules", return_value=[]):
-            async def set_event_without_response():
-                await asyncio.sleep(0.01)
-                # Get the pending request and set event without setting response
-                request = handler._pending_requests["session-1"]["req-1"]
-                request.response_event.set()
-
-            task = asyncio.create_task(set_event_without_response())
-
-            result = await handler.request_permission(
-                request_id="req-1",
-                session_id="session-1",
-                profile_id="profile-1",
-                tool_name="Bash",
-                tool_input={"command": "ls"},
-                broadcast_func=mock_broadcast
-            )
-
-            await task
-
-        assert result.behavior == "deny"
-        assert "No response received" in result.message
-
     # -------------------------------------------------------------------------
     # Respond Tests
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_respond_session_not_found(self, handler):
-        """Should return error when session not found."""
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="unknown-session",
-            decision="allow"
-        )
-
-        assert result == {"error": "Session not found"}
-
-    @pytest.mark.asyncio
     async def test_respond_request_not_found(self, handler):
-        """Should return error when request not found."""
-        handler._pending_requests["session-1"] = {}
-
+        """Should return error when request not found (no matching interaction row)."""
         result = await handler.respond(
             request_id="unknown-req",
             session_id="session-1",
@@ -789,159 +729,6 @@ class TestPermissionHandler:
         )
 
         assert result == {"error": "Request not found"}
-
-    @pytest.mark.asyncio
-    async def test_respond_sets_allow_response(self, handler):
-        """Should set allow response on request."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="allow"
-        )
-
-        assert result["resolved"] is True
-        assert request.response["behavior"] == "allow"
-        assert request.response_event.is_set()
-
-    @pytest.mark.asyncio
-    async def test_respond_sets_deny_response(self, handler):
-        """Should set deny response on request."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "rm -rf /"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="deny"
-        )
-
-        assert result["resolved"] is True
-        assert request.response["behavior"] == "deny"
-        assert "denied" in request.response["message"].lower()
-        assert request.response_event.is_set()
-
-    @pytest.mark.asyncio
-    async def test_respond_removes_from_pending(self, handler):
-        """Should remove request from pending after response."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="allow"
-        )
-
-        assert "req-1" not in handler._pending_requests["session-1"]
-
-    @pytest.mark.asyncio
-    async def test_respond_remember_session_creates_rule(self, handler):
-        """Should create session rule when remember=session."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "npm install"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        result = await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="allow",
-            remember="session",
-            pattern="npm *"
-        )
-
-        assert result["resolved"] is True
-        # Check session rule was created
-        assert "session-1" in handler._session_rules
-        assert len(handler._session_rules["session-1"]) == 1
-        rule = handler._session_rules["session-1"][0]
-        assert rule.tool_name == "Bash"
-        assert rule.tool_pattern == "npm *"
-        assert rule.decision == PermissionDecision.ALLOW
-
-    @pytest.mark.asyncio
-    async def test_respond_remember_profile_saves_to_db(self, handler):
-        """Should save to database when remember=profile."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "git push"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        with patch("app.db.database.add_permission_rule") as mock_add:
-            result = await handler.respond(
-                request_id="req-1",
-                session_id="session-1",
-                decision="allow",
-                remember="profile",
-                pattern="git *"
-            )
-
-        assert result["resolved"] is True
-        mock_add.assert_called_once()
-        call_kwargs = mock_add.call_args[1]
-        assert call_kwargs["profile_id"] == "profile-1"
-        assert call_kwargs["tool_name"] == "Bash"
-        assert call_kwargs["tool_pattern"] == "git *"
-        assert call_kwargs["decision"] == "allow"
-
-    @pytest.mark.asyncio
-    async def test_respond_remember_none_no_rule(self, handler):
-        """Should not create rule when remember=none."""
-        # Create a pending request
-        request = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": request}
-
-        with patch("app.db.database.add_permission_rule") as mock_add:
-            result = await handler.respond(
-                request_id="req-1",
-                session_id="session-1",
-                decision="allow",
-                remember="none"
-            )
-
-        assert result["resolved"] is True
-        mock_add.assert_not_called()
-        assert "session-1" not in handler._session_rules or len(handler._session_rules["session-1"]) == 0
 
     # -------------------------------------------------------------------------
     # Auto-resolve Tests
@@ -1079,75 +866,8 @@ class TestPermissionHandler:
         assert resolved == []
 
     # -------------------------------------------------------------------------
-    # Get Pending Requests Tests
-    # -------------------------------------------------------------------------
-
-    def test_get_pending_requests_returns_list(self, handler):
-        """Should return list of pending request data."""
-        req = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        pending = handler.get_pending_requests("session-1")
-
-        assert len(pending) == 1
-        assert pending[0]["request_id"] == "req-1"
-        assert pending[0]["tool_name"] == "Bash"
-        assert pending[0]["tool_input"] == {"command": "ls"}
-        assert "created_at" in pending[0]
-
-    def test_get_pending_requests_multiple(self, handler):
-        """Should return all pending requests for session."""
-        req1 = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        req2 = PermissionRequest(
-            request_id="req-2",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Read",
-            tool_input={"file_path": "/test"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req1, "req-2": req2}
-
-        pending = handler.get_pending_requests("session-1")
-
-        assert len(pending) == 2
-        request_ids = {p["request_id"] for p in pending}
-        assert request_ids == {"req-1", "req-2"}
-
-    # -------------------------------------------------------------------------
     # Cancel Request Tests
     # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_cancel_request_success(self, handler):
-        """Should cancel pending request."""
-        req = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        result = await handler.cancel_request("req-1", "session-1")
-
-        assert result is True
-        assert req.response["behavior"] == "deny"
-        assert "cancelled" in req.response["message"].lower()
-        assert req.response_event.is_set()
-        assert "req-1" not in handler._pending_requests["session-1"]
 
     @pytest.mark.asyncio
     async def test_cancel_request_not_found(self, handler):
@@ -1168,34 +888,6 @@ class TestPermissionHandler:
     # -------------------------------------------------------------------------
     # Cancel All Requests Tests
     # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_cancel_all_requests(self, handler):
-        """Should cancel all pending requests for session."""
-        req1 = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        req2 = PermissionRequest(
-            request_id="req-2",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Read",
-            tool_input={"file_path": "/test"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req1, "req-2": req2}
-
-        count = await handler.cancel_all_requests("session-1")
-
-        assert count == 2
-        assert req1.response["behavior"] == "deny"
-        assert req2.response["behavior"] == "deny"
-        assert req1.response_event.is_set()
-        assert req2.response_event.is_set()
-        assert "session-1" not in handler._pending_requests
 
     @pytest.mark.asyncio
     async def test_cancel_all_requests_empty_session(self, handler):
@@ -1339,55 +1031,6 @@ class TestEdgeCasesAndSecurity:
         # Note: fnmatch isn't ideal for security, but rules can help
         assert rule.matches("Read", {"file_path": "/home/../etc/passwd"})
 
-    def test_concurrent_requests_isolation(self, handler):
-        """Multiple sessions should be isolated."""
-        req1 = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        req2 = PermissionRequest(
-            request_id="req-1",  # Same request ID but different session
-            session_id="session-2",
-            profile_id="profile-2",
-            tool_name="Bash",
-            tool_input={"command": "ls"}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req1}
-        handler._pending_requests["session-2"] = {"req-1": req2}
-
-        # Each session should see only its own requests
-        assert handler.get_queue_count("session-1") == 1
-        assert handler.get_queue_count("session-2") == 1
-
-        pending1 = handler.get_pending_requests("session-1")
-        pending2 = handler.get_pending_requests("session-2")
-        assert len(pending1) == 1
-        assert len(pending2) == 1
-
-    @pytest.mark.asyncio
-    async def test_respond_with_updated_input(self, handler, mock_broadcast=None):
-        """Should preserve updated_input in allow response."""
-        req = PermissionRequest(
-            request_id="req-1",
-            session_id="session-1",
-            profile_id="profile-1",
-            tool_name="Bash",
-            tool_input={"command": "npm install", "timeout": 300}
-        )
-        handler._pending_requests["session-1"] = {"req-1": req}
-
-        await handler.respond(
-            request_id="req-1",
-            session_id="session-1",
-            decision="allow"
-        )
-
-        # The original tool_input should be in updatedInput
-        assert req.response["updatedInput"] == {"command": "npm install", "timeout": 300}
-
     def test_rule_none_session_and_profile(self):
         """Rule with None session and profile should work."""
         rule = PermissionRule(
@@ -1401,40 +1044,6 @@ class TestEdgeCasesAndSecurity:
 
         # Should still match based on tool_name
         assert rule.matches("Bash", {"command": "any"})
-
-    @pytest.mark.asyncio
-    async def test_concurrent_respond_calls(self, handler):
-        """Should handle concurrent respond calls safely."""
-        # Create multiple pending requests
-        for i in range(5):
-            req = PermissionRequest(
-                request_id=f"req-{i}",
-                session_id="session-1",
-                profile_id="profile-1",
-                tool_name="Bash",
-                tool_input={"command": f"cmd-{i}"}
-            )
-            if "session-1" not in handler._pending_requests:
-                handler._pending_requests["session-1"] = {}
-            handler._pending_requests["session-1"][f"req-{i}"] = req
-
-        # Respond to all concurrently
-        async def respond(req_id):
-            return await handler.respond(
-                request_id=req_id,
-                session_id="session-1",
-                decision="allow"
-            )
-
-        results = await asyncio.gather(*[respond(f"req-{i}") for i in range(5)])
-
-        # All should have resolved
-        for result in results:
-            assert result["resolved"] is True
-
-        # All requests should be removed
-        assert handler.get_queue_count("session-1") == 0
-
 
 # =============================================================================
 # Slice D — ToolPermissionContext enrichment field tests (D.5)
@@ -1513,7 +1122,9 @@ class TestEnrichmentFields:
                 )
             )
 
-            await asyncio.sleep(0.01)
+            # V2 creates the durable row via asyncio.to_thread before
+            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
+            await asyncio.sleep(0.05)
 
             # Inspect the broadcast that was fired
             assert mock_broadcast.called
@@ -1545,7 +1156,9 @@ class TestEnrichmentFields:
                 )
             )
 
-            await asyncio.sleep(0.01)
+            # V2 creates the durable row via asyncio.to_thread before
+            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
+            await asyncio.sleep(0.05)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["type"] == "permission_request"
@@ -1576,7 +1189,9 @@ class TestEnrichmentFields:
                 )
             )
 
-            await asyncio.sleep(0.01)
+            # V2 creates the durable row via asyncio.to_thread before
+            # broadcasting, so sleep(0.01) is occasionally too short (flaky).
+            await asyncio.sleep(0.05)
 
             payload = mock_broadcast.call_args[0][0]
             assert payload["title"] == "Only title set"

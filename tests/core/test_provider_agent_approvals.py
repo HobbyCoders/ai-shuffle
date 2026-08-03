@@ -16,8 +16,8 @@ The chunk's contract (plan §2 C.3, user decision 2026-07-25):
 * an ordinary, non-worker session's permission flow is UNCHANGED.
 
 Harness mirrors ``tests/core/test_interaction_placement.py``: real pg-shim DB
-(``mock_db``), ``v2_placement`` on, gateway LISTEN thread and mobile push
-patched off.
+(``mock_db``), durable placement always on (#603), gateway LISTEN thread and
+mobile push patched off.
 """
 
 import asyncio
@@ -28,7 +28,6 @@ from unittest.mock import AsyncMock
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.core import interaction_wait, provider_agent_approvals as approvals
-from app.core.config import settings
 from app.core.permission_handler import PermissionHandler
 import app.core.permission_handler as ph
 from app.db import interactions
@@ -42,11 +41,6 @@ WORKER_B = "worker-bbbb-2222"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def flag_on(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
-
 
 @pytest.fixture(autouse=True)
 def _no_gateway_listener(monkeypatch):

@@ -10,12 +10,9 @@ durable so peer installs and reconnecting clients agree the prompt is gone.
 
 Start/stop plumbing mirrors ``turn_claim`` exactly:
 
-* started flag-gated (``settings.v2_placement``) from
-  ``startup.install_v2_turns_wiring``; flag OFF ⇒ the module is never imported
-  and nothing sweeps (rows created while ON are stranded-but-inert, cleaned by a
-  later ON boot — see plan A6);
+* started from ``startup.install_v2_turns_wiring``;
 * cancelled at teardown from ``startup.shutdown_services`` via a ``sys.modules``
-  lookup, so a flag-OFF process stays import-free there too.
+  lookup.
 """
 
 from __future__ import annotations
@@ -23,8 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
-
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +36,6 @@ async def sweep_once() -> int:
     one pass must not kill the loop (correctness rides the waiters' local
     deadlines regardless).
     """
-    if not settings.v2_placement:
-        return 0
     try:
         from app.db import interactions
 
@@ -123,8 +116,8 @@ def start() -> None:
 async def stop() -> None:
     """Cancel the sweeper loop and wait for it to exit (idempotent).
 
-    No-op when the loop was never started (flag OFF, or a test process that
-    never called :func:`start`).
+    No-op when the loop was never started (e.g. a test process that never
+    called :func:`start`).
     """
     global _loop_task
     task = _loop_task

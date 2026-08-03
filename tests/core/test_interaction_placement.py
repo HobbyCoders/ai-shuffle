@@ -1,8 +1,8 @@
 """Q4 — permissions & questions on shared ``pending_interactions`` (V2 Phase 4).
 
-Under ``settings.v2_placement`` the permission-request and AskUserQuestion flows
-persist as durable ``pending_interactions`` rows so ANY install answers them
-relay-free; the executing runner blocks on the row via
+The permission-request and AskUserQuestion flows persist as durable
+``pending_interactions`` rows so ANY install answers them relay-free; the
+executing runner blocks on the row via
 ``interaction_wait.await_interaction``. These tests exercise the adapter seams on
 the real pg-shim SQLite DB (``mock_db``):
 
@@ -12,8 +12,6 @@ the real pg-shim SQLite DB (``mock_db``):
   ``_DeferSentinel``); requeue mints a FRESH pending row carrying the same FE
   request_id and drops the old answered-defer row from the derived deferred set;
 * question create/answer/cancel round-trips;
-* flag-OFF inertness: every branched method ignores the table entirely and runs
-  the legacy in-memory path;
 * the dedicated expiry sweeper (Q4-4) start/stop + expire-and-notify pass;
 * the ``await_interaction`` local-deadline fallback (belt to the sweeper) and its
   same-process wake.
@@ -31,7 +29,6 @@ from unittest.mock import AsyncMock
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.core import interaction_events, interaction_sweeper, interaction_wait
-from app.core.config import settings
 from app.core.permission_handler import PermissionHandler, _DeferSentinel
 from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions
@@ -41,11 +38,6 @@ from app.db import session_events as session_events_db
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def flag_on(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
-
 
 @pytest.fixture(autouse=True)
 def _no_gateway_listener(monkeypatch):
@@ -509,38 +501,7 @@ async def test_v2_question_respond_unknown_returns_false(mock_db):
 
 
 # ---------------------------------------------------------------------------
-# Flag-OFF inertness — the table is never consulted; legacy memory path runs.
-# ---------------------------------------------------------------------------
-
-def test_flag_off_permission_reads_ignore_table(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-    # A live table row exists, but the flag-off reader must not see it.
-    interactions.create_interaction("s1", "permission", {"request_id": "r1"}, 60)
-    h = PermissionHandler()
-    assert h.get_pending_requests("s1") == []
-    assert h.get_deferred_requests("s1") == []
-    assert h.get_queue_count("s1") == 0
-
-
-async def test_flag_off_permission_respond_uses_memory(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-    interactions.create_interaction("s1", "permission", {"request_id": "r1"}, 60)
-    h = PermissionHandler()
-    # Legacy path: no in-memory session -> "Session not found" (never the table's
-    # "Request not found"), proving the table was not consulted.
-    result = await h.respond("r1", "s1", "allow", broadcast_func=AsyncMock())
-    assert result == {"error": "Session not found"}
-
-
-def test_flag_off_question_reads_ignore_table(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-    interactions.create_interaction("s1", "question", {"request_id": "q1"}, 60)
-    h = UserQuestionHandler()
-    assert h.get_pending_questions("s1") == []
-
-
-# ---------------------------------------------------------------------------
-# Sweeper (Q4-4) — expire-and-notify pass, flag gating, start/stop.
+# Sweeper (Q4-4) — expire-and-notify pass, start/stop.
 # ---------------------------------------------------------------------------
 
 async def test_sweep_once_expires_overdue_and_notifies(mock_db, monkeypatch):
@@ -558,16 +519,6 @@ async def test_sweep_once_expires_overdue_and_notifies(mock_db, monkeypatch):
     assert set(notified) == {"s1", "s2"}
     # Live row untouched; overdue rows flipped to expired.
     assert len(interactions.get_pending_interactions("s1")) == 1
-
-
-async def test_sweep_once_flag_off_is_inert(mock_db, monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", False)
-
-    def _boom():
-        raise AssertionError("sweeper must not touch the DB with the flag off")
-
-    monkeypatch.setattr(interactions, "expire_due_interactions_detailed", _boom)
-    assert await interaction_sweeper.sweep_once() == 0
 
 
 async def test_sweeper_start_stop(mock_db):

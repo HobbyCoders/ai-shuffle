@@ -364,41 +364,40 @@ class SessionRuntime:
         tid = self.turn_id
         runner_id = settings.effective_instance_id
 
-        # 0. Placement gate (V2 Phase 4, flag ON). A session explicitly placed
-        #    on ANOTHER runner must not be executed here even if this install's
-        #    kick fired first — leave the turn queued for that runner's claim
-        #    loop. FAIL-OPEN: a resolver error must never block local execution
-        #    (the run lease below still guarantees single-runner exclusivity).
+        # 0. Placement gate (V2 Phase 4). A session explicitly placed on ANOTHER
+        #    runner must not be executed here even if this install's kick fired
+        #    first — leave the turn queued for that runner's claim loop.
+        #    FAIL-OPEN: a resolver error must never block local execution (the
+        #    run lease below still guarantees single-runner exclusivity).
         #    ``kind == "none"`` (pinned owner offline / no capable runner) also
         #    leaves the turn queued — degraded state, resolved when the owner
         #    returns or the reap sweep routes it.
         session_row: Optional[Dict[str, Any]] = None
-        if settings.v2_placement:
-            decision = None
-            try:
-                from app.core import placement as placement_mod
-                from app.db import database as database_mod
+        decision = None
+        try:
+            from app.core import placement as placement_mod
+            from app.db import database as database_mod
 
-                session_row = await asyncio.to_thread(database_mod.get_session, sid)
-                if session_row is not None:
-                    decision = placement_mod.resolve_placement(session_row)
-            except Exception:
-                logger.warning(
-                    "SessionRuntime: placement resolution failed for %s — "
-                    "failing open to local execution", sid, exc_info=True,
-                )
-            if decision is not None and decision.kind == "runner" and decision.runner_id != runner_id:
-                logger.info(
-                    "SessionRuntime: session %s is placed on %s (%s) — turn %s stays "
-                    "queued for its claim loop", sid, decision.runner_id, decision.reason, tid,
-                )
-                return None
-            if decision is not None and decision.kind == "none":
-                logger.info(
-                    "SessionRuntime: no capable runner for session %s (%s) — turn %s "
-                    "stays queued", sid, decision.reason, tid,
-                )
-                return None
+            session_row = await asyncio.to_thread(database_mod.get_session, sid)
+            if session_row is not None:
+                decision = placement_mod.resolve_placement(session_row)
+        except Exception:
+            logger.warning(
+                "SessionRuntime: placement resolution failed for %s — "
+                "failing open to local execution", sid, exc_info=True,
+            )
+        if decision is not None and decision.kind == "runner" and decision.runner_id != runner_id:
+            logger.info(
+                "SessionRuntime: session %s is placed on %s (%s) — turn %s stays "
+                "queued for its claim loop", sid, decision.runner_id, decision.reason, tid,
+            )
+            return None
+        if decision is not None and decision.kind == "none":
+            logger.info(
+                "SessionRuntime: no capable runner for session %s (%s) — turn %s "
+                "stays queued", sid, decision.reason, tid,
+            )
+            return None
 
         # 1. Claim the run lease — MANDATORY. No claim ⇒ another runner owns the
         #    session; leave the turn queued for a later kick/reap.
@@ -448,22 +447,21 @@ class SessionRuntime:
             #    placement stays NULL (the local-default, A9) and an existing
             #    runner pin is never rewritten. Best-effort: a pin failure
             #    must not kill the turn (the lease already makes us exclusive).
-            if settings.v2_placement:
-                try:
-                    await asyncio.to_thread(
-                        self._maybe_pin_placement, sid, runner_id, session_row
-                    )
-                except Exception:
-                    logger.warning(
-                        "SessionRuntime: sticky pin failed for %s", sid, exc_info=True
-                    )
+            try:
+                await asyncio.to_thread(
+                    self._maybe_pin_placement, sid, runner_id, session_row
+                )
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: sticky pin failed for %s", sid, exc_info=True
+                )
 
-                # 3b. Working-set restore (V2 Phase 4, Q6): the session's dirty
-                #     working tree may have been snapshotted to a scratch ref by
-                #     a PRIOR turn on ANOTHER runner. Bring it onto this runner's
-                #     clean checkout before the pump starts. Best-effort — a git
-                #     failure must never delay/kill the turn.
-                await self._restore_working_set(sid)
+            # 3b. Working-set restore (V2 Phase 4, Q6): the session's dirty
+            #     working tree may have been snapshotted to a scratch ref by
+            #     a PRIOR turn on ANOTHER runner. Bring it onto this runner's
+            #     clean checkout before the pump starts. Best-effort — a git
+            #     failure must never delay/kill the turn.
+            await self._restore_working_set(sid)
 
             # 4. Per-turn bookkeeping + acquire the reader token; stop any idle
             #    reader so this pump is the session's single reader.
@@ -903,11 +901,9 @@ class SessionRuntime:
 
     async def _snapshot_working_set(self, sid: str) -> None:
         """PUSH hook: snapshot this session's dirty working tree to its scratch
-        ref at turn end. Flag-gated; best-effort — a git failure must NEVER fail
-        or delay turn finalization beyond this call. Silent no-op when the
-        session has no on-disk checkout here or a ``local:`` origin."""
-        if not settings.v2_placement:
-            return
+        ref at turn end. Best-effort — a git failure must NEVER fail or delay
+        turn finalization beyond this call. Silent no-op when the session has
+        no on-disk checkout here or a ``local:`` origin."""
         try:
             from app.core import project_resolver
             from app.core.working_set import snapshot_out
@@ -935,14 +931,12 @@ class SessionRuntime:
     async def _restore_working_set(self, sid: str) -> None:
         """RESTORE hook: if a prior turn on another runner snapshotted this
         session's working set, apply it onto this runner's clean checkout and
-        surface the resulting note as a system event. Flag-gated; best-effort.
+        surface the resulting note as a system event. Best-effort.
 
         ALWAYS re-fetches the session row fresh (never trusts a row read before
         the run lease was claimed): a stale pre-claim read can MISS a snapshot
         committed between that read and the lease grant, or RE-APPLY an already-
         consumed ref value."""
-        if not settings.v2_placement:
-            return
         try:
             from app.core import project_resolver
             from app.core.working_set import restore_in

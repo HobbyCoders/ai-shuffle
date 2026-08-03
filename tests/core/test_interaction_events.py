@@ -5,9 +5,9 @@ Two layers:
 * the emitter helpers in ``app.core.interaction_events`` in isolation — event
   shape, unfenced append (``run_id=None``), backfill-before-append ordering, and
   the swallow-on-failure isolation invariant;
-* the wired handler sites (``permission_handler`` / ``user_question_handler``)
-  under ``settings.v2_placement`` — exactly-once emission gated on the guarded
-  UPDATE, and lost-race emitting nothing.
+* the wired handler sites (``permission_handler`` / ``user_question_handler``),
+  always active (durable placement permanently on, #603) — exactly-once
+  emission gated on the guarded UPDATE, and lost-race emitting nothing.
 
 Runs on the real pg-shim SQLite DB (``mock_db``). The gateway LISTEN thread and
 mobile push are patched off so the suite never spins a real listener/notifier.
@@ -19,7 +19,6 @@ import pytest
 from unittest.mock import AsyncMock
 
 from app.core import interaction_events, interaction_wait
-from app.core.config import settings
 from app.core.permission_handler import PermissionHandler
 from app.core.user_question_handler import UserQuestionHandler
 from app.db import interactions
@@ -29,11 +28,6 @@ from app.db import session_events as session_events_db
 # ---------------------------------------------------------------------------
 # Fixtures (mirror test_interaction_placement)
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def flag_on(monkeypatch):
-    monkeypatch.setattr(settings, "v2_placement", True)
-
 
 @pytest.fixture(autouse=True)
 def _no_gateway_listener(monkeypatch):

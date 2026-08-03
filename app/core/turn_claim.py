@@ -36,9 +36,7 @@ The gateway listener fires on EVERY event tick of every session — including
 each streaming delta batch — so wakes are damped by a cooldown floor: at most
 one pass per ``WAKE_COOLDOWN_SECONDS``, and both passes are tiny indexed reads.
 
-Started flag-gated (``settings.v2_placement``) from
-``startup.install_v2_turns_wiring``; flag OFF ⇒ this module is never imported
-and the legacy relay path runs untouched.
+Started from ``startup.install_v2_turns_wiring``.
 """
 
 from __future__ import annotations
@@ -98,9 +96,6 @@ async def claim_once() -> int:
     Never raises: each session is handled independently and a failure on one
     (racing deletion, resolver error) must not starve the rest.
     """
-    if not settings.v2_placement:
-        return 0
-
     me = settings.effective_instance_id
 
     # --- Interrupt-observe pass (first: reacting to a stop beats starting
