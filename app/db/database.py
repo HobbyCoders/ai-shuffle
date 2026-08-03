@@ -143,7 +143,11 @@ def _safe_json(value):
 #     PROVIDER_USAGE_CONTEXT_PLAN.md U1) holding plan-usage windows, credits and
 #     an allowlisted raw payload. Distinct from usage_snapshots (per-install/
 #     per-account Claude path). Purely additive.
-SCHEMA_VERSION = 67
+# 68 (2026-08-03): add pending_wakeups table — durable per-session wakeups
+#     (#598). ScheduleWakeup and the idle-at-edge watchdog persist their pending
+#     wake here (fire_at as unix epoch), so an app restart rehydrates and re-arms
+#     them instead of dropping the bare in-process asyncio timer. Purely additive.
+SCHEMA_VERSION = 68
 
 
 def _run_column_migrations(cursor):
@@ -806,6 +810,38 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("provider_usage_snapshots")
+
+    # pending_wakeups (v68). Durable per-session wakeups (#598): ScheduleWakeup
+    # and the idle-at-edge watchdog persist their pending wake here so an app
+    # restart rehydrates and re-arms them instead of dropping the bare in-process
+    # asyncio timer. ``fire_at`` is a unix epoch (DOUBLE PRECISION) so the
+    # rehydrate math is timezone/shim-agnostic. Idempotent so upgrades from any
+    # older version land the table without needing the SCHEMA_VERSION bump to fire
+    # the bootstrap path (same defensive pattern as the usage_snapshots block).
+    if not table_exists(cursor, "pending_wakeups"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_wakeups (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                profile_id TEXT,
+                project_id TEXT,
+                prompt TEXT NOT NULL,
+                reason TEXT,
+                source TEXT NOT NULL DEFAULT 'schedule_wakeup',
+                instance_id TEXT,
+                fire_at DOUBLE PRECISION NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("pending_wakeups")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance "
+        "ON pending_wakeups(instance_id, fire_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_wakeups_session "
+        "ON pending_wakeups(session_id)"
+    )
 
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here

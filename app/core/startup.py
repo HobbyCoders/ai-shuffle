@@ -570,6 +570,27 @@ def start_background_tasks() -> List[asyncio.Task]:
         f"(every {int(streaming_status.SWEEP_INTERVAL_SECONDS)}s)"
     )
 
+    # Durable wakeups (#598): rehydrate this install's persisted pending wakeups
+    # (ScheduleWakeup + idle-watchdog nudges dropped by the restart) and re-arm
+    # their timers. Fire-and-forget: claim-on-fire makes a double-arm harmless,
+    # so this never needs to block boot.
+    from app.core import wakeup_service
+    tasks.append(asyncio.create_task(wakeup_service.rehydrate_pending()))
+    logger.info("Durable-wakeup rehydrate scheduled")
+
+    # Idle-at-edge watchdog (#598): periodic sweep that nudges sessions sitting
+    # idle above the context-window edge so the CLI runs its deferred compaction
+    # instead of parking forever. Flag-gated (IDLE_WATCHDOG_ENABLED).
+    if settings.idle_watchdog_enabled:
+        tasks.append(asyncio.create_task(wakeup_service.watchdog_loop()))
+        logger.info(
+            "Idle-at-edge watchdog started "
+            f"(every {int(settings.idle_watchdog_interval_seconds)}s, "
+            f">= {settings.idle_watchdog_context_fraction * 100:.0f}% context)"
+        )
+    else:
+        logger.info("Idle-at-edge watchdog disabled (IDLE_WATCHDOG_ENABLED=false)")
+
     return tasks
 
 

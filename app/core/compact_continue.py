@@ -77,40 +77,22 @@ def is_abnormal_boundary_stop(final_metadata: Optional[Dict[str, Any]]) -> bool:
     return final_metadata.get("stop_reason") == _BOUNDARY_STOP_REASON
 
 
-async def context_over_threshold(session_id: str) -> Tuple[bool, Optional[int]]:
-    """Whether live context usage is at/over the autocompact threshold.
+def usage_over_threshold(usage: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
+    """Pure threshold math over a raw SDK ``get_context_usage()`` payload.
 
-    Returns ``(over, total_tokens)``. Any failure — session not pooled, SDK
-    method unavailable, the control call raising — is treated as "don't nudge"
-    and returns ``(False, None)``: we never auto-continue on a guess.
+    Returns ``(over, total_tokens)``. Shared by the live auto-continue path and
+    the idle-at-edge watchdog (which feeds it a *persisted* snapshot), so the two
+    backstops decide "at the compaction edge" identically. Never raises: a
+    missing/empty payload or absent ``totalTokens`` yields ``(False, None)``.
     """
-    try:
-        from app.core.session_pool import get_session_pool
-
-        # peek(): non-spawning, no LRU promotion. None for parked / remote / never
-        # opened sessions.
-        state = get_session_pool().peek(session_id)
-        if not state or not getattr(state, "is_connected", False):
-            return False, None
-        usage = await state.adapter.get_context_usage()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "compact-boundary: get_context_usage failed for session=%s: %s",
-            session_id, exc,
-        )
-        return False, None
-
     if not usage:
         return False, None
-
     total = usage.get("totalTokens")
     if total is None:
         return False, None
-
     # Autocompact disabled → the boundary cut cannot be a compaction deferral.
     if usage.get("isAutoCompactEnabled") is False:
         return False, total
-
     threshold = usage.get("autoCompactThreshold")
     if threshold is None:
         # No explicit threshold surfaced: fall back to maxTokens, which the SDK
@@ -118,5 +100,102 @@ async def context_over_threshold(session_id: str) -> Tuple[bool, Optional[int]]:
         threshold = usage.get("maxTokens")
     if not threshold:
         return False, total
-
     return total >= threshold, total
+
+
+def usage_fraction(usage: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Fraction of the context window in use (``totalTokens / maxTokens``).
+
+    The idle-at-edge watchdog compares this against its configured ~85% fraction.
+    Returns ``None`` when either figure is missing/zero so the caller can skip a
+    session it cannot evaluate rather than nudge on a guess.
+    """
+    if not usage:
+        return None
+    total = usage.get("totalTokens")
+    max_tokens = usage.get("maxTokens")
+    if not total or not max_tokens:
+        return None
+    try:
+        return float(total) / float(max_tokens)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _persisted_usage(session_id: str) -> Optional[Dict[str, Any]]:
+    """Unwrap the persisted ``sessions.context_usage_json`` snapshot for a session.
+
+    The stored value is wrapped ``{"captured_at": iso, "data": <raw sdk usage>}``
+    (see ``db.sessions.set_session_context_usage``); return the inner ``data``.
+    Never raises — returns ``None`` on any read/shape failure.
+    """
+    try:
+        from app.db.sessions import get_session_context_usage_snapshot
+        wrapped = get_session_context_usage_snapshot(session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "compact-boundary: reading persisted context-usage failed for "
+            "session=%s: %s", session_id, exc,
+        )
+        return None
+    if not wrapped:
+        return None
+    data = wrapped.get("data") if isinstance(wrapped, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+async def context_over_threshold(session_id: str) -> Tuple[bool, Optional[int]]:
+    """Whether context usage is at/over the autocompact threshold.
+
+    Returns ``(over, total_tokens)``. #598 hardening: the degraded-state paths
+    (session not pooled/connected, the SDK control call raising, an empty live
+    payload) no longer *silently* return ``(False, None)`` — each logs WHY and
+    then FALLS BACK to the last persisted ``context_usage_json`` snapshot before
+    declining. Those are exactly the moments the old fail-closed latch dropped a
+    stall (the state was degraded precisely because the session hit the edge), so
+    consulting the last-known usage — rather than skipping the check outright — is
+    the safe fallback. Only when neither a live nor a persisted reading exists do
+    we decline (and say so). We still never auto-continue on a pure guess.
+    """
+    live_usage: Optional[Dict[str, Any]] = None
+    fallback_reason: Optional[str] = None
+    try:
+        from app.core.session_pool import get_session_pool
+
+        # peek(): non-spawning, no LRU promotion. None for parked / remote / never
+        # opened sessions.
+        state = get_session_pool().peek(session_id)
+        if not state or not getattr(state, "is_connected", False):
+            fallback_reason = "session not pooled/connected"
+        else:
+            live_usage = await state.adapter.get_context_usage()
+            if not live_usage:
+                fallback_reason = "live get_context_usage returned empty"
+    except Exception as exc:  # noqa: BLE001
+        fallback_reason = f"get_context_usage raised ({exc})"
+
+    usage = live_usage
+    if fallback_reason is not None:
+        persisted = _persisted_usage(session_id)
+        if persisted is not None:
+            logger.info(
+                "compact-boundary: live context-usage unavailable for session=%s "
+                "(%s) — falling back to persisted snapshot",
+                session_id, fallback_reason,
+            )
+            usage = persisted
+        else:
+            logger.warning(
+                "compact-boundary: cannot verify context threshold for session=%s "
+                "(%s, and no persisted snapshot) — declining auto-continue",
+                session_id, fallback_reason,
+            )
+            return False, None
+
+    over, total = usage_over_threshold(usage)
+    if not over:
+        logger.info(
+            "compact-boundary: context under threshold for session=%s "
+            "(total=%s) — declining auto-continue", session_id, total,
+        )
+    return over, total

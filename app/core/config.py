@@ -348,6 +348,23 @@ class Settings(BaseSettings):
     # AUTO_CONTINUE_ON_COMPACT. See app.core.compact_continue.
     auto_continue_on_compact: bool = True
 
+    # Idle-at-edge watchdog (#598). Belt-and-braces backstop for the edge-of-
+    # context stall: a periodic sweep finds sessions that sit IDLE (no in-flight
+    # turn) with context usage above ``idle_watchdog_context_fraction`` of the
+    # window and, via the durable wakeup machinery, fires ONE synthetic nudge turn
+    # — a real new turn is what makes the CLI run its deferred lazy compaction.
+    # ON by default. Kill switch: IDLE_WATCHDOG_ENABLED=false.
+    idle_watchdog_enabled: bool = True
+    # Sweep cadence. Also the effective idle grace: a session must still be idle
+    # (and over the fraction) at a scan tick to be nudged.
+    idle_watchdog_interval_seconds: int = 300
+    # Context-window fraction (totalTokens / maxTokens) at/above which an idle
+    # session is treated as "at the edge". ~0.85 per the issue.
+    idle_watchdog_context_fraction: float = 0.85
+    # Per-session cooldown after a watchdog nudge, so a session whose compaction
+    # does not drop it back under the fraction is not re-nudged every tick.
+    idle_watchdog_cooldown_seconds: int = 1800
+
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks
     # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget

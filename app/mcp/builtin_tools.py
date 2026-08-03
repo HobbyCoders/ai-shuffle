@@ -324,28 +324,27 @@ def create_builtin_tools_server(
             return _err("prompt is required.")
         reason = (args.get("reason") or "").strip()
 
-        async def _wake() -> None:
-            try:
-                await asyncio.sleep(delay)
-                from app.core import account_failover
-                logger.info(f"ScheduleWakeup firing for session {session_id} after {delay}s")
-                await account_failover.execute_query_with_failover(
-                    prompt=prompt,
-                    profile_id=profile_id,
-                    project_id=project_id,
-                    session_id=session_id,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("ScheduleWakeup wake task failed")
+        # #598: persist the wake BEFORE arming its timer so an app restart
+        # rehydrates and re-arms it (the old bare in-process asyncio.sleep task
+        # was dropped on restart). wakeup_service owns the claim-on-fire + boot
+        # rehydration; the actual wake still re-fires through
+        # execute_query_with_failover (a genuine CLI-owned new turn).
+        from app.core import wakeup_service
 
-        asyncio.create_task(_wake(), name=f"wakeup-{session_id}")
-        fire_at = datetime.now(timezone.utc).timestamp() + delay
+        row = await wakeup_service.schedule(
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            prompt=prompt,
+            delay_seconds=delay,
+            reason=reason or None,
+            source="schedule_wakeup",
+        )
         return _ok({
             "scheduled": True,
             "delay_seconds": delay,
-            "fire_at_unix": fire_at,
+            "fire_at_unix": row.get("fire_at"),
+            "wakeup_id": row.get("id"),
             "reason": reason,
         })
 

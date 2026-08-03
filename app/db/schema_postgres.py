@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 67
+SCHEMA_VERSION = 68
 
 
 def create_postgres_schema(cursor) -> None:
@@ -793,6 +793,36 @@ def create_postgres_schema(cursor) -> None:
             fetched_at BIGINT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36e. Pending wakeups (v68, #598). Durable per-session wakeups so an app
+    #      restart rehydrates and re-arms them instead of dropping the bare
+    #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
+    #      both persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
+    #      the rehydrate math is timezone/shim-agnostic.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_wakeups (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            profile_id TEXT,
+            project_id TEXT,
+            prompt TEXT NOT NULL,
+            reason TEXT,
+            source TEXT NOT NULL DEFAULT 'schedule_wakeup',
+            instance_id TEXT,
+            fire_at DOUBLE PRECISION NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance
+        ON pending_wakeups(instance_id, fire_at)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_wakeups_session
+        ON pending_wakeups(session_id)
     """)
 
     # ------------------------------------------------------------------

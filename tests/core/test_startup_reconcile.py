@@ -338,7 +338,10 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 67 for the provider_usage_snapshots table (PROVIDER_USAGE_CONTEXT
+    # Bumped to 68 for the pending_wakeups table (#598 — durable per-session
+    # wakeups so ScheduleWakeup / idle-at-edge watchdog nudges survive an app
+    # restart instead of dropping the bare in-process asyncio timer). v67 added
+    # the provider_usage_snapshots table (PROVIDER_USAGE_CONTEXT
     # _PLAN.md U1 — one row per non-Claude provider holding plan-usage windows,
     # credits and an allowlisted raw payload; additive, distinct from the
     # per-install usage_snapshots Claude path). v66 added the per-session provider
@@ -358,8 +361,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 67
-    assert pg_version == 67
+    assert db_version == 68
+    assert pg_version == 68
     assert db_version == pg_version
 
 
