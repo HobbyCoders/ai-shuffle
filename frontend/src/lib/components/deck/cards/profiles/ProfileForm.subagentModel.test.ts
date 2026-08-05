@@ -38,10 +38,17 @@ vi.mock('$lib/api/computerUse', () => ({
 import ProfileForm from './ProfileForm.svelte';
 import { hydrateModelRegistry } from '$lib/constants/models';
 
-const PROVIDER_ID = 'or';
+// The subagent picker is `servableOnly` (#789): it offers ONLY providers the
+// translator gateway can serve — provider_type openai / chatgpt / anthropic,
+// mirroring `is_gateway_servable` in app/core/environment.py. So the provider
+// carrying the pickable models must be a servable type; a second, NON-servable
+// provider pins the exclusion.
+const PROVIDER_ID = 'oai';
 const COLON_MODEL = 'meta-llama/llama-3.1:free'; // id containing a colon
 const COLON_MODEL_LABEL = 'Llama 3.1 Free';
 const PLAIN_MODEL = 'openai/gpt-5.6';
+const UNSERVABLE_PROVIDER_ID = 'or';
+const UNSERVABLE_MODEL_LABEL = 'Qwen Coder';
 
 beforeAll(async () => {
 	mocks.apiGet.mockResolvedValue({
@@ -51,13 +58,20 @@ beforeAll(async () => {
 		providers: [
 			{
 				id: PROVIDER_ID,
-				name: 'OpenRouter',
-				provider_type: 'openrouter',
+				name: 'OpenAI Compatible',
+				provider_type: 'openai',
 				models: [
 					{ id: COLON_MODEL, label: COLON_MODEL_LABEL },
 					{ id: PLAIN_MODEL, label: 'GPT-5.6' }
 				],
 				default_model: PLAIN_MODEL
+			},
+			{
+				id: UNSERVABLE_PROVIDER_ID,
+				name: 'OpenRouter',
+				provider_type: 'openrouter',
+				models: [{ id: 'qwen/qwen-coder', label: UNSERVABLE_MODEL_LABEL }],
+				default_model: 'qwen/qwen-coder'
 			}
 		]
 	});
@@ -214,6 +228,17 @@ describe('ProfileForm — subagent picker selection', () => {
 		expect(panel.textContent).not.toContain('Custom…');
 		// Native Claude models are suppressed too.
 		expect(panel.textContent).not.toContain('Sonnet');
+	});
+
+	it('excludes non-gateway-servable providers (#789 servableOnly gate)', async () => {
+		const { container } = renderForm({ provider: PROVIDER_ID, model: PLAIN_MODEL });
+		await fireEvent.click(triggers(container)[1]);
+		const panel = container.querySelector('.mpk-panel')!;
+		// The servable (openai-type) provider's models are offered…
+		expect(panel.textContent).toContain(COLON_MODEL_LABEL);
+		// …but the openrouter-type provider is filtered out: the gateway can't
+		// serve it, so a subagent leg pointing there could never route.
+		expect(panel.textContent).not.toContain(UNSERVABLE_MODEL_LABEL);
 	});
 });
 
