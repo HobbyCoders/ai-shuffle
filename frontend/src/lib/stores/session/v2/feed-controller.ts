@@ -245,6 +245,16 @@ export interface FeedController {
 	attach: (d: FeedControllerDeps) => void;
 	/** Begin feeding a v2 session: full replay from_seq=0, then live tail. */
 	start: (sessionId: string) => void;
+	/**
+	 * Nudge a possibly-half-open feed: abort the reader and reconnect at the
+	 * cursor (from_seq=lastSeq). Unlike start(), this keeps the reducer state —
+	 * no teardown, no full re-backfill, no transcript repaint (#637) — and the
+	 * resume is gap/duplicate-free (server filter is `seq > from_seq`). Call it
+	 * when an out-of-band signal says the network just changed (e.g. the chat WS
+	 * reconnected) while isFeeding() is true. No-op unless feeding (optionally:
+	 * this specific session).
+	 */
+	revive: (sessionId?: string) => void;
 	/** Abort the feed and reset. */
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
@@ -347,6 +357,12 @@ export const feedController: FeedController = {
 		// Immediate fold so the switch-in clears any transient loading state even
 		// before the first frame lands.
 		fold();
+	},
+
+	revive(sessionId?: string) {
+		if (feed === null || currentSessionId === null) return;
+		if (sessionId !== undefined && sessionId !== currentSessionId) return;
+		feed.revive();
 	},
 
 	stop() {

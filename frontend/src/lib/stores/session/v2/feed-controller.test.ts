@@ -30,6 +30,7 @@ const hoisted = vi.hoisted(() => ({
 	onEvent: null as ((e: Record<string, unknown>) => void) | null,
 	onOpen: null as (() => void) | null,
 	stops: 0,
+	revives: 0,
 }));
 
 vi.mock('./sse-feed', () => ({
@@ -45,6 +46,9 @@ vi.mock('./sse-feed', () => ({
 			},
 			get lastSeq() {
 				return 0;
+			},
+			revive() {
+				hoisted.revives++;
 			},
 			stop() {
 				hoisted.stops++;
@@ -158,6 +162,7 @@ beforeEach(() => {
 	hoisted.onEvent = null;
 	hoisted.onOpen = null;
 	hoisted.stops = 0;
+	hoisted.revives = 0;
 	rafQueue = [];
 	rafId = 0;
 	// Install fake timers FIRST — vitest's fake timers also replace
@@ -452,5 +457,48 @@ describe('feedController optimistic seeding (worktree double-load fix)', () => {
 		const msgs = deps.state.messages as Array<{ id: string; role: string }>;
 		expect(msgs.some((m) => m.id === 'opt-1')).toBe(true);
 		expect(deps.state.isStreaming).toBe(true);
+	});
+});
+
+// ─── revive() — heal a possibly-half-open feed on an out-of-band signal ──────
+// (WS reconnect → active-session onConnected calls revive when already feeding;
+// unlike start() it must NOT reset the reducer or stop the feed.)
+
+describe('feedController revive (half-open feed healing)', () => {
+	it('delegates to the feed when feeding the given session, without stopping it', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		const stopsAfterStart = hoisted.stops;
+
+		feedController.revive('s1');
+		expect(hoisted.revives).toBe(1);
+		// No teardown: reviving must not stop the feed (that would reset the
+		// reducer and cause the #637 repaint start() was guarded against).
+		expect(hoisted.stops).toBe(stopsAfterStart);
+		expect(feedController.isFeeding('s1')).toBe(true);
+	});
+
+	it('is a no-op for a session other than the one being fed', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		feedController.revive('s2');
+		expect(hoisted.revives).toBe(0);
+	});
+
+	it('is a no-op when nothing is feeding', () => {
+		feedController.revive('s1');
+		expect(hoisted.revives).toBe(0);
+	});
+
+	it('with no session argument revives whatever is being fed', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+
+		feedController.revive();
+		expect(hoisted.revives).toBe(1);
 	});
 });

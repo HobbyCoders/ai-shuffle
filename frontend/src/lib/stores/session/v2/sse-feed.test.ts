@@ -295,3 +295,76 @@ describe('createSseFeed revive listeners', () => {
 		expect(urls).toHaveLength(afterStop);
 	});
 });
+
+// ─── revive() — explicit half-open heal on an out-of-band signal ─────────────
+// The idle watchdog (see sse-feed-idle-watchdog.test.ts) heals a silent stream
+// after 45s on its own; revive() lets a consumer with an out-of-band network
+// signal (the chat WS just reconnected) heal it immediately instead.
+
+describe('createSseFeed revive()', () => {
+	// Emit the given chunks then park (never close) — a half-open live tail.
+	function streamThenPending(chunks: string[]): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		let i = 0;
+		return new ReadableStream({
+			pull(controller) {
+				if (i < chunks.length) {
+					controller.enqueue(enc.encode(chunks[i++]));
+					return;
+				}
+				return new Promise<void>(() => {});
+			},
+		});
+	}
+
+	const tick = async (n = 30) => {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	};
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	function setupParked() {
+		const urls: string[] = [];
+		const fetchMock = vi.fn(async (url: string) => {
+			urls.push(url);
+			return {
+				ok: true,
+				status: 200,
+				body:
+					urls.length === 1
+						? streamThenPending(['id: 1\ndata: {"seq":1}\n\n', 'id: 2\ndata: {"seq":2}\n\n'])
+						: streamThenPending([]),
+			};
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		return { urls };
+	}
+
+	it('aborts the parked reader and reconnects at from_seq=lastSeq', async () => {
+		const { urls } = setupParked();
+		const feed = createSseFeed('sess-1', { onEvent: () => {} });
+		await tick();
+		expect(urls).toHaveLength(1);
+		expect(feed.lastSeq).toBe(2);
+
+		feed.revive();
+		await tick();
+
+		expect(urls).toHaveLength(2);
+		expect(urls[1]).toContain('from_seq=2');
+		feed.stop();
+	});
+
+	it('is a no-op after stop()', async () => {
+		const { urls } = setupParked();
+		const feed = createSseFeed('sess-1', { onEvent: () => {} });
+		await tick();
+		feed.stop();
+
+		feed.revive();
+		await tick();
+		expect(urls).toHaveLength(1);
+	});
+});

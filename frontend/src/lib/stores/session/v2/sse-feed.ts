@@ -13,6 +13,14 @@
  * is gap-free and duplicate-free). Resubscribes on `visibilitychange`/`online`/`pageshow`
  * (BFCache restore), mirroring ws-connection.ts's revive behavior. `stop()` aborts cleanly.
  *
+ * Half-open detection: a dead TCP path doesn't error the fetch reader — it just
+ * parks `reader.read()` forever, so backoff/reconnect never triggers. The server
+ * guarantees wire activity at least every 15s (`: keepalive` comments on the live
+ * tail — app/api/events.py::KEEPALIVE_SECONDS), so the idle watchdog treats 45s
+ * of wire silence as half-open and force-reconnects at the cursor. Consumers can
+ * also `revive()` explicitly when an out-of-band signal says the network just
+ * changed (e.g. the chat WS reconnected).
+ *
  * No new npm deps: uses `fetch` + `ReadableStream` + `TextDecoder`.
  */
 
@@ -37,6 +45,14 @@ export interface SseFeed {
 	readonly running: boolean;
 	/** Highest frame `id:` (seq) seen so far. */
 	readonly lastSeq: number;
+	/**
+	 * Abort a possibly-half-open reader and reconnect immediately at the cursor
+	 * (`from_seq=lastSeq` — gap-free and duplicate-free). Same operation the
+	 * visibility/online/pageshow listeners run; exposed so a consumer with an
+	 * out-of-band network signal (e.g. a WS reconnect) can heal the stream
+	 * without waiting on the stall watchdog. No-op after stop().
+	 */
+	revive: () => void;
 	/** Abort the stream and tear down revive listeners. Idempotent. */
 	stop: () => void;
 }
@@ -350,6 +366,9 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		},
 		get lastSeq() {
 			return lastSeq;
+		},
+		revive() {
+			reviveNow();
 		},
 		stop() {
 			if (!running) return;

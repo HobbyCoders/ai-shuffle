@@ -10,6 +10,18 @@ from fastapi.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on any single outbound WebSocket send. A half-open connection
+# (client vanished uncleanly — wifi switch, phone lock, NAT timeout) never
+# raises: frames just buffer in the kernel until the socket send buffer fills,
+# then the await blocks INDEFINITELY (uvicorn's protocol-level pings are
+# disabled in main.py, so the dead peer is never detected). An unbounded send
+# in the turn pump's broadcast leg freezes the pump — and with it the
+# TurnRecorder, so the session event log stalls and the transcript goes stale
+# for EVERY device (even a hard refresh backfills only the pre-stall events)
+# until TCP finally gives up on the zombie socket. Bounding the send converts
+# that hang into the normal dead-connection error path within seconds.
+WS_SEND_TIMEOUT_SECONDS = 10.0
+
 
 class WSPayloadEncodeError(Exception):
     """Raised when a WebSocket payload cannot be JSON-encoded.
@@ -32,6 +44,10 @@ async def safe_ws_send(websocket: WebSocket, data: dict) -> None:
         WSPayloadEncodeError: if the payload still can't be encoded (a real
             bug in the message). The caller should drop the message but treat
             the connection as healthy.
+        asyncio.TimeoutError: the send did not complete within
+            ``WS_SEND_TIMEOUT_SECONDS`` — a half-open socket whose send buffer
+            is full. Treat exactly like any transport failure: the connection
+            is dead.
         Exception: any transport-level send failure is propagated unchanged so
             the caller can mark the connection dead.
     """
@@ -39,7 +55,7 @@ async def safe_ws_send(websocket: WebSocket, data: dict) -> None:
         text = json.dumps(data, separators=(",", ":"), default=str)
     except (TypeError, ValueError) as e:
         raise WSPayloadEncodeError(str(e)) from e
-    await websocket.send_text(text)
+    await asyncio.wait_for(websocket.send_text(text), WS_SEND_TIMEOUT_SECONDS)
 
 
 async def ping_loop(

@@ -22,7 +22,7 @@ AI Shuffle puts Claude Code in a browser. Instead of a terminal, you get a full 
 Real-time streaming with WebSocket, rich text input (TipTap editor), `@file` autocomplete, drag-and-drop file upload, inline thinking blocks, tool use visualization, voice input (STT), and a permission queue that surfaces Claude's approval requests as interactive prompts.
 
 ### Profiles
-Create specialized AI configurations with custom system prompts, model selection (Haiku / Sonnet / Opus), thinking modes, permission modes, tool allowlists, and per-profile subagent and plugin controls. Generate profiles from natural language descriptions.
+Create specialized AI configurations with custom system prompts, model selection from a built-in model registry (Anthropic's Claude models by default; admins can also add OpenRouter, custom Anthropic-compatible gateways, or a Codex / ChatGPT-subscription provider), thinking modes, permission modes, tool allowlists, and per-profile subagent and plugin controls. Generate profiles from natural language descriptions.
 
 ### Sessions
 Multi-tab persistent sessions with full history. Fork conversations at any point, rewind to prior states, tag, favorite, search, group, and import/export. Token usage and cost tracking per session.
@@ -46,7 +46,7 @@ Execute custom code at lifecycle events: `PreToolUse`, `PostToolUse`, `Stop`, `S
 Specialized AI agents Claude can invoke mid-conversation. Create custom subagents with model selection and tool restrictions. Autocomplete via `/agent-name` in chat.
 
 ### MCP Servers (Model Context Protocol)
-Manage stdio, SSE, and HTTP MCP servers across four scopes (user, local, project, installed). Built-in browser automation MCP server included.
+Manage stdio, SSE, and HTTP MCP servers across four scopes (user, local, project, installed). A built-in `browser` MCP server (Playwright over CDP) is bundled for web automation — see [Browser Automation](#browser-automation).
 
 ### Projects & Git
 Full project management with file browser, git status/diff, branch management, commit (with AI-generated messages), push, pull request creation, GitHub CI status, and worktree support.
@@ -99,66 +99,70 @@ Open `http://localhost:8000`. You'll be guided through account setup and Claude 
 ### Docker
 
 ```bash
-docker pull ghcr.io/hobbycoders/ai-shuffle:latest
+# Configure secrets first — compose fails fast if POSTGRES_PASSWORD is unset
+cp .env.example .env
+# edit .env: set POSTGRES_PASSWORD (and ADMIN_PASSWORD)
 
-# Or use docker-compose
+# Bring up the app together with its bundled PostgreSQL
 docker compose up -d
-
 ```
+
+The compose stack provisions PostgreSQL for you (`postgres:16-alpine`); the app
+waits for the database to be healthy before starting. Open `http://localhost:8000`
+and you'll be guided through account setup and Claude authentication on first launch.
 
 **Key environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
-| `ADMIN_PASSWORD` | — | Headless encryption key init |
-| `PUID` / `PGID` | `1000` | Runtime user/group for file permissions |
-| `AUTO_UPDATE` | `true` | Auto-update Claude CLI on startup |
+| `POSTGRES_PASSWORD` | — | **Required.** Password for the bundled PostgreSQL service — compose fails fast if unset |
+| `DATABASE_URL` | — | **Required.** PostgreSQL connection string the app connects with (compose wires this to the `postgres` service automatically) |
+| `ADMIN_PASSWORD` | — | Master secret; the at-rest encryption key for stored credentials is derived from it (PBKDF2) |
+| `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
+| `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
-| `START_CHROME` | `1` | Launch headless Chrome for Claude in Chrome (`0` to disable) |
-| `CHROME_CDP` | `1` | Bind Chrome's DevTools port to `127.0.0.1` so the in-app **Set up browser** panel works (`0` to disable) |
-| `CHROME_DEBUG` | `0` | Legacy: also expose DevTools on `:9222` over the network (not needed — the in-app panel replaces it) |
-| `CHROME_MAX_RESTARTS` | `8` | Circuit breaker: after this many *rapid* Chrome crash-restarts the supervisor gives up and disables Claude in Chrome for the container's lifetime (protects the PID budget). `0` = retry forever |
-| `CHROME_HEALTHY_SECS` | `60` | A Chrome that stays up at least this long counts as healthy and resets the crash counter/backoff |
-| `CHROME_BACKOFF_MAX` | `300` | Cap (seconds) on the exponential backoff between rapid Chrome restarts |
+| `START_CHROME` | `1` | Launch & supervise the headless browser the built-in `browser` MCP server drives (`0` to disable) |
+| `CHROME_CDP_PORT` | `9221` | Loopback DevTools (CDP) port the browser listens on and the tools attach to |
+| `CHROME_EXECUTABLE` | auto | Path to the Chrome / Chromium / Edge binary (auto-detected; set if yours is elsewhere) |
+| `BROWSER_MCP_ENTRY` | packaged | Override the browser-mcp entry point (defaults to the packaged Docker path, else `<repo>/browser-mcp/dist/index.js`) |
+| `CHROME_MAX_RESTARTS` | `8` | Circuit breaker: after this many *rapid* crash-restarts the supervisor stops relaunching the browser for the container's lifetime (protects the PID budget). `0` = retry forever |
+| `CHROME_HEALTHY_SECS` | `60` | A browser that stays up at least this long counts as healthy and resets the crash counter/backoff |
+| `CHROME_BACKOFF_MAX` | `300` | Cap (seconds) on the exponential backoff between rapid restarts |
 
-### Claude in Chrome (Docker)
+### Browser Automation
 
-The image bundles **Google Chrome** and force-installs the Claude in Chrome
-extension so agent sessions can drive a real browser (`mcp__claude-in-chrome__*`).
-Chrome starts automatically (headless, as the app user) when the container boots.
-The extension needs a **one-time sign-in + pairing** because the browser is
-headless — do it from the app, no exposed ports required:
+AI Shuffle ships its own **browser MCP server** — `browser-mcp`, a
+provider-agnostic, token-conservative server built on Playwright over CDP — so
+agent sessions can drive a real browser through `mcp__browser__*` tools (navigate,
+snapshot, click/type, screenshot, find, read-text, eval, tabs, network, and more).
+There's **no browser extension, no separate account, and no pairing** — it just
+works once enabled.
 
-1. Sign in to AI Shuffle as **admin** and open **Settings → Browser**.
-2. The panel shows a live status checklist (Chrome running, DevTools port,
-   extension installed, paired). Make sure **Enable browser tools** is on, then
-   click **Set up browser**.
-3. An interactive view of the headless browser opens. Click **Extension sign-in**
-   (or use the URL bar to go to `https://claude.ai`) and **sign in** to your
-   Claude account, then **Authorize** the extension on the consent page.
-4. If a pairing prompt appears, name the browser and **Connect**. The panel flips
-   to **Paired ✓** automatically — you can close it.
+- **Docker:** the image bundles Chromium and supervises it automatically
+  (headless, as the app user) over a loopback DevTools port (`CHROME_CDP_PORT`,
+  default `9221`). A per-session MCP server attaches to it.
+- **Native installs:** the backend auto-launches and supervises a local
+  Chrome / Chromium / Edge the same way. Point `CHROME_EXECUTABLE` at your binary
+  if it isn't auto-detected, or set `START_CHROME=0` to run your own on the CDP port.
 
-That's it. The profile (extension, sign-in, pairing) persists in the
-`browser-profile` volume and the pairing in `~/.claude.json` (on the `claude-auth`
-volume), so the browser **auto-reconnects on later restarts** without prompting.
+Enable it under **Settings → Browser** (admin): a single toggle turns the tools on
+or off and a health dot shows whether the browser is reachable. The browser profile
+persists in the `browser-profile` volume, so logins survive restarts.
 
 > 🔒 The DevTools port is bound to `127.0.0.1` only and is never published to the
-> network; the **Set up browser** panel reaches it through an authenticated,
-> admin-only proxy behind the normal app login. You do **not** need `CHROME_DEBUG`
-> or a `9222` port mapping. Diagnose the chain from the panel, or with
-> `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
->
-> Like local mode, the agent drives a real browser with **no egress filtering**
+> network. The agent drives a real browser with **no egress filtering**
 > (SSRF / local-network reach) — isolate the container if you run untrusted prompts.
+> Diagnose the browser from the Settings panel, or with
+> `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
 
 ---
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **Node.js 18+** — For building the frontend
+- **Node.js 20+** — For building the frontend and the bundled `browser-mcp` server
+- **PostgreSQL** — The database backend (provisioned automatically by Docker Compose)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
 ---
@@ -168,10 +172,10 @@ volume), so the browser **auto-reconnects on later restarts** without prompting.
 | Layer | Technology |
 |---|---|
 | **Frontend** | SvelteKit · Svelte 5 · Tailwind CSS · TipTap |
-| **Backend** | FastAPI · WebSockets · SQLite |
-| **AI Engine** | Claude Agent SDK (Python) |
+| **Backend** | FastAPI · WebSockets · PostgreSQL |
+| **AI Engine** | Claude Agent SDK (Python) · pluggable model providers |
 | **Media** | fal.ai (image, video, 3D, audio) |
-| **Browser** | Claude in Chrome (`--chrome`, via the Claude in Chrome extension) |
+| **Browser** | `browser-mcp` — bundled Playwright-over-CDP MCP server driving a headless Chrome / Chromium |
 | **CI/CD** | GitHub Actions |
 
 ---
@@ -182,6 +186,7 @@ volume), so the browser **auto-reconnects on later restarts** without prompting.
 ai-shuffle/
 ├── app/               # FastAPI backend (API, WebSocket, DB, services)
 ├── frontend/          # SvelteKit frontend (Svelte 5, Tailwind)
+├── browser-mcp/       # Bundled browser-control MCP server (Playwright/CDP)
 ├── tools/             # AI tool scripts (fal.ai integrations)
 ├── docs/              # Technology documentation
 ├── tests/             # Backend test suite

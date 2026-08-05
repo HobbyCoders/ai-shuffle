@@ -429,6 +429,16 @@ const wsConn: WsConnection = createWsConnection({
 			// / start call sites in ws-message-handlers.ts.
 			if (!feedController.isFeeding(sessionId)) {
 				feedController.start(sessionId);
+			} else {
+				// Already feeding — but a WS reconnect means the network just
+				// hiccuped, and the SSE stream may have died the same death WITHOUT
+				// erroring: a half-open socket parks reader.read() forever, and
+				// isFeeding() only says a feed OBJECT exists, not that its stream is
+				// alive. Left alone, the transcript freezes while work continues
+				// server-side. revive() aborts the reader and resumes at
+				// from_seq=lastSeq — no reducer reset, no repaint (unlike the
+				// unconditional restart removed in #640), gap- and duplicate-free.
+				feedController.revive(sessionId);
 			}
 			if (_state.isRestoringSession) {
 				_update(s => (s.sessionId === sessionId ? { ...s, isRestoringSession: false } : s));

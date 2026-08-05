@@ -349,7 +349,39 @@ class ChatWebSocketHandler:
                     f"WebSocket send failed [seq={self._ws_seq}, type={msg_type}, "
                     f"device={self.device_id}, total_drops={self._ws_drops}]: {e}"
                 )
+                # A send timeout means the socket is half-open (dead peer, full
+                # buffer) — starlette still reports it CONNECTED, so the receive
+                # loop would idle on this zombie forever and its finally-cleanup
+                # (device deregistration) would never run. Force-close in the
+                # background to release the transport and unblock receive_json.
+                self._force_close_dead_socket()
                 return False
+
+    def _force_close_dead_socket(self) -> None:
+        """Best-effort background close of a connection marked dead.
+
+        Fire-and-forget: close() itself can block on the same dead transport,
+        so it gets its own timeout and every failure is swallowed — by this
+        point the connection is already excluded from sends via
+        connection_healthy, this just accelerates resource cleanup.
+        """
+        ws = self.websocket
+        if ws is None:
+            return
+
+        async def _close() -> None:
+            try:
+                await asyncio.wait_for(ws.close(code=1011), timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            task = asyncio.get_running_loop().create_task(_close())
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+        except RuntimeError:
+            pass  # no running loop (teardown) — nothing to accelerate
 
     # ------------------------------------------------------------------
     # run — main connection loop
@@ -410,6 +442,12 @@ class ChatWebSocketHandler:
 
                     except asyncio.TimeoutError:
                         if self.websocket.client_state != WebSocketState.CONNECTED:
+                            break
+                        # A half-open socket stays CONNECTED forever in
+                        # starlette's view; a send timeout is what actually
+                        # detects the death. Exit so the finally-cleanup
+                        # deregisters this device instead of idling as a zombie.
+                        if not self.connection_healthy:
                             break
                         continue
 

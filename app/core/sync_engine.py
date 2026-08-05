@@ -15,6 +15,14 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on any single outbound send. A half-open connection (client
+# vanished uncleanly) never raises — the send just blocks forever once the
+# socket buffer fills, and one dead device would then stall broadcast_event's
+# sequential fan-out (which the turn pump awaits, freezing event recording for
+# every device). Mirrors app.api.ws_utils.WS_SEND_TIMEOUT_SECONDS; duplicated
+# locally because core must not import the api layer.
+_SEND_TIMEOUT_SECONDS = 10.0
+
 
 @dataclass
 class SyncEvent:
@@ -45,9 +53,16 @@ class DeviceConnection:
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def send_event(self, event: SyncEvent) -> bool:
-        """Send an event to this device. Returns False if send failed."""
+        """Send an event to this device. Returns False if send failed.
+
+        Bounded: a send that can't complete within _SEND_TIMEOUT_SECONDS (a
+        half-open socket with a full buffer) counts as a failure instead of
+        blocking the caller indefinitely.
+        """
         try:
-            await self.websocket.send_json(event.to_dict())
+            await asyncio.wait_for(
+                self.websocket.send_json(event.to_dict()), _SEND_TIMEOUT_SECONDS
+            )
             self.last_activity = datetime.now(timezone.utc)
             return True
         except Exception as e:
@@ -65,9 +80,14 @@ class UserDeviceConnection:
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def send_json(self, data: Dict[str, Any]) -> bool:
-        """Send JSON data to this device. Returns False if send failed."""
+        """Send JSON data to this device. Returns False if send failed.
+
+        Bounded: a send that can't complete within _SEND_TIMEOUT_SECONDS (a
+        half-open socket with a full buffer) counts as a failure instead of
+        blocking the caller indefinitely.
+        """
         try:
-            await self.websocket.send_json(data)
+            await asyncio.wait_for(self.websocket.send_json(data), _SEND_TIMEOUT_SECONDS)
             self.last_activity = datetime.now(timezone.utc)
             return True
         except Exception as e:
@@ -319,7 +339,12 @@ class SyncEngine:
 
             logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
             try:
-                await conn.websocket.send_text(event_text)
+                # Bounded: this fan-out runs inside the turn pump's broadcast
+                # leg — ONE half-open device must not stall event recording
+                # (and therefore the transcript) for everyone else.
+                await asyncio.wait_for(
+                    conn.websocket.send_text(event_text), _SEND_TIMEOUT_SECONDS
+                )
                 conn.last_activity = datetime.now(timezone.utc)
             except Exception as e:
                 logger.warning(f"Failed to send event to device {conn.device_id}: {e}")
