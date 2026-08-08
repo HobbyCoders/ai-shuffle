@@ -336,9 +336,14 @@ def _transform_sdk_messages(sdk_messages: list) -> list:
 # Access control helpers
 # ---------------------------------------------------------------------------
 
-def check_session_access(request: Request, session: dict) -> None:
-    """Check if API user has access to a session based on project/profile restrictions."""
-    api_user = get_api_user_from_request(request)
+def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
+    """Enforce an API user's project/profile access to a session.
+
+    Pure helper (no Request): ``api_user`` is None for admins (full access).
+    Raises HTTPException(403) when a restricted API user is denied. Extracted
+    from :func:`check_session_access` so non-HTTP callers (e.g. the browser
+    panel WebSocket) can reuse the exact same rule.
+    """
     if not api_user:
         return  # Admin has full access
 
@@ -357,6 +362,11 @@ def check_session_access(request: Request, session: dict) -> None:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this session"
             )
+
+
+def check_session_access(request: Request, session: dict) -> None:
+    """Check if API user has access to a session based on project/profile restrictions."""
+    check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 
 async def require_session(request: Request, session_id: str) -> dict:

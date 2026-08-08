@@ -42,9 +42,15 @@ _BROWSER_ENV_KEYS = (
 # full_env (Docker sets these on the container, not per-session).
 _BROWSER_ENV_OS_FALLBACK_KEYS = ("CHROME_CDP_PORT", "BROWSER_MCP_ENTRY", "BROWSER_UPLOAD_DIR")
 
+# Process-env override for the loopback panel-register URL (same fallback shape
+# as _BROWSER_ENV_OS_FALLBACK_KEYS: an operator may point the spawned server at
+# a non-default host/port when the backend is not on 127.0.0.1:{settings.port}).
+_BROWSER_PANEL_REGISTER_URL_OS_KEY = "BROWSER_PANEL_REGISTER_URL"
+
 
 def _build_browser_server_env(
     tool_env: Optional[Dict[str, str]],
+    session_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Build the curated env subset for the spawned ``browser`` MCP server.
@@ -53,6 +59,12 @@ def _build_browser_server_env(
     falling back to the process environment for the container-level knobs
     (``CHROME_CDP_PORT``/``BROWSER_MCP_ENTRY``). Only non-empty values are
     included so we never inject blank overrides.
+
+    When ``session_id`` is provided, also inject the live-panel wiring so the
+    spawned server can publish its current CDP target back to the backend:
+    ``AIS_SESSION_ID``, ``AIS_PANEL_TOKEN`` (idempotent per session) and
+    ``AIS_PANEL_REGISTER_URL`` (loopback register endpoint, overridable via the
+    ``BROWSER_PANEL_REGISTER_URL`` process env).
     """
     src = tool_env or {}
     env: Dict[str, str] = {}
@@ -62,12 +74,26 @@ def _build_browser_server_env(
             value = os.environ.get(key)
         if value:
             env[key] = value
+
+    if session_id:
+        from app.core import browser_panel_registry
+
+        env["AIS_SESSION_ID"] = session_id
+        env["AIS_PANEL_TOKEN"] = browser_panel_registry.issue_token(session_id)
+        register_url = os.environ.get(_BROWSER_PANEL_REGISTER_URL_OS_KEY)
+        if not register_url:
+            register_url = (
+                f"http://127.0.0.1:{settings.port}/api/v1/browser/panel/register"
+            )
+        env["AIS_PANEL_REGISTER_URL"] = register_url
+
     return env
 
 
 def _build_mcp_servers_dict(
     project_dir: Optional[Path] = None,
     tool_env: Optional[Dict[str, str]] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
@@ -121,7 +147,9 @@ def _build_mcp_servers_dict(
                 # for the spawned ``browser`` built-in (ANTHROPIC_* + CDP port).
                 merged_env: dict = dict(server.env) if server.env else {}
                 if server.name == BROWSER_SERVER_NAME:
-                    merged_env.update(_build_browser_server_env(tool_env))
+                    merged_env.update(
+                        _build_browser_server_env(tool_env, session_id=session_id)
+                    )
                 if merged_env:
                     config["env"] = merged_env
                 mcp_servers[server.name] = config
@@ -152,6 +180,7 @@ def _build_mcp_servers_dict_with_ai_tools(
     project_dir: Optional[Path] = None,
     ai_tools_config: Optional[Dict[str, Any]] = None,
     tool_env: Optional[Dict[str, str]] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Build MCP servers dict including AI content generation tools.
@@ -172,6 +201,7 @@ def _build_mcp_servers_dict_with_ai_tools(
     mcp_servers = _build_mcp_servers_dict(
         project_dir=project_dir,
         tool_env=tool_env,
+        session_id=session_id,
     ) or {}
 
     # Add AI tools SDK MCP server if any AI tools are enabled
