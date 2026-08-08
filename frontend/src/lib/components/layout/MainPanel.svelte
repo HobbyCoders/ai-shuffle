@@ -36,7 +36,9 @@
 	import { isApiError } from '$lib/api/client';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
-	import { Download } from 'lucide-svelte';
+	import { Download, PanelRight } from 'lucide-svelte';
+	import BrowserPanel from '$lib/components/browser/BrowserPanel.svelte';
+	import { browserPanel, browserPanelOpen } from '$lib/stores/browser-panel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
@@ -752,6 +754,18 @@
 					{/if}
 				{/snippet}
 				{#snippet actions()}
+					{#if $activeView?.type === 'chat' && activeTab?.sessionId}
+						<button
+							class="browser-toggle-btn"
+							class:active={$browserPanelOpen}
+							onclick={() => browserPanel.toggle(activeTab?.sessionId ?? null)}
+							title="Toggle live browser view"
+							aria-label="Toggle live browser view"
+							aria-pressed={$browserPanelOpen}
+						>
+							<PanelRight size={16} strokeWidth={1.5} />
+						</button>
+					{/if}
 					{#if activeTab && shouldShowHeaderGitActions({
 						viewType: $activeView?.type,
 						hasProject: !!activeTab.project,
@@ -786,7 +800,12 @@
 			</PageHeader>
 		{/if}
 		{#if $activeView.type === 'chat'}
-			<ChatView />
+			<div class="chat-row">
+				<ChatView />
+				{#if activeTab?.sessionId}
+					<BrowserPanel sessionId={activeTab.sessionId} />
+				{/if}
+			</div>
 		{:else if $activeView.type === 'board'}
 			<div class="feature-panel">
 				<SessionsBoard
@@ -943,6 +962,65 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.download-jsonl-btn {
+			transition: none;
+		}
+	}
+
+	/* Chat + live browser panel share one flex row under the page header. */
+	.chat-row {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	.chat-row > :global(.chat-view) {
+		flex: 1 1 0;
+		min-width: 0;
+	}
+
+	/* Live-browser toggle — matches PageHeader's .header-btn styling. */
+	.browser-toggle-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		flex-shrink: 0;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background-color 150ms ease, color 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.browser-toggle-btn:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.browser-toggle-btn.active {
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+	}
+
+	.browser-toggle-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+
+	@media (max-width: 639px) {
+		.browser-toggle-btn {
+			width: 36px;
+			height: 36px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.browser-toggle-btn {
 			transition: none;
 		}
 	}
