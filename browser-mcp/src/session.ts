@@ -37,6 +37,7 @@ import {
   type MutationClass,
   type MutationStats,
 } from "./dommutation.js";
+import { reportCurrentTarget } from "./panel.js";
 
 export class StaleRefError extends Error {
   constructor(ref: string) {
@@ -194,10 +195,13 @@ export class Session {
         const next = this.pages.keys().next();
         this.currentId = next.done ? undefined : next.value;
         this.notifyNavigation();
+        const nextEntry = this.currentId ? this.pages.get(this.currentId) : undefined;
+        reportCurrentTarget(nextEntry ? nextEntry.page : null, this.currentId);
       }
     });
 
     this.pages.set(id, entry);
+    reportCurrentTarget(entry.page, entry.id);
     return entry;
   }
 
@@ -368,6 +372,7 @@ export class Session {
     if (id !== this.currentId) {
       this.currentId = id;
       this.notifyNavigation();
+      reportCurrentTarget(entry.page, id);
     }
   }
 
