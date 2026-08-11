@@ -212,6 +212,30 @@ async def test_parked_with_work_via_parked_turn(mock_db):
     assert snap.state == STATE_PARKED_WITH_WORK
 
 
+async def test_parked_with_work_clears_after_settle_parked_turns(mock_db):
+    """LEG 2: 'parked' is a TERMINAL state settle_turn refuses to move, so a
+    session that parked on now-finished background work would read
+    parked_with_work forever. settle_parked_turns flips the stale row to
+    'completed'; with no visible tasks the session then reads idle."""
+    from app.db import turns as turns_db
+
+    sid = "lstate-parked-settle"
+    tid = turns_db.enqueue_turn(sid, "user", prompt="p")["id"]
+    turns_db.start_turn(tid, run_id="run-x")
+    turns_db.park_turn(tid, ["task-1"])
+
+    # Before: the parked row alone (no registry tasks) drives parked_with_work.
+    before = await compute(sid)
+    assert before.state == STATE_PARKED_WITH_WORK
+
+    # The background work has finished; settle the stale parked row.
+    settled = turns_db.settle_parked_turns(sid)
+    assert settled == 1
+
+    after = await compute(sid)
+    assert after.state == STATE_IDLE
+
+
 # =============================================================================
 # Drift sensor
 # =============================================================================

@@ -7,6 +7,8 @@ through::
 
     queued -> running -> interrupting -> draining -> completed | aborted
               running --------------------------> parked
+              parked ---------------------------> completed
+                  (settle_parked_turns — stale-park settlement / CLI-wake at rest)
               running/interrupting/draining ----> requeued (back to queued)
 
 At most one turn per session may occupy a *live* state
@@ -348,6 +350,47 @@ def park_turn(
         )
         row = cursor.fetchone()
     return _row(row)
+
+
+def settle_parked_turns(
+    session_id: str, exclude_turn_id: Optional[str] = None
+) -> int:
+    """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
+
+    ``'parked'`` is a TERMINAL state that ``settle_turn`` deliberately refuses
+    to move — so once the background work a turn parked on has finished, nothing
+    transitions the row out of ``parked`` and ``lifecycle_state.compute`` shows
+    the session parked forever. This is the escape hatch: called ONLY when no
+    background work remains (a CLI-owned wake has come to rest, or a fresh
+    app-turn is starting), it flips the stale parked rows to ``completed``,
+    mirroring ``settle_turn``'s column handling (``stop_reason``/``ended_at``).
+    Does NOT loosen ``settle_turn``'s own guard.
+
+    ``exclude_turn_id`` protects the turn currently going live (the self-heal
+    call site) from settling itself. Returns the number of rows settled.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if exclude_turn_id is not None:
+            cursor.execute(
+                "UPDATE turns SET state='completed', "
+                "stop_reason=COALESCE(stop_reason, 'parked_settled'), "
+                "ended_at=NOW() "
+                "WHERE session_id=%s AND state='parked' AND id != %s "
+                "RETURNING id",
+                (session_id, exclude_turn_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE turns SET state='completed', "
+                "stop_reason=COALESCE(stop_reason, 'parked_settled'), "
+                "ended_at=NOW() "
+                "WHERE session_id=%s AND state='parked' "
+                "RETURNING id",
+                (session_id,),
+            )
+        rows = cursor.fetchall()
+    return len(rows or [])
 
 
 def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:

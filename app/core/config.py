@@ -229,6 +229,18 @@ class Settings(BaseSettings):
     # USER_QUESTION_TIMEOUT_SECONDS.
     user_question_timeout_seconds: int = 3600  # 1 hour
 
+    # Between-turns idle reader — CLI-owned wake grace window (seconds). When the
+    # LAST background task completes while the parent is parked, the scheduler
+    # SUPPRESSES the app's own unpark wake because the CLI delivers the wake
+    # itself — but that CLI wake turn arrives 7-60s later, after the idle reader
+    # would otherwise exit on its next 2s poll (has_active_background_work now
+    # False). The reader then never reads the wake, so its frames stay buffered
+    # and the UI never sees it. This grace keeps the reader draining for up to
+    # this long after a CLI-owned suppression, so it captures the wake when it
+    # lands. Refreshed on every frame while waiting; cleared when the wake turn
+    # completes. Override via CLI_WAKE_GRACE_SECONDS.
+    cli_wake_grace_seconds: float = 300.0
+
     # Admission backpressure for the subagent fan-out. A single orchestrator
     # session can spawn dozens of subagent node subprocesses; rather than letting
     # a destructive watchdog reap in-flight work, we refuse to admit NEW top-level

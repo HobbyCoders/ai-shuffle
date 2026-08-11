@@ -41,8 +41,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any, Callable, Dict, Optional
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,13 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "stopped",
 # should still be reading (background work resolved, or a drain-mode client is
 # now safe to evict). Tests shrink it.
 IDLE_READ_POLL_SECONDS = 2.0
+
+# Sentinel returned by ``turn_scheduler.on_task_terminal`` (the terminal-task
+# hook) when it SUPPRESSES the app's own unpark wake because the CLI owns this
+# completion's at-rest wake and will deliver it itself. On seeing it the reader
+# arms a ``cli_wake_grace_seconds`` deadline so it keeps draining until that
+# CLI wake turn lands instead of exiting on its next poll.
+CLI_OWNED_WAKE_SIGNAL = "cli-owned-wake"
 
 
 # ---------------------------------------------------------------------------
@@ -75,19 +85,24 @@ def register_on_task_terminal(hook: Optional[Callable[[str, Dict[str, Any]], Any
     _on_task_terminal = hook
 
 
-async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
-    """Fire the terminal-task callback, if any. Never raises."""
+async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Any:
+    """Fire the terminal-task callback, if any, and RETURN its result. Never
+    raises. The scheduler returns ``CLI_OWNED_WAKE_SIGNAL`` when it suppresses
+    the app wake in favor of the CLI's own delayed wake; the reader uses that to
+    arm its grace window. Returns ``None`` when there is no hook or it raised."""
     hook = _on_task_terminal
     if hook is None:
-        return
+        return None
     try:
         result = hook(session_id, frame)
         if asyncio.iscoroutine(result):
-            await result
+            result = await result
+        return result
     except Exception:  # noqa: BLE001
         logger.warning(
             "idle_reader: on_task_terminal hook failed for %s", session_id, exc_info=True
         )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +176,25 @@ async def run_idle_reader(session_id: str, *, drain_turn_id: Optional[str] = Non
     """
     from app.core import session_runtime
 
+    # Mark the pooled client as held by an active between-turns reader BEFORE
+    # anything can await, so the pool's LRU/idle eviction guards skip this
+    # session for the reader's whole run. Without it, the CLI-wake grace window
+    # is an eviction hazard: is_streaming is False and background work is gone
+    # while the reader waits (up to cli_wake_grace_seconds) for the CLI's own
+    # wake turn — and the reader reads via peek (no LRU promote), so
+    # last_activity never bumps. The flag lives on the pool's SessionState and
+    # is cleared in the finally below, so a crashed/cancelled reader can never
+    # leave it stuck. peek (not get): marking must not perturb LRU order.
+    pool_state = None
+    try:
+        from app.core.session_pool import get_session_pool
+
+        pool_state = get_session_pool().peek(session_id)
+    except Exception:  # noqa: BLE001
+        pool_state = None
+    if pool_state is not None:
+        pool_state.idle_reader_active = True
+
     lock = session_runtime.get_reader_lock(session_id)
     try:
         async with lock:
@@ -173,6 +207,8 @@ async def run_idle_reader(session_id: str, *, drain_turn_id: Optional[str] = Non
     except Exception:  # noqa: BLE001
         logger.warning("idle_reader: run failed for %s", session_id, exc_info=True)
     finally:
+        if pool_state is not None:
+            pool_state.idle_reader_active = False
         session_runtime._drop_idle_reader_self(session_id)
 
 
@@ -231,6 +267,14 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
     # (bracketing turn.completed). Persists across loop iterations because a
     # wake turn spans several drained messages.
     wake_turn_id: Optional[str] = None
+    # CLI-owned-wake grace deadline (monotonic seconds). Armed when the terminal
+    # handoff returns CLI_OWNED_WAKE_SIGNAL: the last background task completed,
+    # the app's wake was suppressed, and the CLI will deliver its own wake turn
+    # 7-60s from now. Until this deadline the reader keeps draining even though
+    # has_active_background_work is False, so it captures that wake instead of
+    # exiting on its next poll and leaving the wake frames buffered forever.
+    # Refreshed on every frame while waiting; cleared when the wake turn closes.
+    wake_deadline: Optional[float] = None
     next_fut: Optional[asyncio.Future] = None
     try:
         while True:
@@ -255,8 +299,42 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                         return
                     continue
                 # Normal idle: keep reading while background work survives; once
-                # it is all done there is nothing more to drain.
+                # it is all done there is nothing more to drain — UNLESS a
+                # CLI-owned wake is still in flight (LEG 1). The last background
+                # task's completion suppressed the app wake because the CLI
+                # delivers its own wake turn 7-60s later; exiting now would leave
+                # that wake buffered and unread. Keep reading if (i) a CLI-wake
+                # turn is currently OPEN on the client, or (ii) a grace deadline
+                # is armed and unexpired.
                 if not task_registry.has_active_background_work(session_id):
+                    if wake_turn_id is not None:
+                        if wake_deadline is None or time.monotonic() < wake_deadline:
+                            continue
+                        logger.warning(
+                            "idle_reader: CLI-wake grace expired mid-wake (turn %s "
+                            "open, no frames) — closing wake turn + exiting "
+                            "[session=%s]", wake_turn_id, session_id,
+                        )
+                        # The synthetic wake turn is still OPEN with no frames.
+                        # Returning here without closing it strands the FE
+                        # streaming forever AND leaves the parked row stuck — the
+                        # exact bug class this reader exists to prevent. Run the
+                        # SAME closure the ResultMessage branch does: close the
+                        # wake turn (terminal), persist end-of-turn state, then
+                        # guardedly settle stale parked rows.
+                        await _close_open_wake_turn(
+                            session_id, wake_turn_id,
+                            stop_reason="cli_wake_grace_expired",
+                        )
+                        return
+                    if wake_deadline is not None:
+                        if time.monotonic() < wake_deadline:
+                            continue
+                        logger.info(
+                            "idle_reader: CLI-wake grace expired with no wake — "
+                            "exiting [session=%s]", session_id,
+                        )
+                        return
                     logger.info(
                         "idle_reader: no background work remains — exiting [session=%s]",
                         session_id,
@@ -288,6 +366,12 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                     await _settle_drained(session_id, drain_turn_id)
                 await _evict_broken_client(session_id)
                 return
+
+            # A frame arrived while a CLI-wake grace window is armed — the wake
+            # is materializing, so push the deadline out. (The wake's own
+            # ResultMessage clears it below once the wake turn closes.)
+            if wake_deadline is not None:
+                wake_deadline = time.monotonic() + settings.cli_wake_grace_seconds
 
             # --- registry taps (unfreeze the indicator) -----------------------
             # Lane-launch recorder FIRST so a grandchild run_in_background tool_use
@@ -357,6 +441,13 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                         if wake_turn_id is None:
                             wake_turn_id = f"cliwake-{uuid.uuid4()}"
                             await record_cli_wake_turn_started(session_id, wake_turn_id)
+                            # An open wake must always have a live deadline
+                            # bounding it (a CLI that hangs mid-wake sends no
+                            # frames, so nothing else would ever expire it).
+                            if wake_deadline is None:
+                                wake_deadline = (
+                                    time.monotonic() + settings.cli_wake_grace_seconds
+                                )
                         n = await record_cli_wake_event(
                             session_id, cli_ev, turn_id=wake_turn_id
                         )
@@ -399,12 +490,40 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                         usage=_wake_usage_summary(message),
                     )
                     wake_turn_id = None
+                    # The CLI-owned wake we were holding the grace window for has
+                    # landed and closed — disarm it (LEG 1).
+                    if wake_deadline is not None:
+                        logger.info(
+                            "idle_reader: CLI-wake captured — disarming grace "
+                            "window [session=%s]", session_id,
+                        )
+                        wake_deadline = None
                 try:
                     from app.core.turn_finalize import persist_turn_end_state
 
                     await persist_turn_end_state(session_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("idle_reader: CLI-turn finalize failed: %s", exc)
+                # LEG 2 call site A: the CLI-owned wake has come to rest. If no
+                # background work remains, settle this session's parked turn rows
+                # to 'completed' so lifecycle_state stops showing the session
+                # parked forever ('parked' is terminal and nothing else moves a
+                # row out of it). Guarded on has_active_background_work: a session
+                # with live work is legitimately still parked — leave its rows.
+                try:
+                    if not task_registry.has_active_background_work(session_id):
+                        from app.db import turns as turns_db
+
+                        settled = await asyncio.to_thread(
+                            turns_db.settle_parked_turns, session_id
+                        )
+                        if settled:
+                            logger.info(
+                                "idle_reader: settled %d parked turn(s) after "
+                                "CLI-wake at rest [session=%s]", settled, session_id,
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("idle_reader: settle_parked_turns failed: %s", exc)
                 # Capture the SDK context-usage breakdown for this CLI-owned wake
                 # turn while its adapter is still live and pooled. Detached and
                 # self-guarding, so it never delays draining.
@@ -434,11 +553,17 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
                 # second one here. Hand the task's LAUNCH tool_use_id from the
                 # registry record to the scheduler so the synthesized wake prompt's
                 # <tool-use-id> is populated, instead of the old hardcoded None.
-                await _fire_on_task_terminal(session_id, {
+                _signal = await _fire_on_task_terminal(session_id, {
                     "task_id": u_task_id,
                     "status": u_status,
                     "tool_use_id": u_record.get("toolUseId"),
                 })
+                if _signal == CLI_OWNED_WAKE_SIGNAL:
+                    wake_deadline = time.monotonic() + settings.cli_wake_grace_seconds
+                    logger.info(
+                        "idle_reader: arming CLI-wake grace window %.1fs [session=%s]",
+                        settings.cli_wake_grace_seconds, session_id,
+                    )
                 continue
 
             # --- terminal TaskNotificationMessage → record + handoff ----------
@@ -480,7 +605,16 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
             )
             # Hand the terminal off to the scheduler seam (default no-op). This
             # REPLACES the legacy unpark latch/deliver machinery.
-            await _fire_on_task_terminal(session_id, frame)
+            _signal = await _fire_on_task_terminal(session_id, frame)
+            if _signal == CLI_OWNED_WAKE_SIGNAL:
+                # The CLI owns this completion's at-rest wake and delivers it
+                # 7-60s later. Arm the grace window so we keep draining until it
+                # lands instead of exiting on the next poll (LEG 1).
+                wake_deadline = time.monotonic() + settings.cli_wake_grace_seconds
+                logger.info(
+                    "idle_reader: arming CLI-wake grace window %.1fs [session=%s]",
+                    settings.cli_wake_grace_seconds, session_id,
+                )
     finally:
         # Exit cleanup (return/cancel/error): cancel the read future WE own so no
         # detached __anext__ keeps running against the client; consume a completed
@@ -513,3 +647,46 @@ async def _settle_drained(session_id: str, turn_id: str) -> None:
         return
     if settled is not None:
         await session_runtime._fire_on_turn_settled(session_id, turn_id, "aborted")
+
+
+async def _close_open_wake_turn(
+    session_id: str,
+    wake_turn_id: str,
+    *,
+    usage: Optional[Dict[str, Any]] = None,
+    stop_reason: Optional[str] = None,
+) -> None:
+    """Close an OPEN CLI-wake turn with the SAME terminal sequence the drain
+    loop's ResultMessage branch runs: (1) a synthetic ``turn.completed`` so the
+    FE reducer flips streaming off and settles speculative cards, (2) persist
+    end-of-turn state so park-pollers render it, (3) a guarded settle of stale
+    ``parked`` rows (only when no background work remains — a session with live
+    work is legitimately still parked). Best-effort throughout — a failure in
+    any step must never propagate into the reader's exit path."""
+    from app.core.turn_recorder import record_cli_wake_turn_completed
+
+    await record_cli_wake_turn_completed(
+        session_id, wake_turn_id, usage=usage, stop_reason=stop_reason,
+    )
+    try:
+        from app.core.turn_finalize import persist_turn_end_state
+
+        await persist_turn_end_state(session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("idle_reader: CLI-turn finalize failed: %s", exc)
+    try:
+        from app.core.task_registry import task_registry
+
+        if not task_registry.has_active_background_work(session_id):
+            from app.db import turns as turns_db
+
+            settled = await asyncio.to_thread(
+                turns_db.settle_parked_turns, session_id
+            )
+            if settled:
+                logger.info(
+                    "idle_reader: settled %d parked turn(s) after closing open "
+                    "wake turn [session=%s]", settled, session_id,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("idle_reader: settle_parked_turns failed: %s", exc)

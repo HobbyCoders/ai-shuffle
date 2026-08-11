@@ -245,6 +245,123 @@ async def test_set_eviction_callback_none_clears_it():
     assert seen == []  # cleared callback never fired
 
 
+# ─── (1) Idle-reader hold guard: both eviction paths ────────────────────────
+#
+# During the CLI-wake grace window the between-turns idle reader holds the
+# pooled client with is_streaming False and ZERO running background work
+# (waiting for the CLI's delayed wake turn), and it reads via peek so
+# last_activity never bumps. SessionState.idle_reader_active is what stops
+# LRU/idle eviction from tearing the subprocess down mid-wait.
+
+
+@pytest.mark.asyncio
+async def test_evict_if_needed_skips_idle_reader_session():
+    """The LRU session is held by an active idle reader (CLI-wake grace window)
+    — LRU eviction skips it and picks the next candidate instead."""
+    pool = SessionPool(max_size=1)
+    reader_state = _make_state()
+    reader_state.idle_reader_active = True
+    pool.put("reader-held", reader_state)  # LRU (oldest), but reader-held
+    pool.put("plain", _make_state())       # MRU, evictable
+
+    evicted = await pool.evict_if_needed()
+
+    assert evicted == "plain"
+    assert "reader-held" in pool  # protected despite being LRU
+    assert "plain" not in pool
+
+
+@pytest.mark.asyncio
+async def test_evict_idle_skips_idle_reader_session():
+    """A long-idle session held by an active idle reader is NOT idle-evicted —
+    peek-based reading never bumps last_activity, so idle age alone must not
+    kill the client while the reader waits for the CLI wake."""
+    pool = SessionPool(max_size=3)
+    state = _make_state(idle_seconds=7200)
+    state.idle_reader_active = True
+    pool.put("waiting-on-wake", state)
+
+    evicted = await pool.evict_idle(max_idle_seconds=600)
+
+    assert evicted == []
+    assert "waiting-on-wake" in pool
+
+
+@pytest.mark.asyncio
+async def test_idle_reader_session_evictable_again_after_clear():
+    """Once the reader clears the flag, the same session is evictable by both
+    paths again (no permanent immunity)."""
+    pool = SessionPool(max_size=3)
+    state = _make_state(idle_seconds=7200)
+    state.idle_reader_active = True
+    pool.put("was-held", state)
+
+    assert await pool.evict_idle(max_idle_seconds=600) == []  # protected
+
+    state.idle_reader_active = False  # reader exited (its finally clears)
+
+    evicted = await pool.evict_idle(max_idle_seconds=600)
+    assert evicted == ["was-held"]
+    assert "was-held" not in pool
+
+
+@pytest.mark.asyncio
+async def test_idle_reader_flag_clears_on_reader_cancellation(monkeypatch):
+    """run_idle_reader sets the flag on the pooled state for its whole run and
+    its finally clears it even when the reader is CANCELLED mid-drain (the
+    stop_idle_reader path) — a stopped reader must never leave the session
+    permanently eviction-immune."""
+    import asyncio
+
+    from app.core import idle_reader
+
+    pool = SessionPool(max_size=3)
+    state = _make_state()
+    pool.put("cancel-me", state)
+    monkeypatch.setattr(sp, "get_session_pool", lambda: pool)
+
+    entered = asyncio.Event()
+
+    async def _blocking_drain(session_id, *, drain_turn_id=None):
+        entered.set()
+        await asyncio.Event().wait()  # block until cancelled
+
+    monkeypatch.setattr(idle_reader, "_drain", _blocking_drain)
+
+    task = asyncio.create_task(idle_reader.run_idle_reader("cancel-me"))
+    await entered.wait()
+    assert state.idle_reader_active is True  # held while the reader runs
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert state.idle_reader_active is False  # cleared despite cancellation
+
+
+@pytest.mark.asyncio
+async def test_idle_reader_flag_clears_on_reader_exception(monkeypatch):
+    """The flag also clears when the reader dies via an unexpected exception
+    (run_idle_reader swallows it — never raises to the caller)."""
+    import asyncio
+
+    from app.core import idle_reader
+
+    pool = SessionPool(max_size=3)
+    state = _make_state()
+    pool.put("crash-me", state)
+    monkeypatch.setattr(sp, "get_session_pool", lambda: pool)
+
+    async def _crashing_drain(session_id, *, drain_turn_id=None):
+        assert state.idle_reader_active is True  # held at drain time
+        raise RuntimeError("reader blew up")
+
+    monkeypatch.setattr(idle_reader, "_drain", _crashing_drain)
+
+    await idle_reader.run_idle_reader("crash-me")  # must not raise
+
+    assert state.idle_reader_active is False  # cleared despite the crash
+
+
 # ─── _has_background_work bridges to the registry predicate ─────────────────
 
 

@@ -996,6 +996,41 @@ class TaskRegistry:
         """
         return bool(self.get_active_background_work(session_id))
 
+    def has_unresolved_background_launches(self, session_id: str) -> bool:
+        """True iff any recorded background-launch tool_use_id has NO registry
+        task record that has reached a TERMINAL status.
+
+        ``_background_launches`` is CUMULATIVE (cleared only on ``clear_session``)
+        and exists to cover the launch-before-registration race — a Task launched
+        but not yet given a registry row. The ``_finalize`` park GATE reads this
+        so it stops counting launches whose task already FINISHED (a terminal
+        record) while still honoring the race a bare launch id exists for.
+
+        A launch with NO matching record at all is UNRESOLVED (True) — that is
+        exactly the launched-but-not-yet-registered case. A launch whose only
+        record is still ``running`` is also UNRESOLVED (True), but that is
+        irrelevant to the gate — ``has_active_background_work`` already arms it
+        for running work. Terminal = any status other than ``running`` (the
+        registry's value vocabulary makes ``running`` the sole live status; every
+        other status — ``completed``/``error``/``killed``/``stopped``/… — is
+        terminal). Read-only, no locks, exception-free; mirrors the iteration
+        convention of the other registry predicates.
+        """
+        if not session_id:
+            return False
+        launches = self._background_launches.get(session_id)
+        if not launches:
+            return False
+        try:
+            resolved: set = set()
+            for record in self._tasks.get(session_id, {}).values():
+                tuid = record.get("tool_use_id")
+                if tuid and record.get("status") != "running":
+                    resolved.add(tuid)
+            return any(tuid not in resolved for tuid in launches)
+        except Exception:  # noqa: BLE001 — a stray shape must never raise.
+            return bool(launches)
+
     def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.
 

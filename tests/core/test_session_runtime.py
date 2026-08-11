@@ -97,6 +97,11 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
     registry = MagicMock(name="task_registry")
     registry.get_active_background_work.return_value = bg_work
     registry.get_background_launches.return_value = bg_launches
+    # Park gate (amended 2026-08-08) reads has_unresolved_background_launches, not
+    # the raw set; the 4b self-heal guard reads has_active_background_work. Derive
+    # both from the same knobs so the fixture stays a single source of truth.
+    registry.has_unresolved_background_launches.return_value = bool(bg_launches)
+    registry.has_active_background_work.return_value = bool(bg_work)
     registry.reset_started_this_turn.return_value = None
 
     recorder = _recorder_mock()
@@ -265,6 +270,52 @@ async def test_finalize_completes_when_no_background_work(mock_db):
     env["start_idle"].assert_not_called()
     env["record_parked"].assert_not_called()
     env["scheduler"].assert_called_once_with("s4", turn["id"], "completed")
+
+
+async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):
+    """FIX 2: the 4b turn-start self-heal settles a stale parked row when NO
+    background work is running — the parked row was residue from work that has
+    since finished, and a fresh app-turn is proof the session is live."""
+    sid = "s4heal"
+    # A prior turn parked (residue) — take + release the live slot so the new
+    # turn can start.
+    stale = turns_db.enqueue_turn(sid, "user", prompt="old")
+    turns_db.start_turn(stale["id"], run_id="run-old")
+    turns_db.park_turn(stale["id"], ["task-gone"])
+    assert turns_db.get_turn(stale["id"])["state"] == "parked"
+
+    fresh = turns_db.enqueue_turn(sid, "user", prompt="new")
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        outcome = await session_runtime.SessionRuntime(fresh).execute()
+
+    assert outcome == "completed"
+    # The stale parked residue was self-healed to completed.
+    assert turns_db.get_turn(stale["id"])["state"] == "completed"
+
+
+async def test_turn_start_self_heal_spares_park_with_running_bg_work(mock_db):
+    """FIX 2: the self-heal is GATED on has_active_background_work. A queued turn
+    intentionally starts while a prior turn is parked on RUNNING work; that parked
+    row is the live signal _cli_owns_at_rest_wake / _latest_context_turn rely on,
+    so settling it early would risk a duplicate wake. With running bg work the
+    stale-looking parked row must SURVIVE."""
+    sid = "s4spare"
+    stale = turns_db.enqueue_turn(sid, "user", prompt="old")
+    turns_db.start_turn(stale["id"], run_id="run-old")
+    turns_db.park_turn(stale["id"], ["task-live"])
+    assert turns_db.get_turn(stale["id"])["state"] == "parked"
+
+    fresh = turns_db.enqueue_turn(sid, "user", prompt="new")
+    # bg_work present → has_active_background_work True → self-heal is skipped.
+    with _runtime_env(
+        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        bg_work=[{"id": "task-live"}],
+    ):
+        await session_runtime.SessionRuntime(fresh).execute()
+
+    # The parked row was NOT settled by the self-heal (live work still parks the
+    # session legitimately).
+    assert turns_db.get_turn(stale["id"])["state"] == "parked"
 
 
 # ---------------------------------------------------------------------------

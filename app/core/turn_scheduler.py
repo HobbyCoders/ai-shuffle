@@ -540,9 +540,15 @@ async def _enqueue_context_wake(
     )
 
 
-async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
+async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
     """Idle-reader hook: a background task reached a terminal state between
     turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
+
+    Returns ``idle_reader.CLI_OWNED_WAKE_SIGNAL`` ("cli-owned-wake") when it
+    takes the A-1 suppression branch (the CLI owns this completion's at-rest
+    wake and will deliver it itself); the idle reader uses that to arm a grace
+    window so it keeps draining until the CLI's wake turn lands instead of
+    exiting on its next poll. Every other path returns ``None``.
 
     Near-simultaneous completions must batch into a single turn (the builder's
     consolidation only fires when it sees all pending frames at once), and a
@@ -611,7 +617,11 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
                     "the at-rest wake (parent parked), suppressing app enqueue",
                     session_id, task_id,
                 )
-                return
+                # Signal the idle reader to arm its CLI-wake grace window: the
+                # CLI delivers this wake itself 7-60s later, so the reader must
+                # keep draining instead of exiting on its next poll (see
+                # idle_reader.CLI_OWNED_WAKE_SIGNAL).
+                return "cli-owned-wake"
             existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
             if existing is not None:
                 existing_payload = dict(existing.get("payload") or {})

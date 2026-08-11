@@ -209,6 +209,60 @@ def test_park_records_task_ids_and_frees_slot(mock_db):
     assert turns.settle_turn(t["id"], "completed") is None
 
 
+def test_settle_parked_turns_clears_stale_parked_rows(mock_db):
+    """settle_parked_turns flips every 'parked' row for a session to 'completed'
+    (the escape hatch settle_turn refuses), and leaves other sessions alone."""
+    a = turns.enqueue_turn("s1", "user")
+    turns.start_turn(a["id"])
+    turns.park_turn(a["id"], task_ids=["t-a"])
+    b = turns.enqueue_turn("s1", "queue")
+    turns.start_turn(b["id"])
+    turns.park_turn(b["id"], task_ids=["t-b"])
+    # A live (running) row and another session must be untouched.
+    live = turns.enqueue_turn("s1", "queue")
+    turns.start_turn(live["id"])
+    other = turns.enqueue_turn("s2", "user")
+    turns.start_turn(other["id"])
+    turns.park_turn(other["id"], task_ids=["t-c"])
+
+    settled = turns.settle_parked_turns("s1")
+
+    assert settled == 2
+    assert turns.get_turn(a["id"])["state"] == "completed"
+    assert turns.get_turn(b["id"])["state"] == "completed"
+    assert turns.get_turn(a["id"])["ended_at"] is not None
+    # Running row untouched; other session's parked row untouched.
+    assert turns.get_turn(live["id"])["state"] == "running"
+    assert turns.get_turn(other["id"])["state"] == "parked"
+
+
+def test_settle_parked_turns_excludes_current_turn(mock_db):
+    """The self-heal call site passes the turn about to go live as exclude so it
+    never settles itself."""
+    stale = turns.enqueue_turn("s1", "user")
+    turns.start_turn(stale["id"])
+    turns.park_turn(stale["id"], task_ids=["t-a"])
+    current = turns.enqueue_turn("s1", "queue")
+    turns.start_turn(current["id"])
+    turns.park_turn(current["id"], task_ids=["t-b"])
+
+    settled = turns.settle_parked_turns("s1", exclude_turn_id=current["id"])
+
+    assert settled == 1
+    assert turns.get_turn(stale["id"])["state"] == "completed"
+    assert turns.get_turn(current["id"])["state"] == "parked"
+
+
+def test_settle_parked_turns_no_rows_returns_zero(mock_db):
+    """No parked rows -> a harmless zero (the common case at every turn start)."""
+    t = turns.enqueue_turn("s1", "user")
+    turns.start_turn(t["id"])
+    assert turns.settle_parked_turns("s1") == 0
+    # settle_turn's own guard is unchanged: it still refuses parked rows.
+    turns.park_turn(t["id"], task_ids=["t-a"])
+    assert turns.settle_turn(t["id"], "completed") is None
+
+
 def test_requeue_keeps_position_and_frees_slot(mock_db):
     t1 = turns.enqueue_turn("s1", "user")
     t2 = turns.enqueue_turn("s1", "queue")

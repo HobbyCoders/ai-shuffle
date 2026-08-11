@@ -593,3 +593,194 @@ async def test_cli_wake_drain_mode_does_not_bracket(mock_db):
     # never appends a synthetic turn.started.
     drained.assert_awaited_once()
     assert [r["event_type"] for r in _wake_events("cw3")] == []
+
+
+# ---------------------------------------------------------------------------
+# CLI-owned-wake grace window (LEG 1): when the LAST background task completes,
+# the scheduler suppresses the app's own wake because the CLI delivers its own
+# wake turn 7-60s later. The reader must NOT exit on its next poll — it arms a
+# grace deadline and keeps draining until that wake lands (and then, LEG 2A,
+# settles the stale parked turn rows).
+# ---------------------------------------------------------------------------
+
+class _StreamAgen:
+    """Async generator over ``steps``. A step wrapped as ``('gap', msg)`` first
+    awaits ``gap`` seconds (forcing >=1 idle poll-timeout) before yielding
+    ``msg``. When ``steps`` is exhausted it raises ``StopAsyncIteration`` unless
+    ``block`` — in which case it blocks forever (a wake that never arrives)."""
+
+    def __init__(self, steps, *, gap=0.0, block=False):
+        self._steps = list(steps)
+        self._i = 0
+        self._gap = gap
+        self._block = block
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._i >= len(self._steps):
+            if self._block:
+                await asyncio.Event().wait()  # never set — blocks forever
+            raise StopAsyncIteration
+        step = self._steps[self._i]
+        self._i += 1
+        if isinstance(step, tuple) and step[0] == "gap":
+            await asyncio.sleep(self._gap)
+            return step[1]
+        return step
+
+
+def _stream_pool(steps, *, gap=0.0, block=False):
+    client = MagicMock()
+    client.receive_messages.return_value = _StreamAgen(steps, gap=gap, block=block)
+    state = MagicMock()
+    state.adapter.is_alive.return_value = True
+    state.is_streaming = False
+    state.client = client
+    pool = MagicMock()
+    pool.peek.return_value = state
+    pool.remove_broken = AsyncMock()
+    pool.remove_dead = AsyncMock()
+    return pool
+
+
+async def test_cli_wake_grace_holds_reader_until_wake_lands_and_settles(
+    mock_db, monkeypatch, caplog
+):
+    """The grace window keeps the reader draining across an idle poll gap so it
+    reads the CLI-owned wake's ResultMessage — and then settles the stale parked
+    turn (LEG 1 + LEG 2A). Without the grace the reader would exit at the first
+    poll after the last task completed, leaving the wake buffered and the row
+    parked forever."""
+    import logging
+
+    turn = turns_db.enqueue_turn("gw1", "user", prompt="hi")
+    turns_db.start_turn(turn["id"])
+    turns_db.park_turn(turn["id"], task_ids=["task-1"])
+
+    # Handoff takes the CLI-owned suppression branch → arms the grace window.
+    handoff = AsyncMock(return_value=idle_reader.CLI_OWNED_WAKE_SIGNAL)
+    idle_reader.register_on_task_terminal(handoff)
+
+    monkeypatch.setattr(idle_reader, "IDLE_READ_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(idle_reader.settings, "cli_wake_grace_seconds", 300.0)
+
+    notif = _make_message(TaskNotificationMessage)
+    result_msg = _make_message(ResultMessage)
+    frame = {"status": "completed", "task_id": "task-1", "tool_use_id": "tu-1",
+             "summary": "done"}
+    # notif now; then a gap spanning several idle polls before the CLI wake's
+    # ResultMessage; then the stream ends.
+    pool = _stream_pool([notif, ("gap", result_msg)], gap=0.06)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        stack.enter_context(patch("app.core.query_persistence.schedule_context_usage_capture", new=MagicMock()))
+        with caplog.at_level(logging.INFO, logger="app.core.idle_reader"):
+            await asyncio.wait_for(idle_reader.run_idle_reader("gw1"), timeout=5)
+
+    handoff.assert_awaited_once_with("gw1", frame)
+    assert any("arming CLI-wake grace window" in r.message for r in caplog.records)
+    # The reader survived the poll gap, read the wake's ResultMessage, and
+    # settled the stale parked row.
+    assert turns_db.get_turn(turn["id"])["state"] == "completed"
+
+
+async def test_cli_wake_grace_expires_and_reader_exits(mock_db, monkeypatch, caplog):
+    """If the CLI wake never arrives the reader must not hang: once the grace
+    deadline lapses it exits (with the greppable grace-expiry log)."""
+    import logging
+
+    handoff = AsyncMock(return_value=idle_reader.CLI_OWNED_WAKE_SIGNAL)
+    idle_reader.register_on_task_terminal(handoff)
+
+    monkeypatch.setattr(idle_reader, "IDLE_READ_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(idle_reader.settings, "cli_wake_grace_seconds", 0.05)
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "task-1", "tool_use_id": "tu-1",
+             "summary": "done"}
+    # notif now; then the stream blocks forever (no wake ever comes).
+    pool = _stream_pool([notif], block=True)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        with caplog.at_level(logging.INFO, logger="app.core.idle_reader"):
+            await asyncio.wait_for(idle_reader.run_idle_reader("gw2"), timeout=5)
+
+    handoff.assert_awaited_once()
+    assert any("CLI-wake grace expired" in r.message for r in caplog.records)
+
+
+async def test_no_grace_without_cli_wake_signal_exits_immediately(mock_db, monkeypatch):
+    """A terminal handoff that does NOT return the CLI-owned signal arms no grace
+    window: with no background work the reader exits on the next poll as before
+    (no regression for the ordinary at-rest case)."""
+    handoff = AsyncMock(return_value=None)
+    idle_reader.register_on_task_terminal(handoff)
+
+    monkeypatch.setattr(idle_reader, "IDLE_READ_POLL_SECONDS", 0.01)
+    # Long grace: if it were (wrongly) armed the reader would block past timeout.
+    monkeypatch.setattr(idle_reader.settings, "cli_wake_grace_seconds", 300.0)
+
+    notif = _make_message(TaskNotificationMessage)
+    frame = {"status": "completed", "task_id": "task-1", "tool_use_id": "tu-1",
+             "summary": "done"}
+    # notif now; then block forever — the reader must still exit promptly since
+    # no grace was armed.
+    pool = _stream_pool([notif], block=True)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._task_notification_frame", return_value=frame))
+        await asyncio.wait_for(idle_reader.run_idle_reader("gw3"), timeout=5)
+
+    handoff.assert_awaited_once()
+
+
+async def test_cli_wake_grace_expires_mid_wake_and_reader_exits(
+    mock_db, monkeypatch, caplog
+):
+    """A CLI that hangs MID-wake (the wake turn opened, then no frames, no read
+    error) must not hold the reader forever: opening the wake arms a grace
+    deadline, and once it lapses with the turn still open the reader exits with
+    the greppable mid-wake expiry log — AND it CLOSES the open wake turn
+    (turn.completed) + settles the stale parked row instead of leaving the FE
+    stuck streaming and the row parked forever (FIX 3)."""
+    import logging
+
+    # A parked row with NO background work: closing the abandoned wake must
+    # settle it (guarded on has_active_background_work, False for this session).
+    turn = turns_db.enqueue_turn("gw4", "user", prompt="hi")
+    turns_db.start_turn(turn["id"])
+    turns_db.park_turn(turn["id"], task_ids=["task-1"])
+
+    monkeypatch.setattr(idle_reader, "IDLE_READ_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(idle_reader.settings, "cli_wake_grace_seconds", 0.05)
+
+    # A wake message opens the turn (renderable chunk → turn.started +
+    # wake_turn_id set); then the stream blocks forever — no ResultMessage ever
+    # closes the wake.
+    wake = _make_message(_WakeMsg)
+    pool = _stream_pool([wake], block=True)
+    cli = MagicMock(side_effect=_cli_side_effect([{"type": "chunk", "content": "x"}]))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.core.session_pool.get_session_pool", return_value=pool))
+        stack.enter_context(patch("app.core.query_engine._cli_turn_events_from_message", new=cli))
+        with caplog.at_level(logging.INFO, logger="app.core.idle_reader"):
+            await asyncio.wait_for(idle_reader.run_idle_reader("gw4"), timeout=5)
+
+    assert any(
+        "CLI-wake grace expired mid-wake" in r.message for r in caplog.records
+    )
+    # The wake turn was opened AND then CLOSED with a synthetic turn.completed
+    # (the FE reducer needs it to flip streaming off — FIX 3).
+    assert [r["event_type"] for r in _wake_events("gw4")] == [
+        "turn.started", "assistant.text_delta", "turn.completed",
+    ]
+    # And the stale parked row was settled (no bg work remained).
+    assert turns_db.get_turn(turn["id"])["state"] == "completed"

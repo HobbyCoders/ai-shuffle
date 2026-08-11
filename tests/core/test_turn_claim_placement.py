@@ -149,6 +149,12 @@ def _runtime_env(*, pump):
     registry = MagicMock(name="task_registry")
     registry.get_active_background_work.return_value = []
     registry.get_background_launches.return_value = set()
+    # Park gate (amended 2026-08-08) reads has_unresolved_background_launches, and
+    # the 4b self-heal reads has_active_background_work — a bare MagicMock returns
+    # a truthy sentinel for both, which would spuriously park these completing
+    # turns. Stub both to the no-background-work default.
+    registry.has_unresolved_background_launches.return_value = False
+    registry.has_active_background_work.return_value = False
     registry.reset_started_this_turn.return_value = None
 
     recorder = MagicMock(name="recorder")

@@ -147,6 +147,17 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
+    # True while the between-turns idle reader (app/core/idle_reader.py) holds
+    # this pooled client. Set at reader start and cleared in the reader's exit
+    # ``finally`` (run_idle_reader), so a crashed or cancelled reader can never
+    # leave it stuck. Checked by the LRU/idle eviction guards: during the
+    # CLI-wake grace window the reader legitimately holds the client with
+    # ``is_streaming`` False and ZERO running background work (it is waiting up
+    # to ``cli_wake_grace_seconds`` for the CLI's own delayed wake turn), and it
+    # reads via ``peek`` (no LRU promote) so ``last_activity`` never bumps —
+    # without this flag either eviction path would tear the subprocess down
+    # mid-wait and kill the wake.
+    idle_reader_active: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     streaming_started_at: Optional[datetime] = None  # Track when streaming began (for timeout detection)
     background_task: Optional[asyncio.Task] = None
@@ -673,21 +684,31 @@ class SessionPool:
 
             victim: Optional[tuple[str, SessionState, str]] = None
 
-            # Find the LRU session that is neither streaming NOR parked on an
-            # in-flight background sub-agent. Evicting either would disconnect the
-            # pooled SDK client out from under live work: a streaming turn, or a
-            # backgrounded sub-agent whose parent turn already returned (parked).
-            # Snapshot the items so a mutation from concurrently-scheduled code
-            # (remove/remove_broken/evict_dead run WITHOUT this lock) can never
-            # raise "dictionary changed size during iteration".
+            # Find the LRU session that is neither streaming, NOR held by the
+            # between-turns idle reader, NOR parked on an in-flight background
+            # sub-agent. Evicting any of these would disconnect the pooled SDK
+            # client out from under live work: a streaming turn, a backgrounded
+            # sub-agent whose parent turn already returned (parked), or — the
+            # idle-reader case — the CLI-wake grace window, where the reader
+            # legitimately holds the client with zero running background work
+            # while it waits for the CLI's delayed wake turn (evicting mid-wait
+            # kills the wake). Snapshot the items so a mutation from
+            # concurrently-scheduled code (remove/remove_broken/evict_dead run
+            # WITHOUT this lock) can never raise "dictionary changed size during
+            # iteration".
             for session_id, state in list(self._pool.items()):
-                if not state.is_streaming and not self._has_background_work(session_id):
+                if (
+                    not state.is_streaming
+                    and not state.idle_reader_active
+                    and not self._has_background_work(session_id)
+                ):
                     victim = (session_id, state, "lru")
                     break
 
             if victim is None:
-                # Every session is busy (streaming or running a background sub-agent)
-                # — allow temporary over-capacity up to the hard cap.
+                # Every session is busy (streaming, held by an idle reader, or
+                # running a background sub-agent) — allow temporary
+                # over-capacity up to the hard cap.
                 hard_cap = self.hard_cap
                 if len(self._pool) < hard_cap:
                     logger.warning(
@@ -858,9 +879,19 @@ class SessionPool:
             if state is None:
                 continue
             # Never evict sessions that are currently streaming, nor sessions
-            # parked on an in-flight background sub-agent (the parent turn has
-            # returned so they look idle, but disconnecting would kill the agent).
-            if state.is_streaming or self._has_background_work(session_id):
+            # held by the between-turns idle reader, nor sessions parked on an
+            # in-flight background sub-agent (the parent turn has returned so
+            # they look idle, but disconnecting would kill the agent). The
+            # idle-reader flag covers the CLI-wake grace window: the reader may
+            # legitimately hold the client with zero running background work
+            # while it waits for the CLI's delayed wake turn — and it reads via
+            # peek (no LRU promote), so last_activity never bumps during that
+            # wait. Evicting mid-wait kills the wake.
+            if (
+                state.is_streaming
+                or state.idle_reader_active
+                or self._has_background_work(session_id)
+            ):
                 continue
             idle_seconds = (now - state.last_activity).total_seconds()
             if idle_seconds >= max_idle_seconds:

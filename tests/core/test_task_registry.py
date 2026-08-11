@@ -783,6 +783,80 @@ class TestBackgroundLaunch:
         assert reg.was_background_launch("s1", "tool-1") is False
 
 
+class TestParkGateLaunchResolution:
+    """The ``_finalize`` park gate reads ``has_unresolved_background_launches``
+    instead of ORing the raw cumulative ``_background_launches`` set (the
+    2026-08-08 amendment to the stuck-parked fix). A launch whose task reached a
+    TERMINAL registry status is RESOLVED — the gate stops counting it, so a
+    finished task no longer re-parks every later turn. A launch with NO registry
+    record yet is UNRESOLVED (the launch-before-registration race it exists for).
+    The launch SET itself stays cumulative and untouched (PR #765 ruling intact):
+    ``complete_task`` no longer discards anything, so ownership signals that read
+    ``was_background_launch`` survive completion."""
+
+    def test_launch_with_terminal_record_is_resolved(self, reg):
+        reg.mark_background_launch("s1", "tu-1")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.has_unresolved_background_launches("s1") is True  # running
+        reg.complete_task("s1", "t1", "completed")
+        # Finished -> gate no longer counts it, so a later turn won't re-park.
+        assert reg.has_unresolved_background_launches("s1") is False
+        # The launch SET is UNCHANGED — only the GATE ignores it (PR #765 intact).
+        assert reg.get_background_launches("s1") == {"tu-1"}
+        assert reg.was_background_launch("s1", "tu-1") is True
+
+    def test_launch_with_no_record_is_unresolved(self, reg):
+        # The launch-before-registration race: a bare launch id with no task row
+        # keeps the gate armed (True) so the park it exists to hold still fires.
+        reg.mark_background_launch("s1", "tu-pending")
+        assert reg.has_unresolved_background_launches("s1") is True
+
+    def test_launch_with_running_record_keeps_bg_gate_armed(self, reg):
+        # A still-RUNNING task's launch: the overall gate stays armed via
+        # has_active_background_work (bg_work arm), which is what the park gate
+        # ORs alongside the launch arm.
+        reg.mark_background_launch("s1", "tu-1")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        assert reg.has_active_background_work("s1") is True
+
+    def test_ownership_survives_completion_for_ack_sniff_launch(self, reg):
+        # ORDERING-HAZARD REGRESSION. A launch armed ONLY via mark_background_launch
+        # (the ACK-sniff path — is_sdk_background_task NOT armed at TaskStarted):
+        # after complete_task, was_background_launch is STILL True and
+        # is_own_background_task STILL True, so the between-turns terminal handoff
+        # still classifies it OWN and delivers the wake. (The removed LEG 3 discard
+        # destroyed this and dropped the wake.)
+        reg.mark_background_launch("s1", "tu-1")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        reg.complete_task("s1", "t1", "completed")
+        assert reg.was_background_launch("s1", "tu-1") is True
+        assert reg.is_own_background_task("s1", "t1") is True
+
+    def test_completion_still_fires_the_failure_chip(self, reg):
+        # is_own_background_task (which reads was_background_launch) is True during
+        # the guaranteed-notification decision, and stays True afterward.
+        chips = []
+        reg.set_terminal_notification_callback(
+            lambda sid, task: chips.append(task["id"])
+        )
+        reg.mark_background_launch("s1", "t-tu")
+        reg.start_task("s1", "bg1", "agent", "bg", tool_use_id="t-tu")
+        reg.complete_task("s1", "bg1", "killed")  # failure of own bg work
+        assert chips == ["bg1"]                    # chip fired
+        assert reg.get_background_launches("s1") == {"t-tu"}  # set unchanged
+
+    def test_launches_survive_complete_task(self, reg):
+        # Belt-and-braces on the #765 ruling: multiple launches, one task
+        # completing does not remove ANY launch entry.
+        reg.mark_background_launch("s1", "tu-1")
+        reg.mark_background_launch("s1", "tu-2")
+        reg.start_task("s1", "t1", "agent", "bg", tool_use_id="tu-1")
+        reg.complete_task("s1", "t1", "completed")
+        assert reg.get_background_launches("s1") == {"tu-1", "tu-2"}
+        # tu-1 resolved (terminal record) but tu-2 has no record -> still unresolved.
+        assert reg.has_unresolved_background_launches("s1") is True
+
+
 class TestRunningBackgroundTaskForToolUse:
     """Reverse lookup (launch tool_use_id -> is there a RUNNING background task?),
     the registry evidence powering the #660 defer classifier. True ONLY for a

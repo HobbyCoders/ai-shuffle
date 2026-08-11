@@ -468,6 +468,42 @@ class SessionRuntime:
             self._reset_started_this_turn(sid)
             await stop_idle_reader(sid)
 
+            # 4b. LEG 2 self-heal: settle any STALE parked turn rows for this
+            #     session (excluding the turn we are about to run). 'parked' is
+            #     terminal and nothing else transitions a row out of it, so a
+            #     session that parked on now-finished background work would show
+            #     parked forever in lifecycle_state. A new app-turn starting is
+            #     proof the session is live again — clear the residue.
+            #
+            #     GUARD: only self-heal when NO background work is still running.
+            #     A queued turn intentionally starts while a PRIOR turn is parked
+            #     on RUNNING work (turn_scheduler starts the next turn without
+            #     waiting for the park to resolve), and that parked row is the
+            #     signal ``_cli_owns_at_rest_wake`` / ``_latest_context_turn``
+            #     rely on — settling it early risks a duplicate wake and wrong
+            #     context attribution. We do NOT also gate on unresolved launches:
+            #     a launch that never materializes a registry record must not
+            #     block the self-heal (that would re-introduce the stuck-parked
+            #     stick this heal exists to clear). Best-effort: a settle failure
+            #     must never delay/kill the turn.
+            try:
+                from app.core.task_registry import task_registry
+
+                if not task_registry.has_active_background_work(sid):
+                    settled = await asyncio.to_thread(
+                        turns_db.settle_parked_turns, sid, tid
+                    )
+                    if settled:
+                        logger.info(
+                            "SessionRuntime: self-healed %d stale parked turn(s) "
+                            "for %s at turn %s start", settled, sid, tid,
+                        )
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: settle_parked_turns failed for %s", sid,
+                    exc_info=True,
+                )
+
             # 5. Recorder bound to the INJECTED lease/turn ids (no self-claim).
             recorder = await TurnRecorder.create_for_run(
                 sid,
@@ -683,18 +719,29 @@ class SessionRuntime:
                 sid, exc_info=True,
             )
 
-        # Park gate — exactly the legacy predicate (chat_ws_handler :4461-4462).
+        # Park gate — the legacy predicate (chat_ws_handler :4461-4462), amended
+        # 2026-08-08: the launch-set arm now counts only UNRESOLVED launches.
+        # ``_background_launches`` itself stays CUMULATIVE and untouched (PR #765
+        # ruling intact — the set is still cleared only by ``clear_session``);
+        # only the GATE ignores launches whose task already reached a terminal
+        # registry status. The prior form ORed the raw cumulative set, so a
+        # launch left behind after its task finished re-parked EVERY subsequent
+        # turn forever (``turn.parked task_ids=[]`` with zero running work — the
+        # stuck-parked bug). Known benign residual: a launch that never
+        # materializes a registry record at all (e.g. an admission refusal) keeps
+        # the gate armed; the post-fix consequence is a single spurious park that
+        # the turn-start self-heal settles, not a permanent stick.
         bg_work: List[Dict[str, Any]] = []
-        bg_launches: set = set()
+        has_unresolved_launches = False
         try:
             from app.core.task_registry import task_registry
 
             bg_work = task_registry.get_active_background_work(sid)
-            bg_launches = task_registry.get_background_launches(sid)
+            has_unresolved_launches = task_registry.has_unresolved_background_launches(sid)
         except Exception:
             logger.debug("SessionRuntime: park-gate read failed for %s", sid, exc_info=True)
 
-        if bg_work or bg_launches:
+        if bg_work or has_unresolved_launches:
             task_ids = [w.get("id") for w in bg_work if w.get("id")]
             parked = None
             try:
