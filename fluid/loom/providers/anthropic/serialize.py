@@ -81,7 +81,13 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
             breakpoints -= 1
         body["system"] = system
     if request.tools:
-        body["tools"] = request.tools
+        tools = [dict(t) for t in request.tools]
+        # Tool defs are the stable second prefix segment: mark the last one so
+        # the whole tool schema is cached and history churn never re-bills it.
+        if breakpoints > 0 and tools:
+            tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+            breakpoints -= 1
+        body["tools"] = tools
     if request.thinking:
         body["thinking"] = request.thinking
     if breakpoints > 0 and messages:

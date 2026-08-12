@@ -13,6 +13,7 @@ event shapes.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -158,3 +159,34 @@ class SubagentEvent(Event):
     kind: str  # "started" | "progress" | "finished"
     description: str | None = None
     summary: str | None = None
+
+
+# ─── Durable event codec ─────────────────────────────────────────────────────
+#
+# The EventBus keeps an in-process log; durable replay across restarts belongs
+# to the SessionStore, which serializes events with these helpers. Round-trips
+# by concrete class name so ``events_since`` returns byte-identical events after
+# a reload.
+
+_EVENT_TYPES: dict[str, type[Event]] = {
+    cls.__name__: cls
+    for cls in (
+        TurnStarted, TurnComplete, Interrupted, ErrorEvent,
+        BlockStart, BlockStop, TextDelta, ThinkingDelta,
+        ToolUse, ToolResult, PermissionRequest,
+        Usage, RateLimit, SubagentEvent,
+    )
+}
+
+
+def event_to_dict(event: Event) -> dict[str, Any]:
+    d: dict[str, Any] = {"_cls": type(event).__name__}
+    for f in dataclasses.fields(event):
+        d[f.name] = getattr(event, f.name)
+    return d
+
+
+def event_from_dict(d: dict[str, Any]) -> Event:
+    d = dict(d)
+    cls = _EVENT_TYPES[d.pop("_cls")]
+    return cls(**d)

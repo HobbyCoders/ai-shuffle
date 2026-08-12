@@ -22,9 +22,13 @@ class CachePlan:
     breakpoints: int  # how many cache_control markers the serializer may place
 
 
-def plan_cache(caps: ProviderCaps) -> CachePlan:
+def plan_cache(caps: ProviderCaps, *, has_tools: bool = False) -> CachePlan:
     if not caps.explicit_cache_breakpoints:
         return CachePlan(breakpoints=0)  # automatic caching: stability discipline only
-    # Reserve two of the provider's breakpoints for now: system tail + newest
-    # history tail. Tool-def and notes breakpoints arrive with M2.
-    return CachePlan(breakpoints=min(2, caps.max_cache_breakpoints))
+    # Breakpoints, from the most stable prefix position outward:
+    #   1. system tail      2. tool-defs tail (M2, only when tools are present)
+    #   3. newest history tail
+    # Tool defs sit in the stable prefix and never mutate mid-session, so the
+    # third breakpoint after them lets history churn without re-billing tools.
+    wanted = 3 if has_tools else 2
+    return CachePlan(breakpoints=min(wanted, caps.max_cache_breakpoints))

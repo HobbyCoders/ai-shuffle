@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from loom.events.model import Event
 from loom.messages import Message
 
 
@@ -42,17 +43,28 @@ class SessionStore(Protocol):
     async def append(self, session_id: str, node: SessionNode) -> None: ...
     async def get_node(self, session_id: str, node_id: str) -> SessionNode | None: ...
     async def load_path(self, session_id: str, leaf_node_id: str | None = None) -> list[SessionNode]: ...
+    async def set_head(self, session_id: str, node_id: str | None) -> None:
+        """Move the session head (fork/rewind) without appending a node."""
+        ...
+    async def append_event(self, session_id: str, event: Event) -> None:
+        """Persist a sequenced event for durable, cross-restart replay."""
+        ...
+    async def events_since(self, session_id: str, seq: int) -> list[Event]:
+        """Return persisted events with ``seq`` strictly greater than the cursor."""
+        ...
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionMeta] = {}
         self._nodes: dict[str, dict[str, SessionNode]] = {}
+        self._events: dict[str, list[Event]] = {}
 
     async def create_session(self, session_id: str | None = None) -> SessionMeta:
         meta = SessionMeta(session_id=session_id or new_id("ses"))
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
+        self._events[meta.session_id] = []
         return meta
 
     async def get_session(self, session_id: str) -> SessionMeta | None:
@@ -78,3 +90,12 @@ class MemoryStore:
             cursor = node.parent_id
         path.reverse()
         return path
+
+    async def set_head(self, session_id: str, node_id: str | None) -> None:
+        self._sessions[session_id].head_node_id = node_id
+
+    async def append_event(self, session_id: str, event: Event) -> None:
+        self._events.setdefault(session_id, []).append(event)
+
+    async def events_since(self, session_id: str, seq: int) -> list[Event]:
+        return [e for e in self._events.get(session_id, []) if e.seq > seq]
