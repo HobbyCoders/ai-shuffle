@@ -399,6 +399,35 @@ class NativeLoop:
                     stop_reason="error",
                 )
 
+        # Reasoning-channel answer fallback (observed on GLM-4.5 via
+        # OpenRouter): the model ends its final call with the entire answer in
+        # thinking_deltas and an EMPTY text channel. Without this, the turn's
+        # Message.text() is "" and text-channel clients render nothing. When a
+        # completed non-tool call produced thinking but zero text, promote the
+        # thinking content to a synthetic text block (streamed as a TextDelta
+        # so live clients see it too).
+        if not interrupted and not tool_uses:
+            has_text = any(
+                b["type"] == "text" and b["text"] for b in blocks.values()
+            )
+            thinking_text = "".join(
+                b["text"] for _, b in sorted(blocks.items())
+                if b["type"] == "thinking" and b["text"]
+            )
+            if not has_text and thinking_text:
+                index = (max(blocks) + 1) if blocks else 0
+                await self._emit(BlockStart(
+                    session_id=sid, turn_id=turn_id, index=index, block_type="text",
+                ))
+                await self._emit(TextDelta(
+                    session_id=sid, turn_id=turn_id, index=index, text=thinking_text,
+                ))
+                await self._emit(BlockStop(session_id=sid, turn_id=turn_id, index=index))
+                blocks[index] = {
+                    "type": "text", "text": thinking_text, "args": "",
+                    "signature": "", "tool_name": None, "tool_use_id": None,
+                }
+
         return _CallResult(
             message=self._assemble_message(blocks),
             tool_uses=tool_uses,
