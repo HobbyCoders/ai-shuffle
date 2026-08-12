@@ -122,3 +122,4 @@ scripts/unraid-lab/lab_manifest.jsonl
 # Local stub upstream (tools/stub_upstream) — throwaway MITM CA + request log
 .stub-upstream-ca/
 stub-requests.jsonl
+vendor/omni-harness/

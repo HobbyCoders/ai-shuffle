@@ -48,7 +48,7 @@ RUN npm run build && npm prune --omit=dev
 # ============================================================================
 # Stage 4: Runtime — lean Python image with only what's needed
 # ============================================================================
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -93,7 +93,7 @@ RUN node --version && npm --version && gh --version
 # chrome-supervisor owns the process (see docker/start-chrome.sh). No browser
 # extension, no native-messaging host, and no --chrome CLI flag are involved.
 #
-# BOTH arches install Debian **Chromium** (this is python:3.11-slim / bookworm,
+# BOTH arches install Debian **Chromium** (this is python:3.12-slim / bookworm,
 # package name `chromium`) and symlink it to /usr/bin/google-chrome-stable so
 # CHROME_EXECUTABLE and start-chrome.sh resolve unchanged. We switched amd64 off
 # full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
@@ -116,6 +116,14 @@ RUN groupadd -g 1000 appuser && \
 # ── Python dependencies ──
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# ── omni harness (optional, feature-flagged backend AIH_USE_OMNI_HARNESS=1) ──
+# CI vendors the harness source tree as
+# a checkout into vendor/omni-harness before the docker build (see
+# .github/workflows/docker-publish.yml); local builds without the checkout
+# just skip the install — the default SDK path never imports omni.
+COPY vendor/ /opt/vendor/
+RUN if [ -f /opt/vendor/omni-harness/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/omni-harness &&         python -c "import omni; print('omni installed')";     else         echo "vendor/omni-harness not present — omni backend not baked in";     fi
 
 # ── Make the bundled Claude Code CLI writable by appuser ──
 # app/core/cli_interrupt_patch.py rewrites a byte in this binary at runtime

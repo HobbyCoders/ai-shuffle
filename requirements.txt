@@ -10,11 +10,11 @@ websockets>=12,<17
 bcrypt==4.2.1
 cryptography>=42.0.0
 claude-agent-sdk==0.2.126
-# loom agent harness — OPTIONAL, feature-flagged backend (AIH_USE_LOOM_HARNESS=1).
-# Additive: the default Claude Agent SDK path above does not depend on it. Editable
-# path dependency; install with `pip install -e /home/owner/Documents/loom-harness`
-# (or uncomment the line below where a compatible pip is available).
-# loom @ file:///home/owner/Documents/loom-harness
+# omni agent harness — OPTIONAL, feature-flagged backend (AIH_USE_OMNI_HARNESS=1).
+# Additive: the default Claude Agent SDK path above does not depend on it. Not
+# listed here because the repo is private (Quickkill0/omni-harness): the Docker
+# image vendors it via CI (see Dockerfile vendor/ stage); dev installs use
+# `pip install -e /path/to/omni-harness`. Requires Python >=3.12.
 # Real BPE tokenizer for the translator_gateway count_tokens endpoint (o200k_base).
 # Falls back to a chars/token heuristic if the BPE vocab fetch fails offline.
 tiktoken>=0.7.0
