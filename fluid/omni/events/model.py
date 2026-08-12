@@ -127,6 +127,23 @@ class PermissionRequest(Event):
     risk: str = "safe"
 
 
+@dataclass(frozen=True, kw_only=True)
+class QuestionRequest(Event):
+    """The engine needs a user-supplied answer to finish a tool call.
+
+    Emitted once per MRTR ``input_required`` request (MCP spec 2026-07-28: a
+    ``tools/call`` can pause for elicitation/sampling input). Clients answer
+    with a ``RespondQuestion`` op carrying this ``request_id``; the engine
+    retries the call with the collected ``inputResponses``.
+    """
+
+    request_id: str
+    tool_use_id: str
+    name: str  # tool being retried
+    message: str  # human-facing prompt from the server's request descriptor
+    schema: dict[str, Any] | None = None  # expected answer shape, if declared
+
+
 # ─── Accounting / signals ────────────────────────────────────────────────────
 
 
@@ -173,7 +190,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
     for cls in (
         TurnStarted, TurnComplete, Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
-        ToolUse, ToolResult, PermissionRequest,
+        ToolUse, ToolResult, PermissionRequest, QuestionRequest,
         Usage, RateLimit, SubagentEvent,
     )
 }

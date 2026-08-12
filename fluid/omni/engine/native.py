@@ -29,6 +29,7 @@ from omni.events.model import (
     Event,
     Interrupted,
     PermissionRequest,
+    QuestionRequest,
     TextDelta,
     ThinkingDelta,
     ToolResult,
@@ -37,7 +38,15 @@ from omni.events.model import (
     TurnStarted,
     Usage,
 )
-from omni.events.ops import Fork, Interrupt, Op, RespondPermission, Rewind, UserTurn
+from omni.events.ops import (
+    Fork,
+    Interrupt,
+    Op,
+    RespondPermission,
+    RespondQuestion,
+    Rewind,
+    UserTurn,
+)
 from omni.hooks.bus import (
     POST_TOOL_USE,
     PRE_TOOL_USE,
@@ -108,6 +117,7 @@ class NativeLoop:
         self._interrupted = asyncio.Event()
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
+        self._pending_questions: dict[str, asyncio.Future] = {}
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -134,6 +144,10 @@ class NativeLoop:
             self._interrupted.set()
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
+            if fut is not None and not fut.done():
+                fut.set_result(op)
+        elif isinstance(op, RespondQuestion):
+            fut = self._pending_questions.get(op.request_id)
             if fut is not None and not fut.done():
                 fut.set_result(op)
         elif isinstance(op, Fork):
@@ -456,7 +470,68 @@ class NativeLoop:
             )
         else:
             outcome = await self.registry.dispatch(name, input, self.ctx)
+
+        # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
+        # Collect answers via QuestionRequest/RespondQuestion round-trips, then
+        # retry the SAME call with inputResponses + the echoed request_state.
+        # Bounded — a server that keeps pausing eventually gets its marker
+        # surfaced as an in-context error instead of wedging the turn.
+        rounds = 0
+        while outcome.input_required is not None and rounds < 3:
+            rounds += 1
+            marker = outcome.input_required
+            answers = await self._collect_input_responses(
+                sid, turn_id, name, tool_use_id, marker
+            )
+            if answers is None:  # interrupted mid-question
+                return await self._finish_tool(
+                    sid, turn_id, name, tool_use_id,
+                    ToolOutcome(text="input_required round-trip interrupted", is_error=True),
+                )
+            outcome = await self.registry.dispatch(
+                name, input, self.ctx,
+                input_responses=answers, request_state=marker.request_state,
+            )
+        if outcome.input_required is not None:
+            outcome = ToolOutcome(
+                text=f"tool {name} still input_required after {rounds} round-trips",
+                is_error=True,
+            )
         return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome)
+
+    async def _collect_input_responses(
+        self, sid: str, turn_id: str, name: str, tool_use_id: str, marker: Any
+    ) -> dict[str, Any] | None:
+        """One QuestionRequest/RespondQuestion round-trip per MRTR request.
+
+        Returns {server-request-id: answer} for the retry's ``inputResponses``,
+        or None if the turn was interrupted while parked on a question.
+        """
+        answers: dict[str, Any] = {}
+        for server_req_id, descriptor in (marker.requests or {}).items():
+            request_id = new_id("q")
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            self._pending_questions[request_id] = fut
+            desc = descriptor if isinstance(descriptor, dict) else {}
+            await self._emit(QuestionRequest(
+                session_id=sid, turn_id=turn_id, request_id=request_id,
+                tool_use_id=tool_use_id, name=name,
+                message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
+                schema=desc.get("schema"),
+            ))
+            interrupt_wait = asyncio.create_task(self._interrupted.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if fut not in done:
+                    return None
+                resp: RespondQuestion = fut.result()
+            finally:
+                interrupt_wait.cancel()
+                self._pending_questions.pop(request_id, None)
+            answers[server_req_id] = resp.answer
+        return answers
 
     async def _await_permission(
         self, sid: str, turn_id: str, name: str, tool_use_id: str,

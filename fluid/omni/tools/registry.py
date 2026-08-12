@@ -195,8 +195,18 @@ class ToolRegistry:
     # ─── Dispatch ────────────────────────────────────────────────────────
 
     async def dispatch(
-        self, name: str, input: dict[str, Any], ctx: ToolCtx | None = None
+        self,
+        name: str,
+        input: dict[str, Any],
+        ctx: ToolCtx | None = None,
+        *,
+        input_responses: Any = None,
+        request_state: str | None = None,
     ) -> ToolOutcome:
+        """``input_responses``/``request_state`` are the MRTR retry leg: echo a
+        prior ``input_required`` outcome's ``request_state`` together with the
+        collected answers and the MCP server resumes the paused call. Only
+        meaningful for MCP-sourced tools; ignored for in-proc handlers."""
         ctx = ctx or ToolCtx()
         entry = self._entries.get(name)
         if entry is None:
@@ -204,7 +214,10 @@ class ToolRegistry:
         try:
             if entry.spec.source == "mcp":
                 _, server, tool = name.split("__", 2)
-                return await self._manager.dispatch(server, tool, input)
+                return await self._manager.dispatch(
+                    server, tool, input,
+                    input_responses=input_responses, request_state=request_state,
+                )
             assert entry.handler is not None
             return _normalize(await entry.handler(input, ctx))
         except Exception as exc:  # keep tool errors in-context, never crash the loop
