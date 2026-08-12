@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from omni.context.cache_plan import plan_cache
+from omni.context.trim import ToolResultTrimmer, TrimConfig
 from omni.engine.base import EngineCaps
 from omni.events.bus import EventBus
 from omni.events.model import (
@@ -28,6 +29,7 @@ from omni.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    HandoffCreated,
     PermissionRequest,
     QuestionRequest,
     TextDelta,
@@ -40,6 +42,7 @@ from omni.events.model import (
 )
 from omni.events.ops import (
     Fork,
+    Handoff,
     Interrupt,
     Op,
     RespondPermission,
@@ -98,6 +101,7 @@ class NativeLoop:
         plan_mode: bool = False,
         codemode: "CodeModeSession | None" = None,
         max_model_calls_per_turn: int = 50,
+        trim: TrimConfig | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -123,6 +127,9 @@ class NativeLoop:
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested CLAUDE.md/AGENTS.md enters context once).
         self._nested_injected: set[str] = set()
+        # Cache-safe tool-result trimming (view-level; the stored tree keeps
+        # full fidelity). Sticky per engine lifetime — see context/trim.py.
+        self._trimmer = ToolResultTrimmer(config=trim or TrimConfig())
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -171,6 +178,8 @@ class NativeLoop:
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
             self.plan_mode = mode == "plan"
+        elif isinstance(op, Handoff):
+            await self._do_handoff(op)
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays
@@ -186,6 +195,56 @@ class NativeLoop:
             meta.head_node_id = op.to_node_id
         else:
             raise NotImplementedError(f"op not supported: {type(op).__name__}")
+
+    async def _do_handoff(self, op: Handoff) -> None:
+        """Amp-style handoff: ask the model for a structured handoff document
+        over the current session, then seed a NEW session with it as the first
+        user message. Nothing is summarized in place — the old session stays
+        intact; the new one starts small, with a fresh cacheable prefix.
+        """
+        meta = await self._ensure_session()
+        nodes = await self.store.load_path(meta.session_id)
+
+        # Bounded plain-text transcript for the summary call (newest last).
+        lines: list[str] = []
+        for node in nodes[-40:]:
+            text = node.message.text().strip()
+            if text:
+                lines.append(f"{node.message.role}: {text[:2000]}")
+        goal_line = f"\nThe stated goal for the next session: {op.goal}" if op.goal else ""
+        prompt = (
+            "Write a handoff document for a fresh agent session continuing this "
+            "work. Structure it as: Goal, Current state (what is done and "
+            "verified), Key decisions and constraints, Relevant files/paths, "
+            "Next steps (ordered). Be specific; the reader has NO other "
+            f"context.{goal_line}\n\n--- transcript ---\n" + "\n".join(lines)
+        )
+        request = ProviderRequest(
+            model=self.model,
+            messages=[Message(role="user", content=[Text(prompt)])],
+            system="You write precise engineering handoff documents.",
+            tools=[],
+            max_tokens=self.max_tokens,
+            cache_breakpoints=0,
+        )
+        parts: list[str] = []
+        async for chunk in self.provider.stream(request):
+            if chunk.kind == "text_delta":
+                parts.append(chunk.payload["text"])
+        content = "".join(parts).strip() or "(handoff document generation failed)"
+
+        new_meta = await self.store.create_session()
+        first = SessionNode(
+            node_id=new_id("node"), parent_id=None,
+            message=Message(role="user", content=[Text(content)]),
+        )
+        await self.store.append(new_meta.session_id, first)
+        await self._emit(HandoffCreated(
+            session_id=meta.session_id,
+            new_session_id=new_meta.session_id,
+            content=content,
+            goal=op.goal,
+        ))
 
     async def _emit(self, event: Event) -> Event:
         """Publish to the bus (assigns seq) and persist for durable replay."""
@@ -253,7 +312,7 @@ class NativeLoop:
         final_stop = "end_turn"
 
         while True:
-            history = [n.message for n in await self.store.load_path(sid, parent.node_id)]
+            history = self._trimmer.apply(await self.store.load_path(sid, parent.node_id))
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
             if result.stop_reason == "error":

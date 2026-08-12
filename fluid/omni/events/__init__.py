@@ -4,6 +4,7 @@ from omni.events.model import (
     BlockStop,
     ErrorEvent,
     Event,
+    HandoffCreated,
     Interrupted,
     PermissionRequest,
     QuestionRequest,
@@ -19,6 +20,7 @@ from omni.events.model import (
 )
 from omni.events.ops import (
     Fork,
+    Handoff,
     Interrupt,
     Op,
     RespondPermission,
@@ -36,6 +38,8 @@ __all__ = [
     "Event",
     "EventBus",
     "Fork",
+    "Handoff",
+    "HandoffCreated",
     "Interrupt",
     "Interrupted",
     "Op",

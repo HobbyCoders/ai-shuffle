@@ -48,6 +48,16 @@ class RespondQuestion(Op):
 
 
 @dataclass(kw_only=True)
+class Handoff(Op):
+    """Start a fresh session seeded with a model-written handoff document
+    (Amp-style): structured goal/state/next-steps instead of cumulative
+    summarization. The engine emits ``HandoffCreated`` with the new session id.
+    """
+
+    goal: str | None = None
+
+
+@dataclass(kw_only=True)
 class SetModel(Op):
     model: str
 

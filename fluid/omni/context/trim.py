@@ -1,0 +1,147 @@
+"""Cache-safe tool-result trimming (microcompaction) — prevention over lossy
+compaction.
+
+Old, bulky tool results are replaced with a short placeholder once the
+estimated context size crosses a trigger. Design rules (plan §7):
+
+* **Batch + sticky = cache-safe.** Trimming mid-history mutates the prefix and
+  invalidates the provider cache, so it must be RARE and AMORTIZED: when the
+  trigger fires, every eligible result is trimmed at once, and each trimmed
+  block stays trimmed for the engine's lifetime (the ``_trimmed`` set). Between
+  batch events the rendered prefix is byte-identical turn over turn, so cache
+  hits resume immediately after the one-time break.
+* **Keep recent, keep errors.** The newest K tool results are never trimmed
+  (the model is often still acting on them), and error results are always kept
+  verbatim — losing an error message is how doom loops start.
+* **The tree is never mutated.** Trimming is a view transformation applied when
+  history is rendered for a request; the stored SessionNodes keep full fidelity
+  (rewind/fork/audit see everything).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from omni.messages import Message, Text, ToolResultBlock
+from omni.store.base import SessionNode
+
+
+@dataclass(kw_only=True)
+class TrimConfig:
+    enabled: bool = True
+    # Estimated-token threshold that arms a batch trim (≈ chars / 4).
+    trigger_tokens: int = 120_000
+    # The newest K tool results are never trimmed.
+    keep_recent_tool_results: int = 5
+    # Results shorter than this are not worth a placeholder.
+    min_result_chars: int = 2_000
+
+
+def _block_chars(block: Any) -> int:
+    total = 0
+    text = getattr(block, "text", None)
+    if isinstance(text, str):
+        total += len(text)
+    for inner in getattr(block, "content", None) or []:
+        inner_text = getattr(inner, "text", None)
+        if isinstance(inner_text, str):
+            total += len(inner_text)
+    return total
+
+
+def estimate_tokens(nodes: list[SessionNode]) -> int:
+    """Cheap chars/4 estimate over every text carried by the path."""
+    chars = sum(
+        _block_chars(b) for n in nodes for b in n.message.content
+    )
+    return chars // 4
+
+
+def _placeholder(chars: int) -> Text:
+    return Text(
+        f"[old tool result trimmed to save context — {chars} chars removed; "
+        "re-run the tool if this output is needed again]"
+    )
+
+
+@dataclass
+class ToolResultTrimmer:
+    """Holds the sticky trimmed-set and renders trimmed history views."""
+
+    config: TrimConfig = field(default_factory=TrimConfig)
+    # (node_id, tool_use_id) blocks already trimmed — stays for the engine's
+    # lifetime so the rendered prefix is stable between batch trims.
+    _trimmed: set = field(default_factory=set)
+
+    def _render(self, nodes: list[SessionNode]) -> list[Message]:
+        if not self._trimmed:
+            return [n.message for n in nodes]
+        out: list[Message] = []
+        for node in nodes:
+            message = node.message
+            if message.role != "user":
+                out.append(message)
+                continue
+            blocks: list[Any] = []
+            changed = False
+            for block in message.content:
+                if (
+                    isinstance(block, ToolResultBlock)
+                    and (node.node_id, block.tool_use_id) in self._trimmed
+                ):
+                    blocks.append(
+                        ToolResultBlock(
+                            tool_use_id=block.tool_use_id,
+                            content=[_placeholder(_block_chars(block))],
+                            is_error=block.is_error,
+                        )
+                    )
+                    changed = True
+                else:
+                    blocks.append(block)
+            out.append(
+                Message(role="user", content=blocks, provider_meta=message.provider_meta)
+                if changed else message
+            )
+        return out
+
+    def _eligible(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
+        """(node_id, tool_use_id) of every trimmable result, oldest first."""
+        found: list[tuple[str, str, int, bool]] = []
+        for node in nodes:
+            if node.message.role != "user":
+                continue
+            for block in node.message.content:
+                if not isinstance(block, ToolResultBlock):
+                    continue
+                found.append(
+                    (node.node_id, block.tool_use_id, _block_chars(block),
+                     bool(block.is_error))
+                )
+        keep = self.config.keep_recent_tool_results
+        candidates = found[:-keep] if keep else found
+        return [
+            (nid, tuid)
+            for nid, tuid, chars, is_error in candidates
+            if not is_error
+            and chars >= self.config.min_result_chars
+            and (nid, tuid) not in self._trimmed
+        ]
+
+    def apply(self, nodes: list[SessionNode]) -> list[Message]:
+        """Render history with sticky trims; arm a new batch when over trigger."""
+        if not self.config.enabled:
+            return [n.message for n in nodes]
+        rendered = self._render(nodes)
+        if estimate_tokens_of_messages(rendered) > self.config.trigger_tokens:
+            newly = self._eligible(nodes)
+            if newly:
+                self._trimmed.update(newly)
+                rendered = self._render(nodes)
+        return rendered
+
+
+def estimate_tokens_of_messages(messages: list[Message]) -> int:
+    chars = sum(_block_chars(b) for m in messages for b in m.content)
+    return chars // 4

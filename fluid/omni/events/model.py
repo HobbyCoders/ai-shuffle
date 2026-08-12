@@ -144,6 +144,15 @@ class QuestionRequest(Event):
     schema: dict[str, Any] | None = None  # expected answer shape, if declared
 
 
+@dataclass(frozen=True, kw_only=True)
+class HandoffCreated(Event):
+    """A Handoff op finished: ``new_session_id`` starts from the handoff doc."""
+
+    new_session_id: str
+    content: str  # the handoff document (also the new session's first message)
+    goal: str | None = None
+
+
 # ─── Accounting / signals ────────────────────────────────────────────────────
 
 
@@ -190,7 +199,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
     for cls in (
         TurnStarted, TurnComplete, Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta,
-        ToolUse, ToolResult, PermissionRequest, QuestionRequest,
+        ToolUse, ToolResult, PermissionRequest, QuestionRequest, HandoffCreated,
         Usage, RateLimit, SubagentEvent,
     )
 }
