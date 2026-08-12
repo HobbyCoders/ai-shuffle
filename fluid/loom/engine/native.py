@@ -48,6 +48,7 @@ from loom.hooks.bus import (
 from loom.messages import Message, Reasoning, Text, Thinking, ToolResultBlock, ToolUseBlock
 from loom.permissions.engine import PermissionEngine, plan_mode_tools
 from loom.providers.base import ProviderClient, ProviderRequest
+from loom.codemode.session import CodeModeSession, register_code_mode_tools
 from loom.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from loom.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
@@ -84,6 +85,7 @@ class NativeLoop:
         hooks: HookBus | None = None,
         ctx: ToolCtx | None = None,
         plan_mode: bool = False,
+        codemode: "CodeModeSession | None" = None,
         max_model_calls_per_turn: int = 50,
     ) -> None:
         self.provider = provider
@@ -97,6 +99,9 @@ class NativeLoop:
         self.hooks = hooks
         self.ctx = ctx or ToolCtx()
         self.plan_mode = plan_mode
+        self._codemode = codemode
+        if codemode is not None and registry is not None:
+            register_code_mode_tools(registry, codemode)
         self.max_model_calls_per_turn = max_model_calls_per_turn
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -169,6 +174,8 @@ class NativeLoop:
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
+        if self._codemode is not None:
+            await self._codemode.aclose()
         await self.bus.close()
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
@@ -271,9 +278,18 @@ class NativeLoop:
     def _build_request(self, history: list[Message]) -> ProviderRequest:
         tools_api: list[dict[str, Any]] = []
         if self.registry is not None:
-            specs = self.registry.list_tools(loaded_only=True)
-            if self.plan_mode:
-                specs = plan_mode_tools(specs)
+            if self._codemode is not None:
+                # Code-mode replaces N schemas with the four-tool surface; the
+                # work-tools stay in the registry (reachable via host calls) but
+                # never enter the prompt schema.
+                specs = [
+                    s for s in self.registry.list_tools(loaded_only=True)
+                    if s.source == "codemode"
+                ]
+            else:
+                specs = self.registry.list_tools(loaded_only=True)
+                if self.plan_mode:
+                    specs = plan_mode_tools(specs)
             tools_api = [s.to_api() for s in specs]
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
         return ProviderRequest(
@@ -382,9 +398,26 @@ class NativeLoop:
     async def _dispatch_tool(
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
-        name = tu["name"]
         tool_use_id = tu["tool_use_id"]
-        input: dict[str, Any] = tu["input"]
+        outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=[Text(outcome.text)],
+            is_error=outcome.is_error,
+        )
+
+    async def _gated_call(
+        self, sid: str, turn_id: str, name: str, tool_use_id: str,
+        input: dict[str, Any],
+    ) -> ToolOutcome:
+        """The gated tool-execution path for the JSON tool surface:
+        PreToolUse hook → PermissionEngine → dispatch → PostToolUse.
+
+        ``run_python`` is intercepted here and handed to the code-mode session,
+        whose in-kernel tool calls are gated host-side by ``HostBridge`` (the
+        same hook + permission + doom-loop pipeline, including the
+        ``code_mode_allowed=False`` escape hatch).
+        """
         assert self.registry is not None
         spec = self.registry.get(name)
 
@@ -415,7 +448,14 @@ class NativeLoop:
                     ToolOutcome(text="permission denied", is_error=True),
                 )
 
-        outcome = await self.registry.dispatch(name, input, self.ctx)
+        # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
+        # tool calls are gated by HostBridge (see CodeModeSession.run_python).
+        if self._codemode is not None and name == "run_python":
+            outcome = await self._codemode.run_python(
+                sid=sid, turn_id=turn_id, input=input, loop=self
+            )
+        else:
+            outcome = await self.registry.dispatch(name, input, self.ctx)
         return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome)
 
     async def _await_permission(
@@ -439,7 +479,7 @@ class NativeLoop:
 
     async def _finish_tool(
         self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome
-    ) -> ToolResultBlock:
+    ) -> ToolOutcome:
         if self.hooks is not None:
             await self.hooks.emit(
                 POST_TOOL_USE,
@@ -450,11 +490,7 @@ class NativeLoop:
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,
         ))
-        return ToolResultBlock(
-            tool_use_id=tool_use_id,
-            content=[Text(outcome.text)],
-            is_error=outcome.is_error,
-        )
+        return outcome
 
     @staticmethod
     def _merge_usage(totals: dict[str, int], usage: dict[str, Any]) -> None:
