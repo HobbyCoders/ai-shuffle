@@ -2370,8 +2370,12 @@ async def _stream_to_websocket_impl(
         # the CLI reads it, so this install sees memories written elsewhere.
         await reconcile_memory(project_id, options.cwd)
 
-        adapter = ClaudeAgentAdapter()
-        logger.debug("[WS] ClaudeAgentAdapter created, attempting connect...")
+        # Feature-flagged backend selection. Default (AIH_USE_LOOM_HARNESS unset)
+        # returns ClaudeAgentAdapter — byte-for-byte the previous behavior. With
+        # the flag on, make_adapter() returns the loom HarnessAdapter instead.
+        from app.core.provider.factory import make_adapter
+        adapter = make_adapter()
+        logger.debug("[WS] provider adapter created (%s), attempting connect...", type(adapter).__name__)
 
         try:
             _connect_start = time.monotonic()

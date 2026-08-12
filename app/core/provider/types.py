@@ -165,6 +165,25 @@ class TaskNotificationEvent(ProviderEvent):
 
 
 @dataclass
+class PermissionRequestEvent(ProviderEvent):
+    """A tool invocation is blocked awaiting a permission decision.
+
+    Emitted by adapters that surface permission gating as a stream event (the
+    loom HarnessAdapter). The caller responds via
+    ``adapter.respond_to_permission(tool_use_id, allow, remember=...)``.
+
+    The Claude Agent SDK path does NOT emit this — it handles permissions
+    out-of-band through the ``can_use_tool`` callback — so this type is additive
+    and only appears on the harness path.
+    """
+    tool_use_id: str
+    name: str
+    input: Any
+    risk: str = "safe"
+    request_id: Optional[str] = None
+
+
+@dataclass
 class TaskProgressEvent(ProviderEvent):
     """Subagent task progress update."""
     task_id: str
