@@ -196,6 +196,7 @@ class HarnessAdapter(ProviderAdapter):
                 mcp_servers=options.mcp_servers,
                 cwd=options.cwd,
                 env=options.env,
+                claude_cmd=_resolve_claude_cmd(),
             )
         else:
             provider_client = _build_provider_client(kind, options)
@@ -819,6 +820,30 @@ class HarnessAdapter(ProviderAdapter):
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
+
+
+def _resolve_claude_cmd() -> Optional[list]:
+    """Command for the delegated ``claude`` CLI, or None for PATH default.
+
+    In the Docker image the CLI is not on PATH — only the copy bundled inside
+    claude_agent_sdk exists — so fall back to the same resolver the interrupt
+    patch uses. Returning None lets DelegatedLoop try bare ``claude`` (dev
+    machines with a global install).
+    """
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return [found]
+    try:
+        from app.core.cli_interrupt_patch import resolve_bundled_cli_path
+
+        bundled = resolve_bundled_cli_path()
+        if bundled is not None:
+            return [str(bundled)]
+    except Exception:  # pragma: no cover — resolver is best-effort
+        logger.debug("bundled claude CLI resolution failed", exc_info=True)
+    return None
 
 
 def _stringify_system(system_prompt: Any) -> Optional[str]:
