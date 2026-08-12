@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from loom.tools.registry import InputRequired, ToolCtx, ToolRegistry
+from omni.tools.registry import InputRequired, ToolCtx, ToolRegistry
 
 FIXTURE = str(Path(__file__).parent.parent / "fixtures" / "fake_mcp_server.py")
 
@@ -17,7 +17,7 @@ FIXTURE = str(Path(__file__).parent.parent / "fixtures" / "fake_mcp_server.py")
 def _config(ttl_ms: int | None = None) -> dict:
     env = dict(__import__("os").environ)
     if ttl_ms is not None:
-        env["LOOM_FAKE_TTL"] = str(ttl_ms)
+        env["OMNI_FAKE_TTL"] = str(ttl_ms)
     return {"transport": "stdio", "command": sys.executable, "args": [FIXTURE], "env": env}
 
 

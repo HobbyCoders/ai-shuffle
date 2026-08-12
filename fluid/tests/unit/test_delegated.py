@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.engine.base import EngineCaps
-from loom.engine.delegated import DelegatedLoop
-from loom.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
-from loom.events import (
+from omni.engine.base import EngineCaps
+from omni.engine.delegated import DelegatedLoop
+from omni.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subtype
+from omni.events import (
     BlockStart,
     BlockStop,
     ErrorEvent,
@@ -35,15 +35,15 @@ from loom.events import (
     Usage,
     UserTurn,
 )
-from loom.messages import Text
-from loom.store.base import MemoryStore
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.mcp.bundled_server import (
+from omni.messages import Text
+from omni.store.base import MemoryStore
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.mcp.bundled_server import (
     bundled_server_config,
     serve_registry_socket,
     write_bundled_config,
 )
-from loom.tools.registry import ToolCtx, ToolRegistry
+from omni.tools.registry import ToolCtx, ToolRegistry
 
 FAKE = str(Path(__file__).parent.parent / "fixtures" / "fake_claude.py")
 GOLDEN = Path(__file__).parent.parent / "golden" / "simple_turn.jsonl"
@@ -159,7 +159,7 @@ async def test_simple_text_turn() -> None:
         assert done.cost_usd == pytest.approx(0.00042)
 
         # version guard + resume handle captured
-        assert loop.cli_version == "claude 2.0.0 (fake-loom)"
+        assert loop.cli_version == "claude 2.0.0 (fake-omni)"
         assert loop.cli_session_id == "cli-sess-123"
 
         # nodes persisted: user + assistant, reload-able
@@ -214,11 +214,11 @@ async def _drive_permission(scenario_decision: str):
 async def test_permission_allow() -> None:
     loop, events = await _drive_permission("allow")
     perm = next(e for e in events if isinstance(e, PermissionRequest))
-    assert perm.name == "mcp__loom_bundled__get_weather"
+    assert perm.name == "mcp__omni_bundled__get_weather"
     tool_use = next(e for e in events if isinstance(e, ToolUse))
-    assert tool_use.name == "mcp__loom_bundled__get_weather"
+    assert tool_use.name == "mcp__omni_bundled__get_weather"
     result = next(e for e in events if isinstance(e, ToolResult))
-    assert result.name == "mcp__loom_bundled__get_weather"  # resolved via tool_use_id map
+    assert result.name == "mcp__omni_bundled__get_weather"  # resolved via tool_use_id map
     assert result.output == "Paris: sunny, 21C" and not result.is_error
     assert any(isinstance(e, TurnComplete) for e in events)
     assert not any(isinstance(e, ErrorEvent) for e in events)
@@ -320,11 +320,11 @@ def test_write_bundled_config(tmp_path) -> None:
     on_disk = json.loads(path.read_text())
     assert on_disk == config
     servers = config["mcpServers"]
-    assert "loom_bundled" in servers and "other" in servers
-    bundled = servers["loom_bundled"]
+    assert "omni_bundled" in servers and "other" in servers
+    bundled = servers["omni_bundled"]
     assert bundled == bundled_server_config(sock)
     assert bundled["command"] == sys.executable
-    assert "-m" in bundled["args"] and "loom.tools.mcp.bundled_server" in bundled["args"]
+    assert "-m" in bundled["args"] and "omni.tools.mcp.bundled_server" in bundled["args"]
     assert sock in bundled["args"]
 
 
@@ -371,7 +371,7 @@ async def test_bundled_server_end_to_end_via_mcp(tmp_path) -> None:
         config = {
             "transport": "stdio",
             "command": sys.executable,
-            "args": ["-m", "loom.tools.mcp.bundled_server", "--socket", sock],
+            "args": ["-m", "omni.tools.mcp.bundled_server", "--socket", sock],
             "env": dict(os.environ),
         }
         specs = await client_reg.connect_mcp("bundled", config)

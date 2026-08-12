@@ -10,8 +10,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from loom.providers.openai_responses import codex_oauth as ox
-from loom.providers.openai_responses.codex_oauth import (
+from omni.providers.openai_responses import codex_oauth as ox
+from omni.providers.openai_responses.codex_oauth import (
     CodexAuth,
     StoredBundle,
     _needs_refresh,

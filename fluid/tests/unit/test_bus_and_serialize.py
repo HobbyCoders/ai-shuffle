@@ -2,10 +2,10 @@
 
 import asyncio
 
-from loom.events import EventBus, TextDelta
-from loom.messages import Message, Reasoning, Text
-from loom.providers.anthropic.serialize import build_request_body
-from loom.providers.base import ProviderRequest
+from omni.events import EventBus, TextDelta
+from omni.messages import Message, Reasoning, Text
+from omni.providers.anthropic.serialize import build_request_body
+from omni.providers.base import ProviderRequest
 
 
 async def test_bus_seq_and_replay() -> None:

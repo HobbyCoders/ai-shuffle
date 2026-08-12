@@ -11,8 +11,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from loom.engine.native import NativeLoop
-from loom.events import (
+from omni.engine.native import NativeLoop
+from omni.events import (
     BlockStart,
     BlockStop,
     TextDelta,
@@ -23,11 +23,11 @@ from loom.events import (
     Usage,
     UserTurn,
 )
-from loom.messages import Reasoning, Text, Thinking, ToolUseBlock
-from loom.providers._sse import sse_events
-from loom.providers.anthropic.serialize import sse_to_chunk
-from loom.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from loom.store.base import MemoryStore
+from omni.messages import Reasoning, Text, Thinking, ToolUseBlock
+from omni.providers._sse import sse_events
+from omni.providers.anthropic.serialize import sse_to_chunk
+from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from omni.store.base import MemoryStore
 
 GOLDEN = Path(__file__).parent.parent / "golden" / "anthropic_text_thinking_tool.sse"
 

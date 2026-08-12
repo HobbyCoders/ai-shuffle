@@ -1,4 +1,4 @@
-# loom
+# omni
 
 A multi-provider AI agent harness. Headless, event-driven core; sessions as branching
 trees; cache-first context management; classic JSON tool-calling plus a code-as-actions

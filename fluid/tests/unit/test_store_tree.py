@@ -7,10 +7,10 @@ tracking, and the event log all survive a restart.
 
 from typing import AsyncIterator
 
-from loom.engine.native import NativeLoop
-from loom.events import Fork, Rewind, UserTurn
-from loom.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from loom.store.jsonl import JsonlStore
+from omni.engine.native import NativeLoop
+from omni.events import Fork, Rewind, UserTurn
+from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from omni.store.jsonl import JsonlStore
 
 
 class ScriptedProvider:

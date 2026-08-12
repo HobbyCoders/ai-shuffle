@@ -1,7 +1,7 @@
 """A tiny in-repo stdio MCP server (official ``mcp`` SDK) for offline tests.
 
 Run as ``python fake_mcp_server.py``. Exposes three tools and, when
-``LOOM_FAKE_TTL`` is set, advertises a ``tools/list`` freshness hint so the
+``OMNI_FAKE_TTL`` is set, advertises a ``tools/list`` freshness hint so the
 client's TTL cache can be exercised. The ``need_input`` tool returns an MRTR
 ``input_required`` result (an elicitation round-trip) to test that path.
 """
@@ -70,8 +70,8 @@ async def on_call_tool(ctx, params):
 
 async def main():
     cache_hints = None
-    if os.environ.get("LOOM_FAKE_TTL"):
-        cache_hints = {"tools/list": CacheHint(ttl_ms=int(os.environ["LOOM_FAKE_TTL"]), scope="private")}
+    if os.environ.get("OMNI_FAKE_TTL"):
+        cache_hints = {"tools/list": CacheHint(ttl_ms=int(os.environ["OMNI_FAKE_TTL"]), scope="private")}
     server = Server(
         "fakesrv", version="0.1.0",
         on_list_tools=on_list_tools, on_call_tool=on_call_tool,

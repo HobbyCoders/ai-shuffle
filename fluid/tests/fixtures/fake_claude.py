@@ -99,7 +99,7 @@ def turn_simple(sid: str) -> None:
 
 def turn_tool(sid: str) -> None:
     tid = "toolu_fake_1"
-    tool_name = "mcp__loom_bundled__get_weather"
+    tool_name = "mcp__omni_bundled__get_weather"
     args = {"city": "Paris"}
     emit(assistant_frame(
         sid, [{"type": "tool_use", "id": tid, "name": tool_name, "input": args}], "tool_use",
@@ -151,7 +151,7 @@ def turn_partial(sid: str) -> None:
 
 def main() -> int:
     if "--version" in sys.argv:
-        print("claude 2.0.0 (fake-loom)")
+        print("claude 2.0.0 (fake-omni)")
         return 0
 
     scenario = os.environ.get("FAKE_CLAUDE_SCENARIO", "a")

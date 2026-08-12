@@ -15,17 +15,17 @@ from typing import AsyncIterator
 
 import pytest
 
-from loom.codemode.kernel import HostReply
-from loom.codemode.projection import Projection, func_name, stub_source
-from loom.codemode.session import CodeModeSession
-from loom.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
-from loom.engine.native import NativeLoop
-from loom.events import PermissionRequest, RespondPermission, ToolResult, ToolUse, TurnComplete, UserTurn
-from loom.permissions.engine import PermissionEngine
-from loom.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from loom.store.base import MemoryStore
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.registry import ToolRegistry, ToolSpec
+from omni.codemode.kernel import HostReply
+from omni.codemode.projection import Projection, func_name, stub_source
+from omni.codemode.session import CodeModeSession
+from omni.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from omni.engine.native import NativeLoop
+from omni.events import PermissionRequest, RespondPermission, ToolResult, ToolUse, TurnComplete, UserTurn
+from omni.permissions.engine import PermissionEngine
+from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from omni.store.base import MemoryStore
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.registry import ToolRegistry, ToolSpec
 
 
 # ── scripted provider (same shape as test_tool_loop) ──────────────────────

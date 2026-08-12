@@ -9,16 +9,16 @@ import asyncio
 import io
 from typing import AsyncIterator
 
-from loom.cli.__main__ import run_once
-from loom.cli.config import list_sessions, make_engine, make_store
-from loom.cli.repl import Repl, stream_turn
-from loom.config.loader import BUILTIN_DEFAULTS, deep_merge
-from loom.config.model import HarnessConfig
-from loom.events.model import PermissionRequest, ToolResult, TurnComplete
-from loom.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from loom.store.base import MemoryStore
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.registry import ToolRegistry
+from omni.cli.__main__ import run_once
+from omni.cli.config import list_sessions, make_engine, make_store
+from omni.cli.repl import Repl, stream_turn
+from omni.config.loader import BUILTIN_DEFAULTS, deep_merge
+from omni.config.model import HarnessConfig
+from omni.events.model import PermissionRequest, ToolResult, TurnComplete
+from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from omni.store.base import MemoryStore
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.registry import ToolRegistry
 
 
 def _text(text: str) -> list[StreamChunk]:
@@ -66,11 +66,11 @@ def _config() -> HarnessConfig:
 def test_run_once_streams_text_and_returns_zero() -> None:
     out = io.StringIO()
     store = MemoryStore()
-    provider = ScriptedProvider([_text("hello from loom")])
+    provider = ScriptedProvider([_text("hello from omni")])
 
     rc = asyncio.run(run_once(_config(), store, "hi", provider=provider, out=out))
     assert rc == 0
-    assert "hello from loom" in out.getvalue()
+    assert "hello from omni" in out.getvalue()
     assert "[done]" in out.getvalue()
 
 

@@ -7,10 +7,10 @@ case, the ``code_mode_allowed=False`` escape hatch, the ``ask`` permission
 round-trip (allow + deny), and large-result truncation via ResultRef.
 """
 
-from loom.codemode import HostBridge, Projection, SubprocessKernel
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.registry import ToolCtx, ToolRegistry, ToolSpec
-from loom.permissions.engine import PermissionEngine
+from omni.codemode import HostBridge, Projection, SubprocessKernel
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.registry import ToolCtx, ToolRegistry, ToolSpec
+from omni.permissions.engine import PermissionEngine
 
 
 def _wx_registry() -> ToolRegistry:
@@ -142,7 +142,7 @@ async def test_large_result_stays_behind_a_result_ref() -> None:
 
 
 async def test_hook_deny_short_circuits_host_call() -> None:
-    from loom.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+    from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
 
     registry = _wx_registry()
     hooks = HookBus()

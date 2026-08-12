@@ -5,7 +5,7 @@ project root to bound the walk. Global discovery reads ``~`` / XDG, so tests
 that exercise it isolate HOME + XDG_CONFIG_HOME to tmp dirs.
 """
 
-from loom.context.instructions import (
+from omni.context.instructions import (
     build_instruction_stack,
     discover_commands,
     discover_instruction_files,

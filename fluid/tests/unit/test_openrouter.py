@@ -6,11 +6,11 @@ from typing import AsyncIterator
 
 import httpx
 
-from loom.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
-from loom.providers._sse import sse_events
-from loom.providers.base import ProviderRequest, StreamChunk
-from loom.providers.openrouter.client import OpenRouterClient
-from loom.providers.openrouter.serialize import (
+from omni.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
+from omni.providers._sse import sse_events
+from omni.providers.base import ProviderRequest, StreamChunk
+from omni.providers.openrouter.client import OpenRouterClient
+from omni.providers.openrouter.serialize import (
     ChatCompletionsNormalizer,
     build_request_body,
 )

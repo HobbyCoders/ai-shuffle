@@ -7,15 +7,15 @@ call, so the whole loop runs offline.
 import asyncio
 from typing import AsyncIterator
 
-from loom.engine.native import NativeLoop
-from loom.events import PermissionRequest, RespondPermission, ToolResult, TurnComplete, UserTurn
-from loom.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
-from loom.permissions.engine import PermissionEngine
-from loom.permissions.rules import Rule
-from loom.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from loom.store.base import MemoryStore
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.registry import ToolCtx, ToolRegistry
+from omni.engine.native import NativeLoop
+from omni.events import PermissionRequest, RespondPermission, ToolResult, TurnComplete, UserTurn
+from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from omni.permissions.engine import PermissionEngine
+from omni.permissions.rules import Rule
+from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from omni.store.base import MemoryStore
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.registry import ToolCtx, ToolRegistry
 
 
 def _text(text: str) -> list[StreamChunk]:
@@ -142,7 +142,7 @@ async def test_permission_ask_allow_and_deny() -> None:
 
 
 async def test_deny_rule_blocks_bash(tmp_path) -> None:
-    from loom.tools.builtins import register_builtins
+    from omni.tools.builtins import register_builtins
 
     marker = tmp_path / "marker.txt"
     registry = ToolRegistry()
@@ -193,7 +193,7 @@ async def test_pre_tool_use_hook_deny_short_circuits() -> None:
 
 
 def test_plan_mode_filters_write_tools() -> None:
-    from loom.tools.builtins import register_builtins
+    from omni.tools.builtins import register_builtins
 
     registry = ToolRegistry()
     register_builtins(registry)

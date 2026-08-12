@@ -2,12 +2,12 @@
 
 import pytest
 
-from loom.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
-from loom.permissions.engine import PermissionEngine, plan_mode_tools
-from loom.permissions.rules import Rule, evaluate_rules
-from loom.tools.builtins import register_builtins
-from loom.tools.inproc import create_inproc_server, tool
-from loom.tools.registry import ToolCtx, ToolRegistry, ToolSpec
+from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from omni.permissions.engine import PermissionEngine, plan_mode_tools
+from omni.permissions.rules import Rule, evaluate_rules
+from omni.tools.builtins import register_builtins
+from omni.tools.inproc import create_inproc_server, tool
+from omni.tools.registry import ToolCtx, ToolRegistry, ToolSpec
 
 
 async def test_inproc_server_naming_and_dispatch() -> None:
@@ -20,13 +20,13 @@ async def test_inproc_server_naming_and_dispatch() -> None:
     assert registry.get("mcp__srv__hello") is not None
     assert [s.name for s in registry.list_tools()] == ["mcp__srv__hello"]
 
-    out = await registry.dispatch("mcp__srv__hello", {"name": "loom"}, ToolCtx())
-    assert out.text == "hi loom"
+    out = await registry.dispatch("mcp__srv__hello", {"name": "omni"}, ToolCtx())
+    assert out.text == "hi omni"
     assert not out.is_error
 
 
 async def test_inproc_accepts_plain_str_and_tooloutcome() -> None:
-    from loom.tools.registry import ToolOutcome
+    from omni.tools.registry import ToolOutcome
 
     @tool("s", "returns str", {"type": "object"})
     async def s(args: dict):

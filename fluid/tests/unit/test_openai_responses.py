@@ -5,11 +5,11 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from loom.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
-from loom.providers._sse import sse_events
-from loom.providers.base import ProviderRequest, StreamChunk
-from loom.providers.openai_responses.client import OpenAIResponsesClient
-from loom.providers.openai_responses.serialize import (
+from omni.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
+from omni.providers._sse import sse_events
+from omni.providers.base import ProviderRequest, StreamChunk
+from omni.providers.openai_responses.client import OpenAIResponsesClient
+from omni.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
     build_request_body,
 )

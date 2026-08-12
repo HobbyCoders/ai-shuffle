@@ -1,13 +1,13 @@
 """M5 — projection: tools → compilable typed Python stubs + discovery catalog."""
 
-from loom.codemode.projection import (
+from omni.codemode.projection import (
     Projection,
     _annotation,
     _py_ident,
     func_name,
     stub_source,
 )
-from loom.tools.registry import ToolSpec
+from omni.tools.registry import ToolSpec
 
 
 def _spec(name: str, *, risk: str = "safe", code_mode_allowed: bool = True) -> ToolSpec:

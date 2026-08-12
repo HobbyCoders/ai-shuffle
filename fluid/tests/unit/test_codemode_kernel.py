@@ -8,8 +8,8 @@ tool dispatch (that is test_codemode_dispatch).
 
 import pytest
 
-from loom.codemode import SubprocessKernel
-from loom.codemode.kernel import HostReply
+from omni.codemode import SubprocessKernel
+from omni.codemode.kernel import HostReply
 
 
 async def _no_tools(name: str, kwargs: dict) -> HostReply:
@@ -92,6 +92,6 @@ async def test_timeout_kills_and_recovers() -> None:
 
 
 async def test_kernel_satisfies_protocol() -> None:
-    from loom.codemode.kernel import Kernel
+    from omni.codemode.kernel import Kernel
 
     assert isinstance(SubprocessKernel(), Kernel)
