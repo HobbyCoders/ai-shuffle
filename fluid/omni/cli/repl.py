@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Awaitable, Callable, TextIO
 
 from omni.events.model import (
@@ -154,7 +155,8 @@ class Repl:
             return False
         if cmd == "/help":
             self.out.write(
-                "commands: /model <name>, /fork <node_id>, /rewind <node_id>, /exit\n"
+                "commands: /model <name>, /fork <node_id>, /rewind <node_id>, /exit,\n"
+                "plus any .claude/commands|.agents/commands *.md file as /<name> [args]\n"
             )
         elif cmd == "/model":
             if arg:
@@ -167,9 +169,31 @@ class Repl:
         elif cmd == "/rewind":
             await self._submit_or_report(Rewind(to_node_id=arg), "rewind")
         else:
-            self.out.write(f"unknown command: {cmd} (try /help)\n")
+            # User-defined slash commands: .claude/commands/*.md and
+            # .agents/commands/*.md files run as a turn, with $ARGUMENTS
+            # substituted (Claude Code convention).
+            rendered = self._render_user_command(cmd.lstrip("/"), arg)
+            if rendered is not None:
+                await self.run_turn(rendered)
+            else:
+                self.out.write(f"unknown command: {cmd} (try /help)\n")
         self.out.flush()
         return True
+
+    def _render_user_command(self, name: str, arg: str) -> str | None:
+        """Resolve a discovered command file to its prompt body, or None."""
+        from omni.context.instructions import discover_commands, parse_frontmatter
+
+        cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
+        match = next((c for c in discover_commands(cwd) if c.name == name), None)
+        if match is None:
+            return None
+        try:
+            raw = Path(match.path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        _, body = parse_frontmatter(raw)
+        return body.replace("$ARGUMENTS", arg).strip()
 
     async def _submit_or_report(self, op, label: str) -> None:
         try:

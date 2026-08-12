@@ -32,7 +32,7 @@ def make_store(directory: str | os.PathLike[str] | None = None):
 
 
 def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -> str | None:
-    """Instruction stack (prefix) + config/per-run system text, or None."""
+    """Instruction stack (prefix) + skill index + config/per-run system text."""
     parts: list[str] = []
     if config.instruction_files.enabled:
         stack = build_instruction_stack(
@@ -42,6 +42,22 @@ def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -
         )
         if stack.strip():
             parts.append(stack)
+        # Progressive disclosure: advertise skills as name+description only —
+        # the Skill builtin loads a body on demand, keeping the prefix small
+        # and cache-stable.
+        if config.instruction_files.discover_skills:
+            from omni.context.instructions import discover_skills
+
+            skills = discover_skills(config.cwd)
+            if skills:
+                lines = "\n".join(
+                    f"- {s.name}: {s.description}" for s in skills
+                )
+                parts.append(
+                    "# Available skills\n"
+                    "Load a skill's full instructions with the Skill tool "
+                    "before doing a task it covers.\n" + lines
+                )
     if config.system:
         parts.append(config.system)
     if extra_system:

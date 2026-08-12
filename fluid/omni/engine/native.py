@@ -45,6 +45,8 @@ from omni.events.ops import (
     RespondPermission,
     RespondQuestion,
     Rewind,
+    SetModel,
+    SetPermissionMode,
     UserTurn,
 )
 from omni.hooks.bus import (
@@ -118,6 +120,9 @@ class NativeLoop:
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
+        # Nested-instruction injection: instruction-file paths already injected
+        # this session (each nested CLAUDE.md/AGENTS.md enters context once).
+        self._nested_injected: set[str] = set()
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -150,6 +155,22 @@ class NativeLoop:
             fut = self._pending_questions.get(op.request_id)
             if fut is not None and not fut.done():
                 fut.set_result(op)
+        elif isinstance(op, SetModel):
+            # Hot-swap: the next _build_request reads self.model.
+            self.model = op.model
+        elif isinstance(op, SetPermissionMode):
+            # Accept omni's native policies directly, plus the Claude-Code-style
+            # mode names clients (AI-Shuffle, the CLI) already speak.
+            mode = op.mode
+            policy = mode if mode in ("never_ask", "on_write", "always_ask") else {
+                "bypassPermissions": "never_ask",
+                "acceptEdits": "on_write",
+                "default": "on_write",
+                "plan": "always_ask",
+            }.get(mode, "on_write")
+            if self.permissions is not None:
+                self.permissions.approval_policy = policy
+            self.plan_mode = mode == "plan"
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays
@@ -443,10 +464,61 @@ class NativeLoop:
     ) -> ToolResultBlock:
         tool_use_id = tu["tool_use_id"]
         outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
+        content = [Text(outcome.text)]
+        # Nested-instruction injection (instruction-file seam): when a tool
+        # touches a path whose own directory carries a CLAUDE.md/AGENTS.md not
+        # in the project stack, ride those instructions into context on this
+        # tool result — model-facing only, once per file per session.
+        reminder = self._nested_instruction_reminder(tu["input"])
+        if reminder:
+            content.append(Text(reminder))
         return ToolResultBlock(
             tool_use_id=tool_use_id,
-            content=[Text(outcome.text)],
+            content=content,
             is_error=outcome.is_error,
+        )
+
+    # Tool-input keys that name a filesystem target worth checking for nested
+    # instruction files.
+    _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path", "directory")
+
+    def _nested_instruction_reminder(self, input: dict[str, Any]) -> str | None:
+        from pathlib import Path
+
+        from omni.context.instructions import _walk_up_dirs, nested_instructions
+
+        if not isinstance(input, dict):
+            return None
+        targets = [
+            v for k in self._PATH_INPUT_KEYS
+            if isinstance((v := input.get(k)), str) and v
+        ]
+        if not targets:
+            return None
+        # Directories already covered by the project stack (git root → cwd)
+        # never re-inject.
+        try:
+            covered = {str(d) for d in _walk_up_dirs(Path(self.ctx.cwd or "."))}
+        except OSError:
+            covered = set()
+        blocks: list[str] = []
+        for target in targets:
+            try:
+                for f in nested_instructions(target):
+                    directory = str(Path(f.path).parent)
+                    if directory in covered or f.path in self._nested_injected:
+                        continue
+                    self._nested_injected.add(f.path)
+                    if f.content.strip():
+                        blocks.append(f"# From: {f.path}\n{f.content.rstrip()}")
+            except OSError:
+                continue
+        if not blocks:
+            return None
+        joined = "\n\n".join(blocks)
+        return (
+            "<system-reminder>\nInstructions apply to the directory just "
+            f"accessed:\n\n{joined}\n</system-reminder>"
         )
 
     async def _gated_call(

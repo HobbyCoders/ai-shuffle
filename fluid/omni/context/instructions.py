@@ -24,14 +24,15 @@ Merge rule (per the plan):
   their bytes are identical. Every block carries a ``# From: <path>`` provenance
   header.
 
-Seams (discovery only; wiring is intentionally deferred):
-  * ``nested_instructions(path)`` — the CLAUDE.md/AGENTS.md that apply when the
-    agent touches a file in a subdirectory. Returned for the loop to inject; the
-    loop wiring is a documented seam.
-  * ``discover_skills`` returns ``Skill`` records with ``body_loaded=False`` for
-    progressive disclosure (only name+description parsed from frontmatter).
-  * ``discover_commands`` returns slash-command file references; execution is a
-    seam.
+Wiring (M6 seams, now closed):
+  * ``nested_instructions(path)`` — injected by ``NativeLoop._dispatch_tool``:
+    a tool call touching a path whose directory carries its own instruction
+    file rides those instructions into that tool result, once per session.
+  * ``discover_skills`` returns ``Skill`` records with ``body_loaded=False``;
+    the CLI advertises name+description in the system prompt and the ``Skill``
+    builtin loads a body on demand (progressive disclosure).
+  * ``discover_commands`` — the REPL runs ``/name args`` from a discovered
+    command file with ``$ARGUMENTS`` substituted.
 """
 
 from __future__ import annotations
@@ -174,8 +175,8 @@ def nested_instructions(path: str | os.PathLike[str]) -> list[InstructionFile]:
     """Instruction files that apply to a file/dir the agent is reading.
 
     When the agent touches ``<subdir>/foo.py``, ``<subdir>``'s own CLAUDE.md /
-    AGENTS.md apply on top of the project stack. This returns those files; the
-    loop wiring (appending them for that tool call) is a documented seam.
+    AGENTS.md apply on top of the project stack. This returns those files;
+    ``NativeLoop._dispatch_tool`` appends them to that call's tool result.
     """
     p = Path(path)
     directory = p if p.is_dir() else p.parent
@@ -261,8 +262,8 @@ def discover_skills(
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
-    Bodies are left unread (``body_loaded=False``) — progressive disclosure: the
-    tool/prompt layer loads a skill body on demand. Wiring that load is a seam.
+    Bodies are left unread (``body_loaded=False``) — progressive disclosure:
+    the ``Skill`` builtin loads a body on demand.
     """
     out: list[Skill] = []
     seen: set[str] = set()
@@ -292,7 +293,7 @@ def discover_commands(
     cwd: str | os.PathLike[str], *, include_global: bool = True
 ) -> list[Command]:
     """Discover slash-command files: ``.claude/commands/*.md`` and
-    ``.agents/commands/*.md``. Discovery only — execution is a seam."""
+    ``.agents/commands/*.md``. The REPL executes these (``$ARGUMENTS`` substituted)."""
     out: list[Command] = []
     seen: set[str] = set()
     bases: list[tuple[Path, str]] = []
