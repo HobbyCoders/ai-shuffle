@@ -86,83 +86,173 @@ def register_sdk_tools(
     *,
     version: str = "1.0.0",
     risk_map: Optional[Mapping[str, str]] = None,
+    default_risk: str = "safe",
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
-    ``mcp__<server_name>__<tool>`` (omni's naming, matching Claude Code)."""
-    server = sdk_tools_to_inproc_server(
-        server_name, sdk_tools, version=version, risk_map=risk_map
-    )
+    ``mcp__<server_name>__<tool>`` (omni's naming, matching Claude Code).
+
+    ``default_risk`` applies to tools absent from ``risk_map`` — used by
+    servers whose tool set is dynamic (connector gateway tools on ``builtins``,
+    the ProviderAgent tool) so unknown tools default to gated, not open.
+    """
+    risk_map = risk_map or {}
+    tools: List[InprocTool] = [
+        sdk_tool_to_inproc(t, risk=risk_map.get(getattr(t, "name", ""), default_risk))
+        for t in sdk_tools
+    ]
+    server = create_inproc_server(server_name, tools, version=version)
     registry.register_inproc(server)
     return server
 
 
-# ─── Worked example: app/mcp/builtin_tools.py ─────────────────────────────────
+# ─── Per-server risk classification ───────────────────────────────────────────
 #
-# builtin_tools.py builds its ``@tool`` objects inside ``create_builtin_tools_server``
-# and passes them straight into ``create_sdk_mcp_server`` (they are not returned
-# separately). To port it WITHOUT editing that module, add a single line at the
-# assembly site (right before the existing ``return patch_sdk_server(...)``):
+# The app assembles five in-proc SDK servers (query_options / app_config_sdk
+# aggregate the individual app/mcp modules into these):
 #
-#     if omni_registry is not None:  # only when running under the omni harness
-#         from app.core.provider.omni_tool_bridge import register_sdk_tools
-#         register_sdk_tools(omni_registry, "builtins", all_tools,
-#                            risk_map=BUILTINS_RISK_MAP)
+#   builtins        builtin_tools.py  (+ dynamic connector gateway tools)
+#   app-config      app_config_sdk.py (aggregates all config_* modules)
+#   ai-tools        ai_tools_sdk.py
+#   computer-use    computer_use_sdk.py
+#   provider-agent  provider_agent_sdk.py
 #
-# That is the entire port. The risk map below classifies the write/destructive
-# builtins so omni's PermissionEngine gates them the way the SDK path did.
+# (phone_tools.py exports raw definitions but is not wired into any SDK server,
+# so there is nothing to bridge for it.)
+#
+# Every server passes through sdk_compat.patch_sdk_server, which records the
+# raw @tool objects (see provider/sdk_tool_records.py);
+# ``register_recorded_sdk_servers`` below re-registers them on an omni
+# ToolRegistry with the risk classifications here, so omni's PermissionEngine
+# gates writes/deletes the way the SDK path's permission callback did.
 
 BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
     "Monitor": "safe",
     "TaskOutput": "safe",
+    "TaskGet": "safe",
+    "TaskList": "safe",
     "TaskStop": "write",
+    "CronList": "safe",
     "CronCreate": "write",
     "CronDelete": "destructive",
     "EnterWorktree": "write",
     "ExitWorktree": "write",
+    "GetAppErrors": "safe",
+    "ToolSearch": "safe",
+    "RemoteTrigger": "write",
+}
+
+# Dynamic gateway tools (per-connector, e.g. sending messages through a linked
+# service) also land on the builtins server — unknown names default to "write".
+BUILTINS_DEFAULT_RISK = "write"
+
+
+def _classify_app_config(name: str) -> str:
+    if name.startswith(("delete", "remove")):
+        return "destructive"
+    if name.startswith(("list", "get")):
+        return "safe"
+    # create*/update*/toggle*/add*/test*/trigger* mutate app configuration.
+    return "write"
+
+
+APP_CONFIG_RISK_MAP: Mapping[str, str] = {
+    name: _classify_app_config(name)
+    for name in (
+        "getConfigCapabilities", "listHooks", "getHook", "createHook",
+        "updateHook", "deleteHook", "toggleHook", "testHook",
+        "listAutomations", "getAutomation", "getAutomationRuns",
+        "createAutomation", "updateAutomation", "deleteAutomation",
+        "toggleAutomation", "triggerAutomation",
+        "listMcpServers", "addMcpServer", "removeMcpServer", "toggleMcpServer",
+        "listProfiles", "getProfile", "createProfile", "updateProfile",
+        "deleteProfile",
+        "listConnectors", "getConnectorStatus", "toggleConnector",
+        "listSubagents", "getSubagent", "createSubagent", "updateSubagent",
+        "deleteSubagent",
+    )
+}
+
+AI_TOOLS_RISK_MAP: Mapping[str, str] = {
+    # Generation tools spend provider credits and write artifacts.
+    "generateImage": "write", "editImage": "write", "generateWithReference": "write",
+    "generateVideo": "write", "imageToVideo": "write", "extendVideo": "write",
+    "generateAudio": "write", "audioToAudio": "write",
+    "imageTo3D": "write", "textTo3D": "write", "runFalModel": "write",
+    "searchModels": "safe",
+}
+
+COMPUTER_USE_RISK_MAP: Mapping[str, str] = {
+    # Pure observation:
+    "screenshot": "safe", "cursor_position": "safe", "list_displays": "safe",
+    "list_granted_applications": "safe", "read_clipboard": "safe",
+    "zoom": "safe", "wait": "safe",
+    # Everything that drives the desktop mutates it:
+    "left_click": "write", "right_click": "write", "middle_click": "write",
+    "double_click": "write", "triple_click": "write", "left_click_drag": "write",
+    "left_mouse_down": "write", "left_mouse_up": "write", "mouse_move": "write",
+    "key": "write", "hold_key": "write", "type": "write", "scroll": "write",
+    "switch_display": "write", "open_application": "write",
+    "write_clipboard": "write", "request_access": "write",
+    "computer_batch": "write",
+}
+
+PROVIDER_AGENT_RISK_MAP: Mapping[str, str] = {
+    "ProviderAgent": "write",  # spawns a worker agent that can act
+}
+
+SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
+    "builtins": BUILTINS_RISK_MAP,
+    "app-config": APP_CONFIG_RISK_MAP,
+    "ai-tools": AI_TOOLS_RISK_MAP,
+    "computer-use": COMPUTER_USE_RISK_MAP,
+    "provider-agent": PROVIDER_AGENT_RISK_MAP,
+}
+
+SERVER_DEFAULT_RISK: Mapping[str, str] = {
+    "builtins": BUILTINS_DEFAULT_RISK,
+    # Unknown/new tools on the other servers default to gated as well —
+    # "safe" must be earned by an explicit entry above.
+    "app-config": "write",
+    "ai-tools": "write",
+    "computer-use": "write",
+    "provider-agent": "write",
 }
 
 
-def bridge_builtins_tools(sdk_tools: Iterable[Any]) -> InprocServer:
-    """Return the omni InprocServer for the ``builtins`` module's SDK tools.
+def register_recorded_sdk_servers(
+    registry: ToolRegistry, mcp_servers: Optional[Mapping[str, Any]]
+) -> List[str]:
+    """Register every recorded in-proc SDK server from an ``mcp_servers``
+    mapping onto ``registry``. Returns the server names registered.
 
-    Pass the same ``all_tools`` list ``create_builtin_tools_server`` assembles.
-    Kept separate from that module so builtin_tools.py stays free of any omni
-    import (additive, reversible).
+    This is the whole port of the app's in-proc tool modules: the tools were
+    recorded (per server INSTANCE, so per-session closures stay correct) when
+    ``patch_sdk_server`` assembled each server; here they are re-registered on
+    omni's ToolRegistry with the risk maps above. Servers with no recording
+    (e.g. built before sdk_compat imported, or non-dict configs) are skipped —
+    the external stdio/sse/http entries are handled by ``connect_mcp`` instead.
     """
-    return sdk_tools_to_inproc_server("builtins", sdk_tools, risk_map=BUILTINS_RISK_MAP)
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
 
-
-# Remaining in-process tool modules to port (identical one-liner each) — all use
-# the SDK @tool / create_sdk_mcp_server pattern, so ``register_sdk_tools`` covers
-# them with only a server-name + risk-map choice:
-#
-#   app/mcp/ai_tools_sdk.py
-#   app/mcp/app_config_sdk.py
-#   app/mcp/computer_use_sdk.py
-#   app/mcp/config_automations.py            (config_* share config_helpers)
-#   app/mcp/config_connectors.py
-#   app/mcp/config_hooks.py
-#   app/mcp/config_mcp_servers.py
-#   app/mcp/config_profiles.py
-#   app/mcp/config_subagents.py
-#   app/mcp/connector_gateway_sdk.py
-#   app/mcp/connector_tools_sdk.py
-#   app/mcp/phone_tools.py
-#
-# (builtin_tools.py is the one proven above.)
-REMAINING_TOOL_MODULES: List[str] = [
-    "app/mcp/ai_tools_sdk.py",
-    "app/mcp/app_config_sdk.py",
-    "app/mcp/computer_use_sdk.py",
-    "app/mcp/config_automations.py",
-    "app/mcp/config_connectors.py",
-    "app/mcp/config_hooks.py",
-    "app/mcp/config_mcp_servers.py",
-    "app/mcp/config_profiles.py",
-    "app/mcp/config_subagents.py",
-    "app/mcp/connector_gateway_sdk.py",
-    "app/mcp/connector_tools_sdk.py",
-    "app/mcp/phone_tools.py",
-]
+    registered: List[str] = []
+    for name, cfg in (mcp_servers or {}).items():
+        if not (isinstance(cfg, dict) and cfg.get("type") == "sdk"):
+            continue
+        tools = recorded_sdk_server_tools(cfg)
+        if not tools:
+            logger.warning(
+                "[omni_tool_bridge] no recorded tools for sdk server %r — skipped",
+                name,
+            )
+            continue
+        register_sdk_tools(
+            registry,
+            name,
+            tools,
+            risk_map=SERVER_RISK_MAPS.get(name),
+            default_risk=SERVER_DEFAULT_RISK.get(name, "write"),
+        )
+        registered.append(name)
+    return registered

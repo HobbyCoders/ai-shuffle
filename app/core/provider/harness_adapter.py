@@ -37,9 +37,14 @@ HONORED:
   * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
   * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
 
+  * in-proc SDK servers in ``mcp_servers`` (type="sdk": builtins, app-config,
+    ai-tools, computer-use, provider-agent) → auto-bridged onto the omni
+    ToolRegistry with per-tool risk maps (see omni_tool_bridge.
+    register_recorded_sdk_servers; tools recorded by sdk_compat.patch_sdk_server).
+
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``tools`` / ``allowed_tools`` / ``disallowed_tools`` — omni uses a ToolRegistry;
-    the app's SDK tool/allow lists are not auto-translated (use omni_inproc_servers).
+  * ``allowed_tools`` / ``disallowed_tools`` — the app's SDK allow/deny lists
+    are not auto-translated to registry filtering yet.
   * ``plugins`` — no omni equivalent.
   * ``thinking`` / ``effort`` — omni manages thinking via provider caps, not passed through.
   * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
@@ -754,10 +759,20 @@ class HarnessAdapter(ProviderAdapter):
 
         inproc_servers = options.extra.get("omni_inproc_servers") or []
         external_mcp = _external_mcp_servers(options.mcp_servers)
-        if not inproc_servers and not external_mcp:
-            return None
 
         registry = ToolRegistry()
+        # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
+        # computer-use, provider-agent): their @tool objects were recorded per
+        # instance when patch_sdk_server assembled them; re-register the same
+        # tools on omni's registry with the bridge's risk maps.
+        from app.core.provider.omni_tool_bridge import register_recorded_sdk_servers
+        recorded = register_recorded_sdk_servers(registry, options.mcp_servers)
+        if recorded:
+            logger.info(
+                "[HarnessAdapter] bridged in-proc sdk servers onto omni registry: %s",
+                ", ".join(recorded),
+            )
+
         for server in inproc_servers:
             registry.register_inproc(server)
         for name, config in external_mcp.items():
@@ -765,6 +780,9 @@ class HarnessAdapter(ProviderAdapter):
                 await registry.connect_mcp(name, config)
             except Exception as exc:  # best-effort; a bad MCP server must not fail connect
                 logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
+
+        if not recorded and not inproc_servers and not external_mcp:
+            return None
         return registry
 
     def _build_permissions(self, options: SessionOptions):
