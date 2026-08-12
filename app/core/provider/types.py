@@ -169,7 +169,7 @@ class PermissionRequestEvent(ProviderEvent):
     """A tool invocation is blocked awaiting a permission decision.
 
     Emitted by adapters that surface permission gating as a stream event (the
-    loom HarnessAdapter). The caller responds via
+    omni HarnessAdapter). The caller responds via
     ``adapter.respond_to_permission(tool_use_id, allow, remember=...)``.
 
     The Claude Agent SDK path does NOT emit this — it handles permissions

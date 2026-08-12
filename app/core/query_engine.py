@@ -1390,8 +1390,8 @@ async def stream_query(
         await reconcile_memory(project_id, getattr(options, "cwd", None))
 
         # Feature-flagged backend selection, same as the WS path below: default
-        # (AIH_USE_LOOM_HARNESS unset) is ClaudeAgentAdapter, flag-on is the
-        # loom HarnessAdapter.
+        # (AIH_USE_OMNI_HARNESS unset) is ClaudeAgentAdapter, flag-on is the
+        # omni HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
 
@@ -2350,9 +2350,9 @@ async def _stream_to_websocket_impl(
         # the CLI reads it, so this install sees memories written elsewhere.
         await reconcile_memory(project_id, options.cwd)
 
-        # Feature-flagged backend selection. Default (AIH_USE_LOOM_HARNESS unset)
+        # Feature-flagged backend selection. Default (AIH_USE_OMNI_HARNESS unset)
         # returns ClaudeAgentAdapter — byte-for-byte the previous behavior. With
-        # the flag on, make_adapter() returns the loom HarnessAdapter instead.
+        # the flag on, make_adapter() returns the omni HarnessAdapter instead.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
         logger.debug("[WS] provider adapter created (%s), attempting connect...", type(adapter).__name__)

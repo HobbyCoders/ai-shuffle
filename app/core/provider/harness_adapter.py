@@ -1,20 +1,20 @@
-"""HarnessAdapter — concrete ProviderAdapter backed by the ``loom`` harness.
+"""HarnessAdapter — concrete ProviderAdapter backed by the ``omni`` harness.
 
 This is the additive, feature-flagged sibling of :class:`ClaudeAgentAdapter`.
-It wraps a loom execution engine (``NativeLoop`` for direct-API providers, or
+It wraps a omni execution engine (``NativeLoop`` for direct-API providers, or
 ``DelegatedLoop`` for the Claude-subscription ``claude`` CLI) and translates the
-loom ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
-so the rest of AI-Shuffle never sees a loom type.
+omni ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
+so the rest of AI-Shuffle never sees a omni type.
 
-It is selected ONLY when ``AIH_USE_LOOM_HARNESS=1`` (see ``factory.make_adapter``);
+It is selected ONLY when ``AIH_USE_OMNI_HARNESS=1`` (see ``factory.make_adapter``);
 the default path remains the Claude Agent SDK adapter, unchanged.
 
 Design mirrors ClaudeAgentAdapter: connect/disconnect/health/reconnect lifecycle,
 send_query/receive_events for streaming, and interrupt/respond/set_* controls.
 
 Provider-kind decision (from SessionOptions):
-  * ``extra["loom_engine"] == "delegated"``  → DelegatedLoop (claude CLI)
-  * ``extra["loom_provider"]`` / env ``AIH_LOOM_PROVIDER`` in
+  * ``extra["omni_engine"] == "delegated"``  → DelegatedLoop (claude CLI)
+  * ``extra["omni_provider"]`` / env ``AIH_OMNI_PROVIDER`` in
     {anthropic, openai_responses, openrouter} → NativeLoop with that client
   * otherwise inferred from the model string:
       - "claude*"            → DelegatedLoop (subscription default)
@@ -28,27 +28,27 @@ HONORED:
   * ``model``                → engine model (native: request model; delegated: --model)
   * ``system_prompt`` (str)  → engine ``system`` (dict system prompts are stringified)
   * ``cwd``                  → ToolCtx.cwd (native) / DelegatedLoop cwd
-  * ``resume_session_id``    → loom session id (native) / ``--resume`` handle (delegated)
-  * ``session_id``           → explicit loom session id
-  * ``permission_mode``      → loom PermissionEngine approval policy + plan_mode
+  * ``resume_session_id``    → omni session id (native) / ``--resume`` handle (delegated)
+  * ``session_id``           → explicit omni session id
+  * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
   * ``env``                  → delegated child env / native provider (via os.environ)
-  * ``mcp_servers``          → loom ``registry.connect_mcp`` (external stdio/sse/http)
-  * ``extra["loom_store_dir"]`` / env ``AIH_LOOM_STORE_DIR`` → JsonlStore root
-  * ``extra["loom_inproc_servers"]`` → loom in-process tool servers (see loom_tool_bridge)
-  * ``extra["loom_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
+  * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/sse/http)
+  * ``extra["omni_store_dir"]`` / env ``AIH_OMNI_STORE_DIR`` → JsonlStore root
+  * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
+  * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
 
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
-  * ``tools`` / ``allowed_tools`` / ``disallowed_tools`` — loom uses a ToolRegistry;
-    the app's SDK tool/allow lists are not auto-translated (use loom_inproc_servers).
-  * ``plugins`` — no loom equivalent.
-  * ``thinking`` / ``effort`` — loom manages thinking via provider caps, not passed through.
-  * ``hooks`` / ``include_hook_events`` — loom has its own HookBus; app SDK hooks not wired.
-  * ``agents`` (subagents) — not configured on the loom engine here.
+  * ``tools`` / ``allowed_tools`` / ``disallowed_tools`` — omni uses a ToolRegistry;
+    the app's SDK tool/allow lists are not auto-translated (use omni_inproc_servers).
+  * ``plugins`` — no omni equivalent.
+  * ``thinking`` / ``effort`` — omni manages thinking via provider caps, not passed through.
+  * ``hooks`` / ``include_hook_events`` — omni has its own HookBus; app SDK hooks not wired.
+  * ``agents`` (subagents) — not configured on the omni engine here.
   * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
-    concepts; loom persistence is the JsonlStore/MemoryStore chosen above.
-  * ``include_partial_messages`` — loom always streams deltas (native); delegated
-    ``partial`` defaults off (set ``extra["loom_partial"]=True`` to enable).
+    concepts; omni persistence is the JsonlStore/MemoryStore chosen above.
+  * ``include_partial_messages`` — omni always streams deltas (native); delegated
+    ``partial`` defaults off (set ``extra["omni_partial"]=True`` to enable).
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
 """
 
@@ -68,7 +68,7 @@ from app.core.provider.types import (
 )
 # The streaming loops dispatch on the provider mirror vocabulary (identical
 # names/shapes to the SDK message classes — see events.py). _translate
-# synthesizes these from the loom Event stream so a flag-on session flows
+# synthesizes these from the omni Event stream so a flag-on session flows
 # through the exact same loop branches as the SDK path.
 from app.core.provider.events import (
     AssistantMessage,
@@ -87,11 +87,11 @@ from app.core.provider.events import (
     UserMessage,
 )
 
-# loom imports (the library we wrap). Its top-level __init__ is intentionally
+# omni imports (the library we wrap). Its top-level __init__ is intentionally
 # empty, so we import from submodules directly.
-from loom.engine.native import NativeLoop
-from loom.engine.delegated import DelegatedLoop
-from loom.events.ops import (
+from omni.engine.native import NativeLoop
+from omni.engine.delegated import DelegatedLoop
+from omni.events.ops import (
     Interrupt,
     RespondPermission,
     RespondQuestion,
@@ -99,19 +99,19 @@ from loom.events.ops import (
     SetPermissionMode,
     UserTurn,
 )
-from loom.permissions.engine import PermissionEngine
-from loom.providers.anthropic.client import AnthropicClient
-from loom.providers.openai_responses.client import OpenAIResponsesClient
-from loom.providers.openrouter.client import OpenRouterClient
-from loom.store.base import MemoryStore
-from loom.store.jsonl import JsonlStore
-from loom.tools.registry import ToolCtx, ToolRegistry
+from omni.permissions.engine import PermissionEngine
+from omni.providers.anthropic.client import AnthropicClient
+from omni.providers.openai_responses.client import OpenAIResponsesClient
+from omni.providers.openrouter.client import OpenRouterClient
+from omni.store.base import MemoryStore
+from omni.store.jsonl import JsonlStore
+from omni.tools.registry import ToolCtx, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 _ENGINE_CLOSE_GRACE_SECONDS = 5.0
 
-# app permission_mode → loom PermissionEngine approval policy
+# app permission_mode → omni PermissionEngine approval policy
 _PERMISSION_POLICY = {
     "bypassPermissions": "never_ask",
     "acceptEdits": "on_write",
@@ -121,7 +121,7 @@ _PERMISSION_POLICY = {
 
 
 class HarnessAdapter(ProviderAdapter):
-    """ProviderAdapter implementation backed by the loom harness."""
+    """ProviderAdapter implementation backed by the omni harness."""
 
     def __init__(self) -> None:
         self._engine: Optional[Any] = None  # NativeLoop | DelegatedLoop
@@ -130,12 +130,12 @@ class HarnessAdapter(ProviderAdapter):
         self._connected: bool = False
         self._options: Optional[SessionOptions] = None
         self._sdk_session_id: Optional[str] = None
-        # receive_events replay cursor: loom's EventBus replays from ``since_seq``,
+        # receive_events replay cursor: omni's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
-        # app tool_use_id -> loom permission request_id (respond_to_permission map)
+        # app tool_use_id -> omni permission request_id (respond_to_permission map)
         self._perm_requests: Dict[str, str] = {}
-        # last pending user-question request_id (loom core does not yet emit a
+        # last pending user-question request_id (omni core does not yet emit a
         # question event; kept for forward-compat with RespondQuestion).
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
@@ -145,11 +145,11 @@ class HarnessAdapter(ProviderAdapter):
         # Open streaming blocks: index -> block_type, and accumulated delta text.
         self._block_types: Dict[int, str] = {}
         self._block_buffers: Dict[int, list] = {}
-        # Last loom Usage reading, attached to the next synthesized
+        # Last omni Usage reading, attached to the next synthesized
         # AssistantMessage (the loops read per-call usage off that message).
         self._pending_usage: Optional[Dict[str, Any]] = None
         # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
-        # present, loom PermissionRequests are bridged to it out-of-band (SDK
+        # present, omni PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
         # surface in-stream as PermissionRequestEvent.
         self._can_use_tool: Optional[Any] = None
@@ -159,13 +159,13 @@ class HarnessAdapter(ProviderAdapter):
 
     @property
     def engine(self) -> Optional[Any]:
-        """Direct access to the underlying loom engine (parallels sdk_client)."""
+        """Direct access to the underlying omni engine (parallels sdk_client)."""
         return self._engine
 
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
-        """Build the loom engine from SessionOptions and prime its session."""
+        """Build the omni engine from SessionOptions and prime its session."""
         self._options = options
         self._store = self._build_store(options)
         self._registry = await self._build_registry(options)
@@ -173,7 +173,7 @@ class HarnessAdapter(ProviderAdapter):
         kind = _decide_provider_kind(options)
         self._is_delegated = kind == "delegated"
 
-        loom_session_id = options.session_id or options.resume_session_id
+        omni_session_id = options.session_id or options.resume_session_id
         system = _stringify_system(options.system_prompt)
         permissions, plan_mode = self._build_permissions(options)
 
@@ -184,10 +184,10 @@ class HarnessAdapter(ProviderAdapter):
                 system=system,
                 permission_mode=options.permission_mode,
                 registry=self._registry,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=loom_session_id),
-                session_id=loom_session_id,
+                ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
+                session_id=omni_session_id,
                 cli_session_id=options.resume_session_id,
-                partial=bool(options.extra.get("loom_partial", False)),
+                partial=bool(options.extra.get("omni_partial", False)),
                 mcp_servers=options.mcp_servers,
                 cwd=options.cwd,
                 env=options.env,
@@ -201,9 +201,9 @@ class HarnessAdapter(ProviderAdapter):
                 system=system,
                 registry=self._registry,
                 permissions=permissions,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=loom_session_id),
+                ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
                 plan_mode=plan_mode,
-                session_id=loom_session_id,
+                session_id=omni_session_id,
             )
 
         # Prime the session so ``session_id`` and ``events()`` are usable
@@ -220,9 +220,9 @@ class HarnessAdapter(ProviderAdapter):
         """Compat shim mirroring ClaudeAgentAdapter.connect_with_sdk_options.
 
         Callers that still build ``ClaudeAgentOptions`` directly (query_engine,
-        query_background) can hand them here; the fields loom can honor are
+        query_background) can hand them here; the fields omni can honor are
         projected onto a SessionOptions. This lets ``make_adapter()`` be a
-        drop-in at those sites. Fields loom cannot honor are ignored (see the
+        drop-in at those sites. Fields omni cannot honor are ignored (see the
         module docstring's degraded list).
         """
         opts = SessionOptions(
@@ -248,7 +248,7 @@ class HarnessAdapter(ProviderAdapter):
         *,
         session_id: Optional[str] = None,
     ) -> None:
-        """Close the loom engine (cancels any running turn, flushes the bus)."""
+        """Close the omni engine (cancels any running turn, flushes the bus)."""
         engine = self._engine
         if engine is None:
             return
@@ -274,7 +274,7 @@ class HarnessAdapter(ProviderAdapter):
     def is_alive(self) -> bool:
         """Whether the engine exists and hasn't been closed.
 
-        loom engines are in-process (native) or supervise a subprocess
+        omni engines are in-process (native) or supervise a subprocess
         (delegated). We treat "connected and not torn down" as alive; the
         delegated subprocess health is managed internally by the engine.
         """
@@ -291,11 +291,11 @@ class HarnessAdapter(ProviderAdapter):
         await self._engine.submit(UserTurn(content=prompt))
 
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
-        """Translate the loom Event stream into ProviderEvents for one turn.
+        """Translate the omni Event stream into ProviderEvents for one turn.
 
         Subscribes at the current replay cursor, yields translated mirror
         messages, and completes on the turn-terminal ResultMessage (synthesized
-        from loom's TurnComplete / Interrupted / ErrorEvent), mirroring the SDK
+        from omni's TurnComplete / Interrupted / ErrorEvent), mirroring the SDK
         adapter's iterator-completion contract.
         """
         if self._engine is None:
@@ -322,14 +322,14 @@ class HarnessAdapter(ProviderAdapter):
                     return
 
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
-        """Route one loom permission request through the app's can_use_tool
+        """Route one omni permission request through the app's can_use_tool
         callback and submit the decision back to the engine.
 
         The callback duck-types its ``context`` argument via getattr (see
         can_use_tool_callback in query_engine), so a SimpleNamespace carrying
         tool_use_id is sufficient. The result is detected by class name to keep
         claude_agent_sdk types out of this module. Any failure denies —
-        loom blocks the tool until a decision arrives, so silence would hang
+        omni blocks the tool until a decision arrives, so silence would hang
         the turn.
         """
         from types import SimpleNamespace
@@ -375,7 +375,7 @@ class HarnessAdapter(ProviderAdapter):
         request_id = self._perm_requests.pop(tool_use_id, None)
         if request_id is None:
             logger.warning(
-                "[HarnessAdapter] no pending loom permission for tool_use_id=%s", tool_use_id
+                "[HarnessAdapter] no pending omni permission for tool_use_id=%s", tool_use_id
             )
             return
         decision = ("allow_always" if remember else "allow") if allow else "deny"
@@ -384,7 +384,7 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     async def respond_to_user_question(self, answer: str) -> None:
-        # loom's core Event model does not yet emit a user-question event, so
+        # omni's core Event model does not yet emit a user-question event, so
         # there is normally no request_id to answer. This is wired for
         # forward-compat: if a question id was recorded, respond to it.
         if self._engine is None or self._pending_question_id is None:
@@ -460,11 +460,11 @@ class HarnessAdapter(ProviderAdapter):
             return True
         return False
 
-    # ─── Translation: loom Event → ProviderEvent mirrors ──────────────
+    # ─── Translation: omni Event → ProviderEvent mirrors ──────────────
 
     def _uuid(self, event: Any) -> str:
-        """Stable synthetic uuid for a loom event (mirrors carry uuid fields)."""
-        return f"loom-{getattr(event, 'seq', -1)}"
+        """Stable synthetic uuid for a omni event (mirrors carry uuid fields)."""
+        return f"omni-{getattr(event, 'seq', -1)}"
 
     def _stream_event(self, event: Any, raw: Dict[str, Any]) -> StreamEvent:
         return StreamEvent(
@@ -489,7 +489,7 @@ class HarnessAdapter(ProviderAdapter):
 
     def _translate(self, event: Any) -> list:
         """The core mapping table. Returns a list of mirror events (possibly
-        empty) — one loom event can fan out to a StreamEvent plus a complete
+        empty) — one omni event can fan out to a StreamEvent plus a complete
         message, exactly like the SDK's partial-message mode."""
         cls = type(event).__name__
         partial = bool(self._options and self._options.include_partial_messages)
@@ -574,7 +574,7 @@ class HarnessAdapter(ProviderAdapter):
                 )
             # Complete text/thinking blocks surface as an AssistantMessage
             # (SDK parity: complete messages follow the deltas). tool_use
-            # blocks are covered by the discrete ToolUse loom event.
+            # blocks are covered by the discrete ToolUse omni event.
             if block_type == "text" and text:
                 out.append(self._assistant(event, [TextBlock(text=text)]))
             elif block_type == "thinking" and text:
@@ -614,7 +614,7 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "PermissionRequest":
             # Record the tool_use_id -> request_id link so respond_to_permission
-            # can route the decision back to the right loom future.
+            # can route the decision back to the right omni future.
             self._perm_requests[event.tool_use_id] = event.request_id
             return [
                 PermissionRequestEvent(
@@ -734,25 +734,25 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
-        # Unknown / no-analog loom event — skip.
+        # Unknown / no-analog omni event — skip.
         return []
 
     # ─── Internal builders ────────────────────────────────────────────
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
-        store_dir = options.extra.get("loom_store_dir") or os.environ.get("AIH_LOOM_STORE_DIR")
+        store_dir = options.extra.get("omni_store_dir") or os.environ.get("AIH_OMNI_STORE_DIR")
         if store_dir:
             return JsonlStore(store_dir)
         return MemoryStore()
 
     async def _build_registry(self, options: SessionOptions) -> Optional[ToolRegistry]:
         # Escape hatch: a caller may hand a fully-built registry.
-        prebuilt = options.extra.get("loom_registry")
+        prebuilt = options.extra.get("omni_registry")
         if isinstance(prebuilt, ToolRegistry):
             return prebuilt
 
-        inproc_servers = options.extra.get("loom_inproc_servers") or []
+        inproc_servers = options.extra.get("omni_inproc_servers") or []
         external_mcp = _external_mcp_servers(options.mcp_servers)
         if not inproc_servers and not external_mcp:
             return None
@@ -778,7 +778,7 @@ class HarnessAdapter(ProviderAdapter):
 
 
 def _stringify_system(system_prompt: Any) -> Optional[str]:
-    """loom takes a plain ``system`` string; coerce dict/None forms."""
+    """omni takes a plain ``system`` string; coerce dict/None forms."""
     if system_prompt is None:
         return None
     if isinstance(system_prompt, str):
@@ -790,9 +790,9 @@ def _stringify_system(system_prompt: Any) -> Optional[str]:
 
 
 def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Only external transports (stdio/sse/http) can be connected via loom's
+    """Only external transports (stdio/sse/http) can be connected via omni's
     McpManager. SDK in-process servers (type='sdk') are skipped — those port
-    through ``loom_tool_bridge`` into ``loom_inproc_servers`` instead."""
+    through ``omni_tool_bridge`` into ``omni_inproc_servers`` instead."""
     out: Dict[str, Any] = {}
     for name, cfg in (mcp_servers or {}).items():
         if isinstance(cfg, dict) and cfg.get("type") == "sdk":
@@ -803,14 +803,14 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
 
 def _decide_provider_kind(options: SessionOptions) -> str:
     """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter'."""
-    engine_hint = options.extra.get("loom_engine")
+    engine_hint = options.extra.get("omni_engine")
     if engine_hint == "delegated":
         return "delegated"
     if engine_hint == "native":
         # fall through to provider selection below
         pass
 
-    provider_hint = options.extra.get("loom_provider") or os.environ.get("AIH_LOOM_PROVIDER")
+    provider_hint = options.extra.get("omni_provider") or os.environ.get("AIH_OMNI_PROVIDER")
     if provider_hint in ("anthropic", "openai_responses", "openrouter"):
         return provider_hint
     if provider_hint == "delegated":
@@ -819,7 +819,7 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     model = (options.model or "").lower()
     if model.startswith("claude"):
         # Subscription default: the claude CLI (delegated). Set
-        # extra["loom_provider"]="anthropic" for the direct-API-key native path.
+        # extra["omni_provider"]="anthropic" for the direct-API-key native path.
         return "delegated" if engine_hint != "native" else "anthropic"
     if model.startswith(("gpt", "o1", "o3", "o4", "codex")):
         return "openai_responses"

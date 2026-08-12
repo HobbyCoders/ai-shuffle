@@ -1,20 +1,20 @@
-"""Unit tests for HarnessAdapter — the loom-backed ProviderAdapter.
+"""Unit tests for HarnessAdapter — the omni-backed ProviderAdapter.
 
-These tests are runnable with the loom venv (no claude_agent_sdk required, no
+These tests are runnable with the omni venv (no claude_agent_sdk required, no
 live API calls). They exercise:
 
-  1. The loom Event -> ProviderEvent translation table, one case per event type.
-  2. Iterator completion on terminal loom events (TurnComplete/Interrupted/Error).
-  3. The permission round-trip: a loom PermissionRequest surfaces as a
+  1. The omni Event -> ProviderEvent translation table, one case per event type.
+  2. Iterator completion on terminal omni events (TurnComplete/Interrupted/Error).
+  3. The permission round-trip: a omni PermissionRequest surfaces as a
      PermissionRequestEvent, and respond_to_permission() submits a matching
-     loom RespondPermission op back to the engine (tool_use_id -> request_id).
+     omni RespondPermission op back to the engine (tool_use_id -> request_id).
   4. An end-to-end turn over a REAL NativeLoop driven by a fake provider that
      replays StreamChunks (text turn -> deltas + usage + result).
   5. The provider-kind decision logic.
-  6. The SDK @tool -> loom InprocTool bridge.
+  6. The SDK @tool -> omni InprocTool bridge.
 
 Run:  cd /home/owner/Documents/AI-Shuffle && \
-      /home/owner/Documents/loom-harness/.venv/bin/python -m pytest \
+      /path/to/omni-harness/.venv/bin/python -m pytest \
           tests/test_harness_adapter.py -q
 """
 
@@ -41,10 +41,10 @@ from app.core.provider.events import (
     UserMessage,
 )
 
-from loom.events import model as lm
-from loom.events.ops import RespondPermission, UserTurn
-from loom.providers.base import ProviderCaps, StreamChunk
-from loom.store.base import MemoryStore
+from omni.events import model as lm
+from omni.events.ops import RespondPermission, UserTurn
+from omni.providers.base import ProviderCaps, StreamChunk
+from omni.store.base import MemoryStore
 
 SID = "ses_test"
 
@@ -53,7 +53,7 @@ SID = "ses_test"
 
 
 class FakeEngine:
-    """Minimal stand-in for a loom engine: scripted events + recorded ops."""
+    """Minimal stand-in for a omni engine: scripted events + recorded ops."""
 
     def __init__(self, events: list) -> None:
         # assign monotonic seq like the EventBus would
@@ -78,7 +78,7 @@ class FakeEngine:
 
 
 class FakeProvider:
-    """A loom ProviderClient replaying a fixed list of StreamChunks."""
+    """A omni ProviderClient replaying a fixed list of StreamChunks."""
 
     name = "fake"
     caps = ProviderCaps()
@@ -188,7 +188,7 @@ async def test_translation_non_partial_buffers_deltas():
 
 @pytest.mark.asyncio
 async def test_usage_attaches_to_next_assistant_message():
-    # A loom Usage reading rides on the next synthesized AssistantMessage in
+    # A omni Usage reading rides on the next synthesized AssistantMessage in
     # the SDK's field names, where the loops read per-call token counts.
     events = [
         lm.TurnStarted(session_id=SID, model="m", provider="fake"),
@@ -269,7 +269,7 @@ async def test_permission_round_trip():
 
 @pytest.mark.asyncio
 async def test_permission_bridged_to_can_use_tool():
-    """With an app can_use_tool callback wired (the WS/chat path), a loom
+    """With an app can_use_tool callback wired (the WS/chat path), a omni
     PermissionRequest never surfaces in-stream; the callback's decision is
     submitted back as a RespondPermission op (SDK out-of-band parity)."""
     events = [
@@ -326,7 +326,7 @@ async def test_permission_deny_mapping():
 
 @pytest.mark.asyncio
 async def test_native_loop_text_turn():
-    from loom.engine.native import NativeLoop
+    from omni.engine.native import NativeLoop
 
     chunks = [
         StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -357,7 +357,7 @@ async def test_native_loop_text_turn():
     assert text == "Hello world"
     assert isinstance(got[-1], ResultMessage) and got[-1].stop_reason == "end_turn"
 
-    # sdk_session_id resolves to the live loom session id.
+    # sdk_session_id resolves to the live omni session id.
     assert adapter.sdk_session_id == loop.session_id
     await adapter.disconnect()
 
@@ -372,10 +372,10 @@ def test_provider_kind_decision():
     assert _decide_provider_kind(SessionOptions(model="meta-llama/llama-3.1-70b")) == "openrouter"
     # explicit hints win
     assert _decide_provider_kind(
-        SessionOptions(model="claude-x", extra={"loom_engine": "native", "loom_provider": "anthropic"})
+        SessionOptions(model="claude-x", extra={"omni_engine": "native", "omni_provider": "anthropic"})
     ) == "anthropic"
     assert _decide_provider_kind(
-        SessionOptions(model="gpt-4o", extra={"loom_provider": "openrouter"})
+        SessionOptions(model="gpt-4o", extra={"omni_provider": "openrouter"})
     ) == "openrouter"
 
 
@@ -390,16 +390,16 @@ def test_requires_reconnect():
     assert a.requires_reconnect(SessionOptions(model="m", system_prompt="Different")) is True
 
 
-# ─── 5. SDK @tool -> loom InprocTool bridge ──────────────────────────────────
+# ─── 5. SDK @tool -> omni InprocTool bridge ──────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_tool_bridge():
-    from app.core.provider.loom_tool_bridge import (
+    from app.core.provider.omni_tool_bridge import (
         register_sdk_tools,
         sdk_tool_to_inproc,
     )
-    from loom.tools.registry import ToolRegistry
+    from omni.tools.registry import ToolRegistry
 
     class SdkToolLike:
         """Duck-typed clone of a claude_agent_sdk @tool object."""

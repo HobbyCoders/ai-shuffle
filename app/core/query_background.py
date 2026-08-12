@@ -297,7 +297,7 @@ async def _run_background_query_impl(
         )
 
         # Feature-flagged backend selection (see app/core/provider/factory.py):
-        # default is ClaudeAgentAdapter, AIH_USE_LOOM_HARNESS=1 is the loom
+        # default is ClaudeAgentAdapter, AIH_USE_OMNI_HARNESS=1 is the omni
         # HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()

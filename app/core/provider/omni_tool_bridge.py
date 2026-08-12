@@ -1,4 +1,4 @@
-"""loom_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto loom's registry.
+"""omni_tool_bridge — port AI-Shuffle's SDK ``@tool`` modules onto omni's registry.
 
 AI-Shuffle's ~10 in-process tool modules under ``app/mcp/`` all follow the
 Claude Agent SDK pattern:
@@ -11,12 +11,12 @@ Claude Agent SDK pattern:
 
     server = create_sdk_mcp_server(name="builtins", version="1.0.0", tools=[handler, ...])
 
-loom's ``loom.tools.inproc`` mirrors that surface deliberately, and its
+omni's ``omni.tools.inproc`` mirrors that surface deliberately, and its
 ``ToolRegistry._normalize`` already accepts the SDK envelope
 (``{"content":[{"type":"text","text":...}]}``) as a handler return. So porting a
 module is *mechanical*: hand this bridge the same list of ``@tool``-decorated
 objects the module already passes to ``create_sdk_mcp_server`` and it produces a
-loom ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
+omni ``InprocServer`` that ``ToolRegistry.register_inproc`` accepts.
 
 This module ships the generic converters used to port every module, plus a
 worked example (``bridge_builtins_tools``) proving the pattern for
@@ -28,18 +28,18 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, List, Mapping, Optional
 
-from loom.tools.inproc import InprocServer, InprocTool, create_inproc_server
-from loom.tools.registry import ToolRegistry
+from omni.tools.inproc import InprocServer, InprocTool, create_inproc_server
+from omni.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
-    """Convert one Claude-Agent-SDK ``@tool`` object into a loom ``InprocTool``.
+    """Convert one Claude-Agent-SDK ``@tool`` object into a omni ``InprocTool``.
 
     The SDK ``@tool`` decorator yields an object with ``.name``, ``.description``,
     ``.input_schema`` and ``.handler`` (an ``async def(args: dict)``) — the exact
-    shape loom's ``InprocTool`` needs. Attribute access is defensive so this also
+    shape omni's ``InprocTool`` needs. Attribute access is defensive so this also
     works with any duck-typed equivalent.
     """
     name = getattr(sdk_tool, "name", None)
@@ -64,11 +64,11 @@ def sdk_tools_to_inproc_server(
     version: str = "1.0.0",
     risk_map: Optional[Mapping[str, str]] = None,
 ) -> InprocServer:
-    """Bundle a list of SDK ``@tool`` objects into a named loom ``InprocServer``.
+    """Bundle a list of SDK ``@tool`` objects into a named omni ``InprocServer``.
 
     ``risk_map`` optionally assigns per-tool risk (``"safe"|"write"|"destructive"``)
     by tool name; anything unlisted defaults to ``"safe"``. This is where a
-    module declares that, e.g., ``CronDelete`` is ``destructive`` so loom's
+    module declares that, e.g., ``CronDelete`` is ``destructive`` so omni's
     PermissionEngine gates it.
     """
     risk_map = risk_map or {}
@@ -88,7 +88,7 @@ def register_sdk_tools(
     risk_map: Optional[Mapping[str, str]] = None,
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
-    ``mcp__<server_name>__<tool>`` (loom's naming, matching Claude Code)."""
+    ``mcp__<server_name>__<tool>`` (omni's naming, matching Claude Code)."""
     server = sdk_tools_to_inproc_server(
         server_name, sdk_tools, version=version, risk_map=risk_map
     )
@@ -103,13 +103,13 @@ def register_sdk_tools(
 # separately). To port it WITHOUT editing that module, add a single line at the
 # assembly site (right before the existing ``return patch_sdk_server(...)``):
 #
-#     if loom_registry is not None:  # only when running under the loom harness
-#         from app.core.provider.loom_tool_bridge import register_sdk_tools
-#         register_sdk_tools(loom_registry, "builtins", all_tools,
+#     if omni_registry is not None:  # only when running under the omni harness
+#         from app.core.provider.omni_tool_bridge import register_sdk_tools
+#         register_sdk_tools(omni_registry, "builtins", all_tools,
 #                            risk_map=BUILTINS_RISK_MAP)
 #
 # That is the entire port. The risk map below classifies the write/destructive
-# builtins so loom's PermissionEngine gates them the way the SDK path did.
+# builtins so omni's PermissionEngine gates them the way the SDK path did.
 
 BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ScheduleWakeup": "safe",
@@ -125,10 +125,10 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
 
 
 def bridge_builtins_tools(sdk_tools: Iterable[Any]) -> InprocServer:
-    """Return the loom InprocServer for the ``builtins`` module's SDK tools.
+    """Return the omni InprocServer for the ``builtins`` module's SDK tools.
 
     Pass the same ``all_tools`` list ``create_builtin_tools_server`` assembles.
-    Kept separate from that module so builtin_tools.py stays free of any loom
+    Kept separate from that module so builtin_tools.py stays free of any omni
     import (additive, reversible).
     """
     return sdk_tools_to_inproc_server("builtins", sdk_tools, risk_map=BUILTINS_RISK_MAP)
