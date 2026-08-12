@@ -514,6 +514,14 @@ sqlite3.register_adapter(list, lambda v: json.dumps(v))
 sqlite3.register_adapter(datetime, lambda dt: dt.isoformat(sep=" "))
 sqlite3.register_adapter(date, lambda d: d.isoformat())
 
+# psycopg2's Json wrapper (pg_session_store / omni_pg_store wrap JSONB params
+# in it). psycopg2 serializes via .adapted at bind time; do the same for SQLite.
+try:
+    from psycopg2._json import Json as _PgJson
+    sqlite3.register_adapter(_PgJson, lambda j: json.dumps(j.adapted))
+except Exception:  # pragma: no cover — psycopg2 always present in app envs
+    pass
+
 
 from contextlib import contextmanager
 

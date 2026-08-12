@@ -147,7 +147,11 @@ def _safe_json(value):
 #     (#598). ScheduleWakeup and the idle-at-edge watchdog persist their pending
 #     wake here (fire_at as unix epoch), so an app restart rehydrates and re-arms
 #     them instead of dropping the bare in-process asyncio timer. Purely additive.
-SCHEMA_VERSION = 68
+# 69 (2026-08-12): add omni_sessions / omni_session_nodes / omni_session_events
+#     — PG-backed omni-harness SessionStore (branching node trees + durable
+#     event log; see app/core/provider/omni_pg_store.py). Purely additive; used
+#     only when the omni backend runs with AIH_OMNI_STORE=pg.
+SCHEMA_VERSION = 69
 
 
 def _run_column_migrations(cursor):

@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 68
+SCHEMA_VERSION = 69
 
 
 def create_postgres_schema(cursor) -> None:
@@ -823,6 +823,35 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_pending_wakeups_session
         ON pending_wakeups(session_id)
+    """)
+
+    # omni harness session store (v69): branching node-tree sessions + durable
+    # event log, mirroring omni.store.base.SessionStore / JsonlStore semantics.
+    # Used only when the omni backend runs with AIH_OMNI_STORE=pg.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS omni_sessions (
+            session_id TEXT PRIMARY KEY,
+            head_node_id TEXT,
+            created_at DOUBLE PRECISION NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS omni_session_nodes (
+            session_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            parent_id TEXT,
+            ts DOUBLE PRECISION NOT NULL,
+            message JSONB NOT NULL,
+            PRIMARY KEY (session_id, node_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS omni_session_events (
+            session_id TEXT NOT NULL,
+            seq BIGINT NOT NULL,
+            event JSONB NOT NULL,
+            PRIMARY KEY (session_id, seq)
+        )
     """)
 
     # ------------------------------------------------------------------

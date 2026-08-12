@@ -746,6 +746,16 @@ class HarnessAdapter(ProviderAdapter):
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
+        # Postgres store (deployment default target): survives restarts and is
+        # shared across app instances, like the SDK path's PgSessionStore.
+        # Opt-in via AIH_OMNI_STORE=pg / extra["omni_store"]="pg" so unit tests
+        # and DB-less environments keep the file/memory stores.
+        store_kind = (
+            options.extra.get("omni_store") or os.environ.get("AIH_OMNI_STORE") or ""
+        ).lower()
+        if store_kind == "pg":
+            from app.core.provider.omni_pg_store import PgOmniStore
+            return PgOmniStore()
         store_dir = options.extra.get("omni_store_dir") or os.environ.get("AIH_OMNI_STORE_DIR")
         if store_dir:
             return JsonlStore(store_dir)
