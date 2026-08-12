@@ -617,6 +617,22 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
+        if cls == "QuestionRequest":
+            # MRTR input_required round-trip (omni engine). Record the id so
+            # respond_to_user_question routes the answer back; surface the
+            # prompt through the permission-event channel (name/input carry the
+            # question text + schema) until a dedicated question UI lands.
+            self._pending_question_id = event.request_id
+            return [
+                PermissionRequestEvent(
+                    tool_use_id=event.tool_use_id,
+                    name=event.name,
+                    input={"question": event.message, "schema": event.schema},
+                    risk="question",
+                    request_id=event.request_id,
+                )
+            ]
+
         if cls == "PermissionRequest":
             # Record the tool_use_id -> request_id link so respond_to_permission
             # can route the decision back to the right omni future.
