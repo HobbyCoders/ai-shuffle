@@ -45,14 +45,13 @@ from app.db import sessions as sessions_db
 def _fake_state(**overrides) -> SessionState:
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
-    adapter.sdk_client.query = AsyncMock()
+    adapter.send_query = AsyncMock()
 
     async def _empty_response():
         if False:  # pragma: no cover — empty async generator
             yield None
 
-    adapter.sdk_client.receive_response = MagicMock(side_effect=lambda: _empty_response())
+    adapter.receive_events = MagicMock(side_effect=lambda: _empty_response())
     state = SessionState(adapter=adapter, is_connected=True)
     for key, value in overrides.items():
         setattr(state, key, value)
@@ -152,7 +151,7 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
 
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in events), events
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
     # The rejection must not clear the ACTIVE turn's flag.
     assert state.is_streaming is True
 
@@ -193,7 +192,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
         a_blocked.set()
         await a_release.wait()
 
-    state.adapter.sdk_client.query = AsyncMock(side_effect=_blocking_query)
+    state.adapter.send_query = AsyncMock(side_effect=_blocking_query)
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
@@ -217,7 +216,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in b_events), b_events
     # Exactly one prompt was ever written into the CLI's stdin.
-    assert state.adapter.sdk_client.query.await_count == 1
+    assert state.adapter.send_query.await_count == 1
     # A's turn completed normally and released the claim.
     assert any(e.get("type") == "done" for e in a_events), a_events
     assert state.is_streaming is False
@@ -226,7 +225,7 @@ async def test_chat_gate_two_concurrent_entrants_exactly_one_proceeds():
 async def test_chat_is_streaming_cleared_on_exception():
     state = _fake_state()
     pool = _StubPool(state)
-    state.adapter.sdk_client.query = AsyncMock(side_effect=RuntimeError("boom"))
+    state.adapter.send_query = AsyncMock(side_effect=RuntimeError("boom"))
 
     with ExitStack() as stack:
         _chat_patches(stack, pool)
@@ -244,7 +243,7 @@ async def test_chat_is_streaming_cleared_on_cancel():
         raise asyncio.CancelledError()
         yield None  # pragma: no cover
 
-    state.adapter.sdk_client.receive_response = MagicMock(
+    state.adapter.receive_events = MagicMock(
         side_effect=lambda: _cancelled_response()
     )
 
@@ -294,7 +293,7 @@ async def test_rest_gate_refuses_busy_client_and_never_writes_stdin():
 
     assert any(e.get("type") == "error" and "busy" in e.get("message", "").lower()
                for e in events), events
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
     assert state.is_streaming is True  # active turn's claim untouched
 
 
@@ -329,7 +328,7 @@ async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_d
             "sess-busy", "hello", {"id": "claude-code"}, None, None, None, None, None,
         )
 
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
     assert state.is_streaming is True  # active turn's claim untouched
     # The failure is surfaced on the session event log: the refused turn
     # recorded its start + user message, then a turn.aborted terminal.
@@ -364,7 +363,7 @@ async def test_chat_claim_window_exception_clears_flag():
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
 
 
 async def test_chat_claim_window_cancel_clears_flag():
@@ -384,7 +383,7 @@ async def test_chat_claim_window_cancel_clears_flag():
 
     assert state.is_streaming is False, "claim must be released on cancellation"
     assert state.streaming_started_at is None
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
 
 
 async def test_rest_claim_window_exception_clears_flag():
@@ -410,7 +409,7 @@ async def test_rest_claim_window_exception_clears_flag():
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
 
 
 async def test_background_claim_window_exception_clears_flag():
@@ -450,7 +449,7 @@ async def test_background_claim_window_exception_clears_flag():
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
     assert state.streaming_started_at is None
-    state.adapter.sdk_client.query.assert_not_awaited()
+    state.adapter.send_query.assert_not_awaited()
 
 
 # ─── Mid-session permission_mode switch is applied in place on pooled reuse ───
@@ -465,8 +464,8 @@ def _reuse_state_with_opts(perm_mode="default", model="m") -> SessionState:
     with the SDK-client runtime setters stubbed as AsyncMocks."""
     state = _fake_state()
     state.connect_options = MagicMock(permission_mode=perm_mode, model=model)
-    state.adapter.sdk_client.set_permission_mode = AsyncMock()
-    state.adapter.sdk_client.set_model = AsyncMock()
+    state.adapter.set_permission_mode = AsyncMock()
+    state.adapter.set_model = AsyncMock()
     return state
 
 
@@ -483,8 +482,8 @@ async def test_chat_applies_permission_mode_on_reuse_without_respawn():
         options.model = "m"  # unchanged → set_model must NOT fire
         events = await _collect(qe.stream_to_websocket("hi", "sess-perm", "claude-code"))
 
-    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
-    state.adapter.sdk_client.set_model.assert_not_awaited()
+    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.set_model.assert_not_awaited()
     assert pool.state is state, "reuse must not evict/replace the pooled client"
     assert not any(e.get("type") == "error" for e in events), events
     assert state.is_streaming is False  # empty turn completed, claim released
@@ -501,7 +500,7 @@ async def test_chat_permission_mode_unchanged_does_not_call_setter():
         options.model = "m"
         await _collect(qe.stream_to_websocket("hi", "sess-noop", "claude-code"))
 
-    state.adapter.sdk_client.set_permission_mode.assert_not_awaited()
+    state.adapter.set_permission_mode.assert_not_awaited()
 
 
 async def test_chat_permission_mode_setter_failure_does_not_propagate():
@@ -509,7 +508,7 @@ async def test_chat_permission_mode_setter_failure_does_not_propagate():
     exception between the is_streaming claim and the main try/finally would
     strand the flag and brick the pooled client. The turn proceeds normally."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
-    state.adapter.sdk_client.set_permission_mode = AsyncMock(side_effect=RuntimeError("setter boom"))
+    state.adapter.set_permission_mode = AsyncMock(side_effect=RuntimeError("setter boom"))
     pool = _StubPool(state)
 
     with ExitStack() as stack:
@@ -518,7 +517,7 @@ async def test_chat_permission_mode_setter_failure_does_not_propagate():
         options.model = "m"
         events = await _collect(qe.stream_to_websocket("hi", "sess-perm-boom", "claude-code"))
 
-    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
     assert not any(e.get("type") == "error" for e in events), events
     assert state.is_streaming is False  # turn still completed cleanly
     assert pool.state is state
@@ -544,8 +543,8 @@ async def test_rest_applies_permission_mode_on_reuse_without_respawn():
         with pytest.raises(RuntimeError, match="sync-log boom"):
             await _collect(qe.stream_query("hi", "claude-code", session_id="sess-perm-rest"))
 
-    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
-    state.adapter.sdk_client.set_model.assert_not_awaited()
+    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.set_model.assert_not_awaited()
     assert pool.state is state, "reuse must not evict/replace the pooled client"
 
 
@@ -583,7 +582,7 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
                 "sess-perm-bg", "hello", {"id": "claude-code"}, None, None, None, None, None,
             )
 
-    state.adapter.sdk_client.set_permission_mode.assert_awaited_once_with("plan")
-    state.adapter.sdk_client.set_model.assert_not_awaited()
+    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.set_model.assert_not_awaited()
     assert pool.state is state, "reuse must not evict/replace the pooled client"
     assert state.is_streaming is False  # claim-guard released it on the raise

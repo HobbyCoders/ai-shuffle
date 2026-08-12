@@ -27,53 +27,25 @@ from typing import Optional, Dict, Any, AsyncGenerator, Callable, List
 from datetime import datetime, timezone
 
 from claude_agent_sdk import query, ClaudeAgentOptions
-from app.core.provider.claude_adapter import ClaudeAgentAdapter
-from claude_agent_sdk import (
+from app.core.provider.claude_adapter import to_provider_event
+# Provider-agnostic mirrors of the SDK streaming message vocabulary (identical
+# class/attribute names — see app/core/provider/events.py). Every stream this
+# module consumes is translated at its boundary (adapter.receive_events(), or
+# to_provider_event() on the raw query()/receive_messages() paths), so the
+# dispatch below never sees a claude_agent_sdk message class. The mirrors
+# always exist, so the per-SDK-version import guards that used to live here
+# (ServerTool*, Task*, RateLimitEvent, HookEventMessage) are gone; version
+# skew is absorbed inside the translation layer instead.
+from app.core.provider.events import (
     AssistantMessage, UserMessage, TextBlock, ThinkingBlock, ToolUseBlock,
-    ToolResultBlock, ResultMessage, SystemMessage,
+    ToolResultBlock, ResultMessage, SystemMessage, StreamEvent,
+    ServerToolUseBlock, ServerToolResultBlock,
+    TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
+    TaskUpdatedMessage, RateLimitEvent, HookEventMessage,
 )
-# SDK 0.1.65+ surfaces server-side tool calls (advisor, web_search, web_fetch)
-# as discrete content blocks instead of dropping them silently. Guard the
-# import so we stay runnable against older pinned wheels in dev.
-try:
-    from claude_agent_sdk import ServerToolUseBlock, ServerToolResultBlock
-    _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
-    _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
-except ImportError:  # SDK < 0.1.65
-    ServerToolUseBlock = ServerToolResultBlock = None  # type: ignore[assignment]
-    _SERVER_TOOL_TYPES = ()
-    _SERVER_TOOL_RESULT_TYPES = ()
-try:
-    from claude_agent_sdk import TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage
-except ImportError:
-    # Stub classes for SDK versions that don't have task message types
-    class TaskStartedMessage:
-        pass
-    class TaskProgressMessage:
-        pass
-    class TaskNotificationMessage:
-        pass
-try:
-    # TaskUpdatedMessage (SDK 0.2.x) can carry a task's terminal state WITHOUT a
-    # following TaskNotificationMessage — notably a TaskStop/killed background task
-    # (see the SDK docstring on TaskUpdatedMessage). We must handle its terminal
-    # status to clear the live "Waiting for N background task(s)…" indicator.
-    # Guarded so older SDK wheels stay importable.
-    from claude_agent_sdk import TaskUpdatedMessage
-except ImportError:
-    class TaskUpdatedMessage:  # safe stub for older SDKs (isinstance never matches a real msg)
-        pass
-try:
-    from claude_agent_sdk import RateLimitEvent
-except ImportError:
-    class RateLimitEvent:
-        pass
-try:
-    from claude_agent_sdk import HookEventMessage  # type: ignore[attr-defined]
-except ImportError:
-    class HookEventMessage:  # safe stub for older SDKs
-        pass
-from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
+_SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
+_SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
+from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -919,6 +891,10 @@ async def execute_query(
 
     try:
         async for message in query(prompt=_prompt_stream(), options=options):
+            # This headless path consumes the SDK's one-shot query() directly
+            # (no pooled adapter), so translate to the provider mirror types at
+            # the boundary — the dispatch below matches ONLY mirror classes.
+            message = to_provider_event(message)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             # Task messages subclass SystemMessage, so this must run before the
             # isinstance chain claims them via the SystemMessage branch below.
@@ -1353,7 +1329,7 @@ async def stream_query(
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and
                             # forces a respawn instead of reaching this set_model() call.
-                            await state.client.set_model(new_model)
+                            await state.adapter.set_model(new_model)
                             logger.debug(f"Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never
                             # goes stale — the host-op guard reads this column.
@@ -1368,7 +1344,7 @@ async def stream_query(
                     old_perm_mode = getattr(old_opts, 'permission_mode', None)
                     if new_perm_mode and new_perm_mode != old_perm_mode:
                         try:
-                            await state.client.set_permission_mode(new_perm_mode)
+                            await state.adapter.set_permission_mode(new_perm_mode)
                             logger.debug(f"Updated permission_mode to {new_perm_mode} for reused session {session_id}")
                         except Exception as e:
                             logger.warning(f"Failed to set permission_mode on reused session {session_id}: {e}")
@@ -1413,7 +1389,11 @@ async def stream_query(
         # Pull shared agent-memory from the DB before the CLI reads it.
         await reconcile_memory(project_id, getattr(options, "cwd", None))
 
-        adapter = ClaudeAgentAdapter()
+        # Feature-flagged backend selection, same as the WS path below: default
+        # (AIH_USE_LOOM_HARNESS unset) is ClaudeAgentAdapter, flag-on is the
+        # loom HarnessAdapter.
+        from app.core.provider.factory import make_adapter
+        adapter = make_adapter()
 
         try:
             # Timeout prevents hanging if MCP servers are unreachable
@@ -1483,9 +1463,9 @@ async def stream_query(
         raise
 
     try:
-        await state.client.query(prompt)
+        await state.adapter.send_query(prompt)
 
-        async for message in state.client.receive_response():
+        async for message in state.adapter.receive_events():
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
@@ -2020,7 +2000,7 @@ async def _stream_to_websocket_impl(
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and
                             # forces a respawn instead of reaching this set_model() call.
-                            await state.client.set_model(new_model)
+                            await state.adapter.set_model(new_model)
                             logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never
                             # goes stale on a mid-life model switch — the host-op
@@ -2044,7 +2024,7 @@ async def _stream_to_websocket_impl(
                     old_perm_mode = getattr(old_opts, 'permission_mode', None)
                     if new_perm_mode and new_perm_mode != old_perm_mode:
                         try:
-                            await state.client.set_permission_mode(new_perm_mode)
+                            await state.adapter.set_permission_mode(new_perm_mode)
                             logger.debug(f"[WS] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
                         except Exception as e:
                             logger.warning(f"[WS] Failed to set permission_mode on reused session {session_id}: {e}")
@@ -2390,7 +2370,7 @@ async def _stream_to_websocket_impl(
             # Check if the CLI subprocess is still alive
             if adapter.is_alive():
                 logger.error("[WS] CLI process is still running (hung during initialization)")
-            elif adapter.sdk_client:
+            elif getattr(adapter, "sdk_client", None):
                 from app.core.sdk_process_handle import SdkProcessHandle
                 handle = SdkProcessHandle(adapter.sdk_client)
                 if handle.available and handle.returncode is not None:
@@ -2564,14 +2544,14 @@ async def _stream_to_websocket_impl(
         prompt = resolve_note_references(prompt)
 
         _query_send_start = time.monotonic()
-        await state.client.query(prompt)
+        await state.adapter.send_query(prompt)
         _query_send_elapsed = time.monotonic() - _query_send_start
         if _query_send_elapsed > 1.0:
             logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")
 
         _stream_start = time.monotonic()
         _event_count = 0
-        async for message in state.client.receive_response():
+        async for message in state.adapter.receive_events():
             # Don't break immediately on interrupt_requested — let receive_response()
             # end naturally so remaining in-flight tool calls reach the UI.
             # The SDK's client.interrupt() causes receive_response() to end after

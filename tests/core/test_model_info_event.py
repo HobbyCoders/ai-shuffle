@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import uuid
 
-from claude_agent_sdk import (
+from app.core.provider.events import (
     AssistantMessage,
     SystemMessage,
     TextBlock,
@@ -40,8 +40,7 @@ from app.db import database
 def _make_state():
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
-    adapter.sdk_client.query = AsyncMock()
+    adapter.send_query = AsyncMock()
     return SessionState(adapter=adapter, is_connected=True)
 
 
@@ -137,7 +136,7 @@ async def _run(messages, model=None, tmp_path=None, provider=None):
     session_id = _new_session()
     state = _make_state()
     pool = _StubPool(state)
-    state.adapter.sdk_client.receive_response = _stream_response(messages)
+    state.adapter.receive_events = _stream_response(messages)
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path), model=model, provider=provider)
         events = await _collect(qe.stream_to_websocket("hi", session_id, "default"))

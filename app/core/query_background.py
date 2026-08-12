@@ -10,20 +10,14 @@ import asyncio
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
-from claude_agent_sdk import (
+# Provider-agnostic mirrors of the SDK message vocabulary (identical names —
+# see app/core/provider/events.py). The stream below arrives pre-translated
+# through adapter.receive_events(), so no claude_agent_sdk message class is
+# dispatched here and the old per-SDK-version import guards are gone.
+from app.core.provider.events import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-    ResultMessage, SystemMessage,
+    ResultMessage, SystemMessage, RateLimitEvent, HookEventMessage,
 )
-try:
-    from claude_agent_sdk import RateLimitEvent
-except ImportError:
-    class RateLimitEvent:
-        pass
-try:
-    from claude_agent_sdk import HookEventMessage  # type: ignore[attr-defined]
-except ImportError:
-    class HookEventMessage:  # safe stub for older SDKs
-        pass
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -36,7 +30,6 @@ from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
-from app.core.provider.claude_adapter import ClaudeAgentAdapter
 from app.core.session_context import set_current_session_id
 
 from app.core.query_persistence import (
@@ -243,7 +236,7 @@ async def _run_background_query_impl(
                             # Live hot-swap stays within the session's current provider;
                             # a provider change is caught by requires_reconnect() and
                             # forces a respawn instead of reaching this set_model() call.
-                            await state.client.set_model(new_model)
+                            await state.adapter.set_model(new_model)
                             logger.debug(f"[Background] Updated model to {new_model} for reused session {session_id}")
                             # Persist the switched model so launched_model never
                             # goes stale — the host-op guard reads this column.
@@ -258,7 +251,7 @@ async def _run_background_query_impl(
                     old_perm_mode = getattr(old_opts, 'permission_mode', None)
                     if new_perm_mode and new_perm_mode != old_perm_mode:
                         try:
-                            await state.client.set_permission_mode(new_perm_mode)
+                            await state.adapter.set_permission_mode(new_perm_mode)
                             logger.debug(f"[Background] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
                         except Exception as e:
                             logger.warning(f"[Background] Failed to set permission_mode on reused session {session_id}: {e}")
@@ -303,7 +296,11 @@ async def _run_background_query_impl(
             project.get("id") if project else None, getattr(options, "cwd", None)
         )
 
-        adapter = ClaudeAgentAdapter()
+        # Feature-flagged backend selection (see app/core/provider/factory.py):
+        # default is ClaudeAgentAdapter, AIH_USE_LOOM_HARNESS=1 is the loom
+        # HarnessAdapter.
+        from app.core.provider.factory import make_adapter
+        adapter = make_adapter()
 
         try:
             await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
@@ -352,9 +349,9 @@ async def _run_background_query_impl(
         raise
 
     try:
-        await state.client.query(prompt)
+        await state.adapter.send_query(prompt)
 
-        async for message in state.client.receive_response():
+        async for message in state.adapter.receive_events():
             if isinstance(message, SystemMessage):
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]

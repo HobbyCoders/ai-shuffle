@@ -2,10 +2,13 @@
 session event log via TurnRecorder instead of live_session_store/sync_engine
 streaming broadcasts.
 
-Drives ``_run_background_query`` end-to-end with a mocked pooled SDK client
-that yields REAL claude_agent_sdk message objects, and asserts against the
-event log written through the per-test SQLite shim (autouse ``_auto_db_shim``).
-No SSE / ASGITransport anywhere (that buffers infinite bodies and deadlocks).
+Drives ``_run_background_query`` end-to-end with a mocked pooled adapter
+that yields provider-agnostic mirror message objects (from
+``app.core.provider.events`` — same class names/fields as the
+claude_agent_sdk message/block classes the streaming loops used to dispatch
+on), and asserts against the event log written through the per-test SQLite
+shim (autouse ``_auto_db_shim``). No SSE / ASGITransport anywhere (that
+buffers infinite bodies and deadlocks).
 
 Also covers ``app.core.turn_finalize.persist_turn_end_state`` — the durable
 end-of-turn side effects extracted from ``live_session_store.end_streaming``.
@@ -15,7 +18,7 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from claude_agent_sdk import (
+from app.core.provider.events import (
     AssistantMessage,
     ResultMessage,
     SystemMessage,
@@ -55,11 +58,10 @@ def _result_message(session_id: str = "sdk-1") -> ResultMessage:
 
 
 def _fake_state(messages=None, receive_error=None) -> SessionState:
-    """Pooled-client stand-in whose receive_response yields real SDK objects."""
+    """Pooled-adapter stand-in whose receive_events yields mirror message objects."""
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
-    adapter.sdk_client = MagicMock()
-    adapter.sdk_client.query = AsyncMock()
+    adapter.send_query = AsyncMock()
 
     async def _response():
         for m in (messages or []):
@@ -67,7 +69,7 @@ def _fake_state(messages=None, receive_error=None) -> SessionState:
         if receive_error is not None:
             raise receive_error
 
-    adapter.sdk_client.receive_response = MagicMock(side_effect=lambda: _response())
+    adapter.receive_events = MagicMock(side_effect=lambda: _response())
     return SessionState(adapter=adapter, is_connected=True)
 
 
@@ -241,7 +243,7 @@ async def test_background_turn_records_full_event_sequence(mock_db):
     finalize.assert_awaited_once_with(sid)
 
     # The pooled client got exactly one prompt and is idle again.
-    state.adapter.sdk_client.query.assert_awaited_once_with("hello")
+    state.adapter.send_query.assert_awaited_once_with("hello")
     assert state.is_streaming is False
 
 
@@ -297,7 +299,7 @@ async def test_background_records_regardless_of_v2_flag(mock_db):
 
     assert _types(sid) == ["turn.started", "message.user", "turn.completed"]
     # The turn itself still ran normally.
-    state.adapter.sdk_client.query.assert_awaited_once()
+    state.adapter.send_query.assert_awaited_once()
 
 
 # ─── launched_model stamp (issue #577) ──────────────────────────────────────

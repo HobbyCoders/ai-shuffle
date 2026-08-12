@@ -61,24 +61,30 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import (
-    ErrorEvent,
-    InterruptedEvent,
     PermissionRequestEvent,
     ProviderEvent,
-    RateLimitEvent,
-    ResultEvent,
     SessionOptions,
-    StreamBlockStartEvent,
-    StreamBlockStopEvent,
-    StreamDeltaEvent,
-    SystemInitEvent,
-    TaskNotificationEvent,
-    TaskProgressEvent,
-    TaskStartedEvent,
-    ToolResultEvent,
-    ToolUseEvent,
-    TurnUsageEvent,
     mcp_servers_equivalent,
+)
+# The streaming loops dispatch on the provider mirror vocabulary (identical
+# names/shapes to the SDK message classes — see events.py). _translate
+# synthesizes these from the loom Event stream so a flag-on session flows
+# through the exact same loop branches as the SDK path.
+from app.core.provider.events import (
+    AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
+    ResultMessage,
+    StreamEvent,
+    SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 
 # loom imports (the library we wrap). Its top-level __init__ is intentionally
@@ -133,6 +139,21 @@ class HarnessAdapter(ProviderAdapter):
         # question event; kept for forward-compat with RespondQuestion).
         self._pending_question_id: Optional[str] = None
         self._is_delegated: bool = False
+        # ─ translation state (see _translate) ─
+        # Model reported by the current turn's TurnStarted (AssistantMessage.model).
+        self._current_model: Optional[str] = None
+        # Open streaming blocks: index -> block_type, and accumulated delta text.
+        self._block_types: Dict[int, str] = {}
+        self._block_buffers: Dict[int, list] = {}
+        # Last loom Usage reading, attached to the next synthesized
+        # AssistantMessage (the loops read per-call usage off that message).
+        self._pending_usage: Optional[Dict[str, Any]] = None
+        # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
+        # present, loom PermissionRequests are bridged to it out-of-band (SDK
+        # parity — the loops never see a permission event); when absent they
+        # surface in-stream as PermissionRequestEvent.
+        self._can_use_tool: Optional[Any] = None
+        self._perm_bridge_tasks: set = set()
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -212,7 +233,13 @@ class HarnessAdapter(ProviderAdapter):
             permission_mode=getattr(sdk_options, "permission_mode", None),
             mcp_servers=getattr(sdk_options, "mcp_servers", None),
             env=getattr(sdk_options, "env", None),
+            include_partial_messages=bool(
+                getattr(sdk_options, "include_partial_messages", False)
+            ),
         )
+        # The app's permission prompt flow rides on this callback (see
+        # _bridge_permission) — same wiring the SDK path uses.
+        self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
         await self.connect(opts)
 
     async def disconnect(
@@ -232,6 +259,11 @@ class HarnessAdapter(ProviderAdapter):
         except Exception as exc:  # never let teardown raise
             logger.warning("[HarnessAdapter] engine.aclose() failed: %r", exc)
         finally:
+            # Unstick any in-flight permission bridges (they'd otherwise await
+            # a user decision for an engine that no longer exists).
+            for task in list(self._perm_bridge_tasks):
+                task.cancel()
+            self._perm_bridge_tasks.clear()
             if self._registry is not None:
                 try:
                     await self._registry.aclose()
@@ -261,10 +293,10 @@ class HarnessAdapter(ProviderAdapter):
     async def receive_events(self) -> AsyncIterator[ProviderEvent]:
         """Translate the loom Event stream into ProviderEvents for one turn.
 
-        Subscribes at the current replay cursor, yields translated events, and
-        completes on a terminal loom event (TurnComplete → ResultEvent,
-        Interrupted → InterruptedEvent, ErrorEvent → ErrorEvent), mirroring the
-        SDK adapter's iterator-completion contract.
+        Subscribes at the current replay cursor, yields translated mirror
+        messages, and completes on the turn-terminal ResultMessage (synthesized
+        from loom's TurnComplete / Interrupted / ErrorEvent), mirroring the SDK
+        adapter's iterator-completion contract.
         """
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
@@ -275,13 +307,55 @@ class HarnessAdapter(ProviderAdapter):
             if getattr(event, "seq", -1) >= 0:
                 self._event_cursor = event.seq
 
-            translated = self._translate(event)
-            if translated is None:
-                continue
-            yield translated
+            for translated in self._translate(event):
+                if isinstance(translated, PermissionRequestEvent) and self._can_use_tool:
+                    # SDK parity: permission prompts run out-of-band through the
+                    # app's can_use_tool callback, not in the message stream.
+                    # Spawned as a task — the callback blocks on the user while
+                    # other stream events keep flowing.
+                    task = asyncio.ensure_future(self._bridge_permission(translated))
+                    self._perm_bridge_tasks.add(task)
+                    task.add_done_callback(self._perm_bridge_tasks.discard)
+                    continue
+                yield translated
+                if isinstance(translated, ResultMessage):
+                    return
 
-            if isinstance(translated, (ResultEvent, InterruptedEvent, ErrorEvent)):
-                return
+    async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
+        """Route one loom permission request through the app's can_use_tool
+        callback and submit the decision back to the engine.
+
+        The callback duck-types its ``context`` argument via getattr (see
+        can_use_tool_callback in query_engine), so a SimpleNamespace carrying
+        tool_use_id is sufficient. The result is detected by class name to keep
+        claude_agent_sdk types out of this module. Any failure denies —
+        loom blocks the tool until a decision arrives, so silence would hang
+        the turn.
+        """
+        from types import SimpleNamespace
+
+        allow = False
+        try:
+            result = await self._can_use_tool(
+                ev.name,
+                ev.input,
+                SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
+            )
+            allow = type(result).__name__ == "PermissionResultAllow"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] can_use_tool bridge failed for %s — denying",
+                ev.name, exc_info=True,
+            )
+        try:
+            await self.respond_to_permission(ev.tool_use_id, allow)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] failed to submit permission decision for %s",
+                ev.tool_use_id, exc_info=True,
+            )
 
     async def interrupt(self) -> None:
         if self._engine is not None:
@@ -386,107 +460,282 @@ class HarnessAdapter(ProviderAdapter):
             return True
         return False
 
-    # ─── Translation: loom Event → ProviderEvent ──────────────────────
+    # ─── Translation: loom Event → ProviderEvent mirrors ──────────────
 
-    def _translate(self, event: Any) -> Optional[ProviderEvent]:
-        """The core mapping table. Returns None for events with no app analog."""
+    def _uuid(self, event: Any) -> str:
+        """Stable synthetic uuid for a loom event (mirrors carry uuid fields)."""
+        return f"loom-{getattr(event, 'seq', -1)}"
+
+    def _stream_event(self, event: Any, raw: Dict[str, Any]) -> StreamEvent:
+        return StreamEvent(
+            uuid=self._uuid(event),
+            session_id=getattr(event, "session_id", "") or "",
+            event=raw,
+            parent_tool_use_id=None,
+        )
+
+    def _assistant(self, event: Any, blocks: list) -> AssistantMessage:
+        """Synthesized AssistantMessage; attaches the last Usage reading so the
+        loops' per-call token accounting sees it (SDK parity)."""
+        usage, self._pending_usage = self._pending_usage, None
+        return AssistantMessage(
+            content=blocks,
+            model=self._current_model
+            or (self._options.model if self._options else ""),
+            usage=usage,
+            session_id=getattr(event, "session_id", None),
+            uuid=self._uuid(event),
+        )
+
+    def _translate(self, event: Any) -> list:
+        """The core mapping table. Returns a list of mirror events (possibly
+        empty) — one loom event can fan out to a StreamEvent plus a complete
+        message, exactly like the SDK's partial-message mode."""
         cls = type(event).__name__
+        partial = bool(self._options and self._options.include_partial_messages)
 
         if cls == "TurnStarted":
-            # Carry the session id up (parallels the SDK's system-init message).
+            # Parallels the SDK's system-init message: the loops read
+            # data["session_id"] (session link) and data.get("model")
+            # (model_info seeding).
             self._sdk_session_id = event.session_id
-            return SystemInitEvent(sdk_session_id=event.session_id)
-
-        if cls == "TextDelta":
-            return StreamDeltaEvent(delta_type="text", content=event.text)
-
-        if cls == "ThinkingDelta":
-            return StreamDeltaEvent(delta_type="thinking", content=event.text)
+            self._current_model = event.model
+            self._block_types.clear()
+            self._block_buffers.clear()
+            return [
+                SystemMessage(
+                    subtype="init",
+                    data={
+                        "session_id": event.session_id,
+                        "model": event.model,
+                        "provider": event.provider,
+                    },
+                )
+            ]
 
         if cls == "BlockStart":
-            return StreamBlockStartEvent(
-                block_type=event.block_type,
-                block_index=event.index,
-                tool_name=event.tool_name,
-                tool_use_id=event.tool_use_id,
+            self._block_types[event.index] = event.block_type
+            self._block_buffers[event.index] = []
+            if not partial:
+                return []
+            content_block: Dict[str, Any] = {"type": event.block_type}
+            if event.block_type == "tool_use":
+                content_block["id"] = event.tool_use_id
+                content_block["name"] = event.tool_name
+                content_block["input"] = {}
+            elif event.block_type == "thinking":
+                content_block["thinking"] = ""
+            else:
+                content_block["text"] = ""
+            return [
+                self._stream_event(
+                    event,
+                    {
+                        "type": "content_block_start",
+                        "index": event.index,
+                        "content_block": content_block,
+                    },
+                )
+            ]
+
+        if cls in ("TextDelta", "ThinkingDelta"):
+            self._block_buffers.setdefault(event.index, []).append(event.text)
+            self._block_types.setdefault(
+                event.index, "text" if cls == "TextDelta" else "thinking"
             )
+            if not partial:
+                return []
+            delta = (
+                {"type": "text_delta", "text": event.text}
+                if cls == "TextDelta"
+                else {"type": "thinking_delta", "thinking": event.text}
+            )
+            return [
+                self._stream_event(
+                    event,
+                    {
+                        "type": "content_block_delta",
+                        "index": event.index,
+                        "delta": delta,
+                    },
+                )
+            ]
 
         if cls == "BlockStop":
-            return StreamBlockStopEvent(block_type="", block_index=event.index)
+            block_type = self._block_types.pop(event.index, "text")
+            text = "".join(self._block_buffers.pop(event.index, []))
+            out: list = []
+            if partial:
+                out.append(
+                    self._stream_event(
+                        event,
+                        {"type": "content_block_stop", "index": event.index},
+                    )
+                )
+            # Complete text/thinking blocks surface as an AssistantMessage
+            # (SDK parity: complete messages follow the deltas). tool_use
+            # blocks are covered by the discrete ToolUse loom event.
+            if block_type == "text" and text:
+                out.append(self._assistant(event, [TextBlock(text=text)]))
+            elif block_type == "thinking" and text:
+                out.append(
+                    self._assistant(event, [ThinkingBlock(thinking=text, signature="")])
+                )
+            return out
 
         if cls == "ToolUse":
-            return ToolUseEvent(
-                name=event.name, input=event.input, tool_use_id=event.tool_use_id
-            )
+            return [
+                self._assistant(
+                    event,
+                    [
+                        ToolUseBlock(
+                            id=event.tool_use_id, name=event.name, input=event.input
+                        )
+                    ],
+                )
+            ]
 
         if cls == "ToolResult":
-            return ToolResultEvent(
-                name=event.name, output=event.output, tool_use_id=event.tool_use_id
-            )
+            output = event.output
+            if output is not None and not isinstance(output, (str, list)):
+                output = str(output)
+            return [
+                UserMessage(
+                    content=[
+                        ToolResultBlock(
+                            tool_use_id=event.tool_use_id,
+                            content=output,
+                            is_error=bool(getattr(event, "is_error", False)),
+                        )
+                    ],
+                    uuid=self._uuid(event),
+                )
+            ]
 
         if cls == "PermissionRequest":
             # Record the tool_use_id -> request_id link so respond_to_permission
             # can route the decision back to the right loom future.
             self._perm_requests[event.tool_use_id] = event.request_id
-            return PermissionRequestEvent(
-                tool_use_id=event.tool_use_id,
-                name=event.name,
-                input=event.input,
-                risk=event.risk,
-                request_id=event.request_id,
-            )
+            return [
+                PermissionRequestEvent(
+                    tool_use_id=event.tool_use_id,
+                    name=event.name,
+                    input=event.input,
+                    risk=event.risk,
+                    request_id=event.request_id,
+                )
+            ]
 
         if cls == "Usage":
-            # loom carries token counts as structured fields plus a raw blob;
-            # surface a merged dict so callers always see token keys even when
-            # the provider left ``raw`` empty.
+            # Held and attached to the next synthesized AssistantMessage — the
+            # loops read per-call usage off AssistantMessage.usage (SDK names).
             usage: Dict[str, Any] = {
                 "input_tokens": event.input_tokens,
                 "output_tokens": event.output_tokens,
-                "cache_read_tokens": event.cache_read_tokens,
-                "cache_creation_tokens": event.cache_creation_tokens,
-                "cache_hit_rate": event.cache_hit_rate,
+                "cache_read_input_tokens": event.cache_read_tokens,
+                "cache_creation_input_tokens": event.cache_creation_tokens,
             }
             if event.raw:
                 usage.update(event.raw)
-            return TurnUsageEvent(
-                usage=usage, model=self._options.model if self._options else None
-            )
+            self._pending_usage = usage
+            return []
 
         if cls == "RateLimit":
-            return RateLimitEvent(
-                status="active",
-                rate_limit_type=event.kind,
-                resets_at=event.resets_at,
-                utilization=event.utilization,
-            )
+            return [
+                RateLimitEvent(
+                    rate_limit_info=RateLimitInfo(
+                        status="allowed",
+                        resets_at=event.resets_at,
+                        rate_limit_type=event.kind,
+                        utilization=event.utilization,
+                    ),
+                    uuid=self._uuid(event),
+                    session_id=getattr(event, "session_id", "") or "",
+                )
+            ]
 
         if cls == "SubagentEvent":
+            common = {
+                "uuid": self._uuid(event),
+                "session_id": getattr(event, "session_id", "") or "",
+            }
             if event.kind == "started":
-                return TaskStartedEvent(task_id=event.task_id, description=event.description)
+                return [
+                    TaskStartedMessage(
+                        subtype="task_started",
+                        data={"task_id": event.task_id},
+                        task_id=event.task_id,
+                        description=event.description or "",
+                        **common,
+                    )
+                ]
             if event.kind == "progress":
-                return TaskProgressEvent(task_id=event.task_id, description=event.description)
-            return TaskNotificationEvent(
-                task_id=event.task_id, status=event.kind, summary=event.summary
-            )
+                return [
+                    TaskProgressMessage(
+                        subtype="task_progress",
+                        data={"task_id": event.task_id},
+                        task_id=event.task_id,
+                        description=event.description or "",
+                        **common,
+                    )
+                ]
+            status = {"finished": "completed"}.get(event.kind, event.kind)
+            return [
+                TaskNotificationMessage(
+                    subtype="task_notification",
+                    data={"task_id": event.task_id},
+                    task_id=event.task_id,
+                    status=status,
+                    output_file="",
+                    summary=event.summary or "",
+                    **common,
+                )
+            ]
 
         if cls == "TurnComplete":
-            return ResultEvent(
-                num_turns=event.num_model_calls,
-                total_cost_usd=event.cost_usd,
-                stop_reason=event.stop_reason,
-                usage=dict(event.usage),
-                is_error=False,
-            )
+            return [
+                ResultMessage(
+                    subtype="success",
+                    is_error=False,
+                    num_turns=event.num_model_calls,
+                    session_id=event.session_id,
+                    stop_reason=event.stop_reason,
+                    total_cost_usd=event.cost_usd,
+                    usage=dict(event.usage),
+                    uuid=self._uuid(event),
+                    terminal_reason="completed",
+                )
+            ]
 
         if cls == "Interrupted":
-            return InterruptedEvent(message=event.message)
+            # SDK parity: an interrupted turn still ends in a ResultMessage;
+            # the loops detect the interrupt via state.interrupt_requested and
+            # terminal_reason, not via a distinct message type.
+            return [
+                ResultMessage(
+                    subtype="success",
+                    is_error=False,
+                    session_id=getattr(event, "session_id", "") or "",
+                    result=event.message,
+                    uuid=self._uuid(event),
+                    terminal_reason="aborted_streaming",
+                )
+            ]
 
         if cls == "ErrorEvent":
-            return ErrorEvent(message=event.message)
+            return [
+                ResultMessage(
+                    subtype="error_during_execution",
+                    is_error=True,
+                    session_id=getattr(event, "session_id", "") or "",
+                    result=event.message,
+                    errors=[event.message],
+                    uuid=self._uuid(event),
+                )
+            ]
 
         # Unknown / no-analog loom event — skip.
-        return None
+        return []
 
     # ─── Internal builders ────────────────────────────────────────────
 

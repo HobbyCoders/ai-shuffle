@@ -55,7 +55,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import (
+from app.core.provider.events import (
     AssistantMessage,
     ResultMessage,
     SystemMessage,
@@ -205,7 +205,7 @@ def _make_state():
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
     adapter.sdk_client = MagicMock()
-    adapter.sdk_client.query = AsyncMock()
+    adapter.send_query = AsyncMock()
     return SessionState(adapter=adapter, is_connected=True)
 
 
@@ -371,7 +371,7 @@ async def test_mid_turn_death_preserves_flushed_blocks_via_real_read_path(test_d
         # never yielded complete.
         ("raise", RuntimeError("Fatal error in message reader")),
     ]
-    state.adapter.sdk_client.receive_response = _stream_response(test_db, sdk_sid, script)
+    state.adapter.receive_events = _stream_response(test_db, sdk_sid, script)
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
@@ -414,7 +414,7 @@ async def test_mid_turn_death_before_any_flush_loses_only_that_turn(test_db, sto
         ("yield", SystemMessage(subtype="init", data={"session_id": sdk_sid})),
         ("raise", RuntimeError("Fatal error in message reader")),
     ]
-    state.adapter.sdk_client.receive_response = _stream_response(test_db, sdk_sid, script)
+    state.adapter.receive_events = _stream_response(test_db, sdk_sid, script)
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
@@ -464,7 +464,7 @@ async def test_normal_turn_end_no_dupes_and_aggregates(test_db, store_read, tmp_
             usage={"input_tokens": 10, "output_tokens": 5},
         )),
     ]
-    state.adapter.sdk_client.receive_response = _stream_response(test_db, sdk_sid, script)
+    state.adapter.receive_events = _stream_response(test_db, sdk_sid, script)
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))
@@ -512,7 +512,7 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
                                    model="claude-test", uuid="a-1")),
         ("raise", asyncio.CancelledError()),
     ]
-    state.adapter.sdk_client.receive_response = _stream_response(test_db, sdk_sid, script)
+    state.adapter.receive_events = _stream_response(test_db, sdk_sid, script)
 
     with ExitStack() as stack:
         _engine_patches(stack, pool, str(tmp_path))

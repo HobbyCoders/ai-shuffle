@@ -113,7 +113,7 @@ class TestTaskNotificationFrame:
 # proven-dead: at-rest injections never pass through stream_to_websocket.)
 # =============================================================================
 
-from claude_agent_sdk import (
+from app.core.provider.events import (
     AssistantMessage,
     TextBlock,
     ThinkingBlock,

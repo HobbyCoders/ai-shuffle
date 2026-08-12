@@ -25,23 +25,20 @@ import dataclasses
 import pytest
 
 from app.core.provider.harness_adapter import HarnessAdapter, _decide_provider_kind
-from app.core.provider.types import (
-    ErrorEvent,
-    InterruptedEvent,
-    PermissionRequestEvent,
+from app.core.provider.types import PermissionRequestEvent, SessionOptions
+from app.core.provider.events import (
+    AssistantMessage,
     RateLimitEvent,
-    ResultEvent,
-    SessionOptions,
-    StreamBlockStartEvent,
-    StreamBlockStopEvent,
-    StreamDeltaEvent,
-    SystemInitEvent,
-    TaskNotificationEvent,
-    TaskProgressEvent,
-    TaskStartedEvent,
-    ToolResultEvent,
-    ToolUseEvent,
-    TurnUsageEvent,
+    ResultMessage,
+    StreamEvent,
+    SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 
 from loom.events import model as lm
@@ -133,24 +130,83 @@ async def test_translation_table():
                         usage={"input_tokens": 10}, cost_usd=0.01),
     ]
     adapter = _adapter_with(FakeEngine(events))
+    # Partial mode on: BlockStart/deltas surface as raw StreamEvents, exactly
+    # like the SDK's include_partial_messages stream.
+    adapter._options = SessionOptions(model="fake-model", include_partial_messages=True)
     got = await _collect(adapter)
 
-    # TurnComplete is terminal -> iterator stops right after ResultEvent.
-    assert isinstance(got[0], SystemInitEvent) and got[0].sdk_session_id == SID
-    assert isinstance(got[1], StreamBlockStartEvent) and got[1].block_type == "text"
-    assert isinstance(got[2], StreamDeltaEvent) and got[2].delta_type == "text" and got[2].content == "Hel"
-    assert isinstance(got[3], StreamDeltaEvent) and got[3].delta_type == "thinking"
-    assert isinstance(got[4], StreamBlockStopEvent) and got[4].block_index == 0
-    assert isinstance(got[5], ToolUseEvent) and got[5].name == "Read" and got[5].tool_use_id == "tu1"
-    assert isinstance(got[6], ToolResultEvent) and got[6].output == "ok"
-    assert isinstance(got[7], TurnUsageEvent) and got[7].usage["input_tokens"] == 10
-    assert isinstance(got[8], RateLimitEvent) and got[8].rate_limit_type == "requests"
-    assert isinstance(got[9], TaskStartedEvent) and got[9].task_id == "t1"
-    assert isinstance(got[10], TaskProgressEvent)
-    assert isinstance(got[11], TaskNotificationEvent) and got[11].status == "finished"
-    assert isinstance(got[12], ResultEvent) and got[12].stop_reason == "end_turn"
+    # TurnComplete is terminal -> iterator stops right after ResultMessage.
+    assert isinstance(got[0], SystemMessage) and got[0].subtype == "init"
+    assert got[0].data["session_id"] == SID and got[0].data["model"] == "m"
+    assert isinstance(got[1], StreamEvent) and got[1].event["type"] == "content_block_start"
+    assert got[1].event["content_block"]["type"] == "text"
+    assert isinstance(got[2], StreamEvent) and got[2].event["delta"] == {
+        "type": "text_delta", "text": "Hel"}
+    assert isinstance(got[3], StreamEvent) and got[3].event["delta"] == {
+        "type": "thinking_delta", "thinking": "hmm"}
+    assert isinstance(got[4], StreamEvent) and got[4].event["type"] == "content_block_stop"
+    # Complete text block follows the deltas as an AssistantMessage (SDK parity).
+    assert isinstance(got[5], AssistantMessage)
+    assert isinstance(got[5].content[0], TextBlock) and got[5].content[0].text == "Hel"
+    assert got[5].model == "m"  # model from TurnStarted, not options
+    assert isinstance(got[6], AssistantMessage)
+    tu = got[6].content[0]
+    assert isinstance(tu, ToolUseBlock) and tu.name == "Read" and tu.id == "tu1"
+    assert isinstance(got[7], UserMessage)
+    tr = got[7].content[0]
+    assert isinstance(tr, ToolResultBlock) and tr.tool_use_id == "tu1" and tr.content == "ok"
+    assert isinstance(got[8], RateLimitEvent)
+    assert got[8].rate_limit_info.rate_limit_type == "requests"
+    assert got[8].rate_limit_info.utilization == 0.5
+    assert isinstance(got[9], TaskStartedMessage) and got[9].task_id == "t1"
+    assert isinstance(got[9], SystemMessage)  # subclass, like the SDK hierarchy
+    assert isinstance(got[10], TaskProgressMessage)
+    assert isinstance(got[11], TaskNotificationMessage) and got[11].status == "completed"
+    assert isinstance(got[12], ResultMessage) and got[12].stop_reason == "end_turn"
     assert got[12].total_cost_usd == 0.01
+    assert got[12].usage == {"input_tokens": 10}
     assert len(got) == 13  # nothing after the terminal event
+
+
+@pytest.mark.asyncio
+async def test_translation_non_partial_buffers_deltas():
+    # Default options (include_partial_messages=False): deltas are buffered
+    # silently and surface once, as the complete AssistantMessage at BlockStop.
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.BlockStart(session_id=SID, index=0, block_type="text"),
+        lm.TextDelta(session_id=SID, index=0, text="Hello "),
+        lm.TextDelta(session_id=SID, index=0, text="world"),
+        lm.BlockStop(session_id=SID, index=0),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    kinds = [type(e).__name__ for e in got]
+    assert kinds == ["SystemMessage", "AssistantMessage", "ResultMessage"]
+    assert got[1].content[0].text == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_usage_attaches_to_next_assistant_message():
+    # A loom Usage reading rides on the next synthesized AssistantMessage in
+    # the SDK's field names, where the loops read per-call token counts.
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.Usage(session_id=SID, input_tokens=10, output_tokens=3,
+                 cache_read_tokens=7, cache_creation_tokens=2),
+        lm.BlockStart(session_id=SID, index=0, block_type="text"),
+        lm.TextDelta(session_id=SID, index=0, text="hi"),
+        lm.BlockStop(session_id=SID, index=0),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    asst = [e for e in got if isinstance(e, AssistantMessage)]
+    assert asst and asst[0].usage == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 7,
+        "cache_creation_input_tokens": 2,
+    }
 
 
 @pytest.mark.asyncio
@@ -161,15 +217,21 @@ async def test_interrupted_is_terminal():
         lm.TextDelta(session_id=SID, index=0, text="should-not-appear"),
     ]
     got = await _collect(_adapter_with(FakeEngine(events)))
-    assert isinstance(got[-1], InterruptedEvent) and got[-1].message == "stopped"
-    assert len(got) == 2
+    # Non-partial mode buffers the delta; the interrupt lands as the terminal
+    # ResultMessage with the SDK's cancellation terminal_reason.
+    assert len(got) == 1
+    assert isinstance(got[0], ResultMessage)
+    assert got[0].terminal_reason == "aborted_streaming"
+    assert got[0].is_error is False and got[0].result == "stopped"
 
 
 @pytest.mark.asyncio
 async def test_error_is_terminal():
     events = [lm.ErrorEvent(session_id=SID, message="boom", retriable=True)]
     got = await _collect(_adapter_with(FakeEngine(events)))
-    assert len(got) == 1 and isinstance(got[0], ErrorEvent) and got[0].message == "boom"
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].is_error is True and got[0].errors == ["boom"]
+    assert got[0].subtype == "error_during_execution"
 
 
 # ─── 2. Permission round-trip ────────────────────────────────────────────────
@@ -203,6 +265,48 @@ async def test_permission_round_trip():
     assert op.remember is True
 
     await agen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_permission_bridged_to_can_use_tool():
+    """With an app can_use_tool callback wired (the WS/chat path), a loom
+    PermissionRequest never surfaces in-stream; the callback's decision is
+    submitted back as a RespondPermission op (SDK out-of-band parity)."""
+    events = [
+        lm.PermissionRequest(
+            session_id=SID, request_id="perm_1", tool_use_id="tu7",
+            name="Bash", input={"cmd": "ls"}, risk="safe",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    engine = FakeEngine(events)
+    adapter = _adapter_with(engine)
+
+    seen = {}
+
+    class _Allow:  # detected by class name, like the SDK's PermissionResultAllow
+        pass
+    _Allow.__name__ = "PermissionResultAllow"
+
+    async def can_use_tool(tool_name, tool_input, context):
+        seen["args"] = (tool_name, tool_input, context.tool_use_id)
+        return _Allow()
+
+    adapter._can_use_tool = can_use_tool
+    got = await _collect(adapter)
+
+    # The permission event was consumed by the bridge, not yielded.
+    assert not any(isinstance(e, PermissionRequestEvent) for e in got)
+    # Let the spawned bridge task run to completion.
+    import asyncio
+    for _ in range(10):
+        if engine.ops:
+            break
+        await asyncio.sleep(0)
+    assert seen["args"] == ("Bash", {"cmd": "ls"}, "tu7")
+    assert len(engine.ops) == 1
+    assert isinstance(engine.ops[0], RespondPermission)
+    assert engine.ops[0].request_id == "perm_1" and engine.ops[0].decision == "allow"
 
 
 @pytest.mark.asyncio
@@ -243,13 +347,15 @@ async def test_native_loop_text_turn():
     await adapter.send_query("hi")
     got = await _collect(adapter)
 
-    kinds = [type(e).__name__ for e in got]
-    assert "SystemInitEvent" in kinds          # from TurnStarted
-    text = "".join(e.content for e in got if isinstance(e, StreamDeltaEvent)
-                   and e.delta_type == "text")
+    inits = [e for e in got if isinstance(e, SystemMessage) and e.subtype == "init"]
+    assert inits and inits[0].data["session_id"] == loop.session_id
+    text = "".join(
+        b.text
+        for e in got if isinstance(e, AssistantMessage)
+        for b in e.content if isinstance(b, TextBlock)
+    )
     assert text == "Hello world"
-    assert any(isinstance(e, TurnUsageEvent) for e in got)
-    assert isinstance(got[-1], ResultEvent) and got[-1].stop_reason == "end_turn"
+    assert isinstance(got[-1], ResultMessage) and got[-1].stop_reason == "end_turn"
 
     # sdk_session_id resolves to the live loom session id.
     assert adapter.sdk_session_id == loop.session_id

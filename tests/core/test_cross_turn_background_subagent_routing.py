@@ -31,8 +31,13 @@ import app.core.query_engine as qe
 from app.core.session_pool import SessionState
 from app.core.task_registry import task_registry
 
-from claude_agent_sdk import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
-from claude_agent_sdk.types import StreamEvent
+from app.core.provider.events import (
+    AssistantMessage,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 
 # ─── harness (mirrors test_busy_write_guard_engine._fake_state / _chat_patches) ─
@@ -42,13 +47,13 @@ def _fake_state(messages, **overrides) -> SessionState:
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
     adapter.sdk_client = MagicMock()
-    adapter.sdk_client.query = AsyncMock()
+    adapter.send_query = AsyncMock()
 
     async def _response():
         for m in messages:
             yield m
 
-    adapter.sdk_client.receive_response = MagicMock(side_effect=lambda: _response())
+    adapter.receive_events = MagicMock(side_effect=lambda: _response())
     state = SessionState(adapter=adapter, is_connected=True)
     for key, value in overrides.items():
         setattr(state, key, value)

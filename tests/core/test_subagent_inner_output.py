@@ -17,7 +17,7 @@ from typing import Optional
 
 import pytest
 
-from claude_agent_sdk import (
+from app.core.provider.events import (
     AssistantMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
@@ -472,13 +472,13 @@ def _ack_state(messages, **overrides) -> _SessionState:
     adapter = _MagicMock()
     adapter.is_alive = _MagicMock(return_value=True)
     adapter.sdk_client = _MagicMock()
-    adapter.sdk_client.query = _AsyncMock()
+    adapter.send_query = _AsyncMock()
 
     async def _response():
         for m in messages:
             yield m
 
-    adapter.sdk_client.receive_response = _MagicMock(side_effect=lambda: _response())
+    adapter.receive_events = _MagicMock(side_effect=lambda: _response())
     state = _SessionState(adapter=adapter, is_connected=True)
     for key, value in overrides.items():
         setattr(state, key, value)
@@ -836,14 +836,14 @@ def _raising_state(messages, exc) -> _SessionState:
     adapter = _MagicMock()
     adapter.is_alive = _MagicMock(return_value=True)
     adapter.sdk_client = _MagicMock()
-    adapter.sdk_client.query = _AsyncMock()
+    adapter.send_query = _AsyncMock()
 
     async def _response():
         for m in messages:
             yield m
         raise exc
 
-    adapter.sdk_client.receive_response = _MagicMock(side_effect=lambda: _response())
+    adapter.receive_events = _MagicMock(side_effect=lambda: _response())
     return _SessionState(adapter=adapter, is_connected=True)
 
 
