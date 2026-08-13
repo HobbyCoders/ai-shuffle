@@ -17,7 +17,7 @@ build_options_from_profile(); these tests pin that wiring.
 """
 
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -140,15 +140,20 @@ class TestAttachHooksToOptions:
 
 @pytest.mark.asyncio
 async def test_execute_query_attaches_hooks():
-    """Hooks must be on options BEFORE the SDK query() call spawns the CLI."""
+    """Hooks must be on options BEFORE the adapter connect spawns the CLI."""
     options = _make_options()
     profile = {"id": "p1", "name": "PE"}
     session_row = {"id": APP_SESSION_ID, "sdk_session_id": None}
 
-    async def crashing_query(prompt, options):
-        # Spawn point reached — hooks must already be attached.
-        raise RuntimeError("stop at spawn")
-        yield  # pragma: no cover  (make this an async generator)
+    # Spawn point is now adapter.connect_with_sdk_options(options) — the options
+    # handed to it must already carry the hooks.
+    adapter = MagicMock()
+    adapter.connect_with_sdk_options = AsyncMock(
+        side_effect=RuntimeError("stop at spawn")
+    )
+    adapter.send_query = AsyncMock()
+    adapter.receive_events = MagicMock()
+    adapter.disconnect = AsyncMock()
 
     with patch.object(qe, "get_profile", return_value=profile), patch.object(
         qe, "database"
@@ -163,8 +168,8 @@ async def test_execute_query_attaches_hooks():
         qe.direct_oauth, "ensure_fresh_credentials", _noop
     ), patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
-    ) as mock_build, patch.object(
-        qe, "query", crashing_query
+    ) as mock_build, patch(
+        "app.core.provider.factory.make_adapter", return_value=adapter
     ):
         mock_db.get_session.return_value = session_row
         with pytest.raises(RuntimeError, match="stop at spawn"):

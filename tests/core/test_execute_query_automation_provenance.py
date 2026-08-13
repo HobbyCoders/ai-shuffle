@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import SystemMessage
+# execute_query consumes the provider MIRROR vocabulary (adapter.receive_events()
+# already translated), not the raw SDK types.
+from app.core.provider.events import SystemMessage
 
 import app.core.query_engine as qe
 
@@ -38,8 +40,16 @@ def engine_mocks():
     async def _noop(*args, **kwargs):
         return None
 
-    async def quick_query(prompt, options):
+    async def quick_events():
         yield _init_message()
+
+    # execute_query now spawns through the provider seam (make_adapter), so the
+    # stub replaces the adapter rather than the raw SDK query().
+    adapter = MagicMock()
+    adapter.connect_with_sdk_options = AsyncMock()
+    adapter.send_query = AsyncMock()
+    adapter.disconnect = AsyncMock()
+    adapter.receive_events = MagicMock(side_effect=lambda: quick_events())
 
     with patch.object(qe, "get_profile", return_value=profile), patch.object(
         qe, "database"
@@ -52,8 +62,8 @@ def engine_mocks():
         qe, "push_memory", _noop
     ), patch.object(
         qe.direct_oauth, "ensure_fresh_credentials", _noop
-    ), patch.object(
-        qe, "query", quick_query
+    ), patch(
+        "app.core.provider.factory.make_adapter", return_value=adapter
     ), patch.object(
         qe, "_persist_turn_results",
         MagicMock(side_effect=lambda **kw: _noop_coro()),

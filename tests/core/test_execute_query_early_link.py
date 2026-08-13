@@ -13,11 +13,13 @@ a relink). The streaming and WebSocket paths already persist the link at
 init; execute_query was the one path that didn't.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import SystemMessage
+# execute_query consumes the provider MIRROR vocabulary (it runs through
+# adapter.receive_events(), which already translated), not the raw SDK types.
+from app.core.provider.events import SystemMessage
 
 import app.core.query_engine as qe
 
@@ -27,6 +29,19 @@ APP_SESSION_ID = "b19ddfa6-9357-4227-9c2f-a6b2f00c3b82"
 
 def _init_message():
     return SystemMessage(subtype="init", data={"session_id": SDK_SESSION_ID})
+
+
+def _adapter_patch(events_factory):
+    """Patch the provider factory so execute_query gets a stub adapter whose
+    receive_events() replays ``events_factory()`` (an async generator)."""
+    adapter = MagicMock()
+    adapter.connect_with_sdk_options = AsyncMock()
+    adapter.send_query = AsyncMock()
+    adapter.disconnect = AsyncMock()
+    adapter.receive_events = MagicMock(side_effect=lambda: events_factory())
+    return patch(
+        "app.core.provider.factory.make_adapter", return_value=adapter
+    )
 
 
 def _early_link_calls(mock_db):
@@ -69,11 +84,11 @@ def engine_mocks():
 async def test_crash_after_init_still_links_sdk_session_id(engine_mocks):
     """A mid-turn crash must not orphan the session (blank history)."""
 
-    async def crashing_query(prompt, options):
+    async def crashing_events():
         yield _init_message()
         raise RuntimeError("subprocess died mid-turn")
 
-    with patch.object(qe, "query", crashing_query):
+    with _adapter_patch(crashing_events):
         with pytest.raises(RuntimeError, match="mid-turn"):
             await qe.execute_query(
                 prompt="do the thing",
@@ -92,12 +107,12 @@ async def test_link_persists_at_init_before_turn_end(engine_mocks):
     """During a long run the link must exist BEFORE _persist_turn_results."""
     linked_before_result = []
 
-    async def slow_query(prompt, options):
+    async def slow_events():
         yield _init_message()
         # By the time the next message arrives, the link must be durable.
         linked_before_result.append(bool(_early_link_calls(engine_mocks)))
 
-    with patch.object(qe, "query", slow_query), patch.object(
+    with _adapter_patch(slow_events), patch.object(
         qe, "_persist_turn_results", MagicMock(side_effect=lambda **kw: _noop_coro())
     ):
         await qe.execute_query(
@@ -117,10 +132,10 @@ async def test_resumed_session_skips_redundant_early_link(engine_mocks):
         "sdk_session_id": SDK_SESSION_ID,
     }
 
-    async def quick_query(prompt, options):
+    async def quick_events():
         yield _init_message()
 
-    with patch.object(qe, "query", quick_query), patch.object(
+    with _adapter_patch(quick_events), patch.object(
         qe, "_persist_turn_results", MagicMock(side_effect=lambda **kw: _noop_coro())
     ):
         await qe.execute_query(
@@ -156,10 +171,10 @@ async def test_resume_repersists_launched_model_on_model_switch(engine_mocks):
     # The fresh subprocess relaunches with a different effective model.
     resumed_options.model = "claude-opus-4-1"
 
-    async def quick_query(prompt, options):
+    async def quick_events():
         yield _init_message()
 
-    with patch.object(qe, "query", quick_query), patch("app.core.sdk_options.build_options_from_profile", return_value=(resumed_options, {})
+    with _adapter_patch(quick_events), patch("app.core.sdk_options.build_options_from_profile", return_value=(resumed_options, {})
     ), patch.object(
         qe, "_persist_turn_results", MagicMock(side_effect=lambda **kw: _noop_coro())
     ):

@@ -26,13 +26,11 @@ import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator, Callable, List
 from datetime import datetime, timezone
 
-from claude_agent_sdk import query, ClaudeAgentOptions
-from app.core.provider.claude_adapter import to_provider_event
+from claude_agent_sdk import ClaudeAgentOptions
 # Provider-agnostic mirrors of the SDK streaming message vocabulary (identical
 # class/attribute names — see app/core/provider/events.py). Every stream this
-# module consumes is translated at its boundary (adapter.receive_events(), or
-# to_provider_event() on the raw query()/receive_messages() paths), so the
-# dispatch below never sees a claude_agent_sdk message class. The mirrors
+# module consumes is translated at its boundary (adapter.receive_events()), so
+# the dispatch below never sees a claude_agent_sdk message class. The mirrors
 # always exist, so the per-SDK-version import guards that used to live here
 # (ServerTool*, Task*, RateLimitEvent, HookEventMessage) are gone; version
 # skew is absorbed inside the translation layer instead.
@@ -872,29 +870,33 @@ async def execute_query(
     sdk_session_id = None
     sdk_link_persisted = False
 
-    # Wrap string prompt as async iterable to force SDK to use stream_input() path.
-    # The SDK's string-prompt path calls end_input() immediately after writing,
-    # closing stdin before the CLI finishes processing. If the CLI sends a control
-    # request (e.g., mcp_tool_request for SDK MCP servers), the response write fails
-    # with "ProcessTransport is not ready for writing". The stream_input() path
-    # properly waits for the result before closing stdin.
-    async def _prompt_stream():
-        yield {
-            "type": "user",
-            "session_id": "",
-            "message": {"role": "user", "content": prompt},
-            "parent_tool_use_id": None,
-        }
-
     # Pull shared agent-memory from the DB before the CLI reads it.
     await reconcile_memory(project_id, getattr(options, "cwd", None))
 
+    # Feature-flagged backend selection (see app/core/provider/factory.py):
+    # default is ClaudeAgentAdapter, AIH_USE_OMNI_HARNESS=1 is the omni
+    # HarnessAdapter. This headless path used to consume the SDK's one-shot
+    # query() directly, which bypassed the seam entirely: under omni it was
+    # handed an omni session id (ses_...) as ClaudeAgentOptions.resume, which
+    # the legacy SDK cannot resume — every wake turn (idle watchdog,
+    # ScheduleWakeup, automations, connectors, POST /api/v1/query) ran with no
+    # context. Routing through make_adapter() keeps this path on the same
+    # backend as every other spawn path.
+    #
+    # One-shot lifecycle: deliberately NOT registered in the session pool (no
+    # pooled reuse for headless turns) — the adapter is torn down in the
+    # finally below. The adapter's client keeps stdin open for the whole turn
+    # (unlike the raw query() string path, which closed it immediately and
+    # broke SDK-MCP control requests), so the prompt is handed over as a plain
+    # string via send_query() exactly like the background path does.
+    from app.core.provider.factory import make_adapter
+    adapter = make_adapter()
+
     try:
-        async for message in query(prompt=_prompt_stream(), options=options):
-            # This headless path consumes the SDK's one-shot query() directly
-            # (no pooled adapter), so translate to the provider mirror types at
-            # the boundary — the dispatch below matches ONLY mirror classes.
-            message = to_provider_event(message)
+        await adapter.connect_with_sdk_options(options)
+        await adapter.send_query(prompt)
+
+        async for message in adapter.receive_events():
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             # Task messages subclass SystemMessage, so this must run before the
             # isinstance chain claims them via the SystemMessage branch below.
@@ -1042,6 +1044,16 @@ async def execute_query(
             raise actual from e
         logger.error(f"Query execution error: {e}")
         raise
+    finally:
+        # One-shot path owns the adapter outright (never pooled), so tear the
+        # subprocess/harness session down here — including on the crash path.
+        try:
+            await adapter.disconnect()
+        except Exception as disconnect_err:
+            logger.warning(
+                f"execute_query adapter disconnect failed for "
+                f"{session_id}: {disconnect_err}"
+            )
 
     # Persist session data to database in a batched write.
     await _persist_turn_results(
