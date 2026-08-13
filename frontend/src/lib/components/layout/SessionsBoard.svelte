@@ -1060,13 +1060,18 @@
 				{#if showProject}
 					<span class="row-proj">{projectName(session)}</span>
 				{/if}
-				{#if session.total_cost_usd > 0}
-					<span class="row-stat">{fmtCost(session.total_cost_usd)}</span>
-					{#if session.turn_count > 0}
+				<!-- Subscription-auth sessions (e.g. Codex-native) accrue $0 cost forever,
+				     so the activity gate must key on turns too — cost alone hides real
+				     activity behind "No activity yet". -->
+				{#if session.total_cost_usd > 0 || session.turn_count > 0}
+					{#if session.total_cost_usd > 0}
+						<span class="row-stat">{fmtCost(session.total_cost_usd)}</span>
 						<span class="sep">·</span>
-						<span class="row-stat">{session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}</span>
 					{/if}
-					<span class="sep">·</span>
+					{#if session.turn_count > 0}
+						<span class="row-stat">{session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}</span>
+						<span class="sep">·</span>
+					{/if}
 					<span class="row-stat">{fmtDuration(session)}</span>
 				{:else}
 					<span class="row-stat muted">No activity yet</span>

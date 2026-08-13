@@ -951,3 +951,43 @@ describe('SessionsBoard inline rename', () => {
 		expect(toggle.getAttribute('aria-expanded')).toBe('false');
 	});
 });
+
+/**
+ * Row activity stats: subscription-auth sessions (e.g. omni Codex-native) never
+ * accrue a dollar cost, so gating the whole "$cost · N turns · duration" block on
+ * total_cost_usd > 0 hid real activity behind "No activity yet" forever. The gate
+ * keys on turn_count too; each part renders only when it has something to say.
+ */
+describe('SessionsBoard row stats', () => {
+	it('shows turns and duration for a zero-cost session with activity', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'z', title: 'Zero cost', total_cost_usd: 0, turn_count: 8 })
+		]);
+		renderBoard();
+		const text = rowFor('Zero cost').textContent ?? '';
+		// Fixture dates: created 2026-07-01, updated 2026-07-08 → fmtDuration = "7d".
+		expect(text).toContain('8 turns');
+		expect(text).toContain('7d');
+		expect(text).not.toContain('No activity yet');
+		// No cost accrued → no dollar figure at all (not "$0.00", not "<$0.01").
+		expect(text).not.toContain('$');
+	});
+
+	it('still shows No activity yet when cost and turns are both zero', () => {
+		mocks.sessions.set([makeSession({ id: 'z', title: 'Idle' })]);
+		renderBoard();
+		expect(rowFor('Idle').textContent).toContain('No activity yet');
+	});
+
+	it('shows cost without turns when turn_count is zero', () => {
+		mocks.sessions.set([
+			makeSession({ id: 'z', title: 'Costly', total_cost_usd: 1.5, turn_count: 0 })
+		]);
+		renderBoard();
+		const text = rowFor('Costly').textContent ?? '';
+		expect(text).toContain('$1.50');
+		expect(text).toContain('7d');
+		expect(text).not.toMatch(/\bturns?\b/);
+		expect(text).not.toContain('No activity yet');
+	});
+});
