@@ -832,7 +832,7 @@ async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeyp
             pass
 
     async def fake_client(kind, options):
-        return FakeProvider([])
+        return FakeProvider([]), None
 
     monkeypatch.setattr(ha, "NativeLoop", FakeNativeLoop)
     monkeypatch.setattr(ha, "_build_provider_client", fake_client)
@@ -1158,3 +1158,175 @@ async def test_adapter_surfaces_one_assistant_message_for_split_frames():
         and e.event.get("delta", {}).get("type") == "text_delta"
     ]
     assert [d.event["delta"]["text"] for d in deltas] == ["one bubble only"]
+
+
+# ─── 8. Usage-header capture on the native legs ──────────────────────────────
+#
+# Flag-on native traffic never touches the translator gateway, so the gateway's
+# passive header capture (upstream.py) never runs and provider_usage_snapshots
+# goes stale. _usage_capture_http_client restores it via an httpx response hook
+# injected into the omni client.
+
+
+CODEX_HEADERS = {
+    "x-codex-primary-used-percent": "12",
+    "x-codex-primary-window-minutes": "300",
+}
+
+
+class _RecordingCapture:
+    """Stand-in for provider_usage.capture_*_headers that records its calls."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def __call__(self, provider_id, headers) -> None:
+        self.calls.append((provider_id, dict(headers)))
+
+
+@pytest.mark.asyncio
+async def test_usage_capture_hook_routes_codex_headers(monkeypatch):
+    """The injected client carries exactly one response hook, and it forwards a
+    Codex response's headers to capture_codex_headers."""
+    import httpx
+
+    from app.core import provider_usage
+    import app.core.provider.harness_adapter as ha
+
+    codex = _RecordingCapture()
+    monkeypatch.setattr(provider_usage, "capture_codex_headers", codex)
+
+    client = ha._usage_capture_http_client("prov-123", True)
+    try:
+        hooks = client.event_hooks["response"]
+        assert len(hooks) == 1
+        await hooks[0](httpx.Response(200, headers=dict(CODEX_HEADERS)))
+    finally:
+        await client.aclose()
+
+    assert len(codex.calls) == 1
+    provider_id, headers = codex.calls[0]
+    assert provider_id == "prov-123"
+    assert headers["x-codex-primary-used-percent"] == "12"
+    assert headers["x-codex-primary-window-minutes"] == "300"
+
+
+@pytest.mark.asyncio
+async def test_usage_capture_hook_routes_openai_headers(monkeypatch):
+    """use_codex_backend=False routes to the OpenAI-platform capture only."""
+    import httpx
+
+    from app.core import provider_usage
+    import app.core.provider.harness_adapter as ha
+
+    codex, openai = _RecordingCapture(), _RecordingCapture()
+    monkeypatch.setattr(provider_usage, "capture_codex_headers", codex)
+    monkeypatch.setattr(provider_usage, "capture_openai_headers", openai)
+
+    client = ha._usage_capture_http_client("prov-openai", False)
+    try:
+        hook = client.event_hooks["response"][0]
+        await hook(httpx.Response(200, headers={"x-ratelimit-remaining-requests": "9"}))
+    finally:
+        await client.aclose()
+
+    assert codex.calls == []
+    assert len(openai.calls) == 1
+    assert openai.calls[0][0] == "prov-openai"
+    assert openai.calls[0][1]["x-ratelimit-remaining-requests"] == "9"
+
+
+@pytest.mark.asyncio
+async def test_usage_capture_hook_swallows_capture_errors(monkeypatch):
+    """Capture is best-effort: a raising capture must never break the turn."""
+    import httpx
+
+    from app.core import provider_usage
+    import app.core.provider.harness_adapter as ha
+
+    def boom(provider_id, headers):
+        raise RuntimeError("capture exploded")
+
+    monkeypatch.setattr(provider_usage, "capture_codex_headers", boom)
+
+    client = ha._usage_capture_http_client("prov-123", True)
+    try:
+        hook = client.event_hooks["response"][0]
+        await hook(httpx.Response(429, headers=dict(CODEX_HEADERS)))
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_injects_capture_client(monkeypatch):
+    """A bound openai_responses provider gets the capture client wired into the
+    omni client (client._http) and handed back for the caller to close."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.omni_credentials import ProviderCredentials
+
+    class _DummyAuth:
+        account_id = "acct_1"
+
+        async def get_access_token(self) -> str:
+            return "tok"
+
+        async def on_401(self) -> None:
+            pass
+
+    async def fake_resolve(kind, provider_id):
+        assert kind == "openai_responses"
+        assert provider_id == "prov-123"
+        return ProviderCredentials(api_key=None, auth=_DummyAuth(), use_codex_backend=True)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+
+    options = SessionOptions(model="gpt-5-codex", extra={"provider_id": "prov-123"})
+    client, http_client = await ha._build_provider_client("openai_responses", options)
+    try:
+        assert http_client is not None
+        assert client._http is http_client
+        assert client._base_url == ha.CODEX_RESPONSES_URL
+    finally:
+        await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_env_fallback_has_no_capture_client(monkeypatch):
+    """No bound provider row → nothing to attribute usage to, so no capture
+    client is injected and the omni client keeps its own default transport."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    client, http_client = await ha._build_provider_client(
+        "openai_responses", SessionOptions(model="gpt-5")
+    )
+
+    assert http_client is None
+    assert client._http is None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_closes_capture_http_client():
+    """Teardown owns the injected client — the omni client never closes one it
+    did not create."""
+    closed = {"count": 0}
+
+    class _StubEngine:
+        async def aclose(self) -> None:
+            pass
+
+    class _StubHttp:
+        async def aclose(self) -> None:
+            closed["count"] += 1
+
+    adapter = HarnessAdapter()
+    adapter._engine = _StubEngine()
+    adapter._connected = True
+    adapter._provider_http = _StubHttp()
+
+    await adapter.disconnect()
+
+    assert closed["count"] == 1
+    assert adapter._provider_http is None
+    assert adapter._connected is False

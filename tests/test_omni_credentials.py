@@ -122,7 +122,9 @@ async def test_api_key_row_passthrough(monkeypatch, kind, provider_type, fake):
             "auth_token": "enc:sk-secret",
         },
     )
-    client = await harness_adapter._build_provider_client(kind, _opts())
+    client, http_client = await harness_adapter._build_provider_client(kind, _opts())
+    if http_client is not None:
+        await http_client.aclose()
     assert isinstance(client, fake)
     assert fake.last["api_key"] == "sk-secret"
     # An API-key openai row stays on the OpenAI platform endpoint.
@@ -168,7 +170,11 @@ CODEX_TOKENS = {
 async def test_codex_subscription_builds_auth_object(monkeypatch):
     fake_provider_rows(monkeypatch, CODEX_ROW, codex=dict(CODEX_TOKENS))
 
-    client = await harness_adapter._build_provider_client("openai_responses", _opts())
+    client, http_client = await harness_adapter._build_provider_client(
+        "openai_responses", _opts()
+    )
+    if http_client is not None:
+        await http_client.aclose()
     assert isinstance(client, FakeOpenAI)
     # OAuth mode: no api_key, an auth object, and the Codex backend URL.
     assert FakeOpenAI.last["api_key"] is None
@@ -245,8 +251,11 @@ async def test_codex_missing_bundle_is_a_clear_error(monkeypatch):
 )
 async def test_env_fallback_when_no_provider_bound(monkeypatch, kind, env_var, fake):
     monkeypatch.setenv(env_var, "env-key")
-    client = await harness_adapter._build_provider_client(kind, _opts(provider_id=None))
+    client, http_client = await harness_adapter._build_provider_client(
+        kind, _opts(provider_id=None)
+    )
     # Constructed bare — the omni client reads the env var itself.
+    assert http_client is None
     assert isinstance(client, fake)
     assert fake.last == {"api_key": None}
 

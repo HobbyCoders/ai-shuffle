@@ -73,6 +73,8 @@ import logging
 import os
 from typing import Any, AsyncIterator, Dict, Optional
 
+import httpx
+
 from app.core.provider.omni_credentials import (
     ProviderCredentialError,
     resolve_provider_credentials,
@@ -176,6 +178,10 @@ class HarnessAdapter(ProviderAdapter):
         # surface in-stream as PermissionRequestEvent.
         self._can_use_tool: Optional[Any] = None
         self._perm_bridge_tasks: set = set()
+        # httpx client injected into the native provider client purely to
+        # capture upstream usage/quota headers (see _usage_capture_http_client).
+        # The omni client does not own it, so disconnect() closes it.
+        self._provider_http: Optional[httpx.AsyncClient] = None
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -234,7 +240,8 @@ class HarnessAdapter(ProviderAdapter):
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
-            provider_client = await _build_provider_client(kind, options)
+            provider_client, provider_http = await _build_provider_client(kind, options)
+            self._provider_http = provider_http
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
@@ -321,6 +328,12 @@ class HarnessAdapter(ProviderAdapter):
                     await self._registry.aclose()
                 except Exception:
                     pass
+            if self._provider_http is not None:
+                try:
+                    await self._provider_http.aclose()
+                except Exception:
+                    pass
+                self._provider_http = None
             self._connected = False
 
     def is_alive(self) -> bool:
@@ -1093,8 +1106,51 @@ def _require_env_credential(env_var: str, kind: str) -> None:
     )
 
 
-async def _build_provider_client(kind: str, options: SessionOptions) -> Any:
+def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
+    """An ``httpx.AsyncClient`` that passively captures usage/quota headers.
+
+    Flag-on native legs talk to the upstream provider directly (the omni client
+    owns the HTTP call), so the translator gateway's header capture in
+    ``app/core/translator_gateway/upstream.py`` never runs and
+    ``provider_usage_snapshots`` goes stale. Injecting this client into the omni
+    client restores the same capture: httpx fires the ``response`` event hook
+    with headers populated before the streamed body is consumed, so the hook
+    mirrors the gateway call sites exactly (``capture_codex_headers`` for the
+    Codex backend, ``capture_openai_headers`` for the OpenAI platform one).
+
+    Deliberately no status-code guard: ``capture_*`` already no-ops when no
+    allowlisted header is present, and error responses (notably 429) carry the
+    freshest quota headers of all. ``timeout=600.0`` matches the vendored omni
+    client's own default, which it bypasses whenever a client is injected.
+
+    ``provider_usage`` is imported inside the hook (mirroring the legacy call
+    sites) to keep the module import graph cycle-free.
+    """
+
+    async def _on_response(resp: httpx.Response) -> None:
+        try:
+            from app.core import provider_usage
+
+            if use_codex_backend:
+                provider_usage.capture_codex_headers(provider_id, resp.headers)
+            else:
+                provider_usage.capture_openai_headers(provider_id, resp.headers)
+        except Exception:  # noqa: BLE001 — capture must never break a turn
+            pass
+
+    return httpx.AsyncClient(timeout=600.0, event_hooks={"response": [_on_response]})
+
+
+async def _build_provider_client(
+    kind: str, options: SessionOptions
+) -> tuple[Any, Optional[httpx.AsyncClient]]:
     """Construct the omni native client for ``kind``, authenticated.
+
+    Returns ``(client, capture_http_client)``. The second element is the
+    usage-header-capturing ``httpx.AsyncClient`` injected into the omni client
+    (openai_responses with a bound provider row only), or ``None`` when no
+    client was injected — the caller owns closing it (the omni client does not,
+    since it did not create it).
 
     Credential resolution order (see ``omni_credentials``):
       1. the session's bound ``model_providers`` row (``extra["provider_id"]``,
@@ -1114,22 +1170,27 @@ async def _build_provider_client(kind: str, options: SessionOptions) -> Any:
 
     if kind == "openai_responses":
         if creds is not None:
-            return OpenAIResponsesClient(
+            http_client = _usage_capture_http_client(
+                str(provider_id), creds.use_codex_backend
+            )
+            client = OpenAIResponsesClient(
                 api_key=creds.api_key,
                 auth=creds.auth,
                 base_url=CODEX_RESPONSES_URL if creds.use_codex_backend else OPENAI_RESPONSES_URL,
+                http_client=http_client,
             )
+            return client, http_client
         _require_env_credential("OPENAI_API_KEY", kind)
-        return OpenAIResponsesClient()
+        return OpenAIResponsesClient(), None
     if kind == "openrouter":
         if creds is not None:
-            return OpenRouterClient(api_key=creds.api_key)
+            return OpenRouterClient(api_key=creds.api_key), None
         _require_env_credential("OPENROUTER_API_KEY", kind)
-        return OpenRouterClient()
+        return OpenRouterClient(), None
     # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
     # never routed here (that path stays delegated-CLI only); resolve_provider_
     # credentials refuses such a row outright.
     if creds is not None:
-        return AnthropicClient(api_key=creds.api_key)
+        return AnthropicClient(api_key=creds.api_key), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
-    return AnthropicClient()
+    return AnthropicClient(), None
