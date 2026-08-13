@@ -121,12 +121,19 @@ async def _fire(row: Dict[str, Any]) -> None:
         "wakeup firing: id=%s session=%s source=%s",
         wakeup_id, session_id, row.get("source"),
     )
-    await account_failover.execute_query_with_failover(
-        prompt=row.get("prompt"),
-        profile_id=row.get("profile_id"),
-        project_id=row.get("project_id"),
-        session_id=session_id,
-    )
+    # The wake must run on the scheduling turn's effective model, not the
+    # profile default — otherwise it re-primes the prompt cache on the wrong
+    # model. Rows without a model (e.g. idle_watchdog) keep the default path.
+    kwargs: Dict[str, Any] = {
+        "prompt": row.get("prompt"),
+        "profile_id": row.get("profile_id"),
+        "project_id": row.get("project_id"),
+        "session_id": session_id,
+    }
+    model = row.get("model")
+    if model:
+        kwargs["overrides"] = {"model": model}
+    await account_failover.execute_query_with_failover(**kwargs)
 
 
 def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
@@ -157,6 +164,7 @@ async def schedule(
     prompt: str,
     delay_seconds: float,
     reason: Optional[str] = None,
+    model: Optional[str] = None,
     source: str = "schedule_wakeup",
 ) -> Dict[str, Any]:
     """Persist a wakeup and arm its in-process timer. Returns the persisted row.
@@ -164,6 +172,10 @@ async def schedule(
     Durable-first: the row is written BEFORE the timer is armed, so a crash in the
     window loses nothing (boot rehydrate re-arms it). ``fire_at`` is an absolute
     unix epoch so rehydrate can compute the remaining delay.
+
+    ``model`` is the scheduling turn's effective model, persisted so the wake
+    replays it as a query-level override instead of running on the profile
+    default.
     """
     fire_at = _now_epoch() + max(0.0, float(delay_seconds))
     row = await asyncio.to_thread(
@@ -175,6 +187,7 @@ async def schedule(
         profile_id=profile_id,
         project_id=project_id,
         reason=reason,
+        model=model,
         source=source,
         instance_id=settings.effective_instance_id,
     )

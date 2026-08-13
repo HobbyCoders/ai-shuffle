@@ -784,7 +784,10 @@ def build_options_from_profile(
 
     # Register Claude Code builtin bridge tools for every session.
     # Session context (session_id, profile_id, project_id) is baked in so
-    # ScheduleWakeup can re-fire prompts back at this session.
+    # ScheduleWakeup can re-fire prompts back at this session. The effective
+    # model is baked in too, so a scheduled wake replays THIS turn's model
+    # instead of firing on the profile default (which re-primes the prompt
+    # cache on the wrong model).
     try:
         from app.mcp.builtin_tools import create_builtin_tools_server
         builtins_srv = create_builtin_tools_server(
@@ -792,6 +795,7 @@ def build_options_from_profile(
             profile_id=profile.get("id"),
             project_id=project.get("id") if project else None,
             is_admin=not api_user_id,
+            model=model_to_use,
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv

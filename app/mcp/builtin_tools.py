@@ -268,6 +268,7 @@ def create_builtin_tools_server(
     profile_id: Optional[str] = None,
     project_id: Optional[str] = None,
     is_admin: bool = False,
+    model: Optional[str] = None,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -279,6 +280,8 @@ def create_builtin_tools_server(
         project_id: Project context for worktree and cron tools.
         is_admin: Whether the caller has admin permissions (gated for
             destructive operations like CronDelete).
+        model: The current turn's effective model, persisted by ScheduleWakeup
+            so the wake replays it instead of running on the profile default.
 
     Returns:
         SDK MCP server config, or ``None`` if the SDK is unavailable.
@@ -338,6 +341,7 @@ def create_builtin_tools_server(
             prompt=prompt,
             delay_seconds=delay,
             reason=reason or None,
+            model=model,
             source="schedule_wakeup",
         )
         return _ok({
@@ -346,6 +350,7 @@ def create_builtin_tools_server(
             "fire_at_unix": row.get("fire_at"),
             "wakeup_id": row.get("id"),
             "reason": reason,
+            "model": model,
         })
 
     all_tools.append(schedule_wakeup)

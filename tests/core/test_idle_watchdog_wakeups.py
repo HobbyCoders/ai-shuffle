@@ -182,6 +182,9 @@ async def test_watchdog_nudges_idle_edge_session(mock_db, monkeypatch):
     assert scheduled[0]["session_id"] == sid
     assert scheduled[0]["source"] == "idle_watchdog"
     assert scheduled[0]["delay_seconds"] == 0.0
+    # watchdog nudges stay model-less by design: they fire on the profile
+    # default, unlike a ScheduleWakeup wake which replays its turn's model.
+    assert scheduled[0].get("model") is None
 
 
 async def test_watchdog_skips_below_threshold(mock_db, monkeypatch):

@@ -163,7 +163,10 @@ def _safe_json(value):
 #     inert prov:/subagent_provider fields dropped) and the table is dropped.
 #     Child FK COLUMN names (sessions.profile_id etc.) are unchanged — they
 #     now reference agents(id). See _migrate_profiles_to_agents().
-SCHEMA_VERSION = 71
+# 72 (2026-08-13): add pending_wakeups.model TEXT — the scheduling turn's
+#     effective model, replayed as the wake query's model override (wakes used to
+#     fire on the profile default and re-prime the prompt cache).
+SCHEMA_VERSION = 72
 
 
 def _migrate_profiles_to_agents(cursor):
@@ -918,6 +921,7 @@ def _run_column_migrations(cursor):
                 project_id TEXT,
                 prompt TEXT NOT NULL,
                 reason TEXT,
+                model TEXT,
                 source TEXT NOT NULL DEFAULT 'schedule_wakeup',
                 instance_id TEXT,
                 fire_at DOUBLE PRECISION NOT NULL,
@@ -925,6 +929,14 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("pending_wakeups")
+
+    # pending_wakeups.model (v72). The scheduling turn's effective model,
+    # replayed as the wake query's model override — without it a wake ran on the
+    # profile default and re-primed the prompt cache on the wrong model.
+    if not column_exists(cursor, "pending_wakeups", "model"):
+        cursor.execute("ALTER TABLE pending_wakeups ADD COLUMN model TEXT")
+        migrations_applied.append("pending_wakeups.model")
+
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance "
         "ON pending_wakeups(instance_id, fire_at)"

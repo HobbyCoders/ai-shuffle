@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 71
+SCHEMA_VERSION = 72
 
 
 def create_postgres_schema(cursor) -> None:
@@ -782,6 +782,9 @@ def create_postgres_schema(cursor) -> None:
     #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
     #      both persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
     #      the rehydrate math is timezone/shim-agnostic.
+    #      ``model`` (v72) is the scheduling turn's effective model, replayed as
+    #      the wake query's model override so a wake never fires on the profile
+    #      default (which re-primes the prompt cache on the wrong model).
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pending_wakeups (
@@ -791,6 +794,7 @@ def create_postgres_schema(cursor) -> None:
             project_id TEXT,
             prompt TEXT NOT NULL,
             reason TEXT,
+            model TEXT,
             source TEXT NOT NULL DEFAULT 'schedule_wakeup',
             instance_id TEXT,
             fire_at DOUBLE PRECISION NOT NULL,

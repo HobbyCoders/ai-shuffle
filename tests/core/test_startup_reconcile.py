@@ -338,7 +338,10 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 71 for the agents unification (ruling A4): ``profiles`` renamed
+    # Bumped to 72 for pending_wakeups.model: the scheduling turn's effective
+    # model, replayed as the wake query's model override so a wake no longer
+    # fires on the profile default and re-primes the prompt cache on the wrong
+    # model. v71 was the agents unification (ruling A4): ``profiles`` renamed
     # in place to ``agents`` (FKs follow), ``subagents`` rows folded into
     # ``agents`` and the table dropped. v70 added omni_sessions.cli_session_id:
     # the delegated engine's ``claude --resume`` handle, which is a CLI-issued
@@ -371,8 +374,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 71
-    assert pg_version == 71
+    assert db_version == 72
+    assert pg_version == 72
     assert db_version == pg_version
 
 

@@ -38,20 +38,25 @@ def create_wakeup(
     profile_id: Optional[str] = None,
     project_id: Optional[str] = None,
     reason: Optional[str] = None,
+    model: Optional[str] = None,
     source: str = "schedule_wakeup",
     instance_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Insert a pending wakeup and return the persisted row as a dict."""
+    """Insert a pending wakeup and return the persisted row as a dict.
+
+    ``model`` is the scheduling turn's effective model; the wake replays it as a
+    query-level model override so it never fires on the profile default.
+    """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""INSERT INTO pending_wakeups
-                (id, session_id, profile_id, project_id, prompt, reason, source,
-                 instance_id, fire_at)
-                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})""",
-            (id, session_id, profile_id, project_id, prompt, reason, source,
-             instance_id, float(fire_at)),
+                (id, session_id, profile_id, project_id, prompt, reason, model,
+                 source, instance_id, fire_at)
+                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})""",
+            (id, session_id, profile_id, project_id, prompt, reason, model,
+             source, instance_id, float(fire_at)),
         )
     return {
         "id": id,
@@ -60,6 +65,7 @@ def create_wakeup(
         "project_id": project_id,
         "prompt": prompt,
         "reason": reason,
+        "model": model,
         "source": source,
         "instance_id": instance_id,
         "fire_at": float(fire_at),
