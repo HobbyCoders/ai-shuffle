@@ -76,6 +76,24 @@ class _CallResult:
     usage: dict[str, Any] = field(default_factory=dict)  # tokens (int) + optional cost_usd (float)
     stop_reason: str = "end_turn"
     interrupted: bool = False
+    error_message: str | None = None  # set when stop_reason == "error"
+    error_retriable: bool = False
+
+
+# Provider error-message markers that mean "the prompt no longer fits" — the
+# one failure the trimmer can recover from by force-trimming and retrying.
+_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context_length_exceeded",
+    "maximum context length",
+    "exceed context limit",
+    "context window",
+)
+
+
+def _is_context_overflow(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
 class NativeLoop:
@@ -102,6 +120,7 @@ class NativeLoop:
         codemode: "CodeModeSession | None" = None,
         max_model_calls_per_turn: int = 50,
         trim: TrimConfig | None = None,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -113,6 +132,9 @@ class NativeLoop:
         self.permissions = permissions
         self.hooks = hooks
         self.ctx = ctx or ToolCtx()
+        if registry is not None:
+            # The ToolSearch builtin reaches the registry through the ctx.
+            self.ctx.extra.setdefault("tool_registry", registry)
         self.plan_mode = plan_mode
         self._codemode = codemode
         if codemode is not None and registry is not None:
@@ -130,6 +152,10 @@ class NativeLoop:
         # Cache-safe tool-result trimming (view-level; the stored tree keeps
         # full fidelity). Sticky per engine lifetime — see context/trim.py.
         self._trimmer = ToolResultTrimmer(config=trim or TrimConfig())
+        # MCP servers from config, connected lazily on the first turn (the
+        # constructor is sync; connecting needs the event loop).
+        self._mcp_servers = dict(mcp_servers or {})
+        self._mcp_connected = False
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -294,6 +320,7 @@ class NativeLoop:
         )
         if self.hooks is not None:
             await self.hooks.emit(TURN_START, {"session_id": sid, "turn_id": turn_id})
+        await self._connect_mcp_once(sid, turn_id)
         try:
             await self._agent_loop(sid, turn_id, user_node)
         except asyncio.CancelledError:
@@ -303,6 +330,26 @@ class NativeLoop:
                 ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc))
             )
 
+    async def _connect_mcp_once(self, sid: str, turn_id: str) -> None:
+        """Connect configured MCP servers on the first turn (idempotent).
+
+        Their tools become searchable/loadable via ToolSearch (progressive
+        disclosure) without entering the prompt schema. A server that fails to
+        connect surfaces as a non-fatal ErrorEvent; the turn proceeds.
+        """
+        if self._mcp_connected or not self._mcp_servers or self.registry is None:
+            return
+        self._mcp_connected = True
+        for name, cfg in self._mcp_servers.items():
+            try:
+                await self.registry.connect_mcp(name, dict(cfg))
+            except Exception as exc:
+                await self._emit(ErrorEvent(
+                    session_id=sid, turn_id=turn_id,
+                    message=f"mcp server {name!r} failed to connect: {exc!r}",
+                    retriable=False,
+                ))
+
     # ─── Agent loop (model call → tool dispatch → repeat) ────────────────
 
     async def _agent_loop(self, sid: str, turn_id: str, user_node: SessionNode) -> None:
@@ -310,13 +357,30 @@ class NativeLoop:
         num_calls = 0
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
+        overflow_retried = False
 
         while True:
-            history = self._trimmer.apply(await self.store.load_path(sid, parent.node_id))
+            nodes = await self.store.load_path(sid, parent.node_id)
+            history = self._trimmer.apply(nodes)
             result = await self._stream_once(sid, turn_id, history)
             num_calls += 1
             if result.stop_reason == "error":
-                return  # ErrorEvent already emitted; leave the turn open-ended
+                if (
+                    not overflow_retried
+                    and result.error_message
+                    and _is_context_overflow(result.error_message)
+                    and self._trimmer.force_trim(nodes)
+                ):
+                    # The prompt outgrew the window: batch-trim everything
+                    # eligible and retry the call once on the smaller view.
+                    overflow_retried = True
+                    continue
+                await self._emit(ErrorEvent(
+                    session_id=sid, turn_id=turn_id,
+                    message=result.error_message or "provider error",
+                    retriable=result.error_retriable,
+                ))
+                return  # leave the turn open-ended
             if "cost_usd" not in result.usage:
                 # No provider-reported cost — fall back to the provider's
                 # optional pricing-table estimate for this call.
@@ -325,7 +389,7 @@ class NativeLoop:
                     cost = est(self.model, result.usage)
                     if cost is not None:
                         result.usage["cost_usd"] = cost
-            self._merge_usage(total_usage, result.usage)
+            self._accumulate_usage(total_usage, result.usage)
 
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
@@ -368,6 +432,12 @@ class NativeLoop:
             )
             await self.store.append(sid, tr_node)
             parent = tr_node
+            if self._interrupted.is_set():
+                # Interrupt landed during tool dispatch (e.g. while parked on a
+                # permission prompt) — stop before issuing another model call.
+                await self._emit(Interrupted(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id))
+                return
 
         if self.hooks is not None:
             await self.hooks.emit(TURN_END, {"session_id": sid, "turn_id": turn_id})
@@ -461,8 +531,20 @@ class NativeLoop:
                 index = payload["index"]
                 await self._emit(BlockStop(session_id=sid, turn_id=turn_id, index=index))
                 block = blocks.get(index)
+                if block is not None and payload.get("block"):
+                    # Authoritative done item (OpenAI Responses): carries the
+                    # encrypted reasoning content / full function-call arguments
+                    # that the deltas alone don't (serialize.py docstring).
+                    block["done_item"] = payload["block"]
                 if block and block["type"] == "tool_use":
-                    args = json.loads(block["args"]) if block["args"] else {}
+                    raw_args = block["args"]
+                    if not raw_args:
+                        # No deltas streamed — fall back to the done item's
+                        # complete arguments (a JSON string on Responses).
+                        fallback = (block.get("done_item") or {}).get("arguments")
+                        if isinstance(fallback, str):
+                            raw_args = fallback
+                    args = json.loads(raw_args) if raw_args else {}
                     block["input"] = args
                     tool_uses.append({
                         "tool_use_id": block["tool_use_id"] or "",
@@ -479,14 +561,14 @@ class NativeLoop:
                 if payload.get("stop_reason"):
                     stop_reason = payload["stop_reason"]
             elif chunk.kind == "error":
-                await self._emit(
-                    ErrorEvent(session_id=sid, turn_id=turn_id,
-                               message=str(payload.get("message", payload)),
-                               retriable=bool(payload.get("retriable")))
-                )
+                # No ErrorEvent here — _agent_loop decides whether this error
+                # is terminal or recoverable (context overflow → forced trim
+                # + one retry) before surfacing it.
                 return _CallResult(
                     message=self._assemble_message(blocks), usage=usage_totals,
                     stop_reason="error",
+                    error_message=str(payload.get("message", payload)),
+                    error_retriable=bool(payload.get("retriable")),
                 )
 
         # Reasoning-channel answer fallback (observed on GLM-4.5 via
@@ -624,7 +706,24 @@ class NativeLoop:
             verdict = self.permissions.evaluate(spec, input)
             deny_message: str | None = None
             if verdict == "allow" and self.permissions.note_execution(name, input):
-                verdict = "ask"  # doom-loop checkpoint
+                # Doom-loop checkpoint. Under never_ask there may be nobody
+                # listening for permission prompts (headless embedders), so an
+                # "ask" would park the turn forever — deny with in-context
+                # feedback instead; that alone breaks the repeat pattern.
+                if self.permissions.approval_policy == "never_ask":
+                    return await self._finish_tool(
+                        sid, turn_id, name, tool_use_id,
+                        ToolOutcome(
+                            text=(
+                                "doom-loop guard: this exact tool call has now "
+                                "been repeated several times in a row — not "
+                                "running it again. Change the input or the "
+                                "approach."
+                            ),
+                            is_error=True,
+                        ),
+                    )
+                verdict = "ask"
             if verdict == "ask":
                 verdict, deny_message, updated_input = await self._await_permission(
                     sid, turn_id, name, tool_use_id, input, spec.risk,
@@ -728,11 +827,22 @@ class NativeLoop:
             session_id=sid, turn_id=turn_id, request_id=request_id,
             tool_use_id=tool_use_id, name=name, input=input, risk=risk,
         ))
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
-            resp: RespondPermission = await fut
+            done, _ = await asyncio.wait(
+                {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if fut not in done:  # Interrupt arrived while parked on the prompt
+                return ("deny", "interrupted while awaiting permission", None)
+            resp: RespondPermission = fut.result()
         finally:
+            interrupt_wait.cancel()
             self._pending_permissions.pop(request_id, None)
         allowed = resp.decision in ("allow", "allow_always")
+        if resp.decision == "allow_always" and self.permissions is not None:
+            # Sticky for the rest of the session: future calls to this tool
+            # skip the prompt (fix: allow_always used to be a one-shot allow).
+            self.permissions.allow_always(name)
         return (
             "allow" if allowed else "deny",
             resp.message,
@@ -756,10 +866,12 @@ class NativeLoop:
 
     @staticmethod
     def _merge_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
+        """WITHIN one model call: usage chunks are cumulative snapshots
+        (message_start carries input counts, the terminal chunk output counts),
+        so token keys take max(); a provider-reported cost rides one terminal
+        chunk and sums harmlessly."""
         for key, value in usage.items():
             if key == "cost_usd":
-                # Cost SUMS: one terminal chunk per call, accumulated across
-                # the agent loop's model calls. Token keys keep max() below.
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     totals[key] = totals.get(key, 0.0) + float(value)
                 continue
@@ -767,7 +879,15 @@ class NativeLoop:
                 totals[key] = max(totals.get(key, 0), value)
 
     @staticmethod
-    def _assemble_message(blocks: dict[int, dict[str, Any]]) -> Message:
+    def _accumulate_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
+        """ACROSS the agent loop's model calls: every call bills its own
+        tokens, so token keys (and cost) SUM into the turn totals."""
+        for key, value in usage.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            totals[key] = totals.get(key, 0) + value
+
+    def _assemble_message(self, blocks: dict[int, dict[str, Any]]) -> Message:
         content: list[Any] = []
         for index in sorted(blocks):
             block = blocks[index]
@@ -775,15 +895,7 @@ class NativeLoop:
                 content.append(Text(block["text"]))
             elif block["type"] == "thinking":
                 content.append(Thinking(block["text"]))
-                content.append(
-                    Reasoning(
-                        origin="anthropic",
-                        summary_text=block["text"],
-                        signature=block["signature"] or None,
-                        raw={"type": "thinking", "thinking": block["text"],
-                             "signature": block["signature"]},
-                    )
-                )
+                content.append(self._reasoning_envelope(block))
             elif block["type"] == "tool_use":
                 content.append(
                     ToolUseBlock(id=block["tool_use_id"] or "",
@@ -791,3 +903,33 @@ class NativeLoop:
                                  input=block.get("input", {}))
                 )
         return Message(role="assistant", content=content)
+
+    def _reasoning_envelope(self, block: dict[str, Any]) -> Reasoning:
+        """Build the provider-tagged Reasoning envelope for one thinking block.
+
+        The origin MUST be the provider that produced the reasoning — each
+        serializer round-trips only its own origin and drops foreign ones. For
+        OpenAI Responses the authoritative reasoning item (encrypted_content)
+        arrives as the block's done item; for Anthropic it's the accumulated
+        thinking text + signature.
+        """
+        origin = self.provider.name
+        done = block.get("done_item")
+        if origin == "openai_responses":
+            return Reasoning(
+                origin=origin,
+                summary_text=block["text"] or None,
+                encrypted_content=(done or {}).get("encrypted_content"),
+                raw=done,
+            )
+        if origin == "anthropic":
+            return Reasoning(
+                origin=origin,
+                summary_text=block["text"],
+                signature=block["signature"] or None,
+                raw={"type": "thinking", "thinking": block["text"],
+                     "signature": block["signature"]},
+            )
+        # Other providers (openrouter, ...): no verbatim round-trip contract —
+        # keep the summary text; serializers drop what they can't resend.
+        return Reasoning(origin=origin, summary_text=block["text"] or None, raw=done)

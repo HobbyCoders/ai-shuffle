@@ -1,85 +1,145 @@
-"""A tiny in-repo stdio MCP server (official ``mcp`` SDK) for offline tests.
+"""A tiny in-repo stdio MCP server (hand-rolled JSON-RPC) for offline tests.
 
-Run as ``python fake_mcp_server.py``. Exposes three tools and, when
-``OMNI_FAKE_TTL`` is set, advertises a ``tools/list`` freshness hint so the
-client's TTL cache can be exercised. The ``need_input`` tool returns an MRTR
-``input_required`` result (an elicitation round-trip) to test that path.
+Deliberately SDK-free: it speaks newline-delimited JSON-RPC over stdio
+directly, so the fixture works regardless of which ``mcp`` SDK generation is
+installed on the client side (the previous version targeted a server API that
+older SDKs don't ship). It answers BOTH the modern ``server/discover``
+handshake (2026-07-28) and the legacy ``initialize`` (echoing the client's
+requested protocolVersion so any client generation validates).
+
+Behavior knobs:
+  * ``OMNI_FAKE_TTL`` — advertise a ``tools/list`` freshness hint (``ttlMs``)
+    so the client's TTL cache can be exercised.
+  * the ``need_input`` tool — returns an MRTR ``input_required`` result
+    (an elicitation round-trip) to test that path.
 """
 
+import json
 import os
+import sys
 
-import anyio
-import mcp.types as t
-from mcp.server import Server
-from mcp.server.caching import CacheHint
-from mcp.server.stdio import stdio_server
-
-
-async def on_list_tools(ctx, params):
-    return t.ListToolsResult(
-        tools=[
-            t.Tool(
-                name="get_weather",
-                description="Look up the current weather for a city.",
-                input_schema={
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                    "required": ["city"],
-                },
-                annotations=t.ToolAnnotations(read_only_hint=True),
-            ),
-            t.Tool(
-                name="write_note",
-                description="Persist a note to the server's scratch store.",
-                input_schema={
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                },
-            ),
-            t.Tool(
-                name="need_input",
-                description="A tool that requires elicited input before finishing.",
-                input_schema={"type": "object", "properties": {}},
-            ),
-        ],
-    )
+TOOLS = [
+    {
+        "name": "get_weather",
+        "description": "Look up the current weather for a city.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "write_note",
+        "description": "Persist a note to the server's scratch store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+        },
+    },
+    {
+        "name": "need_input",
+        "description": "A tool that requires elicited input before finishing.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
 
 
-async def on_call_tool(ctx, params):
-    name = params.name
-    args = params.arguments or {}
+def _tools_list_result() -> dict:
+    result: dict = {"tools": TOOLS}
+    ttl = os.environ.get("OMNI_FAKE_TTL")
+    if ttl:
+        result["ttlMs"] = int(ttl)
+        result["cacheScope"] = "private"
+    return result
+
+
+def _call_tool_result(params: dict) -> dict:
+    name = params.get("name")
+    args = params.get("arguments") or {}
     if name == "get_weather":
         city = args.get("city", "?")
-        return t.CallToolResult(content=[t.TextContent(type="text", text=f"{city}: sunny, 21C")])
+        return {
+            "content": [{"type": "text", "text": f"{city}: sunny, 21C"}],
+            "isError": False,
+        }
     if name == "write_note":
-        return t.CallToolResult(content=[t.TextContent(type="text", text="note saved")])
+        return {"content": [{"type": "text", "text": "note saved"}], "isError": False}
     if name == "need_input":
-        elicit = t.ElicitRequest(
-            method="elicitation/create",
-            params=t.ElicitRequestFormParams(
-                mode="form",
-                message="Confirm before continuing?",
-                requested_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
-            ),
+        return {
+            "content": [],
+            "isError": False,
+            "resultType": "input_required",
+            "requestState": "rs-1",
+            "inputRequests": {
+                "confirm": {
+                    "method": "elicitation/create",
+                    "params": {
+                        "mode": "form",
+                        "message": "Confirm before continuing?",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {"ok": {"type": "boolean"}},
+                        },
+                    },
+                }
+            },
+        }
+    return {
+        "content": [{"type": "text", "text": f"unknown tool {name}"}],
+        "isError": True,
+    }
+
+
+def _handle(msg: dict) -> dict | None:
+    """Response for a request; None for notifications."""
+    method = msg.get("method", "")
+    msg_id = msg.get("id")
+    if msg_id is None:
+        return None  # notification (e.g. notifications/initialized)
+    params = msg.get("params") or {}
+    if method in ("initialize", "server/discover"):
+        # discover pins the modern version; initialize echoes the client's so
+        # every SDK generation's version check passes.
+        version = (
+            "2026-07-28"
+            if method == "server/discover"
+            else params.get("protocolVersion") or "2026-07-28"
         )
-        return t.InputRequiredResult(input_requests={"confirm": elicit}, request_state="rs-1")
-    return t.CallToolResult(
-        content=[t.TextContent(type="text", text=f"unknown tool {name}")], is_error=True
-    )
+        result = {
+            "protocolVersion": version,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fakesrv", "version": "0.1.0"},
+        }
+    elif method == "tools/list":
+        result = _tools_list_result()
+    elif method == "tools/call":
+        result = _call_tool_result(params)
+    elif method == "ping":
+        result = {}
+    else:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "error": {"code": -32601, "message": f"method not found: {method}"},
+        }
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
 
-async def main():
-    cache_hints = None
-    if os.environ.get("OMNI_FAKE_TTL"):
-        cache_hints = {"tools/list": CacheHint(ttl_ms=int(os.environ["OMNI_FAKE_TTL"]), scope="private")}
-    server = Server(
-        "fakesrv", version="0.1.0",
-        on_list_tools=on_list_tools, on_call_tool=on_call_tool,
-        cache_hints=cache_hints,
-    )
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options())
+def main() -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        resp = _handle(msg)
+        if resp is not None:
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
 
 
 if __name__ == "__main__":
-    anyio.run(main)
+    main()

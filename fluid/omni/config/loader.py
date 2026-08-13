@@ -291,4 +291,5 @@ def build_engine(
         ctx=ctx,
         plan_mode=plan_mode,
         codemode=codemode,
+        mcp_servers=config.mcp,
     )

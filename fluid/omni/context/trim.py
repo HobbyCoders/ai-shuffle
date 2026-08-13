@@ -20,6 +20,7 @@ estimated context size crosses a trigger. Design rules (plan §7):
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,6 +44,15 @@ def _block_chars(block: Any) -> int:
     text = getattr(block, "text", None)
     if isinstance(text, str):
         total += len(text)
+    # tool_use inputs count too — Write/Edit calls carry whole files in their
+    # args, and ignoring them lets a write-heavy session blow the window while
+    # the estimate stays "under trigger".
+    input_ = getattr(block, "input", None)
+    if isinstance(input_, dict) and input_:
+        try:
+            total += len(json.dumps(input_, default=str))
+        except (TypeError, ValueError):
+            pass
     for inner in getattr(block, "content", None) or []:
         inner_text = getattr(inner, "text", None)
         if isinstance(inner_text, str):
@@ -128,6 +138,18 @@ class ToolResultTrimmer:
             and chars >= self.config.min_result_chars
             and (nid, tuid) not in self._trimmed
         ]
+
+    def force_trim(self, nodes: list[SessionNode]) -> bool:
+        """Trim every eligible result NOW, ignoring the trigger (context-
+        overflow recovery). Returns True when at least one new block was
+        trimmed — i.e. a retry has a smaller prompt to work with."""
+        if not self.config.enabled:
+            return False
+        newly = self._eligible(nodes)
+        if not newly:
+            return False
+        self._trimmed.update(newly)
+        return True
 
     def apply(self, nodes: list[SessionNode]) -> list[Message]:
         """Render history with sticky trims; arm a new batch when over trigger."""

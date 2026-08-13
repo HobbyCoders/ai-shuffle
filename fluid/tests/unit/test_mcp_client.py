@@ -58,8 +58,17 @@ async def test_ttl_list_cache() -> None:
         assert client.list_fetches == 1
         await reg._manager.refresh("srv")
         assert client.list_fetches == 1  # cache hit, no round-trip
-        assert client.protocol == "2026-07-28"
-        assert client.legacy is False
+        # Handshake facts depend on the installed SDK generation: a 2.0 SDK
+        # speaks server/discover (legacy False, 2026-07-28); a 1.x SDK falls
+        # back to initialize with its own latest version.
+        from mcp.client.session import ClientSession
+
+        modern_sdk = hasattr(ClientSession, "discover")
+        assert client.legacy is (not modern_sdk)
+        if modern_sdk:
+            assert client.protocol == "2026-07-28"
+        else:
+            assert client.protocol  # some version was negotiated
     finally:
         await reg.aclose()
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from omni.tools.builtins import bash, edit, grep, note, read, skill, task, write
+from omni.tools.builtins import (
+    bash, edit, grep, note, read, skill, task, tool_search, write,
+)
 from omni.tools.registry import ToolRegistry
 
-_MODULES = (read, grep, write, edit, bash, skill, note, task)
+_MODULES = (read, grep, write, edit, bash, skill, note, task, tool_search)
 
 
 def register_builtins(registry: ToolRegistry) -> None:

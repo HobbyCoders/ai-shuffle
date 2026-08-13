@@ -45,12 +45,16 @@ class PermissionEngine:
         self._threshold = doom_loop_threshold
         self._last_key: tuple[str, str] | None = None
         self._streak = 0
+        # Session-scoped "allow always" responses (see allow_always()).
+        self._always_allowed: set[str] = set()
 
     def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
         """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
         override = evaluate_rules(self.rules, spec.name, input)
         if override is not None:
             return override
+        if spec.name in self._always_allowed:
+            return "allow"
         return self._policy_decision(spec)
 
     def _policy_decision(self, spec: ToolSpec) -> str:
@@ -60,6 +64,12 @@ class PermissionEngine:
             return "ask"
         # on_write
         return "ask" if spec.risk in _WRITE_RISKS else "allow"
+
+    def allow_always(self, name: str) -> None:
+        """Record a session-scoped allow for ``name`` (the ``allow_always``
+        permission response). Beats the policy's ask for future calls, but
+        never an explicit configured rule — those keep last-match-wins."""
+        self._always_allowed.add(name)
 
     def note_execution(self, name: str, input: dict[str, Any]) -> bool:
         """Record a call; return True when it should be force-asked (doom loop).

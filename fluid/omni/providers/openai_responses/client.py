@@ -14,11 +14,13 @@ httpx streaming POST, same shape as ``AnthropicClient``. Two auth modes:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import AsyncIterator, Protocol, runtime_checkable
 
 import httpx
 
+from omni.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from omni.providers._sse import sse_events
 from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from omni.providers.openai_responses.serialize import (
@@ -55,12 +57,14 @@ class OpenAIResponsesClient:
         auth: ResponsesAuth | None = None,
         timeout: float = 600.0,
         http_client: httpx.AsyncClient | None = None,
+        retry: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self._base_url = base_url
         self._auth = auth
         self._timeout = timeout
         self._http = http_client
+        self._retry = retry or RetryPolicy()
 
     async def _headers(self) -> dict[str, str]:
         headers = {
@@ -83,35 +87,59 @@ class OpenAIResponsesClient:
         body = build_request_body(request)
         client = self._http or httpx.AsyncClient(timeout=self._timeout)
         owns_client = self._http is None
+        attempt = 0
+        refreshed_401 = False
         try:
-            # One retry: on a 401 with the OAuth hook, refresh the rotated token
-            # once and re-issue the request.
-            for attempt in range(2):
-                headers = await self._headers()
-                async with client.stream(
-                    "POST", self._base_url, json=body, headers=headers
-                ) as resp:
-                    if resp.status_code == 200:
-                        normalizer = ResponsesStreamNormalizer()
-                        async for event_name, data in sse_events(resp.aiter_lines()):
-                            for chunk in normalizer.consume(event_name, data):
-                                yield chunk
+            while True:
+                yielded = False
+                try:
+                    headers = await self._headers()
+                    async with client.stream(
+                        "POST", self._base_url, json=body, headers=headers
+                    ) as resp:
+                        if resp.status_code == 200:
+                            normalizer = ResponsesStreamNormalizer()
+                            async for event_name, data in sse_events(resp.aiter_lines()):
+                                for chunk in normalizer.consume(event_name, data):
+                                    yielded = True
+                                    yield chunk
+                            return
+                        text = (await resp.aread()).decode(errors="replace")
+                        # One free retry: a 401 with the OAuth hook refreshes
+                        # the rotated token (doesn't consume a backoff attempt).
+                        if (
+                            resp.status_code == 401
+                            and self._auth is not None
+                            and not refreshed_401
+                        ):
+                            await self._auth.on_401()
+                            refreshed_401 = True
+                            continue
+                        retriable = resp.status_code in RETRIABLE_STATUSES
+                        if retriable and attempt < self._retry.max_retries:
+                            await asyncio.sleep(self._retry.delay(
+                                attempt, resp.headers.get("retry-after")))
+                            attempt += 1
+                            continue
+                        yield StreamChunk(
+                            "error",
+                            {
+                                "status": resp.status_code,
+                                "message": text[:2000],
+                                "retriable": retriable,
+                            },
+                        )
                         return
-                    text = (await resp.aread()).decode(errors="replace")
-                    if (
-                        resp.status_code == 401
-                        and self._auth is not None
-                        and attempt == 0
-                    ):
-                        await self._auth.on_401()
+                except httpx.TransportError as exc:
+                    # Pre-stream connection failures retry; mid-stream ones
+                    # don't (chunks were already delivered downstream).
+                    if not yielded and attempt < self._retry.max_retries:
+                        await asyncio.sleep(self._retry.delay(attempt))
+                        attempt += 1
                         continue
                     yield StreamChunk(
                         "error",
-                        {
-                            "status": resp.status_code,
-                            "message": text[:2000],
-                            "retriable": resp.status_code in (429, 500, 502, 503, 529),
-                        },
+                        {"message": f"{type(exc).__name__}: {exc}", "retriable": False},
                     )
                     return
         finally:

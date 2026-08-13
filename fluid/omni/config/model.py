@@ -109,6 +109,11 @@ class HarnessConfig:
     cwd: str = "."
     max_tokens: int = 8192
     system: str | None = None
+    # MCP servers to connect at session start: name → transport config, e.g.
+    # {"transport": "stdio", "command": "npx", "args": [...]} or
+    # {"transport": "http", "url": "https://..."}. Kept as raw dicts — the
+    # transport layer (McpClient) owns interpretation.
+    mcp: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "HarnessConfig":
@@ -126,6 +131,7 @@ class HarnessConfig:
             cwd=d.get("cwd", "."),
             max_tokens=int(d.get("max_tokens", 8192)),
             system=d.get("system"),
+            mcp={name: dict(cfg) for name, cfg in d.get("mcp", {}).items()},
         )
 
     def provider(self, name: str | None = None) -> ProviderConfig:
@@ -175,4 +181,5 @@ class HarnessConfig:
                 }
                 for name, pc in self.providers.items()
             },
+            "mcp": {name: dict(cfg) for name, cfg in self.mcp.items()},
         }

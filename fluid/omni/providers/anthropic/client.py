@@ -8,11 +8,13 @@ subprocess), not this client.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import AsyncIterator
 
 import httpx
 
+from omni.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from omni.providers._sse import sse_events
 from omni.providers.anthropic.pricing import estimate_cost as _estimate_cost
 from omni.providers.anthropic.serialize import build_request_body, sse_to_chunk
@@ -38,11 +40,13 @@ class AnthropicClient:
         base_url: str = API_URL,
         timeout: float = 600.0,
         http_client: httpx.AsyncClient | None = None,
+        retry: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
         self._http = http_client
+        self._retry = retry or RetryPolicy()
 
     def estimate_cost(self, model: str, usage: dict) -> float | None:
         """Optional engine cost hook: list-price estimate for one model call."""
@@ -58,20 +62,46 @@ class AnthropicClient:
         body = build_request_body(request)
         client = self._http or httpx.AsyncClient(timeout=self._timeout)
         owns_client = self._http is None
+        attempt = 0
         try:
-            async with client.stream("POST", self._base_url, json=body, headers=headers) as resp:
-                if resp.status_code != 200:
-                    text = (await resp.aread()).decode(errors="replace")
+            while True:
+                yielded = False
+                try:
+                    async with client.stream(
+                        "POST", self._base_url, json=body, headers=headers
+                    ) as resp:
+                        if resp.status_code != 200:
+                            text = (await resp.aread()).decode(errors="replace")
+                            retriable = resp.status_code in RETRIABLE_STATUSES
+                            if retriable and attempt < self._retry.max_retries:
+                                await asyncio.sleep(self._retry.delay(
+                                    attempt, resp.headers.get("retry-after")))
+                                attempt += 1
+                                continue
+                            yield StreamChunk(
+                                "error",
+                                {"status": resp.status_code, "message": text[:2000],
+                                 "retriable": retriable},
+                            )
+                            return
+                        async for event_name, data in sse_events(resp.aiter_lines()):
+                            chunk = sse_to_chunk(event_name, data)
+                            if chunk is not None:
+                                yielded = True
+                                yield chunk
+                        return
+                except httpx.TransportError as exc:
+                    # Pre-stream connection failures retry; mid-stream ones
+                    # don't (chunks were already delivered downstream).
+                    if not yielded and attempt < self._retry.max_retries:
+                        await asyncio.sleep(self._retry.delay(attempt))
+                        attempt += 1
+                        continue
                     yield StreamChunk(
                         "error",
-                        {"status": resp.status_code, "message": text[:2000],
-                         "retriable": resp.status_code in (429, 500, 502, 503, 529)},
+                        {"message": f"{type(exc).__name__}: {exc}", "retriable": False},
                     )
                     return
-                async for event_name, data in sse_events(resp.aiter_lines()):
-                    chunk = sse_to_chunk(event_name, data)
-                    if chunk is not None:
-                        yield chunk
         finally:
             if owns_client:
                 await client.aclose()
