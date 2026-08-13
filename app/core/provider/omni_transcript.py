@@ -2,7 +2,7 @@
 
 Background
 ----------
-With ``AIH_OMNI_STORE=pg`` a session's transcript
+With a database configured (every real deployment) a session's transcript
 is NOT the legacy pair (CLI JSONL under ``~/.claude/projects`` + the
 ``session_store_entries`` mirror). It is omni's parent-linked node DAG:
 ``omni_sessions.head_node_id`` points at the leaf, and ``omni_session_nodes``

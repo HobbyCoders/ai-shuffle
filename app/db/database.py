@@ -150,7 +150,7 @@ def _safe_json(value):
 # 69 (2026-08-12): add omni_sessions / omni_session_nodes / omni_session_events
 #     — PG-backed omni-harness SessionStore (branching node trees + durable
 #     event log; see app/core/provider/omni_pg_store.py). Purely additive; used
-#     only when the omni backend runs with AIH_OMNI_STORE=pg.
+#     whenever the app has a database (the omni pg store is derived, not flagged).
 # 70 (2026-08-12): add omni_sessions.cli_session_id TEXT — the delegated
 #     engine's ``claude --resume`` handle (a CLI-issued uuid, NOT the omni
 #     session id). It was previously in-process only, so after a restart the

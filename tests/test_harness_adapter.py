@@ -1038,6 +1038,24 @@ async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     assert _CapturingLoop.captured["add_dirs"] == ["/notes", "/extra"]
 
 
+def test_store_derived_from_database_presence(monkeypatch):
+    """No store flags (2026-08-13 ruling): DATABASE_URL set -> PgOmniStore;
+    DB-less (unit tests) -> MemoryStore. The retired AIH_OMNI_STORE env var
+    must be ignored."""
+    from app.core.config import settings
+    from app.core.provider.omni_pg_store import PgOmniStore
+    from omni.store.base import MemoryStore as OmniMemoryStore
+
+    monkeypatch.setattr(settings, "database_url", "postgresql://REDACTED@h:5432/db")
+    store = HarnessAdapter._build_store(SessionOptions(model="m"))
+    assert isinstance(store, PgOmniStore)
+
+    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setenv("AIH_OMNI_STORE", "pg")  # retired flag — ignored
+    store = HarnessAdapter._build_store(SessionOptions(model="m"))
+    assert isinstance(store, OmniMemoryStore)
+
+
 def test_requires_reconnect():
     a = HarnessAdapter()
     a._options = SessionOptions(model="m", system_prompt="S", cwd="/w")

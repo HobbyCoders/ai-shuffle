@@ -38,7 +38,8 @@ HONORED:
   * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/sse/http)
   * ``include_partial_messages`` → omni always streams deltas (native); delegated
     passes ``--include-partial-messages`` (``extra["omni_partial"]`` overrides)
-  * ``extra["omni_store_dir"]`` / env ``AIH_OMNI_STORE_DIR`` → JsonlStore root
+  * session store: DERIVED, not configured — PgOmniStore when the app has a
+    database (always, in real deployments), MemoryStore in DB-less unit tests
   * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
   * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
   * ``extra["provider_id"]``         → the session's bound ``model_providers`` row;
@@ -61,7 +62,7 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``agents`` (subagents) — not configured on the omni engine here.
   * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
-    concepts; omni persistence is the JsonlStore/MemoryStore chosen above.
+    concepts; omni persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
 
 HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
@@ -135,7 +136,6 @@ from omni.providers.openai_responses.client import (
 )
 from omni.providers.openrouter.client import OpenRouterClient
 from omni.store.base import MemoryStore
-from omni.store.jsonl import JsonlStore
 from omni.tools.registry import ToolCtx, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -1000,19 +1000,18 @@ class HarnessAdapter(ProviderAdapter):
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
-        # Postgres store (deployment default target): survives restarts and is
-        # shared across app instances, like the SDK path's PgSessionStore.
-        # Opt-in via AIH_OMNI_STORE=pg / extra["omni_store"]="pg" so unit tests
-        # and DB-less environments keep the file/memory stores.
-        store_kind = (
-            options.extra.get("omni_store") or os.environ.get("AIH_OMNI_STORE") or ""
-        ).lower()
-        if store_kind == "pg":
+        # Derived, not configured (2026-08-13 ruling: no permanent flags — the
+        # retired AIH_OMNI_STORE/AIH_OMNI_STORE_DIR env vars are ignored).
+        # Whenever the app has a database — which every real deployment does,
+        # DATABASE_URL is required to boot — omni sessions persist in Postgres,
+        # exactly like the SDK path's PgSessionStore: cross-restart resume,
+        # fork, and event replay from any app instance sharing the DB. The
+        # only DB-less environments are unit tests, which get MemoryStore.
+        from app.core.config import settings
+
+        if settings.database_url:
             from app.core.provider.omni_pg_store import PgOmniStore
             return PgOmniStore()
-        store_dir = options.extra.get("omni_store_dir") or os.environ.get("AIH_OMNI_STORE_DIR")
-        if store_dir:
-            return JsonlStore(store_dir)
         return MemoryStore()
 
     async def _build_registry(
