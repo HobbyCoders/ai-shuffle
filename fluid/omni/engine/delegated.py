@@ -86,6 +86,7 @@ class DelegatedLoop:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         add_dirs: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -102,6 +103,7 @@ class DelegatedLoop:
         self.cwd = cwd
         self.env = env
         self.add_dirs = add_dirs
+        self.disallowed_tools = disallowed_tools
         self.cli_version: str | None = None
 
         self._session: SessionMeta | None = None
@@ -296,6 +298,8 @@ class DelegatedLoop:
             argv += ["--system-prompt", self.system]
         for d in self.add_dirs or ():
             argv += ["--add-dir", d]
+        if self.disallowed_tools:
+            argv += ["--disallowed-tools", ",".join(self.disallowed_tools)]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
