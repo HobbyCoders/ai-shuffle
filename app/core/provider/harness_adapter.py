@@ -321,6 +321,7 @@ class HarnessAdapter(ProviderAdapter):
         if ensure is not None:
             meta = await ensure()
             self._sdk_session_id = meta.session_id
+            await self._seed_event_log(meta.session_id)
 
         self._connected = True
 
@@ -471,6 +472,68 @@ class HarnessAdapter(ProviderAdapter):
             )
             return None
         return getattr(meta, "cli_session_id", None) if meta is not None else None
+
+    async def _seed_event_log(self, session_id: str) -> None:
+        """Seed the engine's in-memory event log from the durable store.
+
+        WHY this exists: omni's EventBus numbers events ``seq = len(log) + 1``
+        off its *in-memory* log. A freshly built engine over a RESUMED session
+        starts with an empty log, so its first new event is numbered 1 — even
+        though the store already holds seq 1..N for that session. The durable
+        append is idempotent per ``(session_id, seq)`` (PgOmniStore's
+        ``ON CONFLICT DO NOTHING``), so those re-used numbers collide with the
+        existing rows and the first N events of every post-resume turn are
+        silently DROPPED from ``omni_session_events``.
+
+        Headless one-shot turns (ScheduleWakeup wakes, automations) build a
+        fresh adapter per turn, so they hit this on EVERY turn and the wake's
+        events never reach the durable log at all. Pooled sessions hit it once,
+        on the first resume after a process restart.
+
+        Seeding the bus log with the stored events restores the invariant the
+        bus assumes (log length == highest seq), so new events continue at N+1
+        and persist. Advancing ``_event_cursor`` past the seeded tail keeps
+        ``receive_events()`` from replaying that history into the new turn.
+        """
+        if self._store is None:
+            return
+        try:
+            stored = await self._store.events_since(session_id, 0)
+        except Exception:
+            # Seeding is best effort — it must never fail a connect.
+            logger.exception(
+                "[HarnessAdapter] could not load durable events for %s; new "
+                "events may collide with stored seqs and be dropped",
+                session_id,
+            )
+            return
+        if not stored:
+            return
+        bus = getattr(self._engine, "bus", None)
+        if bus is None:
+            return  # engines/test fakes without an EventBus
+        log = bus.log(session_id)
+        if log:
+            return  # this bus already carries the session's history
+        if stored[-1].seq != len(stored):
+            # A hole in the durable log can only come from prior drops under
+            # this very bug. The bus indexes its log positionally, so only a
+            # contiguous prefix may be seeded.
+            logger.warning(
+                "[HarnessAdapter] non-contiguous durable event log for %s "
+                "(%d events, last seq %s) — seeding the contiguous prefix only",
+                session_id, len(stored), stored[-1].seq,
+            )
+            prefix = []
+            for index, event in enumerate(stored):
+                if getattr(event, "seq", -1) != index + 1:
+                    break
+                prefix.append(event)
+            stored = prefix
+            if not stored:
+                return
+        log.extend(stored)
+        self._event_cursor = max(self._event_cursor, stored[-1].seq)
 
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
         """Route one omni permission request through the app's can_use_tool

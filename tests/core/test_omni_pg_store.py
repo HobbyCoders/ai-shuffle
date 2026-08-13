@@ -9,6 +9,8 @@ copying, and the event log replays idempotently by (session_id, seq).
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.core.provider.omni_pg_store import PgOmniStore
@@ -98,6 +100,32 @@ async def test_event_append_is_idempotent_per_seq(mock_db):
 
     # Cursor semantics: strictly-greater-than.
     assert await fresh.events_since("ses_pg4", 7) == []
+
+
+@pytest.mark.asyncio
+async def test_seq_collision_keeps_first_row_and_warns(mock_db, caplog):
+    """The conflict clause exists for legitimate replays, but it also hid real
+    loss (an engine whose bus restarted numbering at 1 for a resumed session).
+    A dropped insert must now be visible in the logs, and must not raise."""
+    store = PgOmniStore()
+    await store.create_session("ses_pg7")
+    await store.append_event(
+        "ses_pg7", TextDelta(session_id="ses_pg7", index=0, text="first", seq=3)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.core.provider.omni_pg_store"):
+        await PgOmniStore().append_event(
+            "ses_pg7", TextDelta(session_id="ses_pg7", index=0, text="second", seq=3)
+        )
+
+    events = await PgOmniStore().events_since("ses_pg7", 0)
+    assert len(events) == 1 and events[0].text == "first"
+    assert any(
+        "DROPPED by seq collision" in r.getMessage()
+        and "ses_pg7" in r.getMessage()
+        and "seq=3" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
