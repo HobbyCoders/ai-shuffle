@@ -4,12 +4,15 @@ sub-agents by neutralizing ONE call site in the bundled Claude CLI binary.
 
 Why this exists
 ---------------
-The app runs the SDK's bundled ``claude`` CLI (a ~257MB Bun binary shipped
-inside ``claude_agent_sdk``; we never set ``cli_path``). The CLI's interrupt is
-QUERY-scoped, not task-scoped: a single ``interrupt()`` — what a user "Stop"
-triggers — stops EVERY in-flight ``Task`` child, so stopping the main turn also
-kills any background sub-agents the user wanted to keep running. There is no
-task-filtered interrupt to call; the only real fix lives in the CLI itself.
+The delegated Claude leg of the omni harness (``DelegatedLoop``) spawns the
+``claude`` CLI as a subprocess — in Docker that is the ~257MB Bun binary
+bundled inside the ``claude_agent_sdk`` package files, located by
+``app.core.claude_cli_path.resolve_bundled_cli_path`` (the same resolver the
+adapter uses to pick the binary it spawns). The CLI's interrupt is QUERY-scoped,
+not task-scoped: a single interrupt — what a user "Stop" triggers — stops EVERY
+in-flight ``Task`` child, so stopping the main turn also kills any background
+sub-agents the user wanted to keep running. There is no task-filtered interrupt
+to call; the only real fix lives in the CLI itself.
 
 The one call site responsible is the cancel-broadcast call
 ``remote-cancel"));<tok>({taskRegistry:``, where ``<tok>`` is a minified
@@ -69,7 +72,6 @@ is set (see ``app/main.py``). No binary is ever touched by default.
 
 import json
 import logging
-import platform
 import re
 from pathlib import Path
 
@@ -109,26 +111,6 @@ def is_patch_active() -> bool:
     effective behavior (e.g. the ``/live`` endpoint) should AND the two.
     """
     return _PATCH_ACTIVE
-
-
-def resolve_bundled_cli_path() -> Path | None:
-    """Locate the SDK's bundled ``claude`` binary, or None if it is absent.
-
-    Mirrors the SDK's own ``_find_bundled_cli`` resolver: the ``_bundled``
-    directory sits three levels up from ``subprocess_cli.py`` inside the
-    installed ``claude_agent_sdk`` package. The SDK names the binary
-    ``claude.exe`` on Windows and ``claude`` elsewhere, so mirror that too. We
-    never set ``cli_path``, so this is the exact binary every spawn runs.
-    """
-    from claude_agent_sdk._internal.transport import subprocess_cli
-
-    cli_name = "claude.exe" if platform.system() == "Windows" else "claude"
-    bundled = (
-        Path(subprocess_cli.__file__).parent.parent.parent / "_bundled" / cli_name
-    )
-    if bundled.exists() and bundled.is_file():
-        return bundled
-    return None
 
 
 def _marker_path(binary: Path) -> Path:

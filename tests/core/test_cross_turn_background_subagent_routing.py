@@ -109,7 +109,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool):
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qe, "requires_reconnect", return_value=False))
-    stack.enter_context(patch.object(qe, "credentials_rotated", return_value=False))
     stack.enter_context(patch.object(qe, "mark_subprocess_oom_killable", new=MagicMock()))
     stack.enter_context(patch.object(qe, "resolve_note_references", side_effect=lambda p: p))
     stack.enter_context(patch.object(qe, "_persist_turn_results", new=AsyncMock()))

@@ -52,7 +52,6 @@ from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect, graceful_disconnect, mark_subprocess_oom_killable,
-    claude_credentials_mtime, credentials_rotated, refresh_subprocess_credentials,
 )
 from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
@@ -1322,9 +1321,6 @@ async def stream_query(
             # (every future query gets the busy error, evict_idle skips
             # streaming states, report_long_streaming only logs).
             try:
-                if credentials_rotated(state):
-                    await refresh_subprocess_credentials(state, session_id)
-
                 # Runtime-changeable options (model, permission_mode) are baked
                 # into the CLI subprocess at spawn. requires_reconnect() lets them
                 # change without a respawn, so a mid-session switch must be pushed
@@ -1429,7 +1425,6 @@ async def stream_query(
             sdk_session_id=resume_id,
             is_connected=True,
             connect_options=options,
-            credentials_mtime=claude_credentials_mtime(),
             cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)
@@ -1973,18 +1968,12 @@ async def _stream_to_websocket_impl(
             state.is_streaming = True
 
             # Claim-to-try guard: from this claim until the main try/finally is
-            # entered, ANY exit (exception or cancellation — the refresh and
-            # set_model awaits below are suspension points) must clear the flag.
+            # entered, ANY exit (exception or cancellation — the set_model await
+            # below is a suspension point) must clear the flag.
             # A stranded is_streaming=True bricks the pooled client forever:
             # every future query gets the busy error, evict_idle skips
             # streaming states, and report_long_streaming only logs.
             try:
-                # OAuth rotated on disk since spawn → sync it into the subprocess's
-                # config dir in place. Respawning here would SIGTERM the subprocess
-                # and kill every background task/sub-agent it owns.
-                if credentials_rotated(state):
-                    await refresh_subprocess_credentials(state, session_id)
-
                 # Update callback refs so the existing can_use_tool closure sees current values
                 state.callback_refs.update({
                     "broadcast_func": broadcast_func,
@@ -2412,7 +2401,6 @@ async def _stream_to_websocket_impl(
             is_connected=True,
             callback_refs=callback_refs,
             connect_options=options,
-            credentials_mtime=claude_credentials_mtime(),
             cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)

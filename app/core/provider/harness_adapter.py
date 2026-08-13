@@ -1003,9 +1003,10 @@ def _resolve_claude_cmd() -> Optional[list]:
     """Command for the delegated ``claude`` CLI, or None for PATH default.
 
     In the Docker image the CLI is not on PATH — only the copy bundled inside
-    claude_agent_sdk exists — so fall back to the same resolver the interrupt
-    patch uses. Returning None lets DelegatedLoop try bare ``claude`` (dev
-    machines with a global install).
+    the claude_agent_sdk package files exists — so fall back to the shared
+    resolver in ``app.core.claude_cli_path`` (the same one the interrupt patcher
+    uses to locate the binary it patches). Returning None lets DelegatedLoop try
+    bare ``claude`` (dev machines with a global install).
     """
     import shutil
 
@@ -1013,7 +1014,7 @@ def _resolve_claude_cmd() -> Optional[list]:
     if found:
         return [found]
     try:
-        from app.core.cli_interrupt_patch import resolve_bundled_cli_path
+        from app.core.claude_cli_path import resolve_bundled_cli_path
 
         bundled = resolve_bundled_cli_path()
         if bundled is not None:

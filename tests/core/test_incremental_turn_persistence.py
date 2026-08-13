@@ -268,7 +268,6 @@ def _engine_patches(stack: ExitStack, pool: _StubPool, cwd: str):
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qe, "requires_reconnect", return_value=False))
-    stack.enter_context(patch.object(qe, "credentials_rotated", return_value=False))
     stack.enter_context(patch.object(qe, "mark_subprocess_oom_killable", new=MagicMock()))
     stack.enter_context(patch.object(qe, "resolve_note_references", side_effect=lambda p: p))
     stack.enter_context(patch.object(qe, "push_memory", new=AsyncMock()))

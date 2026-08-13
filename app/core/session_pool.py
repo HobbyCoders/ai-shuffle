@@ -175,15 +175,6 @@ class SessionState:
     # Options snapshot from connect() time — for reconnect detection
     connect_options: Optional[ClaudeAgentOptions] = None
 
-    # mtime of ~/.claude/.credentials.json as of spawn time (restamped whenever
-    # refresh_subprocess_credentials handles a rotation). When the OAuth token is
-    # rotated on disk (auto-refresh or manual re-auth), a resume-materialized
-    # subprocess still has a stale COPY in its temp CLAUDE_CONFIG_DIR. Detecting
-    # the mtime change lets us sync the fresh credential into that dir IN PLACE —
-    # never respawn, which would kill the subprocess's background tasks. None when
-    # there is no creds file (e.g. API-key auth); then rotation never triggers.
-    credentials_mtime: Optional[float] = None
-
     # Live capture list for this subprocess's stderr, shared with the wrapped
     # stderr callback registered at connect() time (see _wrap_stderr_capture).
     # Persisted here so the streaming exception handlers can log the captured
@@ -210,21 +201,6 @@ class SessionState:
 def is_subprocess_alive(state: SessionState) -> bool:
     """Check if the subprocess for a session state is still running."""
     return state.adapter.is_alive()
-
-
-def claude_credentials_mtime() -> Optional[float]:
-    """Modification time of the Claude OAuth credentials file, or None.
-
-    Used to detect when the on-disk OAuth token was rotated (auto-refreshed or
-    re-authenticated) so a pooled subprocess holding the now-stale token can be
-    respawned instead of returning a 401. Returns None when the file is absent
-    (e.g. API-key auth) or unreadable. Never raises.
-    """
-    try:
-        from app.core.oauth import direct_oauth
-        return (direct_oauth.config_dir / ".credentials.json").stat().st_mtime
-    except Exception:
-        return None
 
 
 def subprocess_pid(state: SessionState) -> Optional[int]:
@@ -1107,96 +1083,12 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
 
     # NOTE: on-disk OAuth credential rotation is deliberately NOT a reconnect
     # reason. Respawning kills every background task/sub-agent parented to the
-    # subprocess, and the CLI re-reads credentials from its own CLAUDE_CONFIG_DIR
-    # when it needs to re-auth. See credentials_rotated() +
-    # refresh_subprocess_credentials() for the in-place refresh instead.
+    # subprocess, and the delegated CLI re-reads credentials from its config dir
+    # when it needs to re-auth — so a rotation on disk is picked up in place.
 
     # These can be changed at runtime — no reconnect needed
     # (model via client.set_model(), permission_mode via client.set_permission_mode())
     return False
-
-
-def credentials_rotated(state: SessionState) -> bool:
-    """True when the on-disk Claude OAuth credentials changed since connect().
-
-    Rotation is NOT grounds for a respawn (that would SIGTERM the subprocess and
-    kill all of its background tasks/sub-agents mid-run — the "every task dies
-    when I interrupt" bug). Callers that reuse a pooled client should instead
-    call refresh_subprocess_credentials() to sync the fresh token into the
-    subprocess's config dir. No-op for API-key auth (mtime stays None).
-    """
-    return state.credentials_mtime != claude_credentials_mtime()
-
-
-def _materialized_config_dir(state: SessionState) -> Optional[Path]:
-    """Config dir of a resume-materialized subprocess, or None.
-
-    Resumed subprocesses run with CLAUDE_CONFIG_DIR pointing at a temp dir the
-    SDK seeded with a COPY of .credentials.json at spawn time (see the SDK's
-    session_resume.materialize_resume_session). That copy goes stale when the
-    host rotates the real credentials file. Fresh-spawned subprocesses share the
-    host's config dir and need no sync. Never raises.
-    """
-    try:
-        materialized = getattr(state.adapter.sdk_client, "_materialized", None)
-        config_dir = getattr(materialized, "config_dir", None)
-        return Path(config_dir) if config_dir else None
-    except Exception:
-        return None
-
-
-def _oauth_expires_at(path: Path) -> int:
-    """expiresAt (ms epoch) from a credentials file, 0 when absent/unreadable."""
-    try:
-        import json
-        data = json.loads(path.read_text())
-        return int((data.get("claudeAiOauth") or {}).get("expiresAt") or 0)
-    except Exception:
-        return 0
-
-
-async def refresh_subprocess_credentials(state: SessionState, session_id: str) -> None:
-    """Sync rotated OAuth credentials into a pooled subprocess IN PLACE.
-
-    Called instead of a respawn when credentials_rotated() is True on client
-    reuse. For a resume-materialized subprocess, copies the host's fresh
-    .credentials.json over the stale copy in its temp CLAUDE_CONFIG_DIR — but
-    never downgrades: if the subprocess refreshed the token itself (its copy's
-    expiresAt is newer), the copy is skipped. Fresh-spawned subprocesses share
-    the host config dir, so only the mtime stamp needs updating. Best-effort:
-    never raises, and always restamps credentials_mtime so the rotation is not
-    re-detected on every subsequent query.
-    """
-    try:
-        dest_dir = _materialized_config_dir(state)
-        if dest_dir is not None:
-            from app.core.oauth import direct_oauth
-            src = direct_oauth.config_dir / ".credentials.json"
-            dest = dest_dir / ".credentials.json"
-
-            def _copy_if_newer() -> bool:
-                if not src.exists():
-                    return False
-                if _oauth_expires_at(src) <= _oauth_expires_at(dest):
-                    return False  # subprocess already has same-or-newer tokens
-                import shutil
-                tmp = dest.with_name(".credentials.json.tmp")
-                shutil.copy2(src, tmp)
-                os.replace(tmp, dest)  # atomic — CLI never sees a partial file
-                return True
-
-            if await asyncio.to_thread(_copy_if_newer):
-                logger.info(
-                    f"[Pool] OAuth credentials rotated — synced into resumed "
-                    f"subprocess config dir for session {session_id} (no respawn; "
-                    f"background tasks preserved)"
-                )
-    except Exception as e:
-        logger.warning(
-            f"[Pool] Failed to sync rotated credentials for session {session_id}: {e}"
-        )
-    finally:
-        state.credentials_mtime = claude_credentials_mtime()
 
 
 # Global singleton — initialized lazily to avoid circular imports with settings

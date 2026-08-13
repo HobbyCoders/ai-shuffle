@@ -125,7 +125,6 @@ def _bg_patches(stack: ExitStack, pool: _StubPool, run_sync_calls=None):
     stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-    stack.enter_context(patch.object(qb, "credentials_rotated", return_value=False))
     stack.enter_context(patch(
         "app.core.hook_service.attach_hooks_to_options", new=MagicMock()
     ))

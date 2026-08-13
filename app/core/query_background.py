@@ -23,8 +23,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
-    requires_reconnect, claude_credentials_mtime,
-    credentials_rotated, refresh_subprocess_credentials,
+    requires_reconnect,
 )
 from app.core.oauth import direct_oauth
 from app.core.profiles import get_profile
@@ -214,13 +213,10 @@ async def _run_background_query_impl(
             # gate. The finally below clears it on every exit path.
             state.is_streaming = True
             # Claim-to-try guard: any exit between this claim and the main
-            # try/finally (the refresh await is a suspension point) must clear
-            # the flag — a stranded is_streaming=True bricks the pooled client
-            # (busy error forever, never idle-evicted).
+            # try/finally (the set_model await below is a suspension point) must
+            # clear the flag — a stranded is_streaming=True bricks the pooled
+            # client (busy error forever, never idle-evicted).
             try:
-                if credentials_rotated(state):
-                    await refresh_subprocess_credentials(state, session_id)
-
                 # Runtime-changeable options (model, permission_mode) are baked
                 # into the CLI subprocess at spawn. requires_reconnect() lets them
                 # change without a respawn, so a mid-session switch must be pushed
@@ -320,7 +316,6 @@ async def _run_background_query_impl(
             sdk_session_id=resume_id,
             is_connected=True,
             connect_options=options,
-            credentials_mtime=claude_credentials_mtime(),
             cli_stderr_lines=cli_stderr_lines,
         )
         pool.put(session_id, state)

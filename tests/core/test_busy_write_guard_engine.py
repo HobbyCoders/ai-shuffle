@@ -87,8 +87,7 @@ class _StubPool:
         self.state = None
 
 
-def _chat_patches(stack: ExitStack, pool: _StubPool, *, credentials_rotated=False,
-                  refresh_mock=None):
+def _chat_patches(stack: ExitStack, pool: _StubPool):
     """Patch every stream_to_websocket boundary up to (and past) the reuse gate."""
     stack.enter_context(patch.object(
         qe, "get_profile", return_value={"id": "claude-code", "config": {}}
@@ -109,10 +108,6 @@ def _chat_patches(stack: ExitStack, pool: _StubPool, *, credentials_rotated=Fals
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qe, "requires_reconnect", return_value=False))
-    stack.enter_context(patch.object(qe, "credentials_rotated", return_value=credentials_rotated))
-    stack.enter_context(patch.object(
-        qe, "refresh_subprocess_credentials", new=refresh_mock or AsyncMock()
-    ))
     stack.enter_context(patch.object(qe, "mark_subprocess_oom_killable", new=MagicMock()))
     stack.enter_context(patch.object(qe, "resolve_note_references", side_effect=lambda p: p))
     stack.enter_context(patch.object(qe, "_persist_turn_results", new=AsyncMock()))
@@ -127,6 +122,26 @@ def _fake_sync_engine():
     sync = MagicMock()
     sync.broadcast_message_added = AsyncMock()
     return sync
+
+
+def _claim_window_state(set_model_side_effect=None) -> SessionState:
+    """A reusable pooled state whose spawn model differs from this turn's.
+
+    That makes the post-claim ``adapter.set_model`` await the FIRST suspension
+    point after the reuse-decision claim — the observation (and failure
+    injection) point for the claim-window tests below.
+    """
+    state = _fake_state()
+    state.connect_options = MagicMock(permission_mode="default", model="old-model")
+    state.adapter.set_permission_mode = AsyncMock()
+    state.adapter.set_model = AsyncMock(side_effect=set_model_side_effect)
+    return state
+
+
+def _claim_window_options(options) -> None:
+    """Point the turn's options at a different model (and same perm mode)."""
+    options.model = "new-model"
+    options.permission_mode = "default"
 
 
 async def _collect(agen):
@@ -159,19 +174,18 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
 async def test_chat_gate_claims_is_streaming_at_decision_point():
     """is_streaming is set BEFORE the first await after the reuse decision
     (previously it was set ~350 lines later, letting two entrants both pass)."""
-    state = _fake_state(is_streaming=False)
-    pool = _StubPool(state)
     observed = []
 
-    async def _refresh(st, sid):
-        observed.append(st.is_streaming)
+    async def _observe(_model):
+        observed.append(state.is_streaming)
+
+    state = _claim_window_state(set_model_side_effect=_observe)
+    state.is_streaming = False
+    pool = _StubPool(state)
 
     with ExitStack() as stack:
-        _chat_patches(
-            stack, pool,
-            credentials_rotated=True,
-            refresh_mock=AsyncMock(side_effect=_refresh),
-        )
+        options = _chat_patches(stack, pool)
+        _claim_window_options(options)
         await _collect(qe.stream_to_websocket("hi", "sess-claim", "claude-code"))
 
     assert observed == [True], (
@@ -277,7 +291,6 @@ def _rest_patches(stack: ExitStack, pool: _StubPool):
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qe, "requires_reconnect", return_value=False))
-    stack.enter_context(patch.object(qe, "credentials_rotated", return_value=False))
     sync = _fake_sync_engine()
     stack.enter_context(patch.object(qe, "sync_engine", new=sync))
     return options
@@ -346,19 +359,19 @@ async def test_background_gate_refuses_busy_client_and_never_writes_stdin(mock_d
 
 
 async def test_chat_claim_window_exception_clears_flag():
-    """stream_to_websocket: an exception raised AFTER the decision-point claim
-    but BEFORE the main try/finally (here: the credentials refresh await) must
-    clear is_streaming and propagate — never strand the claim."""
-    state = _fake_state()
+    """stream_to_websocket: a BaseException raised AFTER the decision-point claim
+    but BEFORE the main try/finally (here: the post-claim set_model await) must
+    clear is_streaming and propagate — never strand the claim. KeyboardInterrupt
+    stands in for the non-Exception class the guard exists for: the setter's own
+    ``except Exception`` swallows ordinary errors, so only a BaseException can
+    still reach — and must be released by — the claim guard."""
+    state = _claim_window_state(set_model_side_effect=KeyboardInterrupt("claim boom"))
     pool = _StubPool(state)
 
     with ExitStack() as stack:
-        _chat_patches(
-            stack, pool,
-            credentials_rotated=True,
-            refresh_mock=AsyncMock(side_effect=RuntimeError("refresh boom")),
-        )
-        with pytest.raises(RuntimeError, match="refresh boom"):
+        options = _chat_patches(stack, pool)
+        _claim_window_options(options)
+        with pytest.raises(KeyboardInterrupt):
             await _collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
 
     assert state.is_streaming is False, "claim must be released on claim-window failure"
@@ -369,15 +382,12 @@ async def test_chat_claim_window_exception_clears_flag():
 async def test_chat_claim_window_cancel_clears_flag():
     """Same window, CancelledError (except Exception would MISS it — the guard
     must be BaseException-wide): the claim is released and the cancel propagates."""
-    state = _fake_state()
+    state = _claim_window_state(set_model_side_effect=asyncio.CancelledError())
     pool = _StubPool(state)
 
     with ExitStack() as stack:
-        _chat_patches(
-            stack, pool,
-            credentials_rotated=True,
-            refresh_mock=AsyncMock(side_effect=asyncio.CancelledError()),
-        )
+        options = _chat_patches(stack, pool)
+        _claim_window_options(options)
         with pytest.raises(asyncio.CancelledError):
             await _collect(qe.stream_to_websocket("hi", "sess-window", "claude-code"))
 
@@ -414,9 +424,9 @@ async def test_rest_claim_window_exception_clears_flag():
 
 async def test_background_claim_window_exception_clears_flag():
     """_run_background_query: a failure between the reuse-decision claim and the
-    main try (here: the credentials refresh await) clears the flag and
+    main try (here: the post-claim set_model await) clears the flag and
     propagates — the pooled client stays reusable."""
-    state = _fake_state()
+    state = _claim_window_state(set_model_side_effect=KeyboardInterrupt("claim boom"))
     pool = _StubPool(state)
 
     sync = _fake_sync_engine()
@@ -431,18 +441,14 @@ async def test_background_claim_window_exception_clears_flag():
         oauth.ensure_fresh_credentials = AsyncMock()
         stack.enter_context(patch.object(qb, "direct_oauth", new=oauth))
         options = MagicMock()
+        _claim_window_options(options)
         stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
         ))
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
         stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-        stack.enter_context(patch.object(qb, "credentials_rotated", return_value=True))
-        stack.enter_context(patch.object(
-            qb, "refresh_subprocess_credentials",
-            new=AsyncMock(side_effect=RuntimeError("refresh boom")),
-        ))
 
-        with pytest.raises(RuntimeError, match="refresh boom"):
+        with pytest.raises(KeyboardInterrupt):
             await qb._run_background_query(
                 "sess-window", "hello", {"id": "claude-code"}, None, None, None, None, None,
             )
@@ -572,7 +578,6 @@ async def test_background_applies_permission_mode_on_reuse_without_respawn(mock_
         stack.enter_context(patch.object(qb, "get_session_pool", return_value=pool))
         stack.enter_context(patch.object(qb, "is_subprocess_alive", return_value=True))
         stack.enter_context(patch.object(qb, "requires_reconnect", return_value=False))
-        stack.enter_context(patch.object(qb, "credentials_rotated", return_value=False))
         stack.enter_context(patch.object(
             qb, "_store_background_task", side_effect=RuntimeError("stop-after-apply")
         ))

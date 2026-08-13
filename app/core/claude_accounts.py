@@ -393,14 +393,11 @@ def switch_account(account_id: str) -> Dict[str, Any]:
         if oauth_dict is None:
             return {"success": False, "error": refresh_error}
 
-        # 3. Write it to the on-disk credentials file VERBATIM. The existing
-        #    session_pool credentials-rotation machinery (claude_credentials_mtime →
-        #    credentials_rotated → refresh_subprocess_credentials) picks up the
-        #    file mtime change and propagates it to live SDK subprocesses.
-        #    ACCEPTED v1 LIMITATION: pool._copy_if_newer compares expiry timestamps;
-        #    switching to an account whose token expiry is OLDER than the outgoing
-        #    one could momentarily be treated as "not newer" by that heuristic. This
-        #    is acceptable for v1 (the next status check / refresh reconciles it).
+        # 3. Write it to the on-disk credentials file VERBATIM. Live CLI
+        #    subprocesses share the host's config dir (no per-spawn temp copy),
+        #    so they re-read this file directly the next time they need to
+        #    re-auth — the old session_pool credentials-rotation/copy machinery
+        #    that existed for temp-dir copies is retired.
         #
         #    The write fires the post-write hook (sync_back_active_account). At this
         #    point the active pointer STILL names the OUTGOING account, so an

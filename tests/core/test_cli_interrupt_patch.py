@@ -279,8 +279,13 @@ def test_read_only_file_returns_read_only_without_raising(tmp_path):
 
 
 def test_missing_binary_resolver_returns_none(monkeypatch, tmp_path):
-    """resolve_bundled_cli_path returns None when the file is absent."""
-    from app.core import cli_interrupt_patch as m
+    """resolve_bundled_cli_path returns None when the file is absent.
+
+    The resolver lives in app/core/claude_cli_path.py — shared by this patcher
+    and omni's delegated leg, so CLI resolution does not depend on the opt-in
+    patch module.
+    """
+    from app.core import claude_cli_path as m
 
     fake_sdk_mod = tmp_path / "sdk" / "_internal" / "transport"
     fake_sdk_mod.mkdir(parents=True)
