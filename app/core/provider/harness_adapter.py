@@ -29,7 +29,10 @@ HONORED:
   * ``model``                → engine model (native: request model; delegated: --model)
   * ``system_prompt`` (str)  → engine ``system`` (dict system prompts are stringified)
   * ``cwd``                  → ToolCtx.cwd (native) / DelegatedLoop cwd
-  * ``resume_session_id``    → omni session id (native) / ``--resume`` handle (delegated)
+  * ``resume_session_id``    → omni session id (both engines). For the delegated
+    engine the CLI's ``--resume`` handle is NOT this id — it is read off the
+    stored session meta (``cli_session_id``), which DelegatedLoop writes back
+    from the CLI's init frame. See ``_resolve_cli_session_id``.
   * ``session_id``           → explicit omni session id
   * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
   * ``env``                  → delegated child env / native provider (via os.environ)
@@ -197,6 +200,7 @@ class HarnessAdapter(ProviderAdapter):
         permissions, plan_mode = self._build_permissions(options)
 
         if self._is_delegated:
+            cli_session_id = await self._resolve_cli_session_id(omni_session_id, options)
             self._engine = DelegatedLoop(
                 store=self._store,
                 model=options.model,
@@ -206,7 +210,7 @@ class HarnessAdapter(ProviderAdapter):
                 registry=self._registry,
                 ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
                 session_id=omni_session_id,
-                cli_session_id=options.resume_session_id,
+                cli_session_id=cli_session_id,
                 # Honor the SDK-level streaming option (the app turns it on by
                 # default). Without it the delegated CLI never gets
                 # --include-partial-messages and the UI only sees whole messages
@@ -364,6 +368,33 @@ class HarnessAdapter(ProviderAdapter):
                 yield translated
                 if isinstance(translated, ResultMessage):
                     return
+
+    async def _resolve_cli_session_id(
+        self, omni_session_id: Optional[str], options: SessionOptions
+    ) -> Optional[str]:
+        """Resolve the delegated CLI's ``--resume`` handle from the store.
+
+        ``resume_session_id`` is the app's *omni* session id (``ses_...``); the
+        CLI only recognises the uuid it minted itself and reported in its
+        ``init`` frame. DelegatedLoop persists that uuid onto the session meta,
+        so a resumed session reads it back from here.
+
+        Returns None when there is nothing stored — a fresh CLI conversation is
+        the correct degraded behavior. Passing the omni id through instead
+        (the old bug) makes the CLI reject the resume and the turn dies in ~1s.
+        """
+        if not options.resume_session_id or not omni_session_id or self._store is None:
+            return None
+        try:
+            meta = await self._store.get_session(omni_session_id)
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] could not load omni session %s for the CLI resume "
+                "handle — starting a fresh CLI conversation",
+                omni_session_id, exc_info=True,
+            )
+            return None
+        return getattr(meta, "cli_session_id", None) if meta is not None else None
 
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
         """Route one omni permission request through the app's can_use_tool

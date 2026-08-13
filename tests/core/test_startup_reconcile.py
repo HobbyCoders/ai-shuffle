@@ -338,7 +338,12 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 69 for the omni harness session store (omni_sessions /
+    # Bumped to 70 for omni_sessions.cli_session_id (additive nullable TEXT):
+    # the delegated engine's ``claude --resume`` handle, which is a CLI-issued
+    # uuid and NOT the omni session id. It used to live only on the in-process
+    # engine, so after a restart the adapter resumed the CLI with the omni
+    # session id and the turn died immediately. v69 added the omni harness
+    # session store (omni_sessions /
     # omni_session_nodes / omni_session_events — PG-backed branching node
     # trees + durable event log for AIH_OMNI_STORE=pg; purely additive). v68
     # added the pending_wakeups table (#598 — durable per-session
@@ -364,8 +369,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 69
-    assert pg_version == 69
+    assert db_version == 70
+    assert pg_version == 70
     assert db_version == pg_version
 
 

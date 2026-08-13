@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 69
+SCHEMA_VERSION = 70
 
 
 def create_postgres_schema(cursor) -> None:
@@ -828,11 +828,15 @@ def create_postgres_schema(cursor) -> None:
     # omni harness session store (v69): branching node-tree sessions + durable
     # event log, mirroring omni.store.base.SessionStore / JsonlStore semantics.
     # Used only when the omni backend runs with AIH_OMNI_STORE=pg.
+    # cli_session_id (v70): the delegated engine's ``claude --resume`` handle —
+    # a CLI uuid, NOT the omni session id — so a restart can reconnect to the
+    # same CLI conversation instead of resuming a handle the CLI never issued.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS omni_sessions (
             session_id TEXT PRIMARY KEY,
             head_node_id TEXT,
-            created_at DOUBLE PRECISION NOT NULL
+            created_at DOUBLE PRECISION NOT NULL,
+            cli_session_id TEXT
         )
     """)
     cursor.execute("""

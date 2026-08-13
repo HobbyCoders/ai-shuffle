@@ -2,7 +2,7 @@
 
 Persists omni's branching session node-tree and durable event log in the app's
 PostgreSQL database (tables ``omni_sessions`` / ``omni_session_nodes`` /
-``omni_session_events``, schema v69), giving flag-on sessions the same
+``omni_session_events``, schema v70), giving flag-on sessions the same
 cross-restart durability the SDK path gets from PgSessionStore — resume, fork,
 and event replay all survive a process restart and work from any app instance
 sharing the database.
@@ -47,9 +47,11 @@ def _as_dict(value: Any) -> Dict[str, Any]:
 def _create_session_sync(meta: SessionMeta) -> None:
     with get_db() as conn:
         conn.cursor().execute(
-            "INSERT INTO omni_sessions (session_id, head_node_id, created_at) "
-            "VALUES (%s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
-            (meta.session_id, meta.head_node_id, meta.created_at),
+            "INSERT INTO omni_sessions "
+            "(session_id, head_node_id, created_at, cli_session_id) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING",
+            (meta.session_id, meta.head_node_id, meta.created_at,
+             meta.cli_session_id),
         )
 
 
@@ -58,8 +60,8 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT session_id, head_node_id, created_at FROM omni_sessions "
-            "WHERE session_id = %s",
+            "SELECT session_id, head_node_id, created_at, cli_session_id "
+            "FROM omni_sessions WHERE session_id = %s",
             (session_id,),
         )
         meta_row = cur.fetchone()
@@ -108,6 +110,14 @@ def _set_head_sync(session_id: str, node_id: Optional[str]) -> None:
         )
 
 
+def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> None:
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE omni_sessions SET cli_session_id = %s WHERE session_id = %s",
+            (cli_session_id, session_id),
+        )
+
+
 def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) -> None:
     with get_db() as conn:
         conn.cursor().execute(
@@ -140,6 +150,7 @@ class PgOmniStore:
             session_id=meta_row["session_id"],
             head_node_id=meta_row["head_node_id"],
             created_at=meta_row["created_at"],
+            cli_session_id=meta_row.get("cli_session_id"),
         )
         nodes: Dict[str, SessionNode] = {}
         for r in data["nodes"]:
@@ -206,6 +217,21 @@ class PgOmniStore:
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node_id
         await run_sync(_set_head_sync, session_id, node_id)
+
+    async def set_cli_session_id(
+        self, session_id: str, cli_session_id: Optional[str]
+    ) -> None:
+        """Persist the delegated CLI's ``--resume`` handle for this session.
+
+        DelegatedLoop calls this every time the CLI's ``init`` frame reports a
+        new id. Without it the handle only ever lived on the engine object, so
+        a restart resumed the CLI with the omni session id and the turn died.
+        """
+        await self._ensure_loaded(session_id)
+        meta = self._sessions.get(session_id)
+        if meta is not None:
+            meta.cli_session_id = cli_session_id
+        await run_sync(_set_cli_session_id_sync, session_id, cli_session_id)
 
     async def append_event(self, session_id: str, event: Event) -> None:
         await self._ensure_loaded(session_id)

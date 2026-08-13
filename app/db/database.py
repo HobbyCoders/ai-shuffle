@@ -151,7 +151,12 @@ def _safe_json(value):
 #     — PG-backed omni-harness SessionStore (branching node trees + durable
 #     event log; see app/core/provider/omni_pg_store.py). Purely additive; used
 #     only when the omni backend runs with AIH_OMNI_STORE=pg.
-SCHEMA_VERSION = 69
+# 70 (2026-08-12): add omni_sessions.cli_session_id TEXT — the delegated
+#     engine's ``claude --resume`` handle (a CLI-issued uuid, NOT the omni
+#     session id). It was previously in-process only, so after a restart the
+#     adapter resumed the CLI with the omni session id and every turn died
+#     instantly. Additive/nullable, no index.
+SCHEMA_VERSION = 70
 
 
 def _run_column_migrations(cursor):
@@ -846,6 +851,17 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_pending_wakeups_session "
         "ON pending_wakeups(session_id)"
     )
+
+    # omni_sessions.cli_session_id (v70). The delegated engine's
+    # ``claude --resume`` handle, persisted so a restart reconnects to the same
+    # CLI conversation instead of resuming with the omni session id. Guarded on
+    # table_exists because omni_sessions is only created by the bootstrap path
+    # (v69); nothing here should create it on an older database.
+    if table_exists(cursor, "omni_sessions") and not column_exists(
+        cursor, "omni_sessions", "cli_session_id"
+    ):
+        cursor.execute("ALTER TABLE omni_sessions ADD COLUMN cli_session_id TEXT")
+        migrations_applied.append("omni_sessions.cli_session_id")
 
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here

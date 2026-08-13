@@ -603,3 +603,91 @@ async def test_tool_bridge():
 
     outcome = await registry.dispatch("mcp__builtins__Echo", {"msg": "hi"})
     assert outcome.text == "echo:hi" and outcome.is_error is False
+
+
+# ─── 6. Delegated --resume handle resolution ─────────────────────────────────
+
+
+class FakeDelegatedLoop:
+    """Records the kwargs HarnessAdapter builds DelegatedLoop with."""
+
+    last_kwargs: dict = {}
+
+    def __init__(self, **kwargs) -> None:
+        FakeDelegatedLoop.last_kwargs = kwargs
+        self.store = kwargs["store"]
+        self._session_id = kwargs.get("session_id")
+
+    async def _ensure_session(self):
+        meta = await self.store.get_session(self._session_id)
+        if meta is None:
+            meta = await self.store.create_session(self._session_id)
+        return meta
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def _connect_delegated(monkeypatch, store, options) -> HarnessAdapter:
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", FakeDelegatedLoop)
+    monkeypatch.setattr(HarnessAdapter, "_build_store", staticmethod(lambda _o: store))
+    adapter = HarnessAdapter()
+    await adapter.connect(options)
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_delegated_resume_uses_stored_cli_session_id(monkeypatch):
+    """A resumed session must pass the CLI's own uuid, never the omni id."""
+    store = MemoryStore()
+    await store.create_session("ses_resume")
+    await store.set_cli_session_id("ses_resume", "cli-uuid-from-init-frame")
+
+    await _connect_delegated(
+        monkeypatch, store,
+        SessionOptions(model="claude-sonnet-4-5", resume_session_id="ses_resume"),
+    )
+
+    kwargs = FakeDelegatedLoop.last_kwargs
+    assert kwargs["session_id"] == "ses_resume"
+    assert kwargs["cli_session_id"] == "cli-uuid-from-init-frame"
+
+
+@pytest.mark.asyncio
+async def test_delegated_resume_without_stored_handle_starts_fresh(monkeypatch):
+    """No stored handle (pre-v70 row, or a session that never saw an init
+    frame) → None, i.e. a fresh CLI conversation. Passing the ``ses_...`` id
+    through would make the CLI reject --resume and kill the turn."""
+    store = MemoryStore()
+    await store.create_session("ses_no_handle")
+
+    await _connect_delegated(
+        monkeypatch, store,
+        SessionOptions(model="claude-sonnet-4-5", resume_session_id="ses_no_handle"),
+    )
+    assert FakeDelegatedLoop.last_kwargs["cli_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_unknown_session_starts_fresh(monkeypatch):
+    """Resuming a session the store has never seen must not raise."""
+    await _connect_delegated(
+        monkeypatch, MemoryStore(),
+        SessionOptions(model="claude-sonnet-4-5", resume_session_id="ses_ghost"),
+    )
+    assert FakeDelegatedLoop.last_kwargs["cli_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_fresh_session_has_no_cli_handle(monkeypatch):
+    """No resume at all → nothing to look up."""
+    await _connect_delegated(
+        monkeypatch, MemoryStore(), SessionOptions(model="claude-sonnet-4-5"),
+    )
+    assert FakeDelegatedLoop.last_kwargs["cli_session_id"] is None

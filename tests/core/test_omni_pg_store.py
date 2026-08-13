@@ -1,7 +1,7 @@
 """PgOmniStore — omni's SessionStore protocol over the app's Postgres.
 
 Runs against the pg_shim (`mock_db`), exactly like the PgSessionStore tests,
-so the DDL under test is the real schema_postgres v69 tables. The protocol
+so the DDL under test is the real schema_postgres v70 tables. The protocol
 semantics asserted here mirror omni's own JsonlStore behaviors: append moves
 the head, load_path resolves leaf→root root-first, set_head forks without
 copying, and the event log replays idempotently by (session_id, seq).
@@ -115,3 +115,27 @@ async def test_create_session_resumes_existing(mock_db):
 @pytest.mark.asyncio
 async def test_missing_session_is_none(mock_db):
     assert await PgOmniStore().get_session("ses_missing") is None
+
+
+@pytest.mark.asyncio
+async def test_cli_session_id_round_trip(mock_db):
+    """The delegated CLI's --resume handle survives a cold reload (v70)."""
+    store = PgOmniStore()
+    meta = await store.create_session("ses_pg6")
+    assert meta.cli_session_id is None  # nothing known until the CLI reports it
+
+    await store.set_cli_session_id("ses_pg6", "cli-uuid-abc")
+    # Live cache updates immediately...
+    assert (await store.get_session("ses_pg6")).cli_session_id == "cli-uuid-abc"
+    # ...and a fresh instance reads it back from Postgres.
+    assert (await PgOmniStore().get_session("ses_pg6")).cli_session_id == "cli-uuid-abc"
+
+    # A later init frame overwrites the stored handle.
+    await PgOmniStore().set_cli_session_id("ses_pg6", "cli-uuid-def")
+    assert (await PgOmniStore().get_session("ses_pg6")).cli_session_id == "cli-uuid-def"
+
+    # Other meta fields are untouched by the update.
+    await store.append("ses_pg6", _node("n1", None, "hi"))
+    reloaded = await PgOmniStore().get_session("ses_pg6")
+    assert reloaded.head_node_id == "n1"
+    assert reloaded.cli_session_id == "cli-uuid-def"
