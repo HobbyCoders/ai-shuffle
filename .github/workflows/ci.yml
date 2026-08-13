@@ -24,14 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # 3.12 matches production (the Docker image) and the vendored omni
+          # harness's requires-python floor.
+          python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        # The vendored omni harness must be importable or tests/core's omni
+        # modules fail at COLLECTION, aborting the whole run before any test
+        # executes (red on main since the vendor-snapshot commit f9681e4a).
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./vendor/omni-harness
 
       - name: Run fast test subset
         # The suite uses an in-memory SQLite shim — no Postgres service needed.
