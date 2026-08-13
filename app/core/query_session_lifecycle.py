@@ -108,7 +108,11 @@ async def interrupt_session(session_id: str) -> bool:
     # sent but its response future is abandoned), which can wedge the client for
     # every subsequent control call. Shielding lets the wait_for time out while the
     # underlying interrupt keeps running to completion in the background.
-    interrupt_task = asyncio.create_task(state.client.interrupt())
+    # Interrupt via the ADAPTER interface: state.client resolves through the
+    # legacy-only ``sdk_client`` attribute and raises AttributeError on the
+    # omni HarnessAdapter. ClaudeAgentAdapter.interrupt() delegates to the
+    # same sdk_client.interrupt(), so flag-off behavior is unchanged.
+    interrupt_task = asyncio.create_task(state.adapter.interrupt())
     # Attach the swallow/log done-callback AT CREATION (F8): if the CALLER of
     # this coroutine is cancelled while awaiting the shielded wait below, the
     # except branches never run and a later interrupt() failure would surface

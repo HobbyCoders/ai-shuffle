@@ -17,7 +17,8 @@ Provider-kind decision (from SessionOptions):
   * ``extra["omni_provider"]`` / env ``AIH_OMNI_PROVIDER`` in
     {anthropic, openai_responses, openrouter} → NativeLoop with that client
   * otherwise inferred from the model string:
-      - "claude*"            → DelegatedLoop (subscription default)
+      - "claude*" or any model-registry alias ("fable"/"opus"/"sonnet"/"haiku")
+                             → DelegatedLoop (subscription default)
       - "gpt*"/"o1*"/"o3*"/"codex*" → NativeLoop + OpenAIResponsesClient
       - "vendor/model" slug  → NativeLoop + OpenRouterClient
       - else                 → NativeLoop + AnthropicClient (direct API key)
@@ -33,6 +34,8 @@ HONORED:
   * ``permission_mode``      → omni PermissionEngine approval policy + plan_mode
   * ``env``                  → delegated child env / native provider (via os.environ)
   * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/sse/http)
+  * ``include_partial_messages`` → omni always streams deltas (native); delegated
+    passes ``--include-partial-messages`` (``extra["omni_partial"]`` overrides)
   * ``extra["omni_store_dir"]`` / env ``AIH_OMNI_STORE_DIR`` → JsonlStore root
   * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
   * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
@@ -52,8 +55,6 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; omni persistence is the JsonlStore/MemoryStore chosen above.
-  * ``include_partial_messages`` — omni always streams deltas (native); delegated
-    ``partial`` defaults off (set ``extra["omni_partial"]=True`` to enable).
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
 """
 
@@ -179,7 +180,7 @@ class HarnessAdapter(ProviderAdapter):
         self._is_delegated = kind == "delegated"
 
         omni_session_id = options.session_id or options.resume_session_id
-        system = _stringify_system(options.system_prompt)
+        system, append_system = _system_parts(options.system_prompt)
         permissions, plan_mode = self._build_permissions(options)
 
         if self._is_delegated:
@@ -187,13 +188,26 @@ class HarnessAdapter(ProviderAdapter):
                 store=self._store,
                 model=options.model,
                 system=system,
+                append_system_prompt=append_system,
                 permission_mode=options.permission_mode,
                 registry=self._registry,
                 ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
                 session_id=omni_session_id,
                 cli_session_id=options.resume_session_id,
-                partial=bool(options.extra.get("omni_partial", False)),
-                mcp_servers=options.mcp_servers,
+                # Honor the SDK-level streaming option (the app turns it on by
+                # default). Without it the delegated CLI never gets
+                # --include-partial-messages and the UI only sees whole messages
+                # at turn end. extra["omni_partial"] stays a manual override.
+                partial=bool(
+                    getattr(options, "include_partial_messages", False)
+                    or options.extra.get("omni_partial", False)
+                ),
+                # ONLY external transports. The raw map also holds type='sdk'
+                # entries wrapping live in-proc Server instances, and the
+                # delegated leg JSON-serializes this map into its --mcp-config
+                # file -> TypeError("Object of type Server is not JSON
+                # serializable") and a failed spawn.
+                mcp_servers=_external_mcp_servers(options.mcp_servers),
                 cwd=options.cwd,
                 env=options.env,
                 claude_cmd=_resolve_claude_cmd(),
@@ -204,7 +218,10 @@ class HarnessAdapter(ProviderAdapter):
                 provider=provider_client,
                 store=self._store,
                 model=options.model,
-                system=system,
+                # Native legs have no Claude Code preset to append to — the
+                # preset form's append text (security + profile instructions)
+                # becomes the system prompt itself.
+                system=system if system is not None else append_system,
                 registry=self._registry,
                 permissions=permissions,
                 ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
@@ -488,7 +505,10 @@ class HarnessAdapter(ProviderAdapter):
         old = self._options
         if old is None:
             return True
-        if _stringify_system(old.system_prompt) != _stringify_system(
+        # _system_parts, not a flattening stringify: the preset form loses its
+        # append text under flattening, which would mask changes to the
+        # appended profile instructions and skip a needed reconnect.
+        if _system_parts(old.system_prompt) != _system_parts(
             new_options.system_prompt or old.system_prompt
         ):
             return True
@@ -891,16 +911,24 @@ def _resolve_claude_cmd() -> Optional[list]:
     return None
 
 
-def _stringify_system(system_prompt: Any) -> Optional[str]:
-    """omni takes a plain ``system`` string; coerce dict/None forms."""
+def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:
+    """Split the SDK system-prompt shape into ``(system, append)``.
+
+    The app's preset profiles send ``{"type": "preset", "preset":
+    "claude_code", "append": <security + profile instructions>}`` — that
+    append must ride the CLI's ``--append-system-prompt`` (keeping Claude
+    Code's own prompt), NOT be flattened away. Plain strings are a full
+    replacement (``--system-prompt``), matching legacy SDK semantics.
+    """
     if system_prompt is None:
-        return None
+        return None, None
     if isinstance(system_prompt, str):
-        return system_prompt
+        return system_prompt, None
     if isinstance(system_prompt, dict):
-        # SDK preset form {"type": "preset", ...} or {"text": ...}
-        return system_prompt.get("text") or system_prompt.get("prompt") or ""
-    return str(system_prompt)
+        if system_prompt.get("type") == "preset" or "append" in system_prompt:
+            return None, system_prompt.get("append") or ""
+        return system_prompt.get("text") or system_prompt.get("prompt") or "", None
+    return str(system_prompt), None
 
 
 def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -931,7 +959,15 @@ def _decide_provider_kind(options: SessionOptions) -> str:
         return "delegated"
 
     model = (options.model or "").lower()
-    if model.startswith("claude"):
+    # The app selects Claude models by SHORT ALIAS ("fable"/"opus"/"sonnet"/
+    # "haiku"), which does not start with "claude" — those sessions used to fall
+    # through to the plain `return "anthropic"` below, i.e. the raw Anthropic API
+    # client with no API key, which 401s instantly and kills the turn. Resolve
+    # the alias through the model registry first, then keep the raw "claude-*"
+    # id check for full model ids.
+    from app.core.model_registry import get_model_family
+
+    if get_model_family(options.model) is not None or model.startswith("claude"):
         # Subscription default: the claude CLI (delegated). Set
         # extra["omni_provider"]="anthropic" for the direct-API-key native path.
         return "delegated" if engine_hint != "native" else "anthropic"

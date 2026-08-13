@@ -465,6 +465,98 @@ def test_provider_kind_decision():
     ) == "openrouter"
 
 
+def test_provider_kind_short_model_aliases():
+    """The app selects Claude models by short alias — those must route to the
+    delegated (claude CLI) leg, not the API-key-less native Anthropic client."""
+    for alias in ("fable", "opus", "sonnet", "haiku"):
+        assert _decide_provider_kind(SessionOptions(model=alias)) == "delegated"
+    for full_id in ("claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5"):
+        assert _decide_provider_kind(SessionOptions(model=full_id)) == "delegated"
+    # Non-Claude models still route by prefix / slug shape.
+    assert _decide_provider_kind(SessionOptions(model="gpt-5")) == "openai_responses"
+    assert _decide_provider_kind(SessionOptions(model="gpt-5-codex")) == "openai_responses"
+    assert (
+        _decide_provider_kind(SessionOptions(model="anthropic/claude-3.5-sonnet"))
+        == "openrouter"
+    )
+    # engine_hint="native" overrides the subscription default for aliases too.
+    assert (
+        _decide_provider_kind(SessionOptions(model="fable", extra={"omni_engine": "native"}))
+        == "anthropic"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monkeypatch):
+    """The delegated leg JSON-serializes its mcp_servers map into --mcp-config,
+    so in-proc type='sdk' entries (live Server objects) must be filtered out;
+    and the SDK's include_partial_messages must reach ``partial``."""
+    import json
+
+    import app.core.provider.harness_adapter as ha
+    from omni.tools.registry import ToolRegistry
+
+    captured: dict = {}
+
+    class FakeDelegatedLoop:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+        async def _ensure_session(self):
+            class _Meta:
+                session_id = "ses_delegated"
+
+            return _Meta()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(ha, "DelegatedLoop", FakeDelegatedLoop)
+
+    class LiveServer:
+        """Stand-in for an in-proc SDK Server instance (not JSON-serializable)."""
+
+    stdio_cfg = {"type": "stdio", "command": "node", "args": ["ide-server.js"]}
+    mcp_servers = {
+        "builtins": {"type": "sdk", "name": "builtins", "instance": LiveServer()},
+        "ide": stdio_cfg,
+    }
+    # Prebuilt registry short-circuits _build_registry (no real MCP dial-out).
+    options = SessionOptions(
+        model="fable",
+        mcp_servers=mcp_servers,
+        include_partial_messages=True,
+        extra={"omni_registry": ToolRegistry()},
+    )
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    assert adapter._is_delegated is True
+
+    # Only the external stdio server survives, and what survives is serializable.
+    assert captured["mcp_servers"] == {"ide": stdio_cfg}
+    with pytest.raises(TypeError):
+        json.dumps(mcp_servers)
+    json.dumps(captured["mcp_servers"])
+
+    # include_partial_messages drives --include-partial-messages on the CLI.
+    assert captured["partial"] is True
+
+    # extra["omni_partial"] remains a manual override when the SDK flag is off.
+    await adapter.connect(
+        dataclasses.replace(
+            options,
+            include_partial_messages=False,
+            extra={"omni_registry": ToolRegistry(), "omni_partial": True},
+        )
+    )
+    assert captured["partial"] is True
+
+    await adapter.connect(dataclasses.replace(options, include_partial_messages=False))
+    assert captured["partial"] is False
+
+
 def test_requires_reconnect():
     a = HarnessAdapter()
     a._options = SessionOptions(model="m", system_prompt="S", cwd="/w")
