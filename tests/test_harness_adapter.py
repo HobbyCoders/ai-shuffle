@@ -691,3 +691,168 @@ async def test_delegated_fresh_session_has_no_cli_handle(monkeypatch):
         monkeypatch, MemoryStore(), SessionOptions(model="claude-sonnet-4-5"),
     )
     assert FakeDelegatedLoop.last_kwargs["cli_session_id"] is None
+
+
+# ─── 7. Split per-block assistant frames (duplicate-render regression) ───────
+#
+# The delegated CLI splits ONE model message into one ``assistant`` frame per
+# content block, each frame carrying a single-element content list plus the same
+# message ``id`` and the same message-level ``usage``. A thinking+text message —
+# what the model produces whenever extended thinking is on, e.g. the reply after
+# an AskUserQuestion dismissal or any denied tool — therefore arrives as two
+# frames. The mapper used to reset its streamed-block dedupe set at the end of
+# EVERY assistant frame and to read the block index off the in-frame position
+# (always 0), so the second frame's block was re-emitted whole: the same text
+# rendered twice in the chat, and the message's usage counted twice.
+
+_SPLIT_SID = "ses_split"
+
+
+def _se_frame(event: dict) -> dict:
+    return {"type": "stream_event", "session_id": _SPLIT_SID, "event": event}
+
+
+def _assistant_frame(blocks: list[dict], msg_id: str = "msg_split") -> dict:
+    return {
+        "type": "assistant",
+        "session_id": _SPLIT_SID,
+        "message": {
+            "id": msg_id,
+            "model": "claude-fake",
+            "content": blocks,
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 7, "output_tokens": 11,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            },
+        },
+    }
+
+
+def _thinking_then_text_frames(text: str = "Looks like you dismissed the prompt.") -> list[dict]:
+    """The real CLI frame sequence for one thinking+text message, partial
+    streaming on: per-block stream events, each followed by that block's own
+    ``assistant`` frame."""
+    return [
+        _se_frame({"type": "message_start", "message": {"usage": {}}}),
+        _se_frame({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "thinking"}}),
+        _se_frame({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "thinking_delta", "thinking": "weighing it"}}),
+        _se_frame({"type": "content_block_stop", "index": 0}),
+        _assistant_frame([{"type": "thinking", "thinking": "weighing it", "signature": "sig"}]),
+        _se_frame({"type": "content_block_start", "index": 1,
+                   "content_block": {"type": "text"}}),
+        _se_frame({"type": "content_block_delta", "index": 1,
+                   "delta": {"type": "text_delta", "text": text}}),
+        _se_frame({"type": "content_block_stop", "index": 1}),
+        _assistant_frame([{"type": "text", "text": text}]),
+    ]
+
+
+def _map_frames(frames: list[dict]) -> list:
+    from omni.engine.delegated_proto import StreamJsonMapper
+
+    mapper = StreamJsonMapper(
+        session_id=_SPLIT_SID, turn_id="turn_split", model="claude-fake",
+        user_node_id="node_0",
+    )
+    out: list = []
+    for frame in frames:
+        out.extend(mapper.feed(frame).events)
+    return out
+
+
+def test_split_assistant_frames_emit_each_block_once():
+    """Streamed blocks are not re-emitted by their own per-block frame."""
+    text = "Looks like you dismissed the prompt."
+    events = _map_frames(_thinking_then_text_frames(text))
+
+    texts = [e for e in events if isinstance(e, lm.TextDelta)]
+    assert [e.text for e in texts] == [text]
+    thinking = [e for e in events if isinstance(e, lm.ThinkingDelta)]
+    assert [e.text for e in thinking] == ["weighing it"]
+
+
+def test_split_assistant_frames_count_usage_once():
+    """Every per-block frame repeats the message-level usage verbatim; only the
+    first may become a Usage event or the turn double-counts tokens and cost."""
+    events = _map_frames(_thinking_then_text_frames())
+    assert len([e for e in events if isinstance(e, lm.Usage)]) == 1
+
+
+def test_split_assistant_frames_dedupe_survives_batched_ordering():
+    """Same guarantee when the CLI flushes both per-block frames after the whole
+    message streamed (ordering is not part of the contract)."""
+    text = "batched ordering"
+    stream, frames = [], _thinking_then_text_frames(text)
+    assistant_frames = [f for f in frames if f["type"] == "assistant"]
+    stream = [f for f in frames if f["type"] != "assistant"]
+    events = _map_frames(stream + assistant_frames)
+
+    assert [e.text for e in events if isinstance(e, lm.TextDelta)] == [text]
+    assert len([e for e in events if isinstance(e, lm.Usage)]) == 1
+
+
+def test_split_assistant_frames_next_message_is_not_suppressed():
+    """The dedupe set is cleared per MESSAGE, so a following message whose block
+    indices repeat still renders."""
+    frames = _thinking_then_text_frames("first message")
+    frames += [
+        _se_frame({"type": "message_start", "message": {"usage": {}}}),
+        _se_frame({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text"}}),
+        _se_frame({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "second message"}}),
+        _se_frame({"type": "content_block_stop", "index": 0}),
+        _assistant_frame([{"type": "text", "text": "second message"}], msg_id="msg_split_2"),
+    ]
+    events = _map_frames(frames)
+
+    assert [e.text for e in events if isinstance(e, lm.TextDelta)] == [
+        "first message", "second message",
+    ]
+    assert len([e for e in events if isinstance(e, lm.Usage)]) == 2
+
+
+def test_split_assistant_frames_without_partial_streaming_still_emit():
+    """Partial streaming off: no stream events exist to suppress against, so
+    every per-block frame must still produce its block."""
+    events = _map_frames([
+        _assistant_frame([{"type": "thinking", "thinking": "weighing it", "signature": "s"}]),
+        _assistant_frame([{"type": "text", "text": "no partials here"}]),
+    ])
+
+    assert [e.text for e in events if isinstance(e, lm.TextDelta)] == ["no partials here"]
+    assert [e.text for e in events if isinstance(e, lm.ThinkingDelta)] == ["weighing it"]
+    assert len([e for e in events if isinstance(e, lm.Usage)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_surfaces_one_assistant_message_for_split_frames():
+    """End of the pipe: the app sees a single streamed text + a single complete
+    AssistantMessage, which is what the chat renders."""
+    mapped = _map_frames(_thinking_then_text_frames("one bubble only"))
+    engine = FakeEngine(mapped + [lm.TurnComplete(
+        session_id=_SPLIT_SID, node_id="n", turn_id="turn_split",
+        stop_reason="end_turn", num_model_calls=1, usage={}, cost_usd=0.0,
+    )])
+    adapter = _adapter_with(engine)
+    adapter._options = SessionOptions(model="fake-model", include_partial_messages=True)
+
+    events = await _collect(adapter)
+
+    text_messages = [
+        e for e in events
+        if isinstance(e, AssistantMessage)
+        and any(isinstance(b, TextBlock) for b in e.content)
+    ]
+    assert len(text_messages) == 1
+    assert text_messages[0].content[0].text == "one bubble only"
+
+    deltas = [
+        e for e in events
+        if isinstance(e, StreamEvent)
+        and e.event.get("delta", {}).get("type") == "text_delta"
+    ]
+    assert [d.event["delta"]["text"] for d in deltas] == ["one bubble only"]
