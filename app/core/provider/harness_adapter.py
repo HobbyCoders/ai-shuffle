@@ -1,13 +1,12 @@
 """HarnessAdapter — concrete ProviderAdapter backed by the ``omni`` harness.
 
-This is the additive, feature-flagged sibling of :class:`ClaudeAgentAdapter`.
-It wraps a omni execution engine (``NativeLoop`` for direct-API providers, or
+This is the app's only provider backend, and the successor to
+:class:`ClaudeAgentAdapter`. It wraps a omni execution engine (``NativeLoop`` for direct-API providers, or
 ``DelegatedLoop`` for the Claude-subscription ``claude`` CLI) and translates the
 omni ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
 so the rest of AI-Shuffle never sees a omni type.
 
-It is selected ONLY when ``AIH_USE_OMNI_HARNESS=1`` (see ``factory.make_adapter``);
-the default path remains the Claude Agent SDK adapter, unchanged.
+``factory.make_adapter()`` returns it unconditionally for every spawn path.
 
 Design mirrors ClaudeAgentAdapter: connect/disconnect/health/reconnect lifecycle,
 send_query/receive_events for streaming, and interrupt/respond/set_* controls.

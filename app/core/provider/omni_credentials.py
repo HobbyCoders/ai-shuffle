@@ -1,5 +1,5 @@
 """Bridge the app's encrypted ``model_providers`` credentials into omni's
-native provider clients (flag-on ``AIH_USE_OMNI_HARNESS=1`` path only).
+native provider clients.
 
 Background
 ----------

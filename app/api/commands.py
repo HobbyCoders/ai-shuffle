@@ -415,12 +415,12 @@ class RewindResponseV2(BaseModel):
 def _get_checkpoints(sdk_session_id: str, working_dir: str):
     """Checkpoints for a session, from whichever transcript store owns it.
 
-    Flag-aware read facade. A session created with ``AIH_USE_OMNI_HARNESS=1``
-    keeps its transcript in omni's node tree (``omni_session_nodes``) and its
-    ``sdk_session_id`` is an omni ``ses_...`` id, so the JSONL service finds
-    nothing for it — which made the rewind content guard fail closed ("transcript
-    has 0 user prompt(s) matching..."). ``is_omni_session`` is prefix-gated, so a
-    legacy session never even queries: this is a no-op on the default path.
+    Store-aware read facade. An omni session keeps its transcript in omni's
+    node tree (``omni_session_nodes``) and its ``sdk_session_id`` is an omni
+    ``ses_...`` id, so the JSONL service finds nothing for it — which made the
+    rewind content guard fail closed ("transcript has 0 user prompt(s)
+    matching..."). ``is_omni_session`` is prefix-gated, so a pre-omni session
+    never even queries: this is a no-op on the legacy path.
     """
     from app.core.provider.omni_transcript import get_omni_checkpoints, is_omni_session
 

@@ -873,15 +873,15 @@ async def execute_query(
     # Pull shared agent-memory from the DB before the CLI reads it.
     await reconcile_memory(project_id, getattr(options, "cwd", None))
 
-    # Feature-flagged backend selection (see app/core/provider/factory.py):
-    # default is ClaudeAgentAdapter, AIH_USE_OMNI_HARNESS=1 is the omni
-    # HarnessAdapter. This headless path used to consume the SDK's one-shot
-    # query() directly, which bypassed the seam entirely: under omni it was
-    # handed an omni session id (ses_...) as ClaudeAgentOptions.resume, which
-    # the legacy SDK cannot resume — every wake turn (idle watchdog,
-    # ScheduleWakeup, automations, connectors, POST /api/v1/query) ran with no
-    # context. Routing through make_adapter() keeps this path on the same
-    # backend as every other spawn path.
+    # Backend selection goes through the provider seam (see
+    # app/core/provider/factory.py); the omni HarnessAdapter is the only
+    # backend. This headless path used to consume the SDK's one-shot query()
+    # directly, which bypassed the seam entirely: it was handed an omni session
+    # id (ses_...) as ClaudeAgentOptions.resume, which the legacy SDK cannot
+    # resume — every wake turn (idle watchdog, ScheduleWakeup, automations,
+    # connectors, POST /api/v1/query) ran with no context. Routing through
+    # make_adapter() keeps this path on the same backend as every other spawn
+    # path.
     #
     # One-shot lifecycle: deliberately NOT registered in the session pool (no
     # pooled reuse for headless turns) — the adapter is torn down in the
@@ -1401,9 +1401,8 @@ async def stream_query(
         # Pull shared agent-memory from the DB before the CLI reads it.
         await reconcile_memory(project_id, getattr(options, "cwd", None))
 
-        # Feature-flagged backend selection, same as the WS path below: default
-        # (AIH_USE_OMNI_HARNESS unset) is ClaudeAgentAdapter, flag-on is the
-        # omni HarnessAdapter.
+        # Backend selection via the provider seam, same as the WS path below:
+        # make_adapter() always returns the omni HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
 
@@ -2378,9 +2377,8 @@ async def _stream_to_websocket_impl(
         # the CLI reads it, so this install sees memories written elsewhere.
         await reconcile_memory(project_id, options.cwd)
 
-        # Feature-flagged backend selection. Default (AIH_USE_OMNI_HARNESS unset)
-        # returns ClaudeAgentAdapter — byte-for-byte the previous behavior. With
-        # the flag on, make_adapter() returns the omni HarnessAdapter instead.
+        # Backend selection via the provider seam: make_adapter() always
+        # returns the omni HarnessAdapter (see app/core/provider/factory.py).
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()
         logger.debug("[WS] provider adapter created (%s), attempting connect...", type(adapter).__name__)

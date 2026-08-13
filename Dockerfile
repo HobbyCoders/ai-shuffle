@@ -117,13 +117,14 @@ RUN groupadd -g 1000 appuser && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── omni harness (optional, feature-flagged backend AIH_USE_OMNI_HARNESS=1) ──
+# ── omni harness (REQUIRED — the only provider backend) ──
 # CI vendors the harness source tree as
 # a checkout into vendor/omni-harness before the docker build (see
-# .github/workflows/docker-publish.yml); local builds without the checkout
-# just skip the install — the default SDK path never imports omni.
+# .github/workflows/docker-publish.yml). A build without the checkout produces
+# an image that cannot serve queries at all (make_adapter imports omni), so the
+# skip branch below is a loud warning, not a supported configuration.
 COPY vendor/ /opt/vendor/
-RUN if [ -f /opt/vendor/omni-harness/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/omni-harness &&         python -c "import omni; print('omni installed')";     else         echo "vendor/omni-harness not present — omni backend not baked in";     fi
+RUN if [ -f /opt/vendor/omni-harness/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/omni-harness &&         python -c "import omni; print('omni installed')";     else         echo "WARNING: vendor/omni-harness not present — omni backend NOT baked in; this image cannot serve queries";     fi
 
 # ── Make the bundled Claude Code CLI writable by appuser ──
 # app/core/cli_interrupt_patch.py rewrites a byte in this binary at runtime

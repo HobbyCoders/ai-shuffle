@@ -296,8 +296,8 @@ async def _run_background_query_impl(
             project.get("id") if project else None, getattr(options, "cwd", None)
         )
 
-        # Feature-flagged backend selection (see app/core/provider/factory.py):
-        # default is ClaudeAgentAdapter, AIH_USE_OMNI_HARNESS=1 is the omni
+        # Backend selection via the provider seam (see
+        # app/core/provider/factory.py): make_adapter() always returns the omni
         # HarnessAdapter.
         from app.core.provider.factory import make_adapter
         adapter = make_adapter()

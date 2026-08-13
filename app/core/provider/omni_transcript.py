@@ -1,8 +1,8 @@
-"""Flag-aware transcript / checkpoint facade for omni-harness sessions.
+"""Transcript / checkpoint facade for omni-harness sessions.
 
 Background
 ----------
-With ``AIH_USE_OMNI_HARNESS=1`` + ``AIH_OMNI_STORE=pg`` a session's transcript
+With ``AIH_OMNI_STORE=pg`` a session's transcript
 is NOT the legacy pair (CLI JSONL under ``~/.claude/projects`` + the
 ``session_store_entries`` mirror). It is omni's parent-linked node DAG:
 ``omni_sessions.head_node_id`` points at the leaf, and ``omni_session_nodes``
@@ -11,7 +11,7 @@ then carries the omni session id (``ses_<hex12>``), not a CLI UUID.
 
 Every app feature that reads "the transcript" (rewind checkpoint resolution,
 fork, the ``/live`` reload path) was written against the legacy sources and
-therefore sees an EMPTY transcript for a flag-on session. This module is the
+therefore sees an EMPTY transcript for an omni session. This module is the
 one place that knows how to read the omni store for those features.
 
 The central trick: omni nodes are projected into **JSONL-shaped transcript
@@ -28,7 +28,7 @@ Projection is 1:1 and order-preserving: ``entries[i]`` is always
 ``load_omni_path()[i]``. Rewind depends on that (a keep-count over entries maps
 straight back to the node that must become the new head).
 
-Flag-off safety: nothing here runs for a legacy session. Every public entry
+Legacy-session safety: nothing here runs for a pre-omni session. Every public entry
 point is gated on :func:`looks_like_omni_session_id` (a cheap ``ses_`` prefix
 test that a CLI UUID can never satisfy) before any DB work, and the module is
 imported lazily at each call site.
@@ -95,9 +95,8 @@ def is_omni_session(sdk_session_id: Optional[str]) -> bool:
     against the store. The confirmation matters: the id shape alone would make
     every caller treat a typo'd/deleted id as omni and serve an empty
     transcript, whereas an unconfirmed id falls through to the legacy readers
-    exactly as before. Deliberately NOT gated on ``AIH_USE_OMNI_HARNESS`` —
-    a session recorded while the flag was on stays an omni session after the
-    flag is turned off, and its transcript must keep resolving.
+    exactly as before — sessions recorded before the omni cutover keep
+    resolving through the JSONL/session-store path.
     """
     if not looks_like_omni_session_id(sdk_session_id):
         return False
