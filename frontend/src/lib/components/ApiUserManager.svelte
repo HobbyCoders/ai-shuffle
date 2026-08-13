@@ -70,7 +70,7 @@
 		try {
 			const [usersData, profilesData, projectsData] = await Promise.all([
 				getApiUsers(),
-				api.get<Profile[]>('/profiles'),
+				api.get<Profile[]>('/agents'),
 				api.get<Project[]>('/projects')
 			]);
 			apiUsers = usersData;

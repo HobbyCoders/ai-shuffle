@@ -180,7 +180,7 @@
 			const [automationsData, approvalsData, profilesData, projectsData, connectorsData, connectorTypesData] = await Promise.all([
 				getAutomations(),
 				getPendingApprovals(),
-				api.get<Profile[]>('/profiles'),
+				api.get<Profile[]>('/agents'),
 				api.get<Project[]>('/projects'),
 				getConnectors().catch(() => [] as Connector[]),
 				getConnectorTypes().catch(() => [] as ConnectorTypeInfo[])

@@ -160,7 +160,7 @@
 		error = '';
 		try {
 			const [profilesRes, projectsRes] = await Promise.all([
-				api.get<Profile[]>('/profiles'),
+				api.get<Profile[]>('/agents'),
 				api.get<Project[]>('/projects')
 			]);
 			profiles = profilesRes;

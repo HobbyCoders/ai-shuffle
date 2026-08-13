@@ -129,7 +129,7 @@
 		loading = true;
 		try {
 			const [subagentsResult, toolsResult] = await Promise.all([
-				api.get<Subagent[]>('/subagents').catch((err) => {
+				api.get<Subagent[]>('/agents').catch((err) => {
 					console.warn('Failed to load subagents:', err);
 					return [];
 				}),

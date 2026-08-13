@@ -999,6 +999,27 @@ async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
+    """Ruling A6: the CLI's native Task/Agent/Workflow are always disallowed;
+    profile-level disallows merge in."""
+    import app.core.provider.harness_adapter as ha
+    from omni.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            cwd=str(tmp_path),
+            disallowed_tools=["WebSearch"],
+            extra={"omni_registry": ToolRegistry()},
+        )
+    )
+    banned = set(_CapturingLoop.captured["disallowed_tools"])
+    assert {"Task", "Agent", "Workflow", "WebSearch"} <= banned
+
+
+@pytest.mark.asyncio
 async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     """add_dirs (notes dir et al.) must reach the CLI as --add-dir dirs."""
     import app.core.provider.harness_adapter as ha

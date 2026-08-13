@@ -652,160 +652,28 @@ def _mk_subagent(db, agent_id, model):
     )
 
 
-class TestSubagentFrontmatterStamping:
-    def test_provider_session_composite_pin_is_omitted(self, mock_db, tmp_path):
-        """D4: with legs removed, a provider session resolves subagent frontmatter
-        with NATIVE semantics — a ``prov:`` composite can no longer be routed, so
-        the ``model:`` line is omitted and the agent inherits the main model."""
+class TestSubagentDefinitionsRetired:
+    """(P2c, rulings A6/R2) SDK AgentDefinitions are gone: enabled_agents is
+    now the Task tool's optional invoke allowlist, consumed at dispatch time
+    by app.core.task_dispatch — build_options_from_profile no longer builds
+    agents_dict no matter what the profile enables."""
+
+    def test_enabled_agents_produce_no_agent_definitions(self, mock_db):
+        from unittest.mock import patch as _patch
+        import app.core.query_options as qo
         from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
-        )
-        _mk_subagent(db, "pinned", "prov:sub:sub/model")
-        _mk_subagent(db, "unpinned", None)
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["pinned", "unpinned"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env"):
-            opts = _build_options(profile)
-        assert opts.agents["pinned"].model is None      # inherit main
-        assert opts.agents["unpinned"].model is None
 
-    def test_provider_session_claude_alias_pin_is_kept(self, mock_db, tmp_path):
-        """Native semantics keep a Claude alias verbatim on a provider session
-        too. (Under the gateway a chatgpt main replaced it with the session
-        default; there is no session default to substitute any more.)"""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}],
-        )
-        _mk_subagent(db, "cl", "sonnet")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["cl"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env"):
-            opts = _build_options(profile)
-        assert opts.agents["cl"].model == "sonnet"
+        db.create_profile("helper", "Helper", None, {"model": "sonnet"})
+        with _patch.object(qo, "get_security_instructions", return_value=""):
+            opts, agents_dict = qo.build_options_from_profile(
+                profile={"id": "t", "config": {
+                    "model": "opus", "tools_preset": "claude_code",
+                    "enabled_agents": ["helper"],
+                }},
+            )
+        assert agents_dict is None
+        assert opts.agents is None
 
-    def test_claude_alias_pin_kept_on_anthropic_main(self, mock_db, tmp_path):
-        """anthropic main serves Claude ids → a Claude-alias-pinned subagent keeps
-        its alias (behavior delta: anthropic-API main + `sonnet` → kept)."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="an", name="Claude API", provider_type="anthropic",
-            base_url="https://api.anthropic.com",
-            auth_token=encryption.encrypt_value("sk-ant"),
-            small_fast_model="claude-haiku",
-            models=[{"id": "claude-sonnet-4", "label": "S"}],
-        )
-        _mk_subagent(db, "cl", "sonnet")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "claude-sonnet-4", "provider": "an", "cwd": str(tmp_path),
-                "enabled_agents": ["cl"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env"):
-            opts = _build_options(profile)
-        assert opts.agents["cl"].model == "sonnet"
-
-    def test_native_session_leaves_subagent_models_untouched(self, mock_db, tmp_path):
-        """Native (no-provider) session: enabled-subagent models are left exactly
-        as stored (resolver/helper not invoked); apply_provider_env not called."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        _mk_subagent(db, "cl", "sonnet")
-        _mk_subagent(db, "unp", None)
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "opus", "cwd": str(tmp_path),
-                "enabled_agents": ["cl", "unp"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            opts = _build_options(profile)
-        m.assert_not_called()
-        assert opts.agents["cl"].model == "sonnet"
-        assert opts.agents["unp"].model is None
-
-    def test_native_composite_pin_omitted(self, mock_db, tmp_path):
-        """S8-R2: a NATIVE (no-provider) session with a composite-pinned subagent
-        omits the model (→ None → inherit main); the CLI cannot serve a
-        ``prov:...`` composite, so it must never be stamped verbatim."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        _mk_subagent(db, "comp", "prov:sub:gpt-5.6-luna")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "opus", "cwd": str(tmp_path),
-                "enabled_agents": ["comp"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            opts = _build_options(profile)
-        m.assert_not_called()
-        assert opts.agents["comp"].model is None
-
-    def test_native_claude_alias_pin_kept(self, mock_db, tmp_path):
-        """S8-R2: a NATIVE session keeps a Claude-alias-pinned subagent's model."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        _mk_subagent(db, "cl", "sonnet")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "opus", "cwd": str(tmp_path),
-                "enabled_agents": ["cl"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            opts = _build_options(profile)
-        m.assert_not_called()
-        assert opts.agents["cl"].model == "sonnet"
-
-    def test_native_unpinned_stays_none(self, mock_db, tmp_path):
-        """S8-R2: a NATIVE session leaves an unpinned subagent's model None."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        _mk_subagent(db, "unp", None)
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "opus", "cwd": str(tmp_path),
-                "enabled_agents": ["unp"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            opts = _build_options(profile)
-        m.assert_not_called()
-        assert opts.agents["unp"].model is None
-
-
-# ---------------------------------------------------------------------------
-# PR #775 guard: Skill(claude-api) stays blocked on non-Claude provider sessions
-# ---------------------------------------------------------------------------
 
 class TestClaudeApiSkillGuardSurvivesLegRemoval:
     """The guard used to key off ``SubagentLegPlan.main_serves_claude_ids``.

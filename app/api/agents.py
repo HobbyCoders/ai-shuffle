@@ -27,7 +27,7 @@ from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
+router = APIRouter(prefix="/api/v1/agents", tags=["Agents"])
 
 
 # Response model for subagent (matches frontend expectations)

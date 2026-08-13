@@ -503,21 +503,21 @@ export interface AgentImportRequest extends AgentExport {
  * Export an agent/profile as JSON and trigger download
  */
 export async function exportAgent(profileId: string): Promise<void> {
-	await fetchAndDownload(`/profiles/${profileId}/export`, `${profileId}-agent.json`);
+	await fetchAndDownload(`/agents/${profileId}/export`, `${profileId}-agent.json`);
 }
 
 /**
  * Get agent export data without downloading (for preview)
  */
 export async function getAgentExportData(profileId: string): Promise<AgentExport> {
-	return api.get<AgentExport>(`/profiles/${profileId}/export`);
+	return api.get<AgentExport>(`/agents/${profileId}/export`);
 }
 
 /**
  * Import an agent from JSON data
  */
 export async function importAgent(data: AgentImportRequest): Promise<Profile> {
-	return api.post<Profile>('/profiles/import', data);
+	return api.post<Profile>('/agents/import', data);
 }
 
 /** One rate-limit window in a usage snapshot. */
@@ -612,7 +612,7 @@ export async function getSubagentsForAutocomplete(
 	if (search) params.set('search', search);
 	params.set('limit', limit.toString());
 
-	return api.get<AutocompleteSubagent[]>(`/profiles/${profileId}/subagents/all?${params.toString()}`);
+	return api.get<AutocompleteSubagent[]>(`/agents/${profileId}/subagents/all?${params.toString()}`);
 }
 
 // ============================================================================

@@ -296,7 +296,7 @@ export const appData = {
 
 	async loadProfiles() {
 		try {
-			const profiles = await api.get<Profile[]>('/profiles');
+			const profiles = await api.get<Profile[]>('/agents');
 			_update(s => ({ ...s, profiles }));
 		} catch (e) {
 			console.error('Failed to load profiles:', e);
@@ -304,17 +304,17 @@ export const appData = {
 	},
 
 	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
-		await api.post('/profiles', data);
+		await api.post('/agents', data);
 		await appData.loadProfiles();
 	},
 
 	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown> }) {
-		await api.put(`/profiles/${profileId}`, data);
+		await api.put(`/agents/${profileId}`, data);
 		await appData.loadProfiles();
 	},
 
 	async deleteProfile(profileId: string) {
-		await api.delete(`/profiles/${profileId}`);
+		await api.delete(`/agents/${profileId}`);
 		await appData.loadProfiles();
 		// If the deleted profile was currently selected, pick a replacement so
 		// new sessions don't load a null profile. The cycle between app-data
@@ -329,7 +329,7 @@ export const appData = {
 	},
 
 	async restoreProfile(profileId: string) {
-		await api.post(`/profiles/${profileId}/restore`);
+		await api.post(`/agents/${profileId}/restore`);
 		await appData.loadProfiles();
 	},
 

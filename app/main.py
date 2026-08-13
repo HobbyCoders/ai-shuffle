@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, claude_accounts, model_providers, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications, usage
+from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams, model_registry, computer_use, cluster, notifications, usage
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
 
@@ -419,14 +419,13 @@ app.include_router(system.router)
 app.include_router(auth.router)
 app.include_router(claude_accounts.router)
 app.include_router(model_providers.router)
-app.include_router(profiles.router)
+app.include_router(agents.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(query.router)
 app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
-app.include_router(subagents.router)
 app.include_router(teams.router)
 app.include_router(permission_rules.router)
 app.include_router(import_export.router)

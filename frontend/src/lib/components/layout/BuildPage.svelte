@@ -100,7 +100,7 @@
 		plugins.loadInstalled();
 		hooks.loadAppHooks();
 		api
-			.get<unknown[]>('/subagents')
+			.get<unknown[]>('/agents')
 			.then((list) => { subagentCount = Array.isArray(list) ? list.length : 0; })
 			.catch(() => { /* count is best-effort */ });
 	});

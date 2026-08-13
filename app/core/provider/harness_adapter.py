@@ -258,11 +258,29 @@ class HarnessAdapter(ProviderAdapter):
                 cwd=options.cwd,
                 env=options.env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
+                # Ruling A6: the CLI's native subagent tools are BANNED — the
+                # app's Task tool (mcp__builtins__Task here) is the one
+                # orchestration surface. Profile-level disallows ride along.
+                disallowed_tools=sorted(
+                    {"Task", "Agent", "Workflow"} | set(options.disallowed_tools or [])
+                ),
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
+            # omni's bare Task builtin needs the app's dispatcher injected
+            # (ruling A13: omni owns the shape, the app owns the spawning).
+            native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id)
+            if omni_session_id:
+                try:
+                    from app.core.task_dispatch import make_omni_dispatcher
+
+                    native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
+                        omni_session_id
+                    )
+                except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
+                    logger.debug("task_dispatch injection failed", exc_info=True)
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
@@ -275,7 +293,7 @@ class HarnessAdapter(ProviderAdapter):
                 system=self._compile_prompt(system, append_system, options),
                 registry=self._registry,
                 permissions=permissions,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
+                ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=omni_session_id,
             )
@@ -311,6 +329,7 @@ class HarnessAdapter(ProviderAdapter):
                 getattr(sdk_options, "include_partial_messages", False)
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
+            disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -1029,7 +1048,15 @@ class HarnessAdapter(ProviderAdapter):
         # instance when patch_sdk_server assembled them; re-register the same
         # tools on omni's registry with the bridge's risk maps.
         from app.core.provider.omni_tool_bridge import register_recorded_sdk_servers
-        recorded = register_recorded_sdk_servers(registry, options.mcp_servers)
+        # Native legs run omni's bare-named Task builtin (ruling A13) — the
+        # bridged mcp__builtins__Task copy is excluded so the model sees ONE
+        # orchestration tool. The delegated leg keeps the MCP copy (the CLI
+        # can only receive external tools via --mcp-config).
+        recorded = register_recorded_sdk_servers(
+            registry,
+            options.mcp_servers,
+            skip_tools={"builtins": {"Task"}} if native else None,
+        )
         if recorded:
             logger.info(
                 "[HarnessAdapter] bridged in-proc sdk servers onto omni registry: %s",

@@ -21,28 +21,28 @@ class TestProfilesModuleImports:
     """Verify profiles module can be imported correctly."""
 
     def test_profiles_module_imports(self):
-        """Profiles module should import without errors."""
-        from app.api import profiles
-        assert profiles is not None
+        """Agents module should import without errors."""
+        from app.api import agents
+        assert agents is not None
 
     def test_profiles_router_exists(self):
         """Profiles router should exist."""
-        from app.api.profiles import router
+        from app.api.agents import router
         assert router is not None
 
     def test_subagent_response_model_exists(self):
         """SubagentResponse model should exist."""
-        from app.api.profiles import SubagentResponse
+        from app.api.agents import SubagentResponse
         assert SubagentResponse is not None
 
     def test_enabled_agents_request_model_exists(self):
         """EnabledAgentsRequest model should exist."""
-        from app.api.profiles import EnabledAgentsRequest
+        from app.api.agents import EnabledAgentsRequest
         assert EnabledAgentsRequest is not None
 
     def test_profile_subagent_request_model_exists(self):
         """ProfileSubagentRequest model should exist."""
-        from app.api.profiles import ProfileSubagentRequest
+        from app.api.agents import ProfileSubagentRequest
         assert ProfileSubagentRequest is not None
 
 
@@ -51,7 +51,7 @@ class TestRequestResponseModels:
 
     def test_subagent_response_valid(self):
         """SubagentResponse should accept valid data."""
-        from app.api.profiles import SubagentResponse
+        from app.api.agents import SubagentResponse
 
         now = datetime.now(timezone.utc)
         response = SubagentResponse(
@@ -71,7 +71,7 @@ class TestRequestResponseModels:
 
     def test_subagent_response_minimal(self):
         """SubagentResponse should accept minimal data."""
-        from app.api.profiles import SubagentResponse
+        from app.api.agents import SubagentResponse
 
         now = datetime.now(timezone.utc)
         response = SubagentResponse(
@@ -88,7 +88,7 @@ class TestRequestResponseModels:
 
     def test_enabled_agents_request_valid(self):
         """EnabledAgentsRequest should accept valid data."""
-        from app.api.profiles import EnabledAgentsRequest
+        from app.api.agents import EnabledAgentsRequest
 
         request = EnabledAgentsRequest(
             enabled_agents=["agent-1", "agent-2", "agent-3"]
@@ -97,14 +97,14 @@ class TestRequestResponseModels:
 
     def test_enabled_agents_request_empty(self):
         """EnabledAgentsRequest should accept empty list."""
-        from app.api.profiles import EnabledAgentsRequest
+        from app.api.agents import EnabledAgentsRequest
 
         request = EnabledAgentsRequest(enabled_agents=[])
         assert request.enabled_agents == []
 
     def test_profile_subagent_request_valid(self):
         """ProfileSubagentRequest should accept valid data."""
-        from app.api.profiles import ProfileSubagentRequest
+        from app.api.agents import ProfileSubagentRequest
 
         request = ProfileSubagentRequest(
             name="New Agent",
@@ -118,7 +118,7 @@ class TestRequestResponseModels:
 
     def test_profile_subagent_request_minimal(self):
         """ProfileSubagentRequest should accept minimal data for updates."""
-        from app.api.profiles import ProfileSubagentRequest
+        from app.api.agents import ProfileSubagentRequest
 
         request = ProfileSubagentRequest(
             description="Updated description",
@@ -199,18 +199,18 @@ def sample_subagent():
 # =============================================================================
 
 class TestListProfilesEndpoint:
-    """Test GET /api/v1/profiles endpoint."""
+    """Test GET /api/v1/agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_list_profiles_success(self):
         """Listing profiles should return all profiles."""
-        from app.api.profiles import list_profiles
+        from app.api.agents import list_profiles
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None  # Admin user
                 mock_db.get_all_profiles.return_value = [profile]
 
@@ -223,12 +223,12 @@ class TestListProfilesEndpoint:
     @pytest.mark.asyncio
     async def test_list_profiles_empty(self):
         """Listing profiles when none exist should return empty list."""
-        from app.api.profiles import list_profiles
+        from app.api.agents import list_profiles
 
         mock_request = create_mock_request()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_all_profiles.return_value = []
 
@@ -239,13 +239,13 @@ class TestListProfilesEndpoint:
     @pytest.mark.asyncio
     async def test_list_profiles_api_user_restricted(self):
         """API user with profile_ids should only see allowed profiles."""
-        from app.api.profiles import list_profiles
+        from app.api.agents import list_profiles
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_ids": ["test-profile", "other-profile"]
@@ -261,13 +261,13 @@ class TestListProfilesEndpoint:
     @pytest.mark.asyncio
     async def test_list_profiles_api_user_unrestricted(self):
         """API user without profile_ids should see all profiles."""
-        from app.api.profiles import list_profiles
+        from app.api.agents import list_profiles
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_ids": None
@@ -284,18 +284,18 @@ class TestListProfilesEndpoint:
 # =============================================================================
 
 class TestGetProfileEndpoint:
-    """Test GET /api/v1/profiles/{profile_id} endpoint."""
+    """Test GET /api/v1/agents/{profile_id} endpoint."""
 
     @pytest.mark.asyncio
     async def test_get_profile_success(self):
         """Getting a profile should return profile details."""
-        from app.api.profiles import get_profile
+        from app.api.agents import get_profile
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -307,13 +307,13 @@ class TestGetProfileEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_not_found(self):
         """Getting a non-existent profile should raise 404."""
-        from app.api.profiles import get_profile
+        from app.api.agents import get_profile
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = None
 
@@ -326,14 +326,14 @@ class TestGetProfileEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_api_user_forbidden(self):
         """API user should not access profiles not in their list."""
-        from app.api.profiles import get_profile
+        from app.api.agents import get_profile
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_ids": ["other-profile"]  # Does not include test-profile
@@ -349,13 +349,13 @@ class TestGetProfileEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_api_user_allowed(self):
         """API user should access profiles in their list."""
-        from app.api.profiles import get_profile
+        from app.api.agents import get_profile
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_ids": ["test-profile"]
@@ -372,12 +372,12 @@ class TestGetProfileEndpoint:
 # =============================================================================
 
 class TestCreateProfileEndpoint:
-    """Test POST /api/v1/profiles endpoint."""
+    """Test POST /api/v1/agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_create_profile_success(self):
         """Creating a profile should return the new profile."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
         now = datetime.now(timezone.utc).isoformat()
@@ -391,7 +391,7 @@ class TestCreateProfileEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None  # Doesn't exist
             mock_db.create_profile.return_value = created_profile
 
@@ -415,13 +415,13 @@ class TestCreateProfileEndpoint:
         The endpoint no longer raises 409 on a plain conflict — it appends
         ``-1``, ``-2``, ... until a free id is found, then persists that.
         """
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
         existing = sample_profile()  # id == "test-profile"
         created = {**existing, "id": "test-profile-1"}
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # "test-profile" is taken; the suffixed id is free, so the loop
             # terminates after exactly one bump.
             mock_db.get_profile.side_effect = (
@@ -449,11 +449,11 @@ class TestCreateProfileEndpoint:
         MagicMock call history until RAM hit tens of GB. The loop is now capped
         and raises 409 instead of spinning.
         """
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = sample_profile()  # always "exists"
 
             request = ProfileCreate(
@@ -477,18 +477,18 @@ class TestCreateProfileEndpoint:
 # =============================================================================
 
 class TestUpdateProfileEndpoint:
-    """Test PUT /api/v1/profiles/{profile_id} endpoint."""
+    """Test PUT /api/v1/agents/{profile_id} endpoint."""
 
     @pytest.mark.asyncio
     async def test_update_profile_success(self):
         """Updating a profile should return updated profile."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate
 
         profile = sample_profile()
         updated_profile = {**profile, "name": "Updated Name"}
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.update_profile.return_value = updated_profile
 
@@ -500,11 +500,11 @@ class TestUpdateProfileEndpoint:
     @pytest.mark.asyncio
     async def test_update_profile_not_found(self):
         """Updating a non-existent profile should raise 404."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             request = ProfileUpdate(name="Updated Name")
@@ -517,7 +517,7 @@ class TestUpdateProfileEndpoint:
     @pytest.mark.asyncio
     async def test_update_profile_with_config(self):
         """Updating profile config should work."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate, ProfileConfig
 
         profile = sample_profile()
@@ -526,7 +526,7 @@ class TestUpdateProfileEndpoint:
             "config": {"model": "opus", "max_turns": 10}
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.update_profile.return_value = updated_profile
 
@@ -538,13 +538,13 @@ class TestUpdateProfileEndpoint:
     @pytest.mark.asyncio
     async def test_update_builtin_profile(self):
         """Updating a builtin profile should work (allow_builtin=True)."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate
 
         profile = sample_builtin_profile()
         updated_profile = {**profile, "name": "Updated Claude Code"}
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.update_profile.return_value = updated_profile
 
@@ -567,11 +567,11 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_create_leg_requires_subagent_model(self):
         """subagent_provider set without a subagent_model → 400."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             request = ProfileCreate(
                 id="p", name="P",
                 config=ProfileConfig(
@@ -588,11 +588,11 @@ class TestSubagentLegValidation:
     async def test_create_leg_requires_main_provider(self):
         """A cross-provider subagent needs the main model on a provider too → 400
         when config has no provider (native main)."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             request = ProfileCreate(
                 id="p", name="P",
                 config=ProfileConfig(
@@ -608,11 +608,11 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_create_leg_provider_must_exist(self):
         """A subagent provider that does not exist → 400 (main is servable)."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # Main "op" is a servable anthropic provider; subagent "sub" is gone.
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
@@ -634,11 +634,11 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_create_leg_provider_must_be_enabled(self):
         """A disabled subagent provider → 400 (main is servable)."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
                 if pid == "op"
@@ -660,11 +660,11 @@ class TestSubagentLegValidation:
     async def test_create_leg_main_provider_must_be_gateway_servable(self):
         """A main provider that is not gateway-servable (e.g. openrouter/custom)
         → 400 (the leg can only route through the translator gateway)."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # Main "op" is a NON-servable custom provider; subagent is servable.
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Main", "enabled": True, "provider_type": "openrouter"}
@@ -687,11 +687,11 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_create_leg_subagent_provider_must_be_gateway_servable(self):
         """A subagent provider that is not gateway-servable → 400."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # Main servable (anthropic); subagent enabled but NON-servable.
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Main", "enabled": True, "provider_type": "anthropic"}
@@ -715,7 +715,7 @@ class TestSubagentLegValidation:
     async def test_create_leg_happy_path(self):
         """A legal cross-provider leg (anthropic-API main + Codex subagent)
         creates the profile."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
         now = datetime.now(timezone.utc).isoformat()
@@ -727,7 +727,7 @@ class TestSubagentLegValidation:
             },
             "is_builtin": False, "created_at": now, "updated_at": now,
         }
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # Main is an Anthropic-API provider; subagent is an enabled Codex.
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
@@ -754,7 +754,7 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_create_no_leg_skips_validation(self):
         """A profile with no subagent leg never touches provider validation."""
-        from app.api.profiles import create_profile
+        from app.api.agents import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
         now = datetime.now(timezone.utc).isoformat()
@@ -762,7 +762,7 @@ class TestSubagentLegValidation:
             "id": "p", "name": "P", "config": {"model": "sonnet"},
             "is_builtin": False, "created_at": now, "updated_at": now,
         }
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created
 
@@ -775,11 +775,11 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_update_leg_requires_subagent_model(self):
         """PUT validation mirrors create: leg without a model → 400."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate, ProfileConfig
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = sample_profile()
             request = ProfileUpdate(
                 config=ProfileConfig(
@@ -794,7 +794,7 @@ class TestSubagentLegValidation:
     @pytest.mark.asyncio
     async def test_update_leg_happy_path(self):
         """PUT with a legal cross-provider leg persists it."""
-        from app.api.profiles import update_profile
+        from app.api.agents import update_profile
         from app.core.models import ProfileUpdate, ProfileConfig
 
         profile = sample_profile()
@@ -802,7 +802,7 @@ class TestSubagentLegValidation:
             "model": "op/main", "provider": "op",
             "subagent_provider": "sub", "subagent_model": "sub/model",
         }}
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_model_provider.side_effect = lambda pid: (
                 {"id": "op", "name": "Claude API", "enabled": True, "provider_type": "anthropic"}
@@ -828,16 +828,16 @@ class TestSubagentLegValidation:
 # =============================================================================
 
 class TestDeleteProfileEndpoint:
-    """Test DELETE /api/v1/profiles/{profile_id} endpoint."""
+    """Test DELETE /api/v1/agents/{profile_id} endpoint."""
 
     @pytest.mark.asyncio
     async def test_delete_profile_success(self):
         """Deleting a profile should return None (204)."""
-        from app.api.profiles import delete_profile
+        from app.api.agents import delete_profile
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.delete_profile.return_value = True
 
@@ -849,10 +849,10 @@ class TestDeleteProfileEndpoint:
     @pytest.mark.asyncio
     async def test_delete_profile_not_found(self):
         """Deleting a non-existent profile should raise 404."""
-        from app.api.profiles import delete_profile
+        from app.api.agents import delete_profile
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
@@ -866,19 +866,19 @@ class TestDeleteProfileEndpoint:
 # =============================================================================
 
 class TestGetProfileAgentsEndpoint:
-    """Test GET /api/v1/profiles/{profile_id}/agents endpoint."""
+    """Test GET /api/v1/agents/{profile_id}/agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_get_profile_agents_success(self):
         """Getting profile agents should return full subagent data."""
-        from app.api.profiles import get_profile_agents
+        from app.api.agents import get_profile_agents
 
         mock_request = create_mock_request()
         profile = sample_profile()
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
                 mock_db.get_subagent.side_effect = lambda aid: subagent if aid == "agent-1" else None
@@ -892,7 +892,7 @@ class TestGetProfileAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_agents_empty(self):
         """Getting profile agents for profile with no agents should return empty."""
-        from app.api.profiles import get_profile_agents
+        from app.api.agents import get_profile_agents
 
         mock_request = create_mock_request()
         profile = {
@@ -904,8 +904,8 @@ class TestGetProfileAgentsEndpoint:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -916,13 +916,13 @@ class TestGetProfileAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_agents_not_found(self):
         """Getting agents for non-existent profile should raise 404."""
-        from app.api.profiles import get_profile_agents
+        from app.api.agents import get_profile_agents
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = None
 
@@ -934,14 +934,14 @@ class TestGetProfileAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_profile_agents_api_user_restricted(self):
         """API user with profile_id restriction should be denied."""
-        from app.api.profiles import get_profile_agents
+        from app.api.agents import get_profile_agents
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_id": "other-profile"  # Different profile
@@ -959,12 +959,12 @@ class TestGetProfileAgentsEndpoint:
 # =============================================================================
 
 class TestCreateProfileAgentEndpoint:
-    """Test POST /api/v1/profiles/{profile_id}/agents endpoint."""
+    """Test POST /api/v1/agents/{profile_id}/agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_create_profile_agent_success(self):
         """Creating a profile agent should return the new subagent."""
-        from app.api.profiles import create_profile_agent, ProfileSubagentRequest
+        from app.api.agents import create_profile_agent, ProfileSubagentRequest
 
         profile = sample_profile()
         now = datetime.now(timezone.utc).isoformat()
@@ -980,7 +980,7 @@ class TestCreateProfileAgentEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = None  # Doesn't exist yet
             mock_db.create_subagent.return_value = created_subagent
@@ -999,12 +999,12 @@ class TestCreateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_create_profile_agent_no_name(self):
         """Creating a profile agent without name should fail."""
-        from app.api.profiles import create_profile_agent, ProfileSubagentRequest
+        from app.api.agents import create_profile_agent, ProfileSubagentRequest
         from fastapi import HTTPException
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
 
             request = ProfileSubagentRequest(
@@ -1021,13 +1021,13 @@ class TestCreateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_create_profile_agent_conflict(self):
         """Creating a profile agent with existing ID should fail."""
-        from app.api.profiles import create_profile_agent, ProfileSubagentRequest
+        from app.api.agents import create_profile_agent, ProfileSubagentRequest
         from fastapi import HTTPException
 
         profile = sample_profile()
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = subagent  # Already exists
 
@@ -1046,10 +1046,10 @@ class TestCreateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_create_profile_agent_profile_not_found(self):
         """Creating an agent for non-existent profile should fail."""
-        from app.api.profiles import create_profile_agent, ProfileSubagentRequest
+        from app.api.agents import create_profile_agent, ProfileSubagentRequest
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             request = ProfileSubagentRequest(
@@ -1069,18 +1069,18 @@ class TestCreateProfileAgentEndpoint:
 # =============================================================================
 
 class TestUpdateProfileAgentEndpoint:
-    """Test PUT /api/v1/profiles/{profile_id}/agents/{agent_name} endpoint."""
+    """Test PUT /api/v1/agents/{profile_id}/agents/{agent_name} endpoint."""
 
     @pytest.mark.asyncio
     async def test_update_profile_agent_by_id(self):
         """Updating a profile agent by ID should work."""
-        from app.api.profiles import update_profile_agent, ProfileSubagentRequest
+        from app.api.agents import update_profile_agent, ProfileSubagentRequest
 
         profile = sample_profile()
         subagent = sample_subagent()
         updated_subagent = {**subagent, "description": "Updated description"}
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = subagent
             mock_db.update_subagent.return_value = updated_subagent
@@ -1097,7 +1097,7 @@ class TestUpdateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_update_profile_agent_by_name(self):
         """Updating a profile agent by name should work."""
-        from app.api.profiles import update_profile_agent, ProfileSubagentRequest
+        from app.api.agents import update_profile_agent, ProfileSubagentRequest
 
         profile_with_agent = {
             "id": "test-profile",
@@ -1110,7 +1110,7 @@ class TestUpdateProfileAgentEndpoint:
         subagent = sample_subagent()
         updated_subagent = {**subagent, "description": "Updated description"}
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile_with_agent
             # First call (by name) returns None, second call (by ID from enabled_agents) returns subagent
             mock_db.get_subagent.side_effect = lambda aid: subagent if aid == "test-subagent" else None
@@ -1128,12 +1128,12 @@ class TestUpdateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_update_profile_agent_not_found(self):
         """Updating a non-existent agent should raise 404."""
-        from app.api.profiles import update_profile_agent, ProfileSubagentRequest
+        from app.api.agents import update_profile_agent, ProfileSubagentRequest
         from fastapi import HTTPException
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = None
 
@@ -1150,10 +1150,10 @@ class TestUpdateProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_update_profile_agent_profile_not_found(self):
         """Updating an agent for non-existent profile should fail."""
-        from app.api.profiles import update_profile_agent, ProfileSubagentRequest
+        from app.api.agents import update_profile_agent, ProfileSubagentRequest
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             request = ProfileSubagentRequest(
@@ -1172,12 +1172,12 @@ class TestUpdateProfileAgentEndpoint:
 # =============================================================================
 
 class TestDeleteProfileAgentEndpoint:
-    """Test DELETE /api/v1/profiles/{profile_id}/agents/{agent_name} endpoint."""
+    """Test DELETE /api/v1/agents/{profile_id}/agents/{agent_name} endpoint."""
 
     @pytest.mark.asyncio
     async def test_delete_profile_agent_success(self):
         """Deleting a profile agent should return None (204)."""
-        from app.api.profiles import delete_profile_agent
+        from app.api.agents import delete_profile_agent
 
         profile_with_agent = {
             "id": "test-profile",
@@ -1189,7 +1189,7 @@ class TestDeleteProfileAgentEndpoint:
         }
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile_with_agent
             mock_db.get_subagent.return_value = subagent
             mock_db.update_profile.return_value = profile_with_agent
@@ -1203,7 +1203,7 @@ class TestDeleteProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_delete_profile_agent_removes_from_enabled(self):
         """Deleting a profile agent should remove it from enabled_agents."""
-        from app.api.profiles import delete_profile_agent
+        from app.api.agents import delete_profile_agent
 
         profile_with_agent = {
             "id": "test-profile",
@@ -1215,7 +1215,7 @@ class TestDeleteProfileAgentEndpoint:
         }
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile_with_agent
             mock_db.get_subagent.return_value = subagent
             mock_db.update_profile.return_value = profile_with_agent
@@ -1230,12 +1230,12 @@ class TestDeleteProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_delete_profile_agent_not_found(self):
         """Deleting a non-existent agent should raise 404."""
-        from app.api.profiles import delete_profile_agent
+        from app.api.agents import delete_profile_agent
         from fastapi import HTTPException
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = None
 
@@ -1247,10 +1247,10 @@ class TestDeleteProfileAgentEndpoint:
     @pytest.mark.asyncio
     async def test_delete_profile_agent_profile_not_found(self):
         """Deleting an agent for non-existent profile should fail."""
-        from app.api.profiles import delete_profile_agent
+        from app.api.agents import delete_profile_agent
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
@@ -1264,18 +1264,18 @@ class TestDeleteProfileAgentEndpoint:
 # =============================================================================
 
 class TestGetEnabledAgentsEndpoint:
-    """Test GET /api/v1/profiles/{profile_id}/enabled-agents endpoint."""
+    """Test GET /api/v1/agents/{profile_id}/enabled-agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_get_enabled_agents_success(self):
         """Getting enabled agents should return list of IDs."""
-        from app.api.profiles import get_enabled_agents
+        from app.api.agents import get_enabled_agents
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -1286,7 +1286,7 @@ class TestGetEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_enabled_agents_empty(self):
         """Getting enabled agents for profile with no agents should return empty."""
-        from app.api.profiles import get_enabled_agents
+        from app.api.agents import get_enabled_agents
 
         mock_request = create_mock_request()
         profile = {
@@ -1298,8 +1298,8 @@ class TestGetEnabledAgentsEndpoint:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -1310,13 +1310,13 @@ class TestGetEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_enabled_agents_not_found(self):
         """Getting enabled agents for non-existent profile should raise 404."""
-        from app.api.profiles import get_enabled_agents
+        from app.api.agents import get_enabled_agents
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = None
 
@@ -1328,14 +1328,14 @@ class TestGetEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_get_enabled_agents_api_user_restricted(self):
         """API user with profile_id restriction should be denied."""
-        from app.api.profiles import get_enabled_agents
+        from app.api.agents import get_enabled_agents
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_id": "other-profile"
@@ -1353,12 +1353,12 @@ class TestGetEnabledAgentsEndpoint:
 # =============================================================================
 
 class TestUpdateEnabledAgentsEndpoint:
-    """Test PUT /api/v1/profiles/{profile_id}/enabled-agents endpoint."""
+    """Test PUT /api/v1/agents/{profile_id}/enabled-agents endpoint."""
 
     @pytest.mark.asyncio
     async def test_update_enabled_agents_success(self):
         """Updating enabled agents should work."""
-        from app.api.profiles import update_enabled_agents, EnabledAgentsRequest
+        from app.api.agents import update_enabled_agents, EnabledAgentsRequest
 
         profile = sample_profile()
         subagents = [
@@ -1366,7 +1366,7 @@ class TestUpdateEnabledAgentsEndpoint:
             {"id": "agent-4", "name": "Agent 4"}
         ]
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_all_subagents.return_value = subagents
             mock_db.update_profile.return_value = profile
@@ -1379,12 +1379,12 @@ class TestUpdateEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_update_enabled_agents_invalid_ids(self):
         """Updating with invalid agent IDs should fail."""
-        from app.api.profiles import update_enabled_agents, EnabledAgentsRequest
+        from app.api.agents import update_enabled_agents, EnabledAgentsRequest
         from fastapi import HTTPException
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_all_subagents.return_value = [{"id": "valid-agent"}]
 
@@ -1399,11 +1399,11 @@ class TestUpdateEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_update_enabled_agents_empty(self):
         """Updating with empty list should work."""
-        from app.api.profiles import update_enabled_agents, EnabledAgentsRequest
+        from app.api.agents import update_enabled_agents, EnabledAgentsRequest
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_all_subagents.return_value = []
             mock_db.update_profile.return_value = profile
@@ -1416,10 +1416,10 @@ class TestUpdateEnabledAgentsEndpoint:
     @pytest.mark.asyncio
     async def test_update_enabled_agents_not_found(self):
         """Updating enabled agents for non-existent profile should fail."""
-        from app.api.profiles import update_enabled_agents, EnabledAgentsRequest
+        from app.api.agents import update_enabled_agents, EnabledAgentsRequest
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             request = EnabledAgentsRequest(enabled_agents=["agent-1"])
@@ -1435,17 +1435,17 @@ class TestUpdateEnabledAgentsEndpoint:
 # =============================================================================
 
 class TestEnableSubagentEndpoint:
-    """Test POST /api/v1/profiles/{profile_id}/enabled-agents/{subagent_id} endpoint."""
+    """Test POST /api/v1/agents/{profile_id}/enabled-agents/{subagent_id} endpoint."""
 
     @pytest.mark.asyncio
     async def test_enable_subagent_success(self):
         """Enabling a subagent should return success."""
-        from app.api.profiles import enable_subagent
+        from app.api.agents import enable_subagent
 
         profile = sample_profile()
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = subagent
             mock_db.update_profile.return_value = profile
@@ -1458,7 +1458,7 @@ class TestEnableSubagentEndpoint:
     @pytest.mark.asyncio
     async def test_enable_subagent_already_enabled(self):
         """Enabling an already enabled subagent should succeed without update."""
-        from app.api.profiles import enable_subagent
+        from app.api.agents import enable_subagent
 
         profile = {
             "id": "test-profile",
@@ -1470,7 +1470,7 @@ class TestEnableSubagentEndpoint:
         }
         subagent = sample_subagent()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = subagent
 
@@ -1483,12 +1483,12 @@ class TestEnableSubagentEndpoint:
     @pytest.mark.asyncio
     async def test_enable_subagent_not_found(self):
         """Enabling a non-existent subagent should raise 404."""
-        from app.api.profiles import enable_subagent
+        from app.api.agents import enable_subagent
         from fastapi import HTTPException
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = None
 
@@ -1500,10 +1500,10 @@ class TestEnableSubagentEndpoint:
     @pytest.mark.asyncio
     async def test_enable_subagent_profile_not_found(self):
         """Enabling subagent for non-existent profile should fail."""
-        from app.api.profiles import enable_subagent
+        from app.api.agents import enable_subagent
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
@@ -1517,12 +1517,12 @@ class TestEnableSubagentEndpoint:
 # =============================================================================
 
 class TestDisableSubagentEndpoint:
-    """Test DELETE /api/v1/profiles/{profile_id}/enabled-agents/{subagent_id} endpoint."""
+    """Test DELETE /api/v1/agents/{profile_id}/enabled-agents/{subagent_id} endpoint."""
 
     @pytest.mark.asyncio
     async def test_disable_subagent_success(self):
         """Disabling a subagent should return success."""
-        from app.api.profiles import disable_subagent
+        from app.api.agents import disable_subagent
 
         profile = {
             "id": "test-profile",
@@ -1533,7 +1533,7 @@ class TestDisableSubagentEndpoint:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.update_profile.return_value = profile
 
@@ -1545,11 +1545,11 @@ class TestDisableSubagentEndpoint:
     @pytest.mark.asyncio
     async def test_disable_subagent_not_enabled(self):
         """Disabling a non-enabled subagent should succeed without update."""
-        from app.api.profiles import disable_subagent
+        from app.api.agents import disable_subagent
 
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
 
             result = await disable_subagent("test-profile", "not-enabled-agent", token="test-token")
@@ -1561,10 +1561,10 @@ class TestDisableSubagentEndpoint:
     @pytest.mark.asyncio
     async def test_disable_subagent_profile_not_found(self):
         """Disabling subagent for non-existent profile should fail."""
-        from app.api.profiles import disable_subagent
+        from app.api.agents import disable_subagent
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
@@ -1578,18 +1578,18 @@ class TestDisableSubagentEndpoint:
 # =============================================================================
 
 class TestExportProfileEndpoint:
-    """Test GET /api/v1/profiles/{profile_id}/export endpoint."""
+    """Test GET /api/v1/agents/{profile_id}/export endpoint."""
 
     @pytest.mark.asyncio
     async def test_export_profile_success(self):
         """Exporting a profile should return agent export data."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -1605,7 +1605,7 @@ class TestExportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_export_profile_with_system_prompt(self):
         """Exporting a profile with system prompt should include it."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
 
         mock_request = create_mock_request()
         profile = {
@@ -1627,8 +1627,8 @@ class TestExportProfileEndpoint:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -1643,13 +1643,13 @@ class TestExportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_export_profile_not_found(self):
         """Exporting a non-existent profile should raise 404."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = None
 
@@ -1661,14 +1661,14 @@ class TestExportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_export_profile_api_user_restricted(self):
         """API user with profile_id restriction should be denied."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
         from fastapi import HTTPException
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = {
                     "id": "api-user-1",
                     "profile_id": "other-profile"
@@ -1683,13 +1683,13 @@ class TestExportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_export_profile_has_content_disposition(self):
         """Exported profile should have Content-Disposition header."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
 
         mock_request = create_mock_request()
         profile = sample_profile()
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -1704,12 +1704,12 @@ class TestExportProfileEndpoint:
 # =============================================================================
 
 class TestImportProfileEndpoint:
-    """Test POST /api/v1/profiles/import endpoint."""
+    """Test POST /api/v1/agents/import endpoint."""
 
     @pytest.mark.asyncio
     async def test_import_profile_success(self):
         """Importing a profile should return the new profile."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1723,7 +1723,7 @@ class TestImportProfileEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None  # ID doesn't exist
             mock_db.create_profile.return_value = created_profile
 
@@ -1744,7 +1744,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_with_new_id(self):
         """Importing with new_id should use that ID."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1758,7 +1758,7 @@ class TestImportProfileEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
@@ -1778,7 +1778,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_id_increment(self):
         """Importing with conflicting ID should increment."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1800,7 +1800,7 @@ class TestImportProfileEndpoint:
                 return {"id": "imported-agent"}  # First call returns existing
             return None  # Second call returns None
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.side_effect = mock_get_profile
             mock_db.create_profile.return_value = created_profile
 
@@ -1819,7 +1819,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_invalid_type(self):
         """Importing with invalid type should fail."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
         from fastapi import HTTPException
 
@@ -1838,7 +1838,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_unsupported_version(self):
         """Importing with unsupported version should fail."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
         from fastapi import HTTPException
 
@@ -1857,7 +1857,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_empty_name(self):
         """Importing with empty agent name should fail."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
         from fastapi import HTTPException
 
@@ -1878,7 +1878,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_with_custom_system_prompt(self):
         """Importing with custom system prompt should work."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1892,7 +1892,7 @@ class TestImportProfileEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
@@ -1917,7 +1917,7 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_with_preset_and_append(self):
         """Importing with preset system prompt and append should work."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1931,7 +1931,7 @@ class TestImportProfileEndpoint:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
@@ -1956,11 +1956,11 @@ class TestImportProfileEndpoint:
     @pytest.mark.asyncio
     async def test_import_profile_too_many_conflicts(self):
         """Importing when too many similar IDs exist should fail."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
         from fastapi import HTTPException
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             # Always return an existing profile
             mock_db.get_profile.return_value = {"id": "exists"}
 
@@ -1987,7 +1987,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_profile_with_empty_config(self):
         """Profile with empty config should be handled."""
-        from app.api.profiles import get_enabled_agents
+        from app.api.agents import get_enabled_agents
 
         mock_request = create_mock_request()
         profile = {
@@ -1999,8 +1999,8 @@ class TestEdgeCases:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -2011,7 +2011,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_export_profile_with_none_system_prompt(self):
         """Exporting profile with None system_prompt should work."""
-        from app.api.profiles import export_profile
+        from app.api.agents import export_profile
 
         mock_request = create_mock_request()
         profile = {
@@ -2027,8 +2027,8 @@ class TestEdgeCases:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        with patch("app.api.profiles.database") as mock_db:
-            with patch("app.api.profiles.get_api_user_from_request") as mock_api_user:
+        with patch("app.api.agents.database") as mock_db:
+            with patch("app.api.agents.get_api_user_from_request") as mock_api_user:
                 mock_api_user.return_value = None
                 mock_db.get_profile.return_value = profile
 
@@ -2041,7 +2041,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_create_agent_id_generation(self):
         """Agent ID should be properly generated from name."""
-        from app.api.profiles import create_profile_agent, ProfileSubagentRequest
+        from app.api.agents import create_profile_agent, ProfileSubagentRequest
 
         profile = sample_profile()
         now = datetime.now(timezone.utc).isoformat()
@@ -2057,7 +2057,7 @@ class TestEdgeCases:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             mock_db.get_subagent.return_value = None
             mock_db.create_subagent.return_value = created_subagent
@@ -2078,7 +2078,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_import_profile_special_characters_in_name(self):
         """Importing with special characters in name should sanitize ID."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -2092,7 +2092,7 @@ class TestEdgeCases:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
@@ -2112,7 +2112,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_import_profile_with_all_optional_fields(self):
         """Importing with all optional fields should populate config correctly."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData, AIToolsConfig
 
         now = datetime.now(timezone.utc).isoformat()
@@ -2126,7 +2126,7 @@ class TestEdgeCases:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
             # Subagents referenced by the import must exist in the target
@@ -2168,7 +2168,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_import_profile_default_id_fallback(self):
         """Importing with name that sanitizes to empty should use default ID."""
-        from app.api.profiles import import_profile
+        from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
         now = datetime.now(timezone.utc).isoformat()
@@ -2182,7 +2182,7 @@ class TestEdgeCases:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
@@ -2201,7 +2201,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_delete_profile_agent_by_name_match(self):
         """Deleting agent by name when it exists in enabled_agents should work."""
-        from app.api.profiles import delete_profile_agent
+        from app.api.agents import delete_profile_agent
 
         now = datetime.now(timezone.utc).isoformat()
         profile = {
@@ -2224,7 +2224,7 @@ class TestEdgeCases:
             "updated_at": now
         }
 
-        with patch("app.api.profiles.database") as mock_db:
+        with patch("app.api.agents.database") as mock_db:
             mock_db.get_profile.return_value = profile
             # First call for direct ID lookup returns None (agent_name doesn't match an ID)
             # Second call for ID from enabled_agents returns the subagent

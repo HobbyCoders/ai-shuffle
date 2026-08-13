@@ -171,7 +171,7 @@
 		loading = true;
 		error = null;
 		try {
-			subagents = await api.get<Subagent[]>('/subagents');
+			subagents = await api.get<Subagent[]>('/agents');
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to load subagents';

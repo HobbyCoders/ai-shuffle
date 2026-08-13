@@ -171,7 +171,7 @@
     if (dataLoaded) return;
     dataLoaded = true;
     try {
-      subagents = await api.get<Subagent[]>('/subagents');
+      subagents = await api.get<Subagent[]>('/agents');
     } catch (error) {
       console.error('Failed to load subagents:', error);
       subagents = [];

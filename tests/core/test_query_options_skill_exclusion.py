@@ -42,13 +42,9 @@ def _clean_worker_registry():
 
 @contextmanager
 def _stubbed_pa_server():
-    """The ProviderAgent server factory is irrelevant here — stub it so these
-    builds never construct a real SDK server."""
-    with patch(
-        "app.mcp.provider_agent_sdk.create_provider_agent_server",
-        return_value=MagicMock(name="provider-agent-server"),
-    ):
-        yield
+    """(P2c) The standalone ProviderAgent server is retired — the Task tool
+    rides the builtins server, so there is nothing to stub any more."""
+    yield
 
 
 def _mk_provider(provider_id, provider_type, *, models, token="gw-secret"):

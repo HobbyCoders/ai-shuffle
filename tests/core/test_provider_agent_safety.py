@@ -575,10 +575,12 @@ class TestPersistentNestingGuard:
 class TestNestingGuardWiring:
     """The guard has to be the one the options build and the tool actually use."""
 
-    def test_the_tool_is_not_offered_to_a_cross_runner_worker(self, db, monkeypatch):
+    def test_cross_runner_worker_keeps_task_but_not_the_old_server(self, db, monkeypatch):
+        """(P2c) Workers keep the unified Task tool — nesting is depth-gated in
+        task_dispatch, not denied at registration — but the retired
+        provider-agent server must never come back."""
         from app.core.config import settings
         from app.db import runs as runs_db
-        from app.mcp.provider_agent_sdk import get_provider_agent_tool_names
         import app.core.query_options as qo
 
         monkeypatch.setattr(settings, "provider_agent_enabled", True)
@@ -586,9 +588,7 @@ class TestNestingGuardWiring:
         run = runs_db.claim_run("worker-x", "runner-b", 60)
         turns_db.start_turn(turn["id"], run["id"], "runner-b")
 
-        with patch("app.mcp.provider_agent_sdk.create_provider_agent_server",
-                   return_value=MagicMock()), \
-                patch.object(qo, "get_security_instructions", return_value=""):
+        with patch.object(qo, "get_security_instructions", return_value=""):
             opts, _ = qo.build_options_from_profile(
                 profile={"id": "t", "config": {"model": "opus",
                                                "tools_preset": "claude_code"}},
@@ -597,7 +597,7 @@ class TestNestingGuardWiring:
 
         # Nothing in this process ever registered worker-x.
         assert pa.is_worker_session("worker-x") is False
-        assert not set(get_provider_agent_tool_names()) & set(opts.allowed_tools or [])
+        assert "mcp__builtins__Task" in set(opts.allowed_tools or [])
         servers = opts.mcp_servers if isinstance(opts.mcp_servers, dict) else {}
         assert "provider-agent" not in servers
 
@@ -614,9 +614,7 @@ class TestNestingGuardWiring:
         run = runs_db.claim_run("worker-q", "runner-b", 60)
         turns_db.start_turn(turn["id"], run["id"], "runner-b")
 
-        with patch("app.mcp.provider_agent_sdk.create_provider_agent_server",
-                   return_value=MagicMock()), \
-                patch.object(qo, "get_security_instructions", return_value=""):
+        with patch.object(qo, "get_security_instructions", return_value=""):
             opts, _ = qo.build_options_from_profile(
                 profile={"id": "t", "config": {"model": "opus",
                                                "tools_preset": "claude_code"}},
@@ -626,26 +624,28 @@ class TestNestingGuardWiring:
         assert pa.is_worker_session("worker-q") is False
         assert qo.WORKER_DISALLOWED_TOOL in (opts.disallowed_tools or [])
 
-    async def test_the_tool_handler_refuses_a_cross_runner_worker(self, db, monkeypatch):
+    async def test_task_dispatch_refuses_beyond_max_depth(self, db, monkeypatch):
+        """(P2c) The depth gate replaced the old one-level handler refusal:
+        a caller already at settings.task_tool_max_depth cannot dispatch."""
         from app.core.config import settings
-        from app.db import runs as runs_db
-        from app.mcp.provider_agent_sdk import build_provider_agent_tool
-        import json
+        from app.core import task_dispatch as td
 
-        monkeypatch.setattr(settings, "provider_agent_enabled", True)
-        turn = turns_db.enqueue_turn("worker-x", pa.WORKER_TURN_SOURCE, prompt="x")
-        run = runs_db.claim_run("worker-x", "runner-b", 60)
-        turns_db.start_turn(turn["id"], run["id"], "runner-b")
+        monkeypatch.setattr(settings, "task_tool_max_depth", 5)
+        # Simulate a caller five worker-levels deep.
+        monkeypatch.setattr(
+            td, "caller_chain", lambda sid: ([], "root-1", 5)
+        )
+        monkeypatch.setattr(
+            td, "resolve_target_agent",
+            lambda ref: ({"id": "helper", "name": "Helper", "config": {}}, None),
+        )
 
-        tool = build_provider_agent_tool(session_id="worker-x", profile_id="p1")
-        if tool is None:
-            pytest.skip("claude_agent_sdk not installed")
-
-        result = await tool.handler({"instance": "any", "prompt": "go"})
-        body = json.loads(result["content"][0]["text"])
-
-        assert body["success"] is False
-        assert "one nesting level only" in body["error"]
+        payload = await td.dispatch_task_tool(
+            {"agent": "helper", "prompt": "go"},
+            caller_session_id="worker-deep",
+        )
+        assert payload["ok"] is False
+        assert "Nesting limit" in payload["error"]
 
 
 # ---------------------------------------------------------------------------
