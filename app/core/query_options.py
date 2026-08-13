@@ -1127,4 +1127,13 @@ def build_options_from_profile(
             )
             options.enable_file_checkpointing = False
 
+    # Carry the resolved model-provider binding on the options object. The Agent
+    # SDK ignores unknown attributes, so this is inert on the default (flag-off)
+    # path; the omni HarnessAdapter reads it in connect_with_sdk_options and
+    # projects it onto SessionOptions.extra["provider_id"], which is how a native
+    # (non-delegated) omni leg gets the provider row's decrypted credentials
+    # instead of failing with a missing-credential 401. Always stamped (None for
+    # a native Anthropic session) so the attribute's presence is not a signal.
+    options.aih_provider_id = provider_id
+
     return options, agents_dict

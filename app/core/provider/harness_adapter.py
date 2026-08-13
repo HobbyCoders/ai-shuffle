@@ -39,6 +39,11 @@ HONORED:
   * ``extra["omni_store_dir"]`` / env ``AIH_OMNI_STORE_DIR`` → JsonlStore root
   * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
   * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
+  * ``extra["provider_id"]``         → the session's bound ``model_providers`` row;
+    its decrypted credentials authenticate the native client (API key, or a
+    Codex OAuth auth object for a ChatGPT-subscription row). Threaded from
+    ``query_options`` via ``ClaudeAgentOptions.aih_provider_id``. Absent → the
+    omni client's env-var fallback (see ``omni_credentials``).
 
   * in-proc SDK servers in ``mcp_servers`` (type="sdk": builtins, app-config,
     ai-tools, computer-use, provider-agent) → auto-bridged onto the omni
@@ -65,6 +70,10 @@ import logging
 import os
 from typing import Any, AsyncIterator, Dict, Optional
 
+from app.core.provider.omni_credentials import (
+    ProviderCredentialError,
+    resolve_provider_credentials,
+)
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import (
     PermissionRequestEvent,
@@ -107,7 +116,11 @@ from omni.events.ops import (
 )
 from omni.permissions.engine import PermissionEngine
 from omni.providers.anthropic.client import AnthropicClient
-from omni.providers.openai_responses.client import OpenAIResponsesClient
+from omni.providers.openai_responses.client import (
+    API_URL as OPENAI_RESPONSES_URL,
+    CODEX_RESPONSES_URL,
+    OpenAIResponsesClient,
+)
 from omni.providers.openrouter.client import OpenRouterClient
 from omni.store.base import MemoryStore
 from omni.store.jsonl import JsonlStore
@@ -213,7 +226,7 @@ class HarnessAdapter(ProviderAdapter):
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
-            provider_client = _build_provider_client(kind, options)
+            provider_client = await _build_provider_client(kind, options)
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
@@ -260,6 +273,14 @@ class HarnessAdapter(ProviderAdapter):
                 getattr(sdk_options, "include_partial_messages", False)
             ),
         )
+        # The session's bound model provider (``sessions.provider_id``) rides on
+        # the SDK options object as ``aih_provider_id`` (stamped by
+        # ``query_options.build_options_from_profile``; inert on the SDK path).
+        # It is what lets _build_provider_client authenticate a native leg from
+        # the app's encrypted ``model_providers`` row.
+        provider_id = getattr(sdk_options, "aih_provider_id", None)
+        if provider_id:
+            opts.extra["provider_id"] = provider_id
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
@@ -978,9 +999,58 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     return "anthropic"
 
 
-def _build_provider_client(kind: str, options: SessionOptions) -> Any:
+def _require_env_credential(env_var: str, kind: str) -> None:
+    """Dev-mode fallback guard: no provider row bound, so an env key is required.
+
+    Raising here turns "no credentials anywhere" into a user-visible config
+    error at connect time instead of a bare upstream 401 mid-turn.
+    """
+    if os.environ.get(env_var):
+        return
+    raise ProviderCredentialError(
+        f"No model provider is bound to this session and {env_var} is not set, "
+        f"so the {kind} provider has no credentials configured. Bind the session "
+        f"to a model provider (Settings → Model Providers) or set {env_var}."
+    )
+
+
+async def _build_provider_client(kind: str, options: SessionOptions) -> Any:
+    """Construct the omni native client for ``kind``, authenticated.
+
+    Credential resolution order (see ``omni_credentials``):
+      1. the session's bound ``model_providers`` row (``extra["provider_id"]``,
+         threaded from ``query_options`` through ``connect_with_sdk_options``) —
+         decrypted API key, or a Codex OAuth auth object for a
+         ChatGPT-subscription row;
+      2. otherwise the omni client's own env-var fallback (dev mode), which is
+         required to be present.
+
+    A bound-but-uncredentialed provider raises ``ProviderCredentialError``
+    (a ``ValueError``) rather than yielding a client that 401s on first use.
+    """
+    provider_id = options.extra.get("provider_id")
+    creds = None
+    if provider_id:
+        creds = await resolve_provider_credentials(kind, str(provider_id))
+
     if kind == "openai_responses":
+        if creds is not None:
+            return OpenAIResponsesClient(
+                api_key=creds.api_key,
+                auth=creds.auth,
+                base_url=CODEX_RESPONSES_URL if creds.use_codex_backend else OPENAI_RESPONSES_URL,
+            )
+        _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient()
     if kind == "openrouter":
+        if creds is not None:
+            return OpenRouterClient(api_key=creds.api_key)
+        _require_env_credential("OPENROUTER_API_KEY", kind)
         return OpenRouterClient()
+    # anthropic — API-key rows only. A Claude Pro/Max SUBSCRIPTION OAuth token is
+    # never routed here (that path stays delegated-CLI only); resolve_provider_
+    # credentials refuses such a row outright.
+    if creds is not None:
+        return AnthropicClient(api_key=creds.api_key)
+    _require_env_credential("ANTHROPIC_API_KEY", kind)
     return AnthropicClient()
