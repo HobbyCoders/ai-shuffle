@@ -261,8 +261,24 @@ class HarnessAdapter(ProviderAdapter):
                 # Ruling A6: the CLI's native subagent tools are BANNED — the
                 # app's Task tool (mcp__builtins__Task here) is the one
                 # orchestration surface. Profile-level disallows ride along.
+                # The CLI's native session-cron/wake tools (ScheduleWakeup and
+                # the CronCreate family) are banned for the same reason: the CLI
+                # fires those wake turns between queries, so the delegated client
+                # never reads them and they vanish from app history and cost
+                # accounting. The bridged app builtin
+                # mcp__builtins__ScheduleWakeup (wakeup_service-backed) is the
+                # one supported wake path on this leg.
                 disallowed_tools=sorted(
-                    {"Task", "Agent", "Workflow"} | set(options.disallowed_tools or [])
+                    {
+                        "Task",
+                        "Agent",
+                        "Workflow",
+                        "ScheduleWakeup",
+                        "CronCreate",
+                        "CronDelete",
+                        "CronList",
+                    }
+                    | set(options.disallowed_tools or [])
                 ),
                 claude_cmd=_resolve_claude_cmd(),
             )

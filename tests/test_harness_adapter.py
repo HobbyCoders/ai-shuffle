@@ -1020,6 +1020,26 @@ async def test_delegated_leg_bans_cli_subagent_tools(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_delegated_leg_bans_cli_wake_tools(monkeypatch, tmp_path):
+    """The CLI's native wake/cron tools fire turns the delegated client never
+    reads — only the bridged app builtin may schedule wakes."""
+    import app.core.provider.harness_adapter as ha
+    from omni.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            cwd=str(tmp_path),
+            extra={"omni_registry": ToolRegistry()},
+        )
+    )
+    banned = set(_CapturingLoop.captured["disallowed_tools"])
+    assert {"ScheduleWakeup", "CronCreate", "CronDelete", "CronList"} <= banned
+
+
+@pytest.mark.asyncio
 async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     """add_dirs (notes dir et al.) must reach the CLI as --add-dir dirs."""
     import app.core.provider.harness_adapter as ha
