@@ -18,7 +18,6 @@ export type ViewType =
 	| 'build'
 	| 'settings'
 	| 'profile'
-	| 'subagent'
 	| 'project'
 	| 'file-browser'
 	| 'plugins'
@@ -34,8 +33,8 @@ interface ActiveView {
 	/** Session ID for chat views, null for new chat */
 	sessionId?: string | null;
 	/**
-	 * Deep-link target within a feature page (e.g. a profile/subagent id to open
-	 * in its editor). One-shot: never persisted to localStorage and cleared after
+	 * Deep-link target within a feature page (e.g. an agent id to open in its
+	 * editor). One-shot: never persisted to localStorage and cleared after
 	 * the target page consumes it, so a reload doesn't re-open the editor.
 	 */
 	itemId?: string | null;

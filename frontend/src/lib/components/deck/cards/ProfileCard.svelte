@@ -74,6 +74,14 @@
 		is_builtin: boolean;
 	}
 
+	interface AgentTemplate {
+		id: string;
+		name: string;
+		description: string;
+		prompt: string;
+		tools?: string[];
+	}
+
 	interface GroupState {
 		profiles?: {
 			groups?: { name: string }[];
@@ -114,6 +122,9 @@
 	// Internal data state - loaded from stores/API
 	let allSubagents = $state<Subagent[]>([]);
 	let availableTools = $state<ToolsResponse>({ all_tools: [], categories: [] });
+	// Built-in system-prompt templates (GET /agents/templates) — offered when
+	// creating a new agent so the prompt can start from a curated preset.
+	let templates = $state<AgentTemplate[]>([]);
 	let loading = $state(true);
 
 	// Get profiles and groups from stores
@@ -128,18 +139,23 @@
 	async function loadData() {
 		loading = true;
 		try {
-			const [subagentsResult, toolsResult] = await Promise.all([
+			const [subagentsResult, toolsResult, templatesResult] = await Promise.all([
 				api.get<Subagent[]>('/agents').catch((err) => {
-					console.warn('Failed to load subagents:', err);
+					console.warn('Failed to load agents:', err);
 					return [];
 				}),
 				api.get<ToolsResponse>('/tools?refresh=true').catch((err) => {
 					console.warn('Failed to load tools:', err);
 					return { all_tools: [], categories: [] };
+				}),
+				api.get<AgentTemplate[]>('/agents/templates').catch((err) => {
+					console.warn('Failed to load agent templates:', err);
+					return [] as AgentTemplate[];
 				})
 			]);
 			allSubagents = subagentsResult;
 			availableTools = toolsResult;
+			templates = templatesResult;
 		} catch (e) {
 			console.error('Failed to load profile card data:', e);
 		} finally {
@@ -165,13 +181,12 @@
 		description: '',
 		model: getDefaultModel(),
 		provider: null as string | null,
-		subagent_provider: null as string | null,
-		subagent_model: null as string | null,
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
 		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
+		memory: '',
 		include_partial_messages: true,
 		thinking_mode: 'default' as 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think',
 		effort: null as 'low' | 'medium' | 'high' | 'max' | null,
@@ -319,13 +334,12 @@
 			description: '',
 			model: getDefaultModel(),
 			provider: null,
-			subagent_provider: null,
-			subagent_model: null,
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
 			disallowed_tools: [],
 			enabled_agents: [],
+			memory: '',
 			include_partial_messages: true,
 			thinking_mode: 'default' as 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think',
 			effort: null,
@@ -404,13 +418,16 @@
 			description: profile.description || '',
 			model: normalizeModel(config.model) || getDefaultModel(),
 			provider: config.provider ?? null,
-			subagent_provider: (config as any).subagent_provider ?? null,
-			subagent_model: (config as any).subagent_model ?? null,
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
-			enabled_agents: ((config as any).enabled_agents || []).filter((id: string) => allSubagents.some(a => a.id === id)),
+			// Invoke allowlist: keep only ids that still resolve to a known agent,
+			// and never include this agent itself.
+			enabled_agents: ((config as any).enabled_agents || []).filter(
+				(id: string) => id !== profile.id && allSubagents.some(a => a.id === id)
+			),
+			memory: (config as any).memory || '',
 			include_partial_messages: config.include_partial_messages !== false,
 			thinking_mode: (config as any).thinking_mode || 'default',
 			effort: (config as any).effort || null,
@@ -539,7 +556,6 @@
 	const customAgents = $derived(allSubagents.filter(a => !a.is_builtin));
 
 	function toggleAgent(agentId: string) {
-		if (builtinAgentIds.includes(agentId)) return;
 		if (profileForm.enabled_agents.includes(agentId)) {
 			profileForm.enabled_agents = profileForm.enabled_agents.filter((id) => id !== agentId);
 		} else {
@@ -590,6 +606,21 @@
 		if (custom) profileForm.provider = null;
 	}
 
+	// Apply a built-in template to the (new) agent's prompt. Explicit user action
+	// only — never auto-applied. Fills the custom-prompt content and, when the
+	// template carries a tool list, the allow-list; the user can edit freely after.
+	function applyTemplate(templateId: string) {
+		const tpl = templates.find((t) => t.id === templateId);
+		if (!tpl) return;
+		profileForm.system_prompt_type = 'custom';
+		profileForm.system_prompt_content = tpl.prompt;
+		if (Array.isArray(tpl.tools) && tpl.tools.length > 0) {
+			toolSelectionMode = 'allow';
+			profileForm.allowed_tools = [...tpl.tools];
+			profileForm.disallowed_tools = [];
+		}
+	}
+
 	// Save profile
 	async function saveProfile() {
 		if (!profileForm.name) return;
@@ -599,15 +630,6 @@
 			permission_mode: profileForm.permission_mode,
 			// model_providers.id, or omitted (→ native Anthropic) when unset.
 			...(profileForm.provider ? { provider: profileForm.provider } : {}),
-			// Optional cross-provider subagent leg — persisted as a pair, and only
-			// when a provider model is chosen for it (null = inherit). The main
-			// picker clears these whenever the profile drops back to native.
-			...(profileForm.provider && profileForm.subagent_provider
-				? {
-						subagent_provider: profileForm.subagent_provider,
-						subagent_model: profileForm.subagent_model
-					}
-				: {}),
 			include_partial_messages: profileForm.include_partial_messages,
 			enable_file_checkpointing: profileForm.enable_file_checkpointing,
 			app_config_tools: profileForm.app_config_tools,
@@ -631,8 +653,10 @@
 		} else if (toolSelectionMode === 'disallow') {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
-		const allEnabledAgents = [...new Set([...builtinAgentIds, ...profileForm.enabled_agents])];
-		config.enabled_agents = allEnabledAgents;
+		// Invoke allowlist: the raw selection (empty = may invoke any agent).
+		config.enabled_agents = profileForm.enabled_agents;
+		// Per-agent memory (plain text). Omit when empty so clearing it persists.
+		if (profileForm.memory.trim()) config.memory = profileForm.memory;
 		if (profileForm.setting_sources.length > 0) {
 			config.setting_sources = profileForm.setting_sources;
 		}
@@ -700,7 +724,7 @@
 				await tabsStore.createProfile(data);
 			}
 		} catch (e: any) {
-			toast.push('Failed to save profile: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
+			toast.push('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
 			return;
 		}
 
@@ -811,13 +835,12 @@
 			// AI-generated/imported profiles are always native Anthropic today —
 			// the export format doesn't carry a provider id.
 			provider: null,
-			subagent_provider: null,
-			subagent_model: null,
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
+			memory: (agent as any).memory || '',
 			include_partial_messages: agent.include_partial_messages !== false,
 			thinking_mode: (agent as any).thinking_mode || 'default',
 			effort: (agent as any).effort || null,
@@ -875,14 +898,14 @@
 
 {#if viewMode === 'form'}
 		<StudioEditorShell
-			title={editingProfile ? editingProfile.name : 'New Profile'}
-			subtitle={editingProfile ? `Profile · ${getModelDisplay(profileForm.model)}` : 'Create a new profile'}
-			backLabel="Profiles"
+			title={editingProfile ? editingProfile.name : 'New Agent'}
+			subtitle={editingProfile ? `Agent · ${getModelDisplay(profileForm.model)}` : 'Create a new agent'}
+			backLabel="Agents"
 			onBack={backToList}
 			sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: tabIcons[t.id as keyof typeof tabIcons] }))}
 			active={activeTab}
 			onSelect={(id) => (activeTab = id)}
-			railLabel="Profile sections"
+			railLabel="Agent sections"
 		>
 
 			<ProfileForm
@@ -895,6 +918,7 @@
 				{allSubagents}
 				{builtinAgentIds}
 				{customAgents}
+				{templates}
 				{sdkToolCategories}
 				{aiToolCategories}
 				{aiToolsLoading}
@@ -912,6 +936,7 @@
 				onToggleAIToolCategory={toggleAIToolCategory}
 				onToggleSection={toggleSection}
 				onToggleAgent={toggleAgent}
+				onApplyTemplate={applyTemplate}
 				onToggleSettingSource={toggleSettingSource}
 				onAssignToGroup={assignToGroup}
 				onRemoveFromGroup={removeFromGroup}
@@ -961,7 +986,7 @@
 <ConfirmDialog
 	open={!!pendingRevert}
 	title="Restore defaults"
-	message="Restore this profile to its original default settings? Your customizations will be lost."
+	message="Restore this agent to its original default settings? Your customizations will be lost."
 	confirmLabel="Restore"
 	danger
 	onConfirm={confirmRevert}

@@ -1,7 +1,7 @@
 /**
  * Tests for the one-shot deep-link itemId added to the layout store.
  *
- * Spotlight can deep-link to a profile/subagent editor via
+ * Spotlight can deep-link to an agent editor via
  * openFeaturePage(type, itemId). Because activeView persists to localStorage,
  * the itemId must be one-shot: never written to storage (so a reload doesn't
  * re-open the editor) and clearable once the target page consumes it.
@@ -27,12 +27,12 @@ describe('layout store — one-shot deep-link itemId', () => {
 
 	it('does not persist the itemId to localStorage', async () => {
 		const { layout } = await import('./layout.svelte');
-		layout.openFeaturePage('subagent', 'agent-9');
+		layout.openFeaturePage('mcp', 'agent-9');
 
 		const raw = localStorage.getItem(STORAGE_KEY);
 		expect(raw).toBeTruthy();
 		const parsed = JSON.parse(raw!);
-		expect(parsed.activeView.type).toBe('subagent');
+		expect(parsed.activeView.type).toBe('mcp');
 		expect('itemId' in parsed.activeView).toBe(false);
 	});
 

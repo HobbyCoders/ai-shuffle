@@ -80,7 +80,7 @@
 </script>
 
 <div class="set-group">
-	<div class="set-grouphead"><h3><Wrench />Tool access</h3><p>Control which tools this profile can use during conversations.</p></div>
+	<div class="set-grouphead"><h3><Wrench />Tool access</h3><p>Control which tools this agent can use during conversations.</p></div>
 	<div class="set-row">
 		<div class="lab"><h4>Mode</h4><p>Allow everything, block everything, or curate a list.</p></div>
 		<div class="ctl">

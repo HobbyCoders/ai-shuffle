@@ -347,7 +347,7 @@
 			return;
 		}
 		if (!formProfileId) {
-			formError = 'Profile is required';
+			formError = 'Agent is required';
 			return;
 		}
 		formSaving = true;

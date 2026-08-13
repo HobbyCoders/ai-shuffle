@@ -68,14 +68,14 @@
 <!-- One home for every credential -->
 <div class="ed-note">
 	<Info />
-	<div><b>One home for every credential.</b> Your Claude account, API keys and model gateways live here together — each row shows its status and is masked. Pick which models a provider offers via its <b>Manage models</b>; choose the model per profile in the profile editor.</div>
+	<div><b>One home for every credential.</b> Your Claude account, API keys and model gateways live here together — each row shows its status and is masked. Pick which models a provider offers via its <b>Manage models</b>; choose the model per agent in the agent editor.</div>
 </div>
 
 <!-- Group A: model providers -->
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Server />Providers</h3>
-		<p>Your Claude subscription and API key, plus any OpenRouter / OpenAI / custom gateways. Enabled providers and their curated models appear in the profile editor.</p>
+		<p>Your Claude subscription and API key, plus any OpenRouter / OpenAI / custom gateways. Enabled providers and their curated models appear in the agent editor.</p>
 	</div>
 
 	<div class="prov-groupbody">

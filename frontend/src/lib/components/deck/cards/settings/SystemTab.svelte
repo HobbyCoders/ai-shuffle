@@ -36,7 +36,7 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><FileText />System prompt</h3>
-		<p>Prepended to every system prompt sent to Claude, across all profiles.</p>
+		<p>Prepended to every system prompt sent to Claude, across all agents.</p>
 	</div>
 	{#if loadingSecurityInstructions}
 		<div class="sg-body"><p class="muted">Loading…</p></div>

@@ -2,13 +2,15 @@
  * Behavior tests for the reworked SpotlightSearch palette.
  *
  * The rework removed the slash-Commands group and added server-side session
- * search (debounced) plus client-filtered Profiles and Subagents groups. These
- * mount the real component with its data dependencies mocked and assert:
+ * search (debounced) plus a client-filtered Agents group (loaded from
+ * /agents). Profiles and Subagents were unified into a single "Agents" group
+ * when subagents stopped being a distinct concept. These mount the real
+ * component with its data dependencies mocked and assert:
  *  - the Commands group is gone entirely (no "Commands" heading, ever)
- *  - Profiles / Subagents groups render and are selectable
+ *  - the Agents group renders and is selectable
  *  - the debounced session search fires exactly once for a burst of keystrokes
- *  - keyboard ArrowDown navigation crosses group boundaries (Chats → Profiles →
- *    Subagents → Quick Actions) using a single global index
+ *  - keyboard ArrowDown navigation crosses group boundaries (Chats → Agents →
+ *    Quick Actions) using a single global index
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
@@ -20,26 +22,7 @@ if (!('scrollIntoView' in Element.prototype)) {
 }
 
 const mocks = vi.hoisted(() => {
-	function store<T>(initial: T) {
-		let val = initial;
-		const subs = new Set<(v: T) => void>();
-		return {
-			subscribe(fn: (v: T) => void) {
-				fn(val);
-				subs.add(fn);
-				return () => subs.delete(fn);
-			},
-			set(v: T) {
-				val = v;
-				subs.forEach((f) => f(val));
-			}
-		};
-	}
 	return {
-		profilesStore: store<unknown[]>([
-			{ id: 'prof-1', name: 'Researcher', description: 'Deep research profile', is_builtin: false },
-			{ id: 'prof-2', name: 'Coder', description: 'Writes code', is_builtin: false }
-		]),
 		apiGet: vi.fn(),
 		searchSessionsPaginated: vi.fn()
 	};
@@ -51,10 +34,6 @@ vi.mock('$lib/api/sessions', () => ({
 
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet }
-}));
-
-vi.mock('$lib/stores/app-data.svelte', () => ({
-	profiles: mocks.profilesStore
 }));
 
 vi.mock('$lib/utils/sanitize', () => ({
@@ -77,8 +56,7 @@ function baseProps(overrides: Record<string, unknown> = {}) {
 		currentProjectId: undefined,
 		onClose: vi.fn(),
 		onSelectSession: vi.fn(),
-		onSelectProfile: vi.fn(),
-		onSelectSubagent: vi.fn(),
+		onSelectAgent: vi.fn(),
 		onNewChat: vi.fn(),
 		onOpenSettings: vi.fn(),
 		...overrides
@@ -89,7 +67,8 @@ beforeEach(() => {
 	mocks.apiGet.mockReset();
 	mocks.searchSessionsPaginated.mockReset();
 	mocks.apiGet.mockResolvedValue([
-		{ id: 'agent-1', name: 'Explorer', description: 'Searches the codebase' }
+		{ id: 'agent-1', name: 'Explorer', description: 'Searches the codebase' },
+		{ id: 'agent-2', name: 'Researcher', description: 'Deep research agent' }
 	]);
 	mocks.searchSessionsPaginated.mockResolvedValue({
 		items: [],
@@ -106,34 +85,27 @@ afterEach(() => {
 });
 
 describe('SpotlightSearch — groups', () => {
-	it('never renders a Commands group and shows Profiles + Subagents', async () => {
+	it('never renders a Commands group and shows a single Agents group', async () => {
 		render(SpotlightSearch, { props: baseProps() });
-		// Subagents are loaded async via api.get('/subagents').
+		// Agents are loaded async via api.get('/agents').
 		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
 
 		expect(screen.queryByText('Commands')).toBeNull();
+		expect(screen.queryByText('Profiles')).toBeNull();
+		expect(screen.queryByText('Subagents')).toBeNull();
 		expect(screen.getByText('Chats')).toBeTruthy();
-		expect(screen.getByText('Profiles')).toBeTruthy();
-		expect(screen.getByText('Subagents')).toBeTruthy();
+		expect(screen.getByText('Agents')).toBeTruthy();
 		expect(screen.getByText('Quick Actions')).toBeTruthy();
-		// Profiles render from the store.
+		// Agents render from the /agents fetch.
 		expect(screen.getByText('Researcher')).toBeTruthy();
 	});
 
-	it('selecting a profile fires onSelectProfile with its id', async () => {
-		const onSelectProfile = vi.fn();
-		render(SpotlightSearch, { props: baseProps({ onSelectProfile }) });
-		await waitFor(() => expect(screen.getByText('Researcher')).toBeTruthy());
-		await fireEvent.click(screen.getByText('Researcher'));
-		expect(onSelectProfile).toHaveBeenCalledWith('prof-1');
-	});
-
-	it('selecting a subagent fires onSelectSubagent with its id', async () => {
-		const onSelectSubagent = vi.fn();
-		render(SpotlightSearch, { props: baseProps({ onSelectSubagent }) });
+	it('selecting an agent fires onSelectAgent with its id', async () => {
+		const onSelectAgent = vi.fn();
+		render(SpotlightSearch, { props: baseProps({ onSelectAgent }) });
 		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
 		await fireEvent.click(screen.getByText('Explorer'));
-		expect(onSelectSubagent).toHaveBeenCalledWith('agent-1');
+		expect(onSelectAgent).toHaveBeenCalledWith('agent-1');
 	});
 });
 
@@ -168,7 +140,7 @@ describe('SpotlightSearch — keyboard navigation across groups', () => {
 		const { container } = render(SpotlightSearch, { props: baseProps() });
 		await waitFor(() => expect(screen.getByText('Explorer')).toBeTruthy());
 
-		// Layout (empty query): 2 recent chats, 2 profiles, 1 subagent, 2 quick actions.
+		// Layout (empty query): 2 recent chats, 2 agents, 2 quick actions.
 		// index 0 selected by default.
 		const selectedIndexOf = () => {
 			const el = container.querySelector('.spotlight-item.selected') as HTMLElement | null;
@@ -178,14 +150,13 @@ describe('SpotlightSearch — keyboard navigation across groups', () => {
 		expect(selectedIndexOf()).toBe(0);
 
 		const win = window;
-		for (let i = 1; i <= 4; i++) {
+		for (let i = 1; i <= 3; i++) {
 			await fireEvent.keyDown(win, { key: 'ArrowDown' });
 			await tick();
 			expect(selectedIndexOf()).toBe(i);
 		}
-		// index 2 is the first profile row; index 4 is the first subagent row —
-		// proves navigation crossed Chats → Profiles → Subagents.
-		const rowAt4 = container.querySelector('[data-index="4"]') as HTMLElement;
-		expect(rowAt4.textContent).toContain('Explorer');
+		// index 2 is the first agent row — proves navigation crossed Chats → Agents.
+		const rowAt2 = container.querySelector('[data-index="2"]') as HTMLElement;
+		expect(rowAt2.textContent).toContain('Explorer');
 	});
 });

@@ -126,7 +126,7 @@
 	<div class="bpg-toolbar">
 		<div class="bpg-search">
 			<Search size={14} strokeWidth={1.7} />
-			<input type="text" placeholder="Search profiles…" autocomplete="off" bind:value={searchQuery} />
+			<input type="text" placeholder="Search agents…" autocomplete="off" bind:value={searchQuery} />
 		</div>
 		<div class="bpg-tools">
 			<button class="bpg-btn" onclick={onImport} disabled={importing}>
@@ -185,7 +185,7 @@
 						<RowActionMenu
 							open={actionsOpenId === profile.id}
 							onToggle={(e) => toggleRowActions(e, profile.id)}
-							label="Profile actions"
+							label="Agent actions"
 						>
 							{#if profile.is_builtin && profile.is_modified}
 								<button class="bpg-act" title="Revert to defaults" onclick={() => { actionsOpenId = null; onRevertProfile(profile.id); }}>
@@ -208,13 +208,13 @@
 
 		<button class="bpg-new" onclick={onNewProfile}>
 			<span class="bpg-new-plus"><Plus size={20} strokeWidth={2.2} /></span>
-			<span class="bpg-new-label">New profile</span>
+			<span class="bpg-new-label">New agent</span>
 			<span class="bpg-new-sub">or generate with AI</span>
 		</button>
 	</div>
 
 	{#if filtered.length === 0 && searchQuery.trim()}
-		<p class="bpg-empty">No profiles match “{searchQuery}”.</p>
+		<p class="bpg-empty">No agents match “{searchQuery}”.</p>
 	{/if}
 </div>
 

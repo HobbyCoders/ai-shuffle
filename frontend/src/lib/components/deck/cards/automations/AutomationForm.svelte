@@ -335,11 +335,11 @@
 										oninput={(e) => { updateActionStep(i, { ...step, prompt: e.currentTarget.value }); }}></textarea>
 									<div class="af-grid-2">
 										<div class="af-mini-field">
-											<label class="af-mini-label" for="auto-step-profile-{i}">Profile (optional)</label>
+											<label class="af-mini-label" for="auto-step-profile-{i}">Agent (optional)</label>
 											<select class="af-input" id="auto-step-profile-{i}"
 												value={step.profile_id || ''}
 												onchange={(e) => { updateActionStep(i, { ...step, profile_id: e.currentTarget.value || undefined }); }}>
-												<option value="">Default (automation profile)</option>
+												<option value="">Default (automation agent)</option>
 												{#each profiles as profile}
 													<option value={profile.id}>{profile.name}</option>
 												{/each}
@@ -405,10 +405,10 @@
 	</button>
 	{#if !collapsedSections.has('config')}
 		<div class="set-row">
-			<div class="lab"><h4>Profile <span class="req">*</span></h4><p>The profile this automation runs under.</p></div>
+			<div class="lab"><h4>Agent <span class="req">*</span></h4><p>The agent this automation runs under.</p></div>
 			<div class="ctl">
 				<select class="sel" value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
-					<option value="">Select a profile…</option>
+					<option value="">Select an agent…</option>
 					{#each profiles as profile}
 						<option value={profile.id}>{profile.name}</option>
 					{/each}

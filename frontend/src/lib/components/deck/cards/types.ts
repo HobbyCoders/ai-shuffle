@@ -6,7 +6,6 @@ export type CardType =
   | 'chat'
   | 'settings'
   | 'profile'
-  | 'subagent'
   | 'project'
   | 'file-browser'
   | 'plugins'
@@ -40,7 +39,6 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   chat: { width: 480, height: 640 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
-  subagent: { width: 550, height: 580 },
   project: { width: 480, height: 520 },
   'file-browser': { width: 600, height: 500 },
   plugins: { width: 650, height: 550 },
@@ -55,7 +53,6 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   chat: { width: 360, height: 400 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },
-  subagent: { width: 400, height: 350 },
   project: { width: 360, height: 300 },
   'file-browser': { width: 400, height: 350 },
   plugins: { width: 500, height: 450 },

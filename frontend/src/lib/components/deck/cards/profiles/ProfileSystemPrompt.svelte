@@ -31,7 +31,7 @@
 </script>
 
 <div class="set-group">
-	<div class="set-grouphead"><h3><FileText />System prompt</h3><p>Choose how the system prompt is configured for this profile.</p></div>
+	<div class="set-grouphead"><h3><FileText />System prompt</h3><p>Choose how the system prompt is configured for this agent.</p></div>
 	<div class="set-row">
 		<div class="lab"><h4>Mode</h4><p>Append to Claude Code's default, or replace it entirely.</p></div>
 		<div class="ctl">

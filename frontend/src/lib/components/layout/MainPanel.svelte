@@ -52,7 +52,7 @@
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
 	import DiffViewer from '$lib/components/git/DiffViewer.svelte';
 
-	// Feature page components (Profiles/Subagents/MCP/Plugins/Hooks now live
+	// Feature page components (Agents/MCP/Plugins/Hooks now live
 	// inside BuildPage, so they're imported there rather than here).
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
 	import ProjectCard from '$lib/components/deck/cards/ProjectCard.svelte';
@@ -81,8 +81,7 @@
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
 		'settings': 'Settings',
-		'profile': 'Profiles',
-		'subagent': 'Subagents',
+		'profile': 'Agents',
 		'project': 'Projects',
 		'file-browser': 'Files',
 		'plugins': 'Plugins',
@@ -97,15 +96,15 @@
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
 		'board', 'build',
-		'profile', 'project', 'settings', 'subagent',
+		'profile', 'project', 'settings',
 		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'stats', 'docs'
 	]);
 
-	// The Build page hosts the agent-config tools under one surface. The five
+	// The Build page hosts the agent-config tools under one surface. The
 	// member view types remain as deep-link targets ("Configure agents →",
 	// "Manage plugins") and resolve to BuildPage with the right sub-tab.
-	type BuildSub = 'profile' | 'subagent' | 'mcp' | 'plugins' | 'hooks';
-	const BUILD_SUBS: BuildSub[] = ['profile', 'subagent', 'mcp', 'plugins', 'hooks'];
+	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
+	const BUILD_SUBS: BuildSub[] = ['profile', 'mcp', 'plugins', 'hooks'];
 	const isBuildView = $derived(
 		$activeView?.type === 'build' || BUILD_SUBS.includes($activeView?.type as BuildSub)
 	);
@@ -114,7 +113,7 @@
 			? ($activeView!.type as BuildSub)
 			: undefined
 	);
-	// One-shot deep-link target (profile/subagent id) to open in its editor.
+	// One-shot deep-link target (agent id) to open in its editor.
 	const buildRequestedItemId = $derived($activeView?.itemId ?? undefined);
 
 	// Get the active session state (if in chat view)
@@ -796,7 +795,7 @@
 				/>
 			</div>
 		{:else if isBuildView}
-			<!-- Unified Build page (hosts Profiles/Subagents/MCP/Plugins/Hooks) -->
+			<!-- Unified Build page (hosts Agents/MCP/Plugins/Hooks) -->
 			<div class="feature-panel">
 				<BuildPage requestedSub={buildRequestedSub} requestedItemId={buildRequestedItemId} />
 			</div>
