@@ -5,6 +5,8 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+import uuid
+
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
 from app.db import database
@@ -22,6 +24,107 @@ logger = logging.getLogger(__name__)
 
 # Sub-router — included by the main sessions router (no prefix needed)
 fork_router = APIRouter(tags=["Sessions"])
+
+
+async def _fork_omni_session(
+    *,
+    request: Request,
+    session_id: str,
+    original_session: dict,
+    sdk_session_id: str,
+    message_index,
+) -> ForkSessionResponse:
+    """Fork an omni-harness session through its node tree.
+
+    Same product behavior as the JSONL fork below — a new session row whose
+    transcript is the original's history up to the chosen message — expressed
+    in omni's model: the new omni session's head is set to the fork node and the
+    ancestry prefix is copied verbatim (same node ids, same parents, same
+    messages), so the shared prefix stays byte-identical and prompt caching
+    survives the fork.
+
+    ``message_index`` keeps its existing meaning: an index into the session's
+    display entries, which for omni is exactly the on-path node list (the node
+    tree has no meta/sidechain/queue-operation entries to filter out). ``None``
+    means "fork the whole session" — the sessions-board Fork action.
+    """
+    from app.core.provider.omni_transcript import (
+        fork_omni_session,
+        omni_transcript_entries,
+    )
+
+    entries = await run_sync(omni_transcript_entries, sdk_session_id)
+    if not entries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot fork an empty session",
+        )
+
+    if message_index is None:
+        fork_message_index = len(entries) - 1
+    else:
+        if message_index < 0 or message_index >= len(entries):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid message_index: {message_index}. Session has "
+                    f"{len(entries)} messages (0-{len(entries) - 1})"
+                ),
+            )
+        fork_message_index = message_index
+
+    fork_node_id = entries[fork_message_index]["uuid"]
+
+    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
+    api_user = get_api_user_from_request(request)
+    api_user_id = api_user["id"] if api_user else None
+    original_title = original_session.get("title") or "Untitled"
+    fork_title = f"Fork of {original_title}"
+
+    # Copy the ancestry FIRST: if it fails there is no orphan session row to
+    # clean up (the JSONL fork below has to delete the row it already created).
+    try:
+        new_sdk_session_id, node_count = await run_sync(
+            fork_omni_session, sdk_session_id, fork_node_id
+        )
+    except Exception:
+        logger.exception("Failed to fork omni node tree for session %s", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create forked session",
+        )
+
+    await run_sync(
+        database.create_session,
+        session_id=new_session_id,
+        profile_id=original_session.get("profile_id"),
+        project_id=original_session.get("project_id"),
+        title=fork_title,
+        api_user_id=api_user_id,
+        parent_session_id=session_id,
+        fork_point_message_index=fork_message_index,
+        is_active=True,
+    )
+    await run_sync(
+        database.update_session,
+        session_id=new_session_id,
+        sdk_session_id=new_sdk_session_id,
+    )
+
+    logger.debug(
+        "Forked omni session %s -> %s (omni %s, %d nodes) at message index %d",
+        session_id, new_session_id, new_sdk_session_id, node_count,
+        fork_message_index,
+    )
+
+    return ForkSessionResponse(
+        session_id=new_session_id,
+        title=fork_title,
+        parent_session_id=session_id,
+        fork_point_message_index=fork_message_index,
+        message_count=node_count,
+        status="success",
+    )
 
 
 @fork_router.post("/{session_id}/fork", response_model=ForkSessionResponse)
@@ -66,6 +169,20 @@ async def fork_session(
         project = await run_sync(database.get_project, project_id)
         if project:
             working_dir = get_project_working_dir(project)
+
+    # omni (flag-on) sessions keep their transcript in omni's node tree, not in
+    # a CLI JSONL — the lookup below would fail with "JSONL file not found" and
+    # the fork never happens. Fork them through the node tree instead.
+    from app.core.provider.omni_transcript import is_omni_session
+
+    if await run_sync(is_omni_session, sdk_session_id):
+        return await _fork_omni_session(
+            request=request,
+            session_id=session_id,
+            original_session=original_session,
+            sdk_session_id=sdk_session_id,
+            message_index=body.message_index,
+        )
 
     # Find the original JSONL file
     original_jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)

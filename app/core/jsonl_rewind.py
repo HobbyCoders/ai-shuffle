@@ -155,6 +155,129 @@ def _trim_trailing_queue_ops(
     return keep_count
 
 
+def extract_entry_text(entry: Mapping[str, Any]) -> str:
+    """Extract the text content from a transcript entry.
+
+    Source-agnostic: ``entry`` is any raw transcript dict (a JSONL line, a
+    session-store ``entry`` JSONB, or an omni node projected by
+    ``app.core.provider.omni_transcript``).
+    """
+    message = entry.get('message', {})
+    content = message.get('content', '')
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get('type') == 'text':
+                    text_parts.append(block.get('text', ''))
+        return ' '.join(text_parts)
+
+    return ''
+
+
+def checkpoints_from_entries(
+    entries: Sequence[Mapping[str, Any]]
+) -> List[Checkpoint]:
+    """Build the rewind checkpoint list from raw transcript entries.
+
+    The pure, source-agnostic core of :meth:`JSONLRewindService.get_checkpoints`
+    — extracted so the omni node-tree transcript
+    (:func:`app.core.provider.omni_transcript.get_omni_checkpoints`) produces a
+    checkpoint list with IDENTICAL population and ordering rules. That identity
+    is load-bearing: the rewind content guard compares a client-side occurrence
+    ordinal against this list, so any divergence in which entries qualify would
+    make the guard refuse (or, worse, mis-target) a valid rewind.
+
+    Both user and assistant messages are checkpoints:
+    - rewinding to a user message removes it and everything after,
+    - rewinding to an assistant message keeps that response and removes after.
+    """
+    checkpoints: List[Checkpoint] = []
+    checkpoint_index = 0
+
+    for entry in entries:
+        # Skip non-message entries
+        entry_type = entry.get('type')
+        if entry_type not in ('user', 'assistant'):
+            continue
+
+        # Skip meta messages (slash commands, system prompts)
+        if entry.get('isMeta'):
+            continue
+
+        # Skip sidechain messages (alternate conversation branches)
+        if entry.get('isSidechain'):
+            continue
+
+        message = entry.get('message', {})
+        role = message.get('role')
+
+        # Handle user messages
+        if entry_type == 'user' and role == 'user':
+            # Extract message text
+            text = extract_entry_text(entry)
+
+            # Skip empty messages and tool results
+            if not text or text.startswith('<'):
+                continue
+
+            # Check if content is tool_result (array with tool_result blocks)
+            content = message.get('content', '')
+            if isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(block, dict) and block.get('type') == 'tool_result'
+                    for block in content
+                )
+                if has_tool_result:
+                    continue
+
+            checkpoints.append(Checkpoint(
+                uuid=entry.get('uuid', ''),
+                index=checkpoint_index,
+                message_preview=text[:100] + ('...' if len(text) > 100 else ''),
+                full_message=text,
+                role='user',
+                timestamp=entry.get('timestamp')
+            ))
+            checkpoint_index += 1
+
+        # Handle assistant messages
+        elif entry_type == 'assistant' and role == 'assistant':
+            # Extract message text
+            text = extract_entry_text(entry)
+
+            # Skip empty messages
+            if not text:
+                continue
+
+            # Skip tool use messages (we want the final text response)
+            content = message.get('content', '')
+            if isinstance(content, list):
+                # Check if this is purely tool_use blocks (no text)
+                has_text = any(
+                    isinstance(block, dict) and block.get('type') == 'text'
+                    for block in content
+                )
+                if not has_text:
+                    continue
+
+            checkpoints.append(Checkpoint(
+                uuid=entry.get('uuid', ''),
+                index=checkpoint_index,
+                message_preview=text[:100] + ('...' if len(text) > 100 else ''),
+                full_message=text,
+                role='assistant',
+                timestamp=entry.get('timestamp')
+            ))
+            checkpoint_index += 1
+
+    return checkpoints
+
+
 class JSONLRewindService:
     """
     Service for rewinding Claude conversations by manipulating JSONL files.
@@ -228,22 +351,13 @@ class JSONLRewindService:
         return entries
 
     def _extract_message_text(self, entry: Dict[str, Any]) -> str:
-        """Extract the text content from a message entry."""
-        message = entry.get('message', {})
-        content = message.get('content', '')
+        """Extract the text content from a message entry.
 
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get('type') == 'text':
-                        text_parts.append(block.get('text', ''))
-            return ' '.join(text_parts)
-
-        return ''
+        Thin wrapper over the module-level :func:`extract_entry_text` (kept as a
+        method because ``rewind_db_sync`` and the tests call it through the
+        service singleton).
+        """
+        return extract_entry_text(entry)
 
     def get_checkpoints(
         self,
@@ -270,87 +384,7 @@ class JSONLRewindService:
             return []
 
         entries = self._parse_jsonl_entries(jsonl_path)
-        checkpoints = []
-        checkpoint_index = 0
-
-        for entry in entries:
-            # Skip non-message entries
-            entry_type = entry.get('type')
-            if entry_type not in ('user', 'assistant'):
-                continue
-
-            # Skip meta messages (slash commands, system prompts)
-            if entry.get('isMeta'):
-                continue
-
-            # Skip sidechain messages (alternate conversation branches)
-            if entry.get('isSidechain'):
-                continue
-
-            message = entry.get('message', {})
-            role = message.get('role')
-
-            # Handle user messages
-            if entry_type == 'user' and role == 'user':
-                # Extract message text
-                text = self._extract_message_text(entry)
-
-                # Skip empty messages and tool results
-                if not text or text.startswith('<'):
-                    continue
-
-                # Check if content is tool_result (array with tool_result blocks)
-                content = message.get('content', '')
-                if isinstance(content, list):
-                    has_tool_result = any(
-                        isinstance(block, dict) and block.get('type') == 'tool_result'
-                        for block in content
-                    )
-                    if has_tool_result:
-                        continue
-
-                checkpoint = Checkpoint(
-                    uuid=entry.get('uuid', ''),
-                    index=checkpoint_index,
-                    message_preview=text[:100] + ('...' if len(text) > 100 else ''),
-                    full_message=text,
-                    role='user',
-                    timestamp=entry.get('timestamp')
-                )
-                checkpoints.append(checkpoint)
-                checkpoint_index += 1
-
-            # Handle assistant messages
-            elif entry_type == 'assistant' and role == 'assistant':
-                # Extract message text
-                text = self._extract_message_text(entry)
-
-                # Skip empty messages
-                if not text:
-                    continue
-
-                # Skip tool use messages (we want the final text response)
-                content = message.get('content', '')
-                if isinstance(content, list):
-                    # Check if this is purely tool_use blocks (no text)
-                    has_text = any(
-                        isinstance(block, dict) and block.get('type') == 'text'
-                        for block in content
-                    )
-                    if not has_text:
-                        continue
-
-                checkpoint = Checkpoint(
-                    uuid=entry.get('uuid', ''),
-                    index=checkpoint_index,
-                    message_preview=text[:100] + ('...' if len(text) > 100 else ''),
-                    full_message=text,
-                    role='assistant',
-                    timestamp=entry.get('timestamp')
-                )
-                checkpoints.append(checkpoint)
-                checkpoint_index += 1
-
+        checkpoints = checkpoints_from_entries(entries)
         logger.debug(f"Found {len(checkpoints)} checkpoints for session {sdk_session_id}")
         return checkpoints
 

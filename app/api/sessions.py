@@ -1098,7 +1098,22 @@ async def get_live_session(
             # Worktree-aware working dir (worktree → project → default).
             working_dir = await run_sync(resolve_working_dir, dict(session))
 
-            if _postgres_only:
+            from app.core.provider.omni_transcript import (
+                is_omni_session,
+                omni_live_messages,
+            )
+
+            if await run_sync(is_omni_session, sdk_session_id):
+                # omni (flag-on) session: the transcript is omni's node tree,
+                # so neither the store parser nor the JSONL parser finds
+                # anything and the read fell through to the legacy-DB rescue
+                # below ("postgres_only store empty for ... — serving legacy DB
+                # transcript"). Serve the node tree, run through the SAME
+                # _transform_entries core, so the rendered shape is identical.
+                jsonl_messages, usage_data = await run_sync(
+                    omni_live_messages, sdk_session_id, working_dir
+                )
+            elif _postgres_only:
                 # postgres_only: replace the JSONL fallback with the store-backed
                 # parser (SAME transform). The DB fast path above is unchanged.
                 jsonl_messages, usage_data = await run_sync(

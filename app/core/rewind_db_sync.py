@@ -113,7 +113,23 @@ def _load_transcript_entries(
     every rewind (the e2e "rewind leftover" bug).
 
     Returns ``[]`` when neither source has entries. Never raises.
+
+    An omni-harness session has neither source: its transcript is omni's node
+    tree. The facade projects those nodes onto the same entry shape, so every
+    matcher in this module keeps working unchanged. The probe is prefix-gated,
+    so a legacy session pays nothing for it.
     """
+    try:
+        from app.core.provider.omni_transcript import (
+            is_omni_session,
+            omni_transcript_entries,
+        )
+
+        if is_omni_session(sdk_session_id):
+            return omni_transcript_entries(sdk_session_id)
+    except Exception as e:
+        logger.debug("Omni transcript load failed for %s: %s", sdk_session_id, e)
+
     try:
         jsonl_path = jsonl_rewind_service._get_jsonl_path(sdk_session_id, working_dir)
         if jsonl_path:

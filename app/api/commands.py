@@ -412,6 +412,23 @@ class RewindResponseV2(BaseModel):
     warning: Optional[str] = None  # Warning message for partial success scenarios
 
 
+def _get_checkpoints(sdk_session_id: str, working_dir: str):
+    """Checkpoints for a session, from whichever transcript store owns it.
+
+    Flag-aware read facade. A session created with ``AIH_USE_OMNI_HARNESS=1``
+    keeps its transcript in omni's node tree (``omni_session_nodes``) and its
+    ``sdk_session_id`` is an omni ``ses_...`` id, so the JSONL service finds
+    nothing for it — which made the rewind content guard fail closed ("transcript
+    has 0 user prompt(s) matching..."). ``is_omni_session`` is prefix-gated, so a
+    legacy session never even queries: this is a no-op on the default path.
+    """
+    from app.core.provider.omni_transcript import get_omni_checkpoints, is_omni_session
+
+    if is_omni_session(sdk_session_id):
+        return get_omni_checkpoints(sdk_session_id)
+    return jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+
+
 async def rewind_files_via_sdk(
     sdk_session_id: str,
     target_uuid: str,
@@ -492,7 +509,7 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
     working_dir = get_working_dir_for_project(session.get("project_id"))
 
     # Get checkpoints from JSONL rewind service
-    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
 
     if not checkpoints:
         # Fallback: get from our local database (less accurate but better than nothing)
@@ -618,7 +635,7 @@ def _resolve_checkpoint_uuid_from_content(
             "Rewind refused: no target content supplied to resolve against "
             "(content guard)"
         )
-    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
     matches = [
         cp for cp in checkpoints
         if cp.role == "user" and (cp.full_message or "").strip() == want
@@ -681,7 +698,7 @@ def _resolve_rewind_from_seq(
                 f"Rewind refused: assistant target {target_uuid} not found in "
                 f"the event log (assistant targets resolve by uuid only)"
             )
-        checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+        checkpoints = _get_checkpoints(sdk_session_id, working_dir)
         user_cps = [cp for cp in checkpoints if cp.role == "user"]
         pos = next(
             (k for k, cp in enumerate(user_cps) if cp.uuid == target_uuid), None
@@ -764,6 +781,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     # Get working directory for project
     working_dir = get_working_dir_for_project(session.get("project_id"))
+
+    # Which transcript store owns this session? An omni (flag-on) session keeps
+    # its conversation in omni's node tree, so the JSONL/session-store
+    # truncation path below simply has nothing to cut — it needs the node-tree
+    # rewind instead. Prefix-gated probe: a legacy session never queries.
+    from app.core.provider.omni_transcript import is_omni_session
+    omni_session = await asyncio.to_thread(is_omni_session, sdk_session_id)
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
@@ -863,7 +887,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # IMPORTANT: File rewind must happen BEFORE chat rewind.
     # Chat rewind truncates the JSONL file, which can remove the target message UUID.
     # The SDK needs that UUID present in the JSONL to find the file checkpoint.
-    if request.restore_files:
+    if request.restore_files and omni_session:
+        # File checkpoints are an SDK feature keyed to a CLI transcript uuid;
+        # ``rewind_files_via_sdk`` would resume the SDK on an omni ``ses_...``
+        # id it cannot find. Refuse explicitly instead of surfacing a confusing
+        # SDK error — the chat rewind below still runs (partial success).
+        errors.append(
+            "File restore is not available for omni-harness sessions "
+            "(no SDK file checkpoints)"
+        )
+    elif request.restore_files:
         file_success, file_error = await rewind_files_via_sdk(
             sdk_session_id=sdk_session_id,
             target_uuid=request.target_uuid,
@@ -874,13 +907,95 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         else:
             errors.append(file_error or "File rewind failed")
 
+    # Chat rewind, omni (flag-on) sessions. The transcript is omni's node tree,
+    # so the rewind is omni's NATIVE one: move ``omni_sessions.head_node_id``
+    # back up the parent chain. Nothing is deleted — the rewound-away nodes stay
+    # in the tree but off-path, so ``load_path`` (and therefore the context the
+    # next turn builds) stops at the checkpoint and that turn branches a sibling.
+    # WHERE it cuts comes from the same ``compute_rewind_keep_count`` the legacy
+    # truncation uses, so the rewind lands on the same message either way.
+    #
+    # The legacy ``session_messages`` rows are truncated alongside it (same
+    # anchor logic as below) because they are what the UI actually renders for
+    # these sessions today — omitting that is the "rewind succeeded but the
+    # message is still in chat" bug.
+    if request.restore_chat and omni_session:
+        from app.core.provider.omni_transcript import rewind_omni_session
+
+        anchor_id: Optional[int] = None
+        try:
+            anchor_id = await asyncio.to_thread(
+                resolve_rewind_anchor,
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                working_dir=working_dir,
+                target_uuid=request.target_uuid,
+            )
+        except Exception as anchor_err:
+            logger.error(
+                f"Omni rewind DB anchor resolution failed for session "
+                f"{session_id}: {anchor_err}",
+                exc_info=True,
+            )
+
+        omni_result = await asyncio.to_thread(
+            rewind_omni_session,
+            sdk_session_id,
+            request.target_uuid,
+            request.include_response,
+            request.target_role,
+        )
+        if omni_result.success:
+            chat_rewound = True
+            messages_removed = omni_result.messages_removed or 0
+            if omni_result.remaining_user_turns is not None:
+                turn_diff = omni_result.remaining_user_turns - session.get("turn_count", 0)
+                if turn_diff != 0:
+                    await asyncio.to_thread(
+                        database.update_session, session_id, turn_increment=turn_diff
+                    )
+        else:
+            errors.append(f"Chat rewind failed: {omni_result.error}")
+
+        if chat_rewound:
+            if anchor_id is not None:
+                try:
+                    db_removed = await asyncio.to_thread(
+                        apply_rewind_delete,
+                        session_id=session_id,
+                        anchor_id=anchor_id,
+                        include_response=request.include_response,
+                    )
+                    logger.info(
+                        f"Omni rewind DB sync: session={session_id}, "
+                        f"target_node={request.target_uuid}, "
+                        f"db_rows_removed={db_removed}, "
+                        f"nodes_dropped={messages_removed}"
+                    )
+                except Exception as db_err:
+                    logger.error(
+                        f"Omni rewind DB sync failed for session {session_id}: {db_err}",
+                        exc_info=True,
+                    )
+                    errors.append(f"DB sync failed: {db_err}")
+            else:
+                logger.warning(
+                    f"Omni rewind DB sync skipped: no anchor row resolved for "
+                    f"session={session_id} target={request.target_uuid}"
+                )
+            # The sdk_session_id pointer is NOT cleared even when the rewind
+            # emptied the transcript: an omni session with a NULL head is a
+            # perfectly resumable session (the next turn appends a root node),
+            # unlike a CLI session id whose transcript no longer exists.
+            invalidate_parse_cache(sdk_session_id)
+
     # Execute chat rewind. There are up to three storage layers to keep in sync:
     #   (a) the Postgres session store (``session_store_entries``) — the source
     #       of truth the UI reads in ``postgres_only`` mode,
     #   (b) the on-disk JSONL transcript the SDK resumes from, and
     #   (c) the legacy ``session_messages`` rows.
     # Which one is authoritative depends on ``session_store_mode``.
-    if request.restore_chat:
+    elif request.restore_chat:
         store_mode = settings.session_store_mode
         postgres_only = store_mode == "postgres_only"
         store_truncation_enabled = store_mode in ("mirror", "postgres_only")
@@ -1098,6 +1213,21 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     if partial_success:
         warning = "Chat rewound successfully. File restore unavailable - no checkpoint exists for this point."
 
+    # Honesty guard for omni sessions running the DELEGATED (claude CLI) engine:
+    # the store-side rewind and the visible transcript are correct, but the CLI
+    # keeps its OWN conversation history and omni cannot truncate it
+    # (``DelegatedLoop.caps`` declares rewind=False; ``--resume`` is its only
+    # history control). The model may therefore still carry the rewound-away
+    # turns into the next reply. Surfaced rather than swallowed — a rewind that
+    # silently lied about context would be worse than one that refuses.
+    if omni_session and chat_rewound:
+        divergence = (
+            "Transcript rewound. Note: on the delegated claude-CLI engine the "
+            "model's own history is not truncated, so it may still recall the "
+            "removed turns."
+        )
+        warning = f"{warning} {divergence}" if warning else divergence
+
     # Build result message
     if success and not partial_success:
         parts = []
@@ -1208,7 +1338,7 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
     sdk_session_id = session.get("sdk_session_id")
     working_dir = get_working_dir_for_project(session.get("project_id"))
 
-    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
 
     if request.checkpoint_index >= len(checkpoints):
         return RewindExecuteResponse(
