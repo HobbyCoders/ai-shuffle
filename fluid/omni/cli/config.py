@@ -16,7 +16,6 @@ from typing import Any
 
 from omni.config.loader import build_engine
 from omni.config.model import HarnessConfig
-from omni.context.instructions import build_instruction_stack
 
 
 def default_store_dir() -> Path:
@@ -32,37 +31,28 @@ def make_store(directory: str | os.PathLike[str] | None = None):
 
 
 def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -> str | None:
-    """Instruction stack (prefix) + skill index + config/per-run system text."""
-    parts: list[str] = []
-    if config.instruction_files.enabled:
-        stack = build_instruction_stack(
-            config.cwd,
-            include_global=config.instruction_files.discover_global,
-            include_project=config.instruction_files.discover_project,
-        )
-        if stack.strip():
-            parts.append(stack)
-        # Progressive disclosure: advertise skills as name+description only —
-        # the Skill builtin loads a body on demand, keeping the prefix small
-        # and cache-stable.
-        if config.instruction_files.discover_skills:
-            from omni.context.instructions import discover_skills
+    """CLI prompt assembly, delegated to the shared compiler.
 
-            skills = discover_skills(config.cwd)
-            if skills:
-                lines = "\n".join(
-                    f"- {s.name}: {s.description}" for s in skills
-                )
-                parts.append(
-                    "# Available skills\n"
-                    "Load a skill's full instructions with the Skill tool "
-                    "before doing a task it covers.\n" + lines
-                )
-    if config.system:
-        parts.append(config.system)
-    if extra_system:
-        parts.append(extra_system)
-    return "\n\n".join(parts) if parts else None
+    The CLI's historical layering (instruction stack first, then config/per-run
+    system text) predates the compiler's base-first order; ``config.system`` and
+    ``extra_system`` therefore ride as ``extra_blocks``, preserving the CLI's
+    observable ordering. The CLI keeps env injection off — its REPL banner
+    already shows cwd/model, and pre-compiler behavior carried no env block.
+    """
+    from omni.context.compiler import PromptInputs, compile_system_prompt
+
+    enabled = config.instruction_files.enabled
+    return compile_system_prompt(
+        PromptInputs(
+            base=None,
+            extra_blocks=[b for b in (config.system, extra_system) if b],
+            cwd=config.cwd,
+            include_env=False,
+            include_global_instructions=enabled and config.instruction_files.discover_global,
+            include_project_instructions=enabled and config.instruction_files.discover_project,
+            include_skills=enabled and config.instruction_files.discover_skills,
+        )
+    )
 
 
 def make_engine(

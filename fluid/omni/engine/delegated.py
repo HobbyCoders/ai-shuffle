@@ -85,6 +85,7 @@ class DelegatedLoop:
         mcp_servers: dict[str, Any] | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        add_dirs: list[str] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -100,6 +101,7 @@ class DelegatedLoop:
         self.mcp_servers = mcp_servers
         self.cwd = cwd
         self.env = env
+        self.add_dirs = add_dirs
         self.cli_version: str | None = None
 
         self._session: SessionMeta | None = None
@@ -292,6 +294,8 @@ class DelegatedLoop:
             argv += ["--append-system-prompt", self.append_system_prompt]
         elif self.system:
             argv += ["--system-prompt", self.system]
+        for d in self.add_dirs or ():
+            argv += ["--add-dir", d]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
