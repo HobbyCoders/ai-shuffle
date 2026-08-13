@@ -105,10 +105,18 @@ class ProviderAdapter(ABC):
         allow: bool,
         *,
         remember: bool = False,
+        message: Optional[str] = None,
+        updated_input: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a tool permission request from the provider.
 
         The provider blocks tool execution until this is called.
+
+        ``message`` is the deny reason the model reads back as the blocked
+        call's tool_result (adapters fall back to their own generic text when
+        it is None). ``updated_input`` is the SDK's ``updatedInput``: the tool
+        input to run on an allow, which is how a decider feeds collected data
+        (e.g. AskUserQuestion answers) into the call.
         """
 
     @abstractmethod

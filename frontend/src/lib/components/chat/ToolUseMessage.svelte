@@ -4,6 +4,7 @@
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
+	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
 
 	interface Props {
 		name: string;
@@ -177,6 +178,12 @@
 		return '';
 	});
 
+	// Closing the AskUserQuestion modal resolves the tool call as a DENY (the
+	// tool has no "unanswered" value). That is correct mechanically but it is
+	// not a failure, so the card drops the red error chrome for neutral,
+	// muted "dismissed" styling. See ./question-outcome.ts.
+	const dismissedQuestion = $derived(isDismissedQuestion(name, status, result));
+
 	// Check if tool result contains media (image, video, or file)
 	function toolResultHasMedia(content: string): boolean {
 		try {
@@ -234,7 +241,13 @@
 		<details class="w-full border border-border rounded-lg overflow-hidden group" bind:open={detailsOpen} ontoggle={handleToggle}>
 			<summary class="tool-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator - use toolStatus as primary, not streaming -->
-				{#if status === 'running'}
+				{#if dismissedQuestion}
+					<!-- Neutral "closed" mark: not an error, not a success. -->
+					<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" data-testid="tool-dismissed-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<circle cx="12" cy="12" r="9" stroke-width="2" />
+						<path stroke-linecap="round" stroke-width="2" d="M8.5 12h7" />
+					</svg>
+				{:else if status === 'running'}
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>
@@ -356,8 +369,18 @@
 						title="Executed server-side by Anthropic API"
 					>server</span>
 				{/if}
+				<!-- Dismissed question: say what actually happened, in muted chrome. -->
+				{#if dismissedQuestion}
+					<span
+						class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-border bg-muted text-muted-foreground flex-shrink-0 uppercase tracking-wide"
+					>dismissed</span>
+					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+					<span
+						class="text-sm text-muted-foreground truncate min-w-0"
+						title={QUESTION_DISMISSED_LABEL}
+					>{QUESTION_DISMISSED_LABEL}</span>
 				<!-- Summary (if available) -->
-				{#if summary}
+				{:else if summary}
 					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
 					<span
 						class="text-sm text-muted-foreground truncate min-w-0"
@@ -393,7 +416,9 @@
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
 								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
 									<div class="max-h-60 overflow-auto">
-										{#if result}
+										{#if dismissedQuestion}
+											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none" data-testid="tool-dismissed-result">{result}</pre>
+										{:else if result}
 											{#if toolResultHasMedia(result)}
 												<span class="text-[10px] text-green-500">&#10003; {toolResultMediaLabel(result)} generated</span>
 											{:else}

@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import ToolUseGroup from './ToolUseGroup.svelte';
 import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+import { QUESTION_DISMISS_MESSAGE } from './question-outcome';
 import type { ChatMessage } from '$lib/stores/types';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
@@ -72,6 +73,34 @@ describe('ToolUseGroup screenshot hoisting', () => {
 		expect(container.querySelectorAll('.tool-screenshot').length).toBe(2);
 		// Both hoisted out of the details.
 		expect(container.querySelector('details .tool-screenshot')).toBeNull();
+	});
+
+	it('does not count a dismissed AskUserQuestion as a failure', () => {
+		const tools = [
+			makeTool({ id: 't1', toolName: 'Read' }),
+			makeTool({
+				id: 't2',
+				toolName: 'AskUserQuestion',
+				toolStatus: 'error',
+				toolResult: QUESTION_DISMISS_MESSAGE
+			})
+		];
+		const { container } = render(ToolUseGroup, { props: { tools } });
+
+		// No "(1 failed)" chip, and the group header keeps its non-error mark.
+		expect(container.textContent).not.toContain('failed');
+		expect(container.querySelector('summary .text-red-500')).toBeNull();
+		expect(container.textContent).toContain('2/2 tools');
+	});
+
+	it('still counts a genuinely failed tool', () => {
+		const tools = [
+			makeTool({ id: 't1', toolName: 'Read' }),
+			makeTool({ id: 't2', toolName: 'Bash', toolStatus: 'error', toolResult: 'boom' })
+		];
+		const { container } = render(ToolUseGroup, { props: { tools } });
+
+		expect(container.textContent).toContain('(1 failed)');
 	});
 
 	it('renders no screenshot block when no tool carries one', () => {

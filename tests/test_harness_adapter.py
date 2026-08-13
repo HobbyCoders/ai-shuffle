@@ -405,6 +405,203 @@ async def test_permission_deny_mapping():
         break  # grab the permission event
     await adapter.respond_to_permission("t1", allow=False)
     assert engine.ops[0].decision == "deny"
+    # No reason given -> the engine keeps its own generic deny text.
+    assert engine.ops[0].message is None
+
+
+# ─── 3b. Question dismissal / answers survive the omni permission bridge ─────
+#
+# On the omni path an AskUserQuestion call is gated as a PermissionRequest, so
+# the modal's "X" resolves through the *permission* deny path. The dismissal
+# only reads as a dismissal (rather than "permission denied") if the callback's
+# PermissionResultDeny.message rides along on the RespondPermission op — and
+# answers only reach the tool if PermissionResultAllow.updated_input does.
+
+
+class _FakeDeny:
+    """Stand-in for the SDK's PermissionResultDeny (detected by class name)."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+_FakeDeny.__name__ = "PermissionResultDeny"
+
+
+class _FakeAllow:
+    """Stand-in for the SDK's PermissionResultAllow."""
+
+    def __init__(self, updated_input: dict) -> None:
+        self.updated_input = updated_input
+
+
+_FakeAllow.__name__ = "PermissionResultAllow"
+
+
+async def _drain_bridge(engine) -> None:
+    """Let the spawned permission-bridge task submit its decision."""
+    import asyncio
+
+    for _ in range(20):
+        if engine.ops:
+            return
+        await asyncio.sleep(0)
+
+
+def _question_request() -> list:
+    return [
+        lm.PermissionRequest(
+            session_id=SID, request_id="q1", tool_use_id="tuq",
+            name="AskUserQuestion",
+            input={"questions": [{"question": "Pick one", "options": []}]},
+            risk="safe",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_question_dismissal_forwards_deny_message():
+    """A dismissed question denies with the dismissal text, not a bare deny."""
+    from app.core.user_question_handler import DISMISS_MESSAGE
+
+    engine = FakeEngine(_question_request())
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        return _FakeDeny(DISMISS_MESSAGE)
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    await _drain_bridge(engine)
+
+    op = engine.ops[0]
+    assert isinstance(op, RespondPermission)
+    assert op.decision == "deny"
+    assert op.message == DISMISS_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_answered_question_forwards_updated_input():
+    """Collected answers (skips included) ride back as ``updated_input``."""
+    from app.core.user_question_handler import SKIP_ANSWER_TEXT
+
+    answers = {"Pick one": "A", "Second question": SKIP_ANSWER_TEXT}
+    engine = FakeEngine(_question_request())
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        return _FakeAllow({**tool_input, "answers": answers})
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    await _drain_bridge(engine)
+
+    op = engine.ops[0]
+    assert op.decision == "allow"
+    assert op.updated_input is not None
+    assert op.updated_input["answers"] == answers
+
+
+@pytest.mark.asyncio
+async def test_delegated_loop_writes_deny_message_to_the_cli():
+    """DelegatedLoop turns the op's message into the CLI's deny control_response.
+
+    That deny message is what the CLI writes as the blocked call's tool_result,
+    so this is the last hop between the modal's "X" and what the model (and the
+    chat card) reads.
+    """
+    import asyncio
+
+    from omni.engine.delegated import DelegatedLoop
+    from omni.engine.delegated_proto import PermissionBridge
+    from app.core.user_question_handler import DISMISS_MESSAGE
+
+    loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
+    frames: list = []
+
+    async def _capture(frame):
+        frames.append(frame)
+
+    loop._write_frame = _capture  # type: ignore[assignment]
+
+    bridge = PermissionBridge(
+        cli_request_id="cli_1", omni_request_id="p1",
+        tool_name="AskUserQuestion", tool_use_id="tuq",
+        input={"questions": []},
+    )
+    task = asyncio.create_task(loop._handle_permission(bridge))
+    for _ in range(20):  # let _handle_permission register its future
+        if "p1" in loop._pending_permissions:
+            break
+        await asyncio.sleep(0)
+    await loop.submit(
+        RespondPermission(request_id="p1", decision="deny", message=DISMISS_MESSAGE)
+    )
+    await asyncio.wait_for(task, timeout=5)
+
+    assert frames[0]["response"]["response"] == {
+        "behavior": "deny", "message": DISMISS_MESSAGE,
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegated_loop_deny_falls_back_to_generic_message():
+    from omni.engine.delegated import DelegatedLoop
+
+    loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
+    frames: list = []
+
+    async def _capture(frame):
+        frames.append(frame)
+
+    loop._write_frame = _capture  # type: ignore[assignment]
+    await loop._write_control_response("cli_2", False, {"a": 1})
+    assert frames[0]["response"]["response"] == {
+        "behavior": "deny", "message": "permission denied",
+    }
+
+    # An allow carries the (possibly rewritten) input through as updatedInput.
+    await loop._write_control_response("cli_3", True, {"answers": {"q": "a"}})
+    assert frames[1]["response"]["response"] == {
+        "behavior": "allow", "updatedInput": {"answers": {"q": "a"}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegated_loop_allow_uses_updated_input():
+    import asyncio
+
+    from omni.engine.delegated import DelegatedLoop
+    from omni.engine.delegated_proto import PermissionBridge
+
+    loop = DelegatedLoop(store=MemoryStore(), model="claude-fake", claude_cmd=["true"])
+    frames: list = []
+
+    async def _capture(frame):
+        frames.append(frame)
+
+    loop._write_frame = _capture  # type: ignore[assignment]
+
+    bridge = PermissionBridge(
+        cli_request_id="cli_4", omni_request_id="p2",
+        tool_name="AskUserQuestion", tool_use_id="tuq",
+        input={"questions": []},
+    )
+    task = asyncio.create_task(loop._handle_permission(bridge))
+    for _ in range(20):
+        if "p2" in loop._pending_permissions:
+            break
+        await asyncio.sleep(0)
+    await loop.submit(RespondPermission(
+        request_id="p2", decision="allow",
+        updated_input={"questions": [], "answers": {"Pick one": "A"}},
+    ))
+    await asyncio.wait_for(task, timeout=5)
+
+    assert frames[0]["response"]["response"]["updatedInput"] == {
+        "questions": [], "answers": {"Pick one": "A"},
+    }
 
 
 # ─── 3. End-to-end over a real NativeLoop + fake provider ────────────────────

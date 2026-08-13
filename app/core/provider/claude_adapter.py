@@ -193,9 +193,13 @@ class ClaudeAgentAdapter(ProviderAdapter):
         allow: bool,
         *,
         remember: bool = False,
+        message: Optional[str] = None,
+        updated_input: Optional[Dict[str, Any]] = None,
     ) -> None:
         # Permission responses are handled via the can_use_tool callback,
-        # not through the adapter directly. This is a placeholder for Phase 2.
+        # not through the adapter directly (the callback's own
+        # PermissionResultAllow/Deny already carries updated_input/message).
+        # This is a placeholder for Phase 2.
         pass
 
     async def respond_to_user_question(self, answer: str) -> None:

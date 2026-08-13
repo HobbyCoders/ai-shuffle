@@ -6,6 +6,7 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
+	import { isDismissedQuestion } from './question-outcome';
 
 	interface Props {
 		tools: ChatMessage[];
@@ -21,19 +22,22 @@
 	let userToggled = $state(false);
 	let detailsOpen = $state(false);
 
+	// A dismissed AskUserQuestion is denied, not failed — it must not colour the
+	// group red or inflate the "(n failed)" count. See ./question-outcome.ts.
+	const isFailure = (t: ChatMessage) =>
+		t.toolStatus === 'error' && !isDismissedQuestion(t.toolName, t.toolStatus, t.toolResult);
+
 	const groupStatus = $derived.by(() => {
 		if (tools.some(t => t.toolStatus === 'running' || t.streaming)) return 'running';
-		if (tools.some(t => t.toolStatus === 'error')) return 'error';
+		if (tools.some(isFailure)) return 'error';
 		return 'complete';
 	});
 
 	const completedCount = $derived(
-		tools.filter(t => t.toolStatus === 'complete').length
+		tools.filter(t => t.toolStatus === 'complete' || (t.toolStatus === 'error' && !isFailure(t))).length
 	);
 
-	const errorCount = $derived(
-		tools.filter(t => t.toolStatus === 'error').length
-	);
+	const errorCount = $derived(tools.filter(isFailure).length);
 
 	const finishedCount = $derived(completedCount + errorCount);
 

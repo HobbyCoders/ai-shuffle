@@ -410,6 +410,8 @@ class HarnessAdapter(ProviderAdapter):
         from types import SimpleNamespace
 
         allow = False
+        message: Optional[str] = None
+        updated_input: Optional[Dict[str, Any]] = None
         try:
             result = await self._can_use_tool(
                 ev.name,
@@ -417,6 +419,20 @@ class HarnessAdapter(ProviderAdapter):
                 SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
             )
             allow = type(result).__name__ == "PermissionResultAllow"
+            if allow:
+                # PermissionResultAllow.updated_input is how the callback hands
+                # data back to the tool (AskUserQuestion answers, rewritten
+                # commands). Dropping it silently ran the ORIGINAL input.
+                candidate = getattr(result, "updated_input", None)
+                if isinstance(candidate, dict):
+                    updated_input = candidate
+            else:
+                # PermissionResultDeny.message is the text the model reads as the
+                # denied call's tool_result. Forwarding it is what keeps a
+                # question DISMISSAL from reading as a permission failure.
+                candidate_msg = getattr(result, "message", None)
+                if isinstance(candidate_msg, str) and candidate_msg:
+                    message = candidate_msg
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -425,7 +441,9 @@ class HarnessAdapter(ProviderAdapter):
                 ev.name, exc_info=True,
             )
         try:
-            await self.respond_to_permission(ev.tool_use_id, allow)
+            await self.respond_to_permission(
+                ev.tool_use_id, allow, message=message, updated_input=updated_input,
+            )
         except Exception:
             logger.warning(
                 "[HarnessAdapter] failed to submit permission decision for %s",
@@ -444,6 +462,8 @@ class HarnessAdapter(ProviderAdapter):
         allow: bool,
         *,
         remember: bool = False,
+        message: Optional[str] = None,
+        updated_input: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self._engine is None:
             return
@@ -455,7 +475,13 @@ class HarnessAdapter(ProviderAdapter):
             return
         decision = ("allow_always" if remember else "allow") if allow else "deny"
         await self._engine.submit(
-            RespondPermission(request_id=request_id, decision=decision, remember=remember)
+            RespondPermission(
+                request_id=request_id,
+                decision=decision,
+                remember=remember,
+                message=message,
+                updated_input=updated_input,
+            )
         )
 
     async def respond_to_user_question(self, answer: str) -> None:

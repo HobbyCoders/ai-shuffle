@@ -39,7 +39,8 @@ describe('permission-handler', () => {
 	});
 
 	it('omits dismissed/skipped when the question was answered normally', () => {
-		const wsSend = vi.fn(() => true);
+		// Typed parameter so `mock.calls[0][0]` is the sent payload, not `never`.
+		const wsSend = vi.fn((_message: unknown) => true);
 		const handler = createPermissionHandler({ wsSend });
 
 		handler.sendUserQuestionResponse('question-1', 'tool-1', { Confirm: 'yes' }, 'session-1', {
