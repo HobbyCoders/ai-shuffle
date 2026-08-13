@@ -7,6 +7,8 @@ call, so the whole loop runs offline.
 import asyncio
 from typing import AsyncIterator
 
+import pytest
+
 from omni.engine.native import NativeLoop
 from omni.events import PermissionRequest, RespondPermission, ToolResult, TurnComplete, UserTurn
 from omni.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
@@ -190,6 +192,72 @@ async def test_pre_tool_use_hook_deny_short_circuits() -> None:
     result = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, ToolResult))
     assert result.is_error
     assert "blocked by hook: not allowed" in result.output
+
+
+# ─── per-turn cost reporting ─────────────────────────────────────────────────
+
+
+def _with_cost(script: list[StreamChunk], cost: float) -> list[StreamChunk]:
+    """Copy a script, adding a provider-reported cost to its usage chunk."""
+    out: list[StreamChunk] = []
+    for chunk in script:
+        if chunk.kind == "usage":
+            payload = dict(chunk.payload)
+            payload["usage"] = {**payload["usage"], "cost_usd": cost}
+            out.append(StreamChunk("usage", payload))
+        else:
+            out.append(chunk)
+    return out
+
+
+class EstimatingProvider(ScriptedProvider):
+    """Provider with no reported cost but the optional estimate hook."""
+
+    def estimate_cost(self, model: str, usage: dict) -> float | None:
+        return 0.5
+
+
+async def _run_two_call_turn(provider: ScriptedProvider) -> TurnComplete:
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="weather in Paris?"))
+    await loop.wait_turn()
+    done = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, TurnComplete))
+    assert done.num_model_calls == 2
+    return done
+
+
+async def test_turn_cost_sums_provider_reported_costs() -> None:
+    provider = ScriptedProvider([
+        _with_cost(_tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'), 0.002),
+        _with_cost(_text("It is sunny in Paris."), 0.003),
+    ])
+    done = await _run_two_call_turn(provider)
+    assert done.cost_usd == pytest.approx(0.005)
+    assert "cost_usd" not in done.usage
+
+
+async def test_turn_cost_falls_back_to_provider_estimate() -> None:
+    provider = EstimatingProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("It is sunny in Paris."),
+    ])
+    done = await _run_two_call_turn(provider)
+    assert done.cost_usd == pytest.approx(1.0)
+    assert "cost_usd" not in done.usage
+
+
+async def test_turn_cost_is_none_without_cost_or_estimator() -> None:
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("It is sunny in Paris."),
+    ])
+    done = await _run_two_call_turn(provider)
+    assert done.cost_usd is None
 
 
 def test_plan_mode_filters_write_tools() -> None:

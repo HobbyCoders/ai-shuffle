@@ -35,6 +35,11 @@ class SessionMeta:
     session_id: str
     head_node_id: str | None = None  # latest appended node (default parent for new turns)
     created_at: float = field(default_factory=time.time)
+    # Backend-owned resume handle for engines that delegate to an external
+    # agent process (DelegatedLoop's ``claude --resume <uuid>``). It is NOT the
+    # omni session id and must survive a restart, otherwise a resumed session
+    # hands the child a handle it has never seen.
+    cli_session_id: str | None = None
 
 
 class SessionStore(Protocol):
@@ -45,6 +50,9 @@ class SessionStore(Protocol):
     async def load_path(self, session_id: str, leaf_node_id: str | None = None) -> list[SessionNode]: ...
     async def set_head(self, session_id: str, node_id: str | None) -> None:
         """Move the session head (fork/rewind) without appending a node."""
+        ...
+    async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:
+        """Persist the delegated backend's resume handle on the session meta."""
         ...
     async def append_event(self, session_id: str, event: Event) -> None:
         """Persist a sequenced event for durable, cross-restart replay."""
@@ -93,6 +101,11 @@ class MemoryStore:
 
     async def set_head(self, session_id: str, node_id: str | None) -> None:
         self._sessions[session_id].head_node_id = node_id
+
+    async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:
+        meta = self._sessions.get(session_id)
+        if meta is not None:
+            meta.cli_session_id = cli_session_id
 
     async def append_event(self, session_id: str, event: Event) -> None:
         self._events.setdefault(session_id, []).append(event)

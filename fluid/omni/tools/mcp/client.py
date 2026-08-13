@@ -94,12 +94,19 @@ class McpClient:
                 read, write = streams[0], streams[1]
                 async with ClientSession(read, write) as session:
                     try:
-                        await session.discover()  # modern 2026-07-28 handshake
+                        result = await session.discover()  # modern 2026-07-28 handshake
                         self.legacy = False
                     except Exception:
-                        await session.initialize()  # legacy 2025-era fallback
+                        result = await session.initialize()  # legacy 2025-era fallback
                         self.legacy = True
-                    self.protocol = session.protocol_version
+                    # The handshake result carries the negotiated version on
+                    # every supported mcp release; ``ClientSession`` only grew a
+                    # ``protocol_version`` attribute later, so read the result
+                    # first and fall back to the attribute when present.
+                    self.protocol = (
+                        getattr(result, "protocolVersion", None)
+                        or getattr(session, "protocol_version", None)
+                    )
                     assert self._started is not None
                     if not self._started.done():
                         self._started.set_result(None)
@@ -151,7 +158,11 @@ class McpClient:
             tools.append(ToolDescriptor(
                 name=t.name,
                 description=t.description or "",
-                input_schema=t.input_schema or {"type": "object"},
+                # ``inputSchema`` is the only spelling on current mcp releases
+                # (``input_schema`` is the 2.0-SDK alias) — go through _field so
+                # both work instead of raising AttributeError on the camelCase-
+                # only model.
+                input_schema=_field(t, "input_schema", "inputSchema") or {"type": "object"},
                 risk=_risk_from_annotations(annotations),
                 annotations=annotations,
             ))

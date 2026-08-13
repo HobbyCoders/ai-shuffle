@@ -50,6 +50,11 @@ class ProviderRequest:
 
 
 class ProviderClient(Protocol):
+    # Optional cost hook (NOT part of the protocol — implementing it is opt-in):
+    # a provider MAY expose ``estimate_cost(model, usage) -> float | None``. The
+    # engine discovers it via ``getattr`` and calls it once per model call, only
+    # when that call's usage dict carries no provider-reported ``"cost_usd"``.
+    # Return ``None`` for models with no known price (never guess).
     name: str
     caps: ProviderCaps
 

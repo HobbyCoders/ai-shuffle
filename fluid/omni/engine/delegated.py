@@ -18,14 +18,19 @@ control_requests: the loop surfaces a ``PermissionRequest`` event, parks until
 
 The process is kept alive across turns; ``cli_session_id`` (from the ``init``
 frame) is the ``--resume`` handle for reconnecting to the same CLI conversation.
+It is written back to the store's ``SessionMeta`` every time it changes, so a
+process restart can hand the CLI a handle it actually recognises instead of an
+omni session id.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
+import socket
 import tempfile
 from typing import Any, AsyncIterator
 
@@ -44,6 +49,8 @@ from omni.events.ops import (
 from omni.messages import Image, Message, Text
 from omni.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from omni.tools.registry import ToolCtx, ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class DelegatedLoop:
@@ -102,6 +109,8 @@ class DelegatedLoop:
         self._interrupted = asyncio.Event()
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
+        # Fire-and-forget writes of cli_session_id back to the store.
+        self._cli_id_writes: set[asyncio.Task] = set()
 
         # Bundled inproc/builtin tool server (lazy — only if a registry is set).
         self._mcp_config_path: str | None = None
@@ -183,12 +192,21 @@ class DelegatedLoop:
                 await self._socket_server.wait_closed()
             except Exception:
                 pass
+        # A "tcp:..." bridge address names no file — closing the server above is
+        # the whole cleanup; only real paths get unlinked.
         for path in (self._socket_path, self._mcp_config_path):
-            if path and os.path.exists(path):
+            if path and not path.startswith("tcp:") and os.path.exists(path):
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
+        # Let any in-flight resume-handle write land — losing it here is exactly
+        # the restart case this persistence exists for.
+        if self._cli_id_writes:
+            try:
+                await asyncio.wait(set(self._cli_id_writes), timeout=5)
+            except Exception:
+                logger.debug("draining cli_session_id writes failed", exc_info=True)
         await self.bus.close()
 
     # ─── process lifecycle ───────────────────────────────────────────────
@@ -214,8 +232,16 @@ class DelegatedLoop:
         return env
 
     async def _start_bundled_server(self) -> None:
-        """Expose the registry's inproc/builtin tools over a unix socket and
-        point ``--mcp-config`` at a bundled stdio server that bridges to it."""
+        """Expose the registry's inproc/builtin tools over a local socket and
+        point ``--mcp-config`` at a bundled stdio server that bridges to it.
+
+        Transport: a unix domain socket where the platform has one, otherwise
+        (Windows — no ``AF_UNIX``) a **loopback-only** TCP socket on an
+        ephemeral port. The TCP form widens the trust boundary from "same user"
+        to "same machine"; that is the same boundary the CLI child already sits
+        inside, so the bridge stays unauthenticated — but binding anything other
+        than 127.0.0.1 would require a handshake secret first.
+        """
         if self.registry is None or self._socket_server is not None:
             return
         from omni.tools.mcp.bundled_server import serve_registry_socket, write_bundled_config
@@ -227,12 +253,20 @@ class DelegatedLoop:
         if not specs and not self.mcp_servers:
             return
         tmpdir = tempfile.mkdtemp(prefix="omni-delegated-")
-        self._socket_path = os.path.join(tmpdir, "bundled.sock")
         self._mcp_config_path = os.path.join(tmpdir, "mcp.json")
+        use_unix = hasattr(socket, "AF_UNIX")
+        self._socket_path = (
+            os.path.join(tmpdir, "bundled.sock") if use_unix else "tcp:127.0.0.1:0"
+        )
         if specs:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx,
             )
+            if not use_unix:
+                # Port 0 was an ask for *any* free port — resolve what we got so
+                # the child config names the port it can actually dial.
+                port = self._socket_server.sockets[0].getsockname()[1]
+                self._socket_path = f"tcp:127.0.0.1:{port}"
         write_bundled_config(
             self.registry, self._mcp_config_path,
             socket_path=self._socket_path, user_servers=self.mcp_servers,
@@ -246,6 +280,10 @@ class DelegatedLoop:
             argv += ["--model", self.model]
         if self.permission_mode:
             argv += ["--permission-mode", self.permission_mode]
+        # Route permission decisions to the harness: without this the headless
+        # CLI never emits ``can_use_tool`` control_requests (it silently
+        # auto-denies), so the PermissionBridge below would never fire.
+        argv += ["--permission-prompt-tool", "stdio"]
         if self.cli_session_id:
             argv += ["--resume", self.cli_session_id]
         if self._mcp_config_path:
@@ -314,8 +352,38 @@ class DelegatedLoop:
         except Exception as exc:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc)))
         finally:
-            if mapper.cli_session_id:
+            if mapper.cli_session_id and mapper.cli_session_id != self.cli_session_id:
                 self.cli_session_id = mapper.cli_session_id
+                self._persist_cli_session_id(sid, mapper.cli_session_id)
+
+    def _persist_cli_session_id(self, session_id: str, cli_session_id: str) -> None:
+        """Write the refreshed ``--resume`` handle back to the store.
+
+        Fire-and-forget: this runs from the turn's ``finally`` (possibly while
+        the task is being cancelled), so it must not await. Stores predating
+        ``set_cli_session_id`` simply have no handle to persist; a failing write
+        costs a fresh CLI conversation on the next restart, not a broken turn,
+        so it is logged at debug rather than raised.
+        """
+        setter = getattr(self.store, "set_cli_session_id", None)
+        if setter is None:
+            logger.debug("store %s cannot persist cli_session_id", type(self.store).__name__)
+            return
+        try:
+            task = asyncio.ensure_future(setter(session_id, cli_session_id))
+        except RuntimeError:  # no running loop (shutdown) — nothing to persist onto
+            logger.debug("no running loop; dropped cli_session_id persist", exc_info=True)
+            return
+        self._cli_id_writes.add(task)
+        task.add_done_callback(self._on_cli_session_id_written)
+
+    def _on_cli_session_id_written(self, task: asyncio.Task) -> None:
+        self._cli_id_writes.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.debug("failed to persist cli_session_id: %r", exc)
 
     async def _read_until_result(
         self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
@@ -362,15 +430,28 @@ class DelegatedLoop:
         finally:
             self._pending_permissions.pop(bridge.omni_request_id, None)
         allow = resp.decision in ("allow", "allow_always")
-        await self._write_control_response(bridge.cli_request_id, allow, bridge.input)
+        # An allow may carry a rewritten input (the SDK's ``updatedInput``) —
+        # that is how a decider feeds data back into the tool call, e.g. the
+        # answers collected for AskUserQuestion. Fall back to what the CLI asked
+        # about when the responder had nothing to change.
+        input = bridge.input
+        if allow and resp.updated_input is not None:
+            input = resp.updated_input
+        await self._write_control_response(
+            bridge.cli_request_id, allow, input, message=resp.message,
+        )
 
     async def _write_control_response(
         self, cli_request_id: str, allow: bool, input: dict[str, Any],
+        *, message: str | None = None,
     ) -> None:
         if allow:
             response_data: dict[str, Any] = {"behavior": "allow", "updatedInput": input}
         else:
-            response_data = {"behavior": "deny", "message": "permission denied"}
+            # The CLI turns this message into the denied call's tool_result
+            # text, so it is the only place a caller can explain the outcome to
+            # the model. Generic default when the responder gave no reason.
+            response_data = {"behavior": "deny", "message": message or "permission denied"}
         await self._write_frame({
             "type": "control_response",
             "response": {

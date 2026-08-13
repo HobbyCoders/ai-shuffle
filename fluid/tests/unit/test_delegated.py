@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -37,8 +39,15 @@ from omni.events import (
 )
 from omni.messages import Text
 from omni.store.base import MemoryStore
+from omni.store.jsonl import JsonlStore
 from omni.tools.inproc import create_inproc_server, tool
 from omni.tools.mcp.bundled_server import (
+    _call_result,
+    _field_name,
+    _parse_address,
+    _socket_rpc,
+    _tool_from_spec,
+    build_child_server,
     bundled_server_config,
     serve_registry_socket,
     write_bundled_config,
@@ -270,6 +279,65 @@ async def test_resume_second_loop() -> None:
         await loop2.aclose()
 
 
+async def test_cli_session_id_persisted_to_store() -> None:
+    """The --resume handle must outlive the engine object, or a restart resumes
+    the CLI with an omni session id it has never issued."""
+    store = MemoryStore()
+    loop = _make_loop("a", store=store)
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        sid = loop.session_id
+    finally:
+        await loop.aclose()  # drains the fire-and-forget write
+
+    meta = await store.get_session(sid)
+    assert meta is not None and meta.cli_session_id == "cli-sess-123"
+
+
+async def test_cli_session_id_survives_jsonl_reload(tmp_path) -> None:
+    """Same handle, read back through a cold JsonlStore (serialization path)."""
+    store = JsonlStore(tmp_path)
+    loop = _make_loop("a", store=store)
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        sid = loop.session_id
+    finally:
+        await loop.aclose()
+
+    reloaded = await JsonlStore(tmp_path).get_session(sid)
+    assert reloaded is not None and reloaded.cli_session_id == "cli-sess-123"
+
+    # A later handle overwrites the earlier record on replay.
+    await store.set_cli_session_id(sid, "cli-sess-999")
+    assert (await JsonlStore(tmp_path).get_session(sid)).cli_session_id == "cli-sess-999"
+
+
+async def test_store_without_setter_does_not_break_a_turn() -> None:
+    """Persistence is best-effort: a store predating set_cli_session_id (or one
+    whose write fails) must not fail the turn."""
+
+    class LegacyStore(MemoryStore):
+        set_cli_session_id = None  # type: ignore[assignment]
+
+    class FailingStore(MemoryStore):
+        async def set_cli_session_id(self, session_id, cli_session_id):
+            raise RuntimeError("boom")
+
+    for store in (LegacyStore(), FailingStore()):
+        loop = _make_loop("a", store=store)
+        try:
+            await loop.submit(UserTurn(content="hi"))
+            await loop.wait_turn()
+            events = loop.bus.log(loop.session_id)
+            assert any(isinstance(e, TurnComplete) for e in events)
+            assert not any(isinstance(e, ErrorEvent) for e in events)
+            assert loop.cli_session_id == "cli-sess-123"
+        finally:
+            await loop.aclose()
+
+
 # ─── Partial streaming dedupe ────────────────────────────────────────────────
 
 
@@ -335,13 +403,75 @@ def test_bundled_config_omits_server_without_tools(tmp_path) -> None:
     assert config["mcpServers"] == {}
 
 
-async def test_bundled_socket_dispatch(tmp_path) -> None:
+# ─── Bridge transports (unix socket / loopback TCP) ──────────────────────────
+
+HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
+# TCP is exercised everywhere; unix only where the platform has AF_UNIX (i.e.
+# not Windows, which is exactly why the TCP transport exists).
+TRANSPORTS = ["tcp"] + (["unix"] if HAS_AF_UNIX else [])
+
+
+@asynccontextmanager
+async def _bridge(reg: ToolRegistry, transport: str, tmp_path):
+    """Start the parent bridge; yield the *resolved* address a child would dial."""
+    address = str(tmp_path / "b.sock") if transport == "unix" else "tcp:127.0.0.1:0"
+    server = await serve_registry_socket(reg, address)
+    try:
+        if transport == "tcp":
+            address = f"tcp:127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        yield address
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+def _child_env() -> dict[str, str]:
+    """Env for a spawned bridge child that imports *this* omni, not whatever a
+    global PYTHONPATH happens to point at."""
+    import omni
+
+    root = str(Path(omni.__file__).resolve().parent.parent)
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = root + (os.pathsep + existing if existing else "")
+    return env
+
+
+async def _dial(address: str):
+    tcp = _parse_address(address)
+    if tcp is not None:
+        return await asyncio.open_connection(*tcp)
+    return await asyncio.open_unix_connection(address)
+
+
+def test_parse_address() -> None:
+    assert _parse_address("tcp:127.0.0.1:8123") == ("127.0.0.1", 8123)
+    assert _parse_address("tcp:127.0.0.1:0") == ("127.0.0.1", 0)
+    assert _parse_address("/tmp/omni/b.sock") is None
+    assert _parse_address(r"C:\Users\x\b.sock") is None  # a drive letter is not "tcp:"
+    for bad in ("tcp:", "tcp:127.0.0.1", "tcp:127.0.0.1:http"):
+        with pytest.raises(ValueError):
+            _parse_address(bad)
+
+
+async def test_tcp_bridge_binds_loopback_only(tmp_path) -> None:
+    """The TCP transport must never be reachable off-box."""
+    reg = _weather_registry()
+    server = await serve_registry_socket(reg, "tcp:127.0.0.1:0")
+    try:
+        hosts = {s.getsockname()[0] for s in server.sockets}
+        assert hosts == {"127.0.0.1"}
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_bundled_socket_dispatch(transport, tmp_path) -> None:
     """Parent socket side: list + call against the live registry."""
     reg = _weather_registry()
-    sock = str(tmp_path / "b.sock")
-    server = await serve_registry_socket(reg, sock)
-    try:
-        reader, writer = await asyncio.open_unix_connection(sock)
+    async with _bridge(reg, transport, tmp_path) as address:
+        reader, writer = await _dial(address)
         writer.write(b'{"op": "list"}\n')
         await writer.drain()
         listing = json.loads(await reader.readline())
@@ -354,34 +484,218 @@ async def test_bundled_socket_dispatch(tmp_path) -> None:
         assert result == {"text": "Paris: sunny", "is_error": False}
         writer.close()
         await writer.wait_closed()
-    finally:
-        server.close()
-        await server.wait_closed()
 
 
-async def test_bundled_server_end_to_end_via_mcp(tmp_path) -> None:
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_socket_rpc_round_trip(transport, tmp_path) -> None:
+    """The child's own RPC helper, one connection per call, over each transport."""
+    reg = _weather_registry()
+    async with _bridge(reg, transport, tmp_path) as address:
+        listing = await _socket_rpc(address, {"op": "list"})
+        assert [t["name"] for t in listing["tools"]] == ["mcp__wx__get_weather"]
+        assert listing["tools"][0]["input_schema"]["properties"] == {"city": {"type": "string"}}
+
+        called = await _socket_rpc(address, {
+            "op": "call", "name": "mcp__wx__get_weather", "arguments": {"city": "Paris"},
+        })
+        assert called == {"text": "Paris: sunny", "is_error": False}
+
+        assert "error" in await _socket_rpc(address, {"op": "nope"})
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
+    """The real child process, driven by the mcp SDK's own stdio client.
+
+    Deliberately bypasses omni's ``tools.mcp.client`` wrapper: this test is
+    about the child bridge itself (transport + the installed SDK's tool API),
+    so a wrapper-side incompatibility must not be able to mask it.
+    """
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    reg = _weather_registry()
+    async with _bridge(reg, transport, tmp_path) as address:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "omni.tools.mcp.bundled_server", "--socket", address],
+            env=_child_env(),
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                listed = await session.list_tools()
+                assert [t.name for t in listed.tools] == ["mcp__wx__get_weather"]
+                called = await session.call_tool("mcp__wx__get_weather", {"city": "Paris"})
+                assert [c.text for c in called.content] == ["Paris: sunny"]
+                assert called.isError is False
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_bundled_server_end_to_end_via_mcp(transport, tmp_path) -> None:
     """Full bridge: an MCP client connects to the child, which proxies over the
     socket to the parent's live registry."""
     parent_reg = _weather_registry()
-    sock = str(tmp_path / "b.sock")
-    server = await serve_registry_socket(parent_reg, sock)
-
     client_reg = ToolRegistry()
+    async with _bridge(parent_reg, transport, tmp_path) as address:
+        try:
+            config = {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": ["-m", "omni.tools.mcp.bundled_server", "--socket", address],
+                "env": _child_env(),
+            }
+            specs = await client_reg.connect_mcp("bundled", config)
+            assert "mcp__bundled__mcp__wx__get_weather" in {s.name for s in specs}
+            out = await client_reg.dispatch(
+                "mcp__bundled__mcp__wx__get_weather", {"city": "Paris"}, ToolCtx(),
+            )
+            assert out.text == "Paris: sunny"
+            assert not out.is_error
+        finally:
+            await client_reg.aclose()
+
+
+async def test_delegated_start_bundled_server_uses_available_transport(tmp_path) -> None:
+    """The loop picks a transport for the platform and writes the *resolved*
+    address into the config it hands the CLI."""
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(),
+        registry=_weather_registry(),
+    )
     try:
-        config = {
-            "transport": "stdio",
-            "command": sys.executable,
-            "args": ["-m", "omni.tools.mcp.bundled_server", "--socket", sock],
-            "env": dict(os.environ),
-        }
-        specs = await client_reg.connect_mcp("bundled", config)
-        assert "mcp__bundled__mcp__wx__get_weather" in {s.name for s in specs}
-        out = await client_reg.dispatch(
-            "mcp__bundled__mcp__wx__get_weather", {"city": "Paris"}, ToolCtx(),
-        )
-        assert out.text == "Paris: sunny"
-        assert not out.is_error
+        await loop._start_bundled_server()
+        assert loop._socket_server is not None
+        address = json.loads(Path(loop._mcp_config_path).read_text())[
+            "mcpServers"]["omni_bundled"]["args"][-1]
+        assert address == loop._socket_path
+        if HAS_AF_UNIX:
+            assert _parse_address(address) is None
+        else:
+            host, port = _parse_address(address)
+            assert (host, port > 0) == ("127.0.0.1", True)
+        # the address written to disk is the one that actually answers
+        listing = await _socket_rpc(address, {"op": "list"})
+        assert [t["name"] for t in listing["tools"]] == ["mcp__wx__get_weather"]
     finally:
-        await client_reg.aclose()
-        server.close()
-        await server.wait_closed()
+        await loop.aclose()
+    assert not os.path.exists(loop._mcp_config_path)
+
+
+# ─── Child-side mcp SDK compatibility ────────────────────────────────────────
+
+
+def _declared(model_obj, *candidates: str):
+    """Read whichever of ``candidates`` the model actually declares, so these
+    assertions do not care which spelling the installed SDK uses."""
+    dumped = model_obj.model_dump(by_alias=True)
+    declared = [c for c in candidates if c in dumped]
+    assert declared, f"none of {candidates} present in {sorted(dumped)}"
+    return dumped[declared[0]]
+
+
+def test_tool_from_spec_uses_installed_schema_field() -> None:
+    """mcp's models are extra="allow", so the wrong spelling silently drops the
+    schema instead of raising — assert the installed field really got set."""
+    import mcp.types as t
+
+    spec = {"name": "wx", "description": "Get weather",
+            "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    tool_obj = _tool_from_spec(t, spec)
+    assert isinstance(tool_obj, t.Tool)
+    assert tool_obj.name == "wx"
+    assert tool_obj.description == "Get weather"
+    assert _declared(tool_obj, "inputSchema", "input_schema") == spec["input_schema"]
+
+
+def test_tool_from_spec_defaults_missing_schema() -> None:
+    import mcp.types as t
+
+    tool_obj = _tool_from_spec(t, {"name": "x"})
+    assert _declared(tool_obj, "inputSchema", "input_schema") == {"type": "object"}
+
+
+def test_call_result_carries_is_error() -> None:
+    import mcp.types as t
+
+    ok = _call_result(t, "Paris: sunny", False)
+    assert [c.text for c in ok.content] == ["Paris: sunny"]
+    assert _declared(ok, "isError", "is_error") is False
+
+    bad = _call_result(t, "boom", True)
+    assert _declared(bad, "isError", "is_error") is True
+
+
+def test_field_name_prefers_declared_spelling() -> None:
+    class Camel:
+        model_fields = {"inputSchema": object()}
+
+    class Snake:
+        model_fields = {"input_schema": object()}
+
+    assert _field_name(Camel, "inputSchema", "input_schema") == "inputSchema"
+    assert _field_name(Snake, "inputSchema", "input_schema") == "input_schema"
+    assert _field_name(object(), "inputSchema", "input_schema") == "inputSchema"
+
+
+def test_server_rejects_handler_kwargs_on_installed_mcp() -> None:
+    """Pins the API this file targets: mcp 1.29's low-level ``Server`` takes no
+    ``on_list_tools`` / ``on_call_tool`` constructor kwargs (decorators only).
+    If a future SDK reinstates them, this test is the reminder to revisit."""
+    from mcp.server import Server
+
+    with pytest.raises(TypeError):
+        Server("probe", version="0.1.0", on_list_tools=lambda: None)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_child_server_handlers_answer_over_bridge(transport, tmp_path) -> None:
+    """The child's registered handlers, invoked as the SDK would invoke them,
+    against a live parent bridge."""
+    import mcp.types as t
+
+    reg = _weather_registry()
+    async with _bridge(reg, transport, tmp_path) as address:
+        server = build_child_server(address)
+        assert t.ListToolsRequest in server.request_handlers
+        assert t.CallToolRequest in server.request_handlers
+
+        listed = await server.request_handlers[t.ListToolsRequest](
+            t.ListToolsRequest(method="tools/list"),
+        )
+        tools = listed.root.tools
+        assert [tool_obj.name for tool_obj in tools] == ["mcp__wx__get_weather"]
+        schema = _declared(tools[0], "inputSchema", "input_schema")
+        assert schema["properties"] == {"city": {"type": "string"}}
+
+        called = await server.request_handlers[t.CallToolRequest](
+            t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
+                name="mcp__wx__get_weather", arguments={"city": "Paris"},
+            )),
+        )
+        result = called.root
+        assert isinstance(result, t.CallToolResult)
+        assert [c.text for c in result.content] == ["Paris: sunny"]
+        assert result.isError is False
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_child_server_propagates_tool_errors(transport, tmp_path) -> None:
+    """A failing in-process tool must reach the CLI as isError, not as success."""
+    import mcp.types as t
+
+    @tool("boom", "Always fails", {"type": "object"})
+    async def boom(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "kaboom"}], "is_error": True}
+
+    reg = ToolRegistry()
+    reg.register_inproc(create_inproc_server("bad", [boom]))
+    async with _bridge(reg, transport, tmp_path) as address:
+        server = build_child_server(address)
+        called = await server.request_handlers[t.CallToolRequest](
+            t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
+                name="mcp__bad__boom", arguments={},
+            )),
+        )
+        assert called.root.isError is True
+        assert [c.text for c in called.root.content] == ["kaboom"]

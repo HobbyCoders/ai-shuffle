@@ -73,7 +73,7 @@ class _CallResult:
 
     message: Message
     tool_uses: list[dict[str, Any]] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)  # tokens (int) + optional cost_usd (float)
     stop_reason: str = "end_turn"
     interrupted: bool = False
 
@@ -308,7 +308,7 @@ class NativeLoop:
     async def _agent_loop(self, sid: str, turn_id: str, user_node: SessionNode) -> None:
         parent = user_node
         num_calls = 0
-        total_usage: dict[str, int] = {}
+        total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
 
         while True:
@@ -317,6 +317,14 @@ class NativeLoop:
             num_calls += 1
             if result.stop_reason == "error":
                 return  # ErrorEvent already emitted; leave the turn open-ended
+            if "cost_usd" not in result.usage:
+                # No provider-reported cost — fall back to the provider's
+                # optional pricing-table estimate for this call.
+                est = getattr(self.provider, "estimate_cost", None)
+                if est is not None:
+                    cost = est(self.model, result.usage)
+                    if cost is not None:
+                        result.usage["cost_usd"] = cost
             self._merge_usage(total_usage, result.usage)
 
             node = SessionNode(
@@ -363,10 +371,12 @@ class NativeLoop:
 
         if self.hooks is not None:
             await self.hooks.emit(TURN_END, {"session_id": sid, "turn_id": turn_id})
+        # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
+        cost_total = total_usage.pop("cost_usd", None)
         await self._emit(TurnComplete(
             session_id=sid, node_id=parent.node_id, turn_id=turn_id,
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
-            usage=dict(total_usage),
+            usage=dict(total_usage), cost_usd=cost_total,
         ))
 
     def _build_request(self, history: list[Message]) -> ProviderRequest:
@@ -401,7 +411,7 @@ class NativeLoop:
         request = self._build_request(history)
 
         blocks: dict[int, dict[str, Any]] = {}
-        usage_totals: dict[str, int] = {}
+        usage_totals: dict[str, Any] = {}
         tool_uses: list[dict[str, Any]] = []
         stop_reason = "end_turn"
         interrupted = False
@@ -612,14 +622,21 @@ class NativeLoop:
         # Permission gate.
         if self.permissions is not None and spec is not None:
             verdict = self.permissions.evaluate(spec, input)
+            deny_message: str | None = None
             if verdict == "allow" and self.permissions.note_execution(name, input):
                 verdict = "ask"  # doom-loop checkpoint
             if verdict == "ask":
-                verdict = await self._await_permission(sid, turn_id, name, tool_use_id, input, spec.risk)
+                verdict, deny_message, updated_input = await self._await_permission(
+                    sid, turn_id, name, tool_use_id, input, spec.risk,
+                )
+                if verdict != "deny" and updated_input is not None:
+                    input = updated_input
             if verdict == "deny":
                 return await self._finish_tool(
                     sid, turn_id, name, tool_use_id,
-                    ToolOutcome(text="permission denied", is_error=True),
+                    # The responder's reason is what the model reads back; only
+                    # fall back to the generic text when none was given.
+                    ToolOutcome(text=deny_message or "permission denied", is_error=True),
                 )
 
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
@@ -696,8 +713,13 @@ class NativeLoop:
     async def _await_permission(
         self, sid: str, turn_id: str, name: str, tool_use_id: str,
         input: dict[str, Any], risk: str,
-    ) -> str:
-        """Publish a PermissionRequest and park the turn until RespondPermission."""
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
+        """Publish a PermissionRequest and park the turn until RespondPermission.
+
+        Returns ``(verdict, deny_message, updated_input)``: the responder's
+        reason (surfaced as the denied tool's output) and any rewritten tool
+        input it handed back on an allow.
+        """
         request_id = new_id("perm")
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -710,7 +732,12 @@ class NativeLoop:
             resp: RespondPermission = await fut
         finally:
             self._pending_permissions.pop(request_id, None)
-        return "allow" if resp.decision in ("allow", "allow_always") else "deny"
+        allowed = resp.decision in ("allow", "allow_always")
+        return (
+            "allow" if allowed else "deny",
+            resp.message,
+            resp.updated_input if allowed else None,
+        )
 
     async def _finish_tool(
         self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome
@@ -728,8 +755,14 @@ class NativeLoop:
         return outcome
 
     @staticmethod
-    def _merge_usage(totals: dict[str, int], usage: dict[str, Any]) -> None:
+    def _merge_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
         for key, value in usage.items():
+            if key == "cost_usd":
+                # Cost SUMS: one terminal chunk per call, accumulated across
+                # the agent loop's model calls. Token keys keep max() below.
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    totals[key] = totals.get(key, 0.0) + float(value)
+                continue
             if isinstance(value, int):
                 totals[key] = max(totals.get(key, 0), value)
 

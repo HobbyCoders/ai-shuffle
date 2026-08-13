@@ -155,6 +155,9 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         "stream": True,
         # Ask for a usage object on the terminal chunk (finalize hook).
         "stream_options": {"include_usage": True},
+        # OpenRouter usage accounting: adds `cost` (USD credits) to the
+        # terminal chunk's usage object alongside the token counts.
+        "usage": {"include": True},
     }
     if request.tools:
         body["tools"] = _translate_tools(request.tools)
@@ -280,10 +283,15 @@ class ChatCompletionsNormalizer:
         if usage is not None:
             for key in self._order:
                 out.append(StreamChunk("block_stop", {"index": self._index_of[key]}))
+            normalized: dict[str, Any] = dict(_normalize_usage(usage))
+            cost = usage.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                # Provider-reported cost (USD credits) wins over any estimate.
+                normalized["cost_usd"] = float(cost)
             out.append(
                 StreamChunk(
                     "usage",
-                    {"usage": _normalize_usage(usage), "stop_reason": self._stop_reason},
+                    {"usage": normalized, "stop_reason": self._stop_reason},
                 )
             )
             out.append(StreamChunk("message_stop", {}))

@@ -114,7 +114,7 @@ class CodeModeSession:
         # is surfaced as an engine PermissionRequest (parking the turn until the
         # client answers) via on_permission.
         async def _on_permission(spec: ToolSpec, tool_input: dict) -> bool:
-            verdict = await loop._await_permission(
+            verdict, _message, _updated_input = await loop._await_permission(
                 sid, turn_id, spec.name, new_id("call"), tool_input, spec.risk
             )
             return verdict == "allow"

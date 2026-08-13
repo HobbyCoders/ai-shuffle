@@ -15,14 +15,18 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
   * ``{"type":"assistant","message":{"content":[...],"usage":{...},...}}`` — each
     content block becomes BlockStart + a whole-block delta + BlockStop (+ ToolUse
     for ``tool_use``); ``usage`` becomes a per-model-call Usage event. The full
-    message is assembled into a ``SessionNode`` for persistence.
+    message is assembled into a ``SessionNode`` for persistence. NOTE: the CLI
+    splits a multi-block model message into ONE assistant frame PER BLOCK, each
+    repeating the same message ``id`` and ``usage`` — hence the message-level
+    block cursor (in-frame positions are always 0) and the usage-once guard.
   * ``{"type":"user","message":{"content":[{"type":"tool_result",...}]}}`` —
     ToolResult events (name resolved via the ``tool_use_id`` → name map).
   * ``{"type":"stream_event","event":{<raw Anthropic SSE>}}`` — real streaming
     deltas (only with ``--include-partial-messages``). Reuses the Anthropic
     ``sse_to_chunk`` serializer, then maps chunks exactly as ``NativeLoop`` does.
     When partial streaming is on, the block indices seen here suppress the
-    whole-block re-emission from the following ``assistant`` frame (dedupe).
+    whole-block re-emission from the ``assistant`` frames of the SAME message
+    (dedupe); ``message_start`` is what clears that state, one message at a time.
   * ``{"type":"result","subtype":...,"total_cost_usd":...,"num_turns":...}`` —
     TurnComplete (+ a fallback Usage if no assistant frame carried usage).
   * ``{"type":"rate_limit_event","rate_limit_info":{...}}`` — RateLimit.
@@ -149,11 +153,25 @@ class StreamJsonMapper:
         self._tool_names: dict[str, str] = {}  # tool_use_id → tool name
         self._usage_emitted = False
         self._last_node_id: str = user_node_id
-        # Dedupe: block indices already streamed via stream_event since the last
-        # assistant frame (their whole-block re-emission is suppressed).
+        # Dedupe: block indices already streamed via stream_event for the CURRENT
+        # model message (their whole-block re-emission is suppressed). Cleared on
+        # the message_start chunk — NOT per assistant frame: the CLI splits one
+        # model message into one `assistant` frame PER CONTENT BLOCK, so a
+        # per-frame reset would drop the dedupe state before the sibling frames
+        # arrive and every block after the first would be re-emitted whole.
         self._streamed: set[int] = set()
         # In-flight stream_event tool_use blocks: index → accumulated args/name.
         self._se_tool: dict[int, dict[str, Any]] = {}
+        # Message-level index of the next block an `assistant` frame reports.
+        # Those per-block frames each carry a one-element content list, so the
+        # in-frame position is always 0 and cannot be matched against the
+        # message-level indices in ``_streamed``; this running cursor supplies
+        # the real index. Reset on message_start with ``_streamed``.
+        self._block_cursor = 0
+        # Message id whose `usage` was already turned into a Usage event. Every
+        # per-block frame of a message repeats that message's usage verbatim, so
+        # without this a two-block message double-counts its tokens and cost.
+        self._usage_msg_id: str | None = None
 
     # ─── frame dispatch ──────────────────────────────────────────────────
 
@@ -222,7 +240,10 @@ class StreamJsonMapper:
             if not isinstance(block, dict):
                 continue
             btype = block.get("type")
-            streamed = index in self._streamed
+            # Suppression is decided on the MESSAGE-level index (the one the
+            # stream events carry); emission keeps the in-frame index, which is
+            # what the non-partial path has always used.
+            streamed = (self._block_cursor + index) in self._streamed
 
             if btype == "text":
                 text = block.get("text", "")
@@ -261,13 +282,15 @@ class StreamJsonMapper:
         self._last_node_id = node_id
 
         usage = msg.get("usage")
-        if usage:
+        msg_id = msg.get("id")
+        if usage and (msg_id is None or msg_id != self._usage_msg_id):
             events.append(self._usage_event(node_id, usage))
             self._usage_emitted = True
+            self._usage_msg_id = msg_id
 
-        # This assistant message consumed any partial-streamed blocks.
-        self._streamed = set()
-        self._se_tool = {}
+        # Advance past the blocks this frame reported: the next `assistant`
+        # frame of the same message continues where this one stopped.
+        self._block_cursor += len(blocks)
 
         return Mapped(events=events, message=Message(role="assistant", content=content), node_id=node_id)
 
@@ -310,7 +333,17 @@ class StreamJsonMapper:
         p = chunk.payload
         events: list[Event] = []
 
-        if kind == "block_start":
+        if kind == "message_start":
+            # A new model message begins: the previous message's streamed-block
+            # bookkeeping no longer applies, and its `assistant` frames have all
+            # been consumed by now (they are emitted per block, before or right
+            # after the block's own stream events, never after the NEXT
+            # message_start). Deliberately NOT message_stop: the CLI may flush a
+            # message's per-block assistant frames after it.
+            self._streamed.clear()
+            self._se_tool.clear()
+            self._block_cursor = 0
+        elif kind == "block_start":
             index = p["index"]
             self._streamed.add(index)
             btype = p.get("block_type", "text")
@@ -342,8 +375,8 @@ class StreamJsonMapper:
             if block is not None:
                 args = json.loads(block["args"]) if block["args"] else {}
                 events.append(self._tool_use(block["tool_use_id"] or "", block["name"] or "", args))
-        # message_start / usage(message_delta) / message_stop from the partial
-        # stream are ignored: Usage is emitted once from the assistant frame.
+        # usage(message_delta) / message_stop from the partial stream are
+        # ignored: Usage is emitted once from the assistant frame.
         return Mapped(events=events)
 
     def _on_result(self, frame: dict[str, Any]) -> Mapped:

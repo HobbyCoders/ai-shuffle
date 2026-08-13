@@ -14,6 +14,7 @@ from typing import AsyncIterator
 import httpx
 
 from omni.providers._sse import sse_events
+from omni.providers.anthropic.pricing import estimate_cost as _estimate_cost
 from omni.providers.anthropic.serialize import build_request_body, sse_to_chunk
 from omni.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 
@@ -42,6 +43,10 @@ class AnthropicClient:
         self._base_url = base_url
         self._timeout = timeout
         self._http = http_client
+
+    def estimate_cost(self, model: str, usage: dict) -> float | None:
+        """Optional engine cost hook: list-price estimate for one model call."""
+        return _estimate_cost(model, usage)
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         headers = {

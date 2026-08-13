@@ -2,9 +2,11 @@
 
 Layout (one directory per store):
   ``<session_id>.jsonl``         node/head log; first line is a ``meta`` header,
-                                 then one line per ``append`` (a ``node`` record)
-                                 and one ``head`` record whenever the head moves
-                                 (append, fork, rewind).
+                                 then one line per ``append`` (a ``node`` record),
+                                 one ``head`` record whenever the head moves
+                                 (append, fork, rewind), and one ``cli_session``
+                                 record whenever a delegated backend refreshes its
+                                 resume handle.
   ``<session_id>.events.jsonl``  the durable Event log — one sequenced event per
                                  line — so ``events_since`` survives a restart.
 
@@ -68,6 +70,7 @@ class JsonlStore:
                     session_id=rec["session_id"],
                     head_node_id=rec.get("head_node_id"),
                     created_at=rec.get("created_at", 0.0),
+                    cli_session_id=rec.get("cli_session_id"),
                 )
             elif kind == "node":
                 n = rec["node"]
@@ -80,6 +83,9 @@ class JsonlStore:
             elif kind == "head":
                 if meta is not None:
                     meta.head_node_id = rec["head_node_id"]
+            elif kind == "cli_session":
+                if meta is not None:
+                    meta.cli_session_id = rec.get("cli_session_id")
         if meta is None:  # corrupt/empty log
             return False
 
@@ -106,7 +112,8 @@ class JsonlStore:
         self._append_line(
             self._log_path(meta.session_id),
             {"t": "meta", "session_id": meta.session_id,
-             "created_at": meta.created_at, "head_node_id": meta.head_node_id},
+             "created_at": meta.created_at, "head_node_id": meta.head_node_id,
+             "cli_session_id": meta.cli_session_id},
         )
         return meta
 
@@ -149,6 +156,15 @@ class JsonlStore:
         self._ensure_loaded(session_id)
         self._sessions[session_id].head_node_id = node_id
         self._append_line(self._log_path(session_id), {"t": "head", "head_node_id": node_id})
+
+    async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:
+        if not self._ensure_loaded(session_id):
+            return
+        self._sessions[session_id].cli_session_id = cli_session_id
+        self._append_line(
+            self._log_path(session_id),
+            {"t": "cli_session", "cli_session_id": cli_session_id},
+        )
 
     async def append_event(self, session_id: str, event: Event) -> None:
         self._ensure_loaded(session_id)

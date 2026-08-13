@@ -39,6 +39,15 @@ class RespondPermission(Op):
     request_id: str
     decision: str  # "allow" | "deny" | "allow_always"
     remember: bool = False
+    # Why the call was denied, in the model's words. Engines surface it as the
+    # denied tool's ``tool_result`` text; ``None`` keeps their generic
+    # "permission denied". Lets a caller distinguish outcomes that are not
+    # really permission failures (e.g. the user closing a question dialog).
+    message: str | None = None
+    # The (possibly rewritten) tool input to run on an allow — the SDK's
+    # ``updatedInput``. ``None`` keeps the input the engine already has. This is
+    # how a decider hands data back to the tool (e.g. AskUserQuestion answers).
+    updated_input: dict[str, Any] | None = None
 
 
 @dataclass(kw_only=True)

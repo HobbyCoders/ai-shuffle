@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
+import pytest
 
 from omni.messages import Image, Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
 from omni.providers._sse import sse_events
@@ -73,6 +74,31 @@ async def test_usage_cached_tokens() -> None:
     assert u["output_tokens"] == 24
 
 
+def _terminal_usage_payload(usage: dict) -> dict:
+    norm = ChatCompletionsNormalizer()
+    norm.consume(
+        "message",
+        {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]},
+    )
+    out = norm.consume("message", {"choices": [], "usage": usage})
+    return next(c for c in out if c.kind == "usage").payload["usage"]
+
+
+def test_usage_carries_provider_reported_cost() -> None:
+    u = _terminal_usage_payload(
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "cost": 0.00123}
+    )
+    assert u["cost_usd"] == pytest.approx(0.00123)
+    assert u["input_tokens"] == 100
+
+
+def test_usage_without_cost_has_no_cost_key() -> None:
+    u = _terminal_usage_payload(
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    )
+    assert "cost_usd" not in u
+
+
 def test_reasoning_delta_maps_to_thinking() -> None:
     norm = ChatCompletionsNormalizer()
     out = norm.consume(
@@ -118,6 +144,7 @@ def test_request_body_message_mapping() -> None:
     body = build_request_body(request)
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
+    assert body["usage"] == {"include": True}
     assert body["messages"] == [
         {"role": "system", "content": "be terse"},
         {"role": "user", "content": "weather?"},
