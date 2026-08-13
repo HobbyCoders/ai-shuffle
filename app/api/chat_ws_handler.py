@@ -839,20 +839,11 @@ class ChatWebSocketHandler:
             # running->interrupting flip below is visible to whichever runner
             # executes the turn (its turn_claim observe pass drives the live
             # runtime), so stop needs no HTTP hop.
-            from app.core.query_engine import stop_all_background_tasks
-            from app.core.cli_interrupt_patch import is_patch_active
-
-            # Opt-in: also tear down in-flight background sub-agents. Only meaningful
-            # when the preserve-background patch is BOTH enabled and actually active
-            # — otherwise a plain interrupt already kills them, so the per-task loop
-            # would be redundant. Gating here also makes flag-OFF a true no-op even
-            # though the frontend always sends stop_background=true. (Gate computed
-            # VERBATIM for both paths — plan §1.4(1).)
-            stop_background = (
-                bool(data.get("stop_background"))
-                and settings.preserve_background_on_interrupt
-                and is_patch_active()
-            )
+            # The CLI's interrupt is query-scoped: a plain interrupt already
+            # tears down in-flight background sub-agents, so no per-task stop
+            # loop is needed. (The old PRESERVE_BACKGROUND_ON_INTERRUPT
+            # binary-patch opt-in that made one meaningful was removed with
+            # the Agent SDK.)
 
             # v2 turns cutover: the ONE interrupt implementation. Flip the live
             # turn running->interrupting (durable intent) and fire the executor,
@@ -872,7 +863,7 @@ class ChatWebSocketHandler:
             flipped = turn_manager.interrupt(
                 session_id,
                 "stop",
-                stop_background=stop_background,
+                stop_background=False,
                 turn_id=target_turn_id,
             )
             if flipped is not None:
@@ -882,8 +873,6 @@ class ChatWebSocketHandler:
                 # already fired; the observe pass is a guarded no-op (O4).
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
-            if stop_background:
-                await stop_all_background_tasks(session_id)
             return
 
     # ------------------------------------------------------------------

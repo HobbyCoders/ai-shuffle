@@ -16,7 +16,6 @@ stays importable/testable on Linux CI.
 Knobs:
   * ``CHROME_CDP_PORT`` (default 9221) — the loopback DevTools port.
   * ``CHROME_EXECUTABLE`` — explicit path to a Chrome/Edge/Chromium binary.
-  * ``START_CHROME=0`` — opt out of auto-launch entirely (e.g. you run your own).
 
 If the CDP port is already answered by something else, we do NOT spawn (an
 external browser owns the port); its detail is surfaced via ``get_detail()``.
@@ -227,16 +226,15 @@ async def _supervise(exe: str, port: int) -> None:
 async def ensure_started() -> None:
     """Ensure a supervised native browser is running on the loopback CDP port.
 
-    No-op when: (a) in a container, (b) ``START_CHROME=0``, (c) already
-    supervising, or (d) the CDP port is already answered by something else
-    (external browser owns it). Otherwise resolves an executable and starts the
-    supervision loop. Never raises — best-effort.
+    No-op when: (a) in a container, (b) already supervising, or (c) the CDP
+    port is already answered by something else (external browser owns it —
+    which also covers "run your own browser on the CDP port"). Otherwise
+    resolves an executable and starts the supervision loop. Never raises —
+    best-effort.
     """
     global _supervisor_task, _last_detail, _stopping
 
     if _in_container():
-        return
-    if os.environ.get("START_CHROME") == "0":
         return
     if _supervisor_task is not None and not _supervisor_task.done():
         return

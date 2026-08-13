@@ -5,7 +5,7 @@
  * - The transcript + streaming state load via the SSE feed (feed-controller),
  *   which replays the session event log from_seq=0 on switch-in.
  * - A one-shot `/live` snapshot fills the metadata the feed does not carry
- *   (preserve_background_on_interrupt, remote controllability, usage totals,
+ *   (remote controllability, usage totals,
  *   worktree/cloud fields).
  */
 
@@ -56,7 +56,6 @@ interface LiveSnapshot {
 		cache_creation_tokens?: number;
 		cache_read_tokens?: number;
 	};
-	preserve_background_on_interrupt?: boolean;
 	session_meta?: {
 		title?: string;
 		worktree_id?: string | null;
@@ -456,15 +455,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
-		// /live so preserve_background_on_interrupt and worktree/cloud fields are
-		// correct on switch-in.
+		// /live so worktree/cloud fields are correct on switch-in.
 		void applyMetadataSnapshot(sessionId, generation);
 	}
 
 	/**
 	 * Fetch the `/live` snapshot once and fold the metadata the SSE feed does not
 	 * carry into activeSession — closing the v2 metadata gap
-	 * (preserve_background_on_interrupt, usage totals, and server-authoritative
+	 * (usage totals and server-authoritative
 	 * worktree/cloud fields). Never touches
 	 * messages / isStreaming / activeTasks (the feed owns those). Guarded on the
 	 * switch generation + active sessionId so a stale response can't write into a
@@ -497,9 +495,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			patch.totalCacheReadTokens = cacheRead;
 			patch.contextUsed = inTok + cacheCreate + cacheRead;
 		}
-
-		// "Plain Stop spares background sub-agents" — the feed never sets this.
-		patch.preserveBackgroundOnInterrupt = snap.preserve_background_on_interrupt ?? false;
 
 		const meta = snap.session_meta;
 		if (meta) {

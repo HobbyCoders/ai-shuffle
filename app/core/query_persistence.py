@@ -369,8 +369,6 @@ async def _persist_turn_results(
 
     Returns the assistant message dict if one was stored, else None.
     """
-    from app.db.sessions import add_session_messages_batch
-
     # Normalise optional lists
     thinking_blocks = thinking_blocks or []
     system_messages = system_messages or []
@@ -532,21 +530,9 @@ async def _persist_turn_results(
             "jsonl_uuid": assistant_uuid,
         })
 
-    # 3. Insert all messages in one transaction
-    # TODO: remove this gate once postgres_only mode proves stable (Slice A.2).
-    if batch and settings.session_store_mode != "postgres_only":
-        try:
-            inserted = await run_sync(add_session_messages_batch, batch)
-            # Find the last assistant row. With ordered text persistence the
-            # assistant text may not be the final batch entry (a turn can end
-            # on a tool_use), so scan from the end for the last assistant role.
-            if inserted:
-                for k in range(len(batch) - 1, -1, -1):
-                    if batch[k]["role"] == "assistant":
-                        assistant_msg = inserted[k]
-                        break
-        except Exception as e:
-            logger.error(f"{log_prefix}Failed to store messages for session {session_id}: {e}")
+    # 3. (removed) Legacy session_messages batch insert. The Postgres session
+    # store is the single source of truth for the transcript, so the legacy
+    # write was dead weight and is gone along with the SESSION_STORE_MODE flag.
 
     # 3b. (removed) App-level durable write to PgSessionStore.
     #

@@ -4,7 +4,7 @@ Tests for native-install browser support:
   * ``builtin_mcp_servers._browser_mcp_entry`` — the env → docker-path → repo
     fallback resolution order.
   * ``native_chrome.resolve_chrome_executable`` — Chrome/Edge/Chromium discovery.
-  * ``native_chrome.ensure_started`` — the no-op guards (container / START_CHROME).
+  * ``native_chrome.ensure_started`` — the no-op guards (container).
 
 Pure/logic tests only: nothing here spawns Chrome or binds a port, and no
 POSIX-only APIs are exercised (the module and these tests import on Linux CI).
@@ -113,16 +113,3 @@ class TestEnsureStartedNoOps:
             await nc.ensure_started()
         assert nc._supervisor_task is None
 
-    @pytest.mark.asyncio
-    async def test_noop_when_start_chrome_disabled(self):
-        nc._supervisor_task = None
-        env = dict(os.environ)
-        env["START_CHROME"] = "0"
-        with patch.dict(os.environ, env, clear=True), \
-             patch("app.core.native_chrome._in_container", return_value=False), \
-             patch(
-                 "app.core.native_chrome.asyncio.create_subprocess_exec",
-                 new=AsyncMock(side_effect=AssertionError("must not spawn")),
-             ):
-            await nc.ensure_started()
-        assert nc._supervisor_task is None

@@ -228,36 +228,32 @@ chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null
 # =============================================================================
 # Launch the headless Chromium as appuser (the same user the app runs as) so the
 # built-in browser MCP server (browser-mcp) has a browser to drive over CDP.
-# Supervised so a crash auto-restarts. Disable with START_CHROME=0.
-if [ "${START_CHROME:-1}" = "1" ]; then
-    # The browser profile lives in a NON-default dir (~/chrome-profile) so Chrome
-    # 136+ keeps honoring --remote-debugging-port (the loopback CDP surface the
-    # browser-mcp server attaches to).
-    mkdir -p /home/appuser/chrome-profile
-    chown -R appuser:appuser /home/appuser/chrome-profile 2>/dev/null || true
-    echo "Starting Chromium for browser automation (CHROME_CDP=${CHROME_CDP:-1}, port ${CHROME_CDP_PORT:-9221})..."
-    # The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
-    # docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
-    # applies the circuit breaker + exponential backoff, and (crucially) drops
-    # into slow-retry instead of permanently disabling Chrome, as defense in
-    # depth against crashes (the known deterministic first-run-suppression
-    # SIGTRAP is already fixed in start-chrome.sh). We launch it here
-    # backgrounded with the same log redirection and pass the same env defaults
-    # through; the supervisor itself does the setpriv drop to appuser.
-    CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}" \
-    CHROME_HEALTHY_SECS="${CHROME_HEALTHY_SECS:-60}" \
-    CHROME_BACKOFF_MAX="${CHROME_BACKOFF_MAX:-300}" \
-    CHROME_SLOW_RETRY_SECS="${CHROME_SLOW_RETRY_SECS:-300}" \
-    CHROME_CDP="${CHROME_CDP:-1}" \
-    CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
-    CHROME_DEBUG="${CHROME_DEBUG:-0}" \
-    CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
-    CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
-        chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
-    echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor"
-else
-    echo "START_CHROME=0 — skipping Chrome launch (browser automation will be unavailable)"
-fi
+# Supervised so a crash auto-restarts.
+# The browser profile lives in a NON-default dir (~/chrome-profile) so Chrome
+# 136+ keeps honoring --remote-debugging-port (the loopback CDP surface the
+# browser-mcp server attaches to).
+mkdir -p /home/appuser/chrome-profile
+chown -R appuser:appuser /home/appuser/chrome-profile 2>/dev/null || true
+echo "Starting Chromium for browser automation (CHROME_CDP=${CHROME_CDP:-1}, port ${CHROME_CDP_PORT:-9221})..."
+# The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
+# docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
+# applies the circuit breaker + exponential backoff, and (crucially) drops
+# into slow-retry instead of permanently disabling Chrome, as defense in
+# depth against crashes (the known deterministic first-run-suppression
+# SIGTRAP is already fixed in start-chrome.sh). We launch it here
+# backgrounded with the same log redirection and pass the same env defaults
+# through; the supervisor itself does the setpriv drop to appuser.
+CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}" \
+CHROME_HEALTHY_SECS="${CHROME_HEALTHY_SECS:-60}" \
+CHROME_BACKOFF_MAX="${CHROME_BACKOFF_MAX:-300}" \
+CHROME_SLOW_RETRY_SECS="${CHROME_SLOW_RETRY_SECS:-300}" \
+CHROME_CDP="${CHROME_CDP:-1}" \
+CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
+CHROME_DEBUG="${CHROME_DEBUG:-0}" \
+CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
+CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
+    chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
+echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor" 
 
 # =============================================================================
 # Start Application

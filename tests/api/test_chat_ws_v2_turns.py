@@ -307,12 +307,13 @@ async def test_handle_clear_queued_messages_aborts_only_user_chips(mock_db):
     assert cwh._v2_queue_view("sess-1") == []
 
 
-# ═══ handle_stop — interrupt(stop) + stop_background gate ═════════════════════
+# ═══ handle_stop — interrupt(stop) ════════════════════════════════════════════
 
 
 async def test_handle_stop_interrupts_live_turn(mock_db):
-    """A stop flips the live turn running->interrupting (durable intent). With
-    the opt-in gate off, background teardown is NOT invoked."""
+    """A stop flips the live turn running->interrupting (durable intent). The
+    query-scoped interrupt already tears down background tasks, so no per-task
+    teardown is invoked."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
     turns_db.start_turn(live, run_id="run-1")
@@ -327,30 +328,7 @@ async def test_handle_stop_interrupts_live_turn(mock_db):
             )
 
     assert turns_db.get_turn(live)["state"] == "interrupting"
-    stop_bg.assert_not_awaited()  # gate off (patch not active) -> no teardown
-
-
-async def test_handle_stop_background_gate_tears_down_when_active(mock_db, monkeypatch):
-    """When stop_background is requested AND the preserve-background patch is both
-    enabled and active, surviving background tasks are torn down transport-side
-    (the runtime interrupt does not carry the opt-in)."""
-    _make_session("sess-1")
-    live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
-    turns_db.start_turn(live, run_id="run-1")
-    monkeypatch.setattr(settings, "preserve_background_on_interrupt", True)
-
-    with _Patches():
-        with patch("app.core.cli_interrupt_patch.is_patch_active", return_value=True), \
-             patch(
-                 "app.core.query_engine.stop_all_background_tasks", new=AsyncMock()
-             ) as stop_bg:
-            handler = _make_handler()
-            await handler.handle_stop(
-                {"session_id": "sess-1", "stop_background": True}
-            )
-
-    assert turns_db.get_turn(live)["state"] == "interrupting"
-    stop_bg.assert_awaited_once_with("sess-1")
+    stop_bg.assert_not_awaited()
 
 
 async def test_handle_stop_with_current_turn_id_interrupts(mock_db):

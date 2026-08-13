@@ -691,12 +691,8 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     working_dir = "/workspace"
     store_parse_failed = False
 
-    from app.core.config import settings as _store_settings
-    _postgres_only = _store_settings.session_store_mode == "postgres_only"
-
     if sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history
             from app.core.message_resolver import resolve_working_dir
             from app.core.config import settings
 
@@ -721,17 +717,14 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 jsonl_messages, usage_data = await run_sync(
                     omni_live_messages, sdk_session_id, working_dir
                 )
-            elif _postgres_only:
-                # postgres_only read cutover: Postgres (session_store_entries) is
-                # the source of truth. Load the rich transcript from the store and
-                # run it through the SAME transform as the JSONL path (so
-                # messages/usage are identical). The JSONL block is skipped
-                # entirely. In mirror/disabled this branch is never entered.
+            else:
+                # Postgres (session_store_entries) is the source of truth. Load
+                # the rich transcript from the store and run it through the SAME
+                # transform as the old JSONL path (so messages/usage are
+                # identical).
                 jsonl_messages, usage_data = await run_sync(
                     parse_session_history_via_store, sdk_session_id, working_dir
                 )
-            else:
-                jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Per-message profile resolution. JSONL entries carry no DB row id,
                 # so each user message's profile is read from the DB user rows by
@@ -825,66 +818,28 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # A RAISED store parse (transient DB error) is not an EMPTY store:
             # the legacy fallback below must not fire, or a post-cutover
             # session would render as the user-rows-only legacy view.
-            store_parse_failed = _postgres_only
+            store_parse_failed = True
 
-    # Mirror-mode drift check — no-op unless session_store_mode == "mirror".
-    # Pure observability: compares the Postgres transcript mirror against the
-    # JSONL we just read and logs any divergence (see app/core/session_store_verify).
-    # Read-only; offloaded to a worker thread so it never blocks the loop, and
-    # wrapped so a verification glitch can't affect the response.
-    if sdk_session_id:
-        from app.core.config import settings as _settings
-        if _settings.session_store_mode == "mirror":
-            try:
-                from app.core.session_store_verify import log_session_store_drift
-                await run_sync(log_session_store_drift, sdk_session_id, working_dir)
-            except Exception:
-                pass
-
-    if _postgres_only:
-        # postgres_only: the store stays the single source of truth and the SDK
-        # JSONL disk reader (Fallback 2) stays hard-cut. But an EMPTY result —
-        # after the lazy JSONL backfill inside parse_session_history_via_store
-        # had its chance — means the transcript predates the cutover and lives
-        # ONLY in the legacy session_messages table (shared across installs;
-        # e.g. the JSONL sits on another machine). Serve that instead of
-        # rendering an existing chat as empty. Post-cutover sessions always
-        # have store rows, so this can never shadow the store with the
-        # user-rows-only legacy view (the "vanishing replies" trap) — EXCEPT
-        # when the store parse RAISED: then "no messages" proves nothing about
-        # the store, so serve empty (a transient blank beats a wrong
-        # transcript) rather than fall through to the legacy view.
-        if not messages and not store_parse_failed:
-            if sdk_session_id:
-                logger.warning(
-                    "[Session API] postgres_only: no entries in session_store for "
-                    "session %s (sdk_session_id=%s) — serving legacy "
-                    "session_messages transcript.",
-                    session_id, sdk_session_id,
-                )
-            messages = await _legacy_db_messages(session_id)
-    else:
-        # Fallback 2: Try SDK get_session_messages() if custom parser failed.
-        # The SDK handles JSONL parsing + conversation chain building independently,
-        # so it may succeed where our parser has edge-case issues.
-        if not messages and sdk_session_id and sdk_get_session_messages:
-            try:
-                sdk_msgs = sdk_get_session_messages(
-                    session_id=sdk_session_id,
-                    directory=working_dir,
-                )
-                if sdk_msgs:
-                    messages = _transform_sdk_messages(sdk_msgs)
-                    logger.debug(
-                        f"Loaded {len(messages)} messages via SDK get_session_messages "
-                        f"for session {session_id}"
-                    )
-            except Exception as e:
-                logger.warning(f"SDK get_session_messages fallback failed for {session_id}: {e}")
-
-        # Fallback 3: Database messages (oldest data, least rich)
-        if not messages:
-            messages = await _legacy_db_messages(session_id)
+    # The store stays the single source of truth. But an EMPTY result — after
+    # the lazy JSONL backfill inside parse_session_history_via_store had its
+    # chance — means the transcript predates the cutover and lives ONLY in the
+    # legacy session_messages table (shared across installs; e.g. the JSONL
+    # sits on another machine). Serve that instead of rendering an existing
+    # chat as empty. Post-cutover sessions always have store rows, so this can
+    # never shadow the store with the user-rows-only legacy view (the
+    # "vanishing replies" trap) — EXCEPT when the store parse RAISED: then "no
+    # messages" proves nothing about the store, so serve empty (a transient
+    # blank beats a wrong transcript) rather than fall through to the legacy
+    # view.
+    if not messages and not store_parse_failed:
+        if sdk_session_id:
+            logger.warning(
+                "[Session API] no entries in session_store for "
+                "session %s (sdk_session_id=%s) — serving legacy "
+                "session_messages transcript.",
+                session_id, sdk_session_id,
+            )
+        messages = await _legacy_db_messages(session_id)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
@@ -920,10 +875,9 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 async def _legacy_db_messages(session_id: str) -> list:
     """Legacy ``session_messages`` rows transformed for the detail response.
 
-    The least-rich source (Fallback 3): type is inferred from the role/tool
-    columns. Used in mirror/disabled when JSONL yields nothing, and in
-    postgres_only as the last-resort read for pre-cutover sessions whose
-    transcript was never backfilled into the store.
+    The least-rich source: type is inferred from the role/tool columns. The
+    last-resort read for pre-cutover sessions whose transcript was never
+    backfilled into the session store.
     """
     db_messages = await run_sync(database.get_session_messages, session_id)
     messages = []
@@ -1035,16 +989,6 @@ async def get_live_session(
     active_tasks = lifecycle.active_tasks
     unpark_pending = lifecycle.unpark_pending
 
-    # Effective "a plain Stop spares background sub-agents" state. Only true when
-    # the operator opted in AND the deploy-time CLI binary patch actually landed
-    # (the flag alone is intent, not effect). Computed ONCE and attached to every
-    # local response body so the client can label the Stop control accordingly.
-    from app.core.config import settings as _pb_settings
-    from app.core.cli_interrupt_patch import is_patch_active
-    preserve_background_on_interrupt = bool(
-        _pb_settings.preserve_background_on_interrupt and is_patch_active()
-    )
-
     # Per-session V2 streaming opt-in (V2 Phase 1). Surfaced on every response
     # body so a polling client always knows which streaming path this session
     # is on, the same way the flags above are attached to every path.
@@ -1077,36 +1021,17 @@ async def get_live_session(
     working_dir = "/workspace"
     usage_data = None
 
-    from app.core.config import settings as _store_settings
-    _postgres_only = _store_settings.session_store_mode == "postgres_only"
+    # NOTE: the legacy DB fast path (load_messages_from_db) is deliberately
+    # absent here: the legacy `session_messages` table only holds the USER rows
+    # — assistant/system turns live exclusively in the session store
+    # (session_store_entries, written by the SDK mirror). Reading the legacy
+    # table first returned a user-only transcript (the "assistant replies
+    # vanish on reopen" bug).
 
-    # Fast path: DB message loader (~10-60ms vs 6-20s JSONL parse).
-    #
-    # SKIPPED under postgres_only: load_messages_from_db reads the legacy
-    # `session_messages` table, which in postgres_only only holds the USER rows —
-    # assistant/system turns now live exclusively in the session store
-    # (session_store_entries, written by the SDK mirror). Reading the legacy table
-    # here returned a user-only transcript (the "assistant replies vanish on
-    # reopen" bug): has_db was True from the user rows, so this short-circuited
-    # before the store-backed parser (Fallback 1) could run. The session-detail
-    # read (GET /{id}) was already cut over to the store in PR C.1; this brings the
-    # /live read path to the same single source of truth.
-    if not _postgres_only:
-        from app.core.db_message_loader import load_messages_from_db
-        try:
-            db_messages, has_db = await run_sync(load_messages_from_db, session_id)
-            if has_db:
-                messages = db_messages
-                logger.debug(f"Live endpoint: loaded {len(messages)} messages from DB for {session_id}")
-        except Exception as e:
-            logger.warning(f"DB message load failed for live {session_id}: {e}")
-
-    # Fallback 1: JSONL parsing (legacy sessions without DB messages).
-    # In postgres_only this loads from the session store instead of JSONL.
+    # Primary read: the Postgres session store.
     store_parse_failed = False
     if not messages and sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history
             from app.core.message_resolver import resolve_working_dir
             from app.core.config import settings
 
@@ -1128,14 +1053,11 @@ async def get_live_session(
                 jsonl_messages, usage_data = await run_sync(
                     omni_live_messages, sdk_session_id, working_dir
                 )
-            elif _postgres_only:
-                # postgres_only: replace the JSONL fallback with the store-backed
-                # parser (SAME transform). The DB fast path above is unchanged.
+            else:
+                # Store-backed parser (SAME transform as the old JSONL path).
                 jsonl_messages, usage_data = await run_sync(
                     parse_session_history_via_store, sdk_session_id, working_dir
                 )
-            else:
-                jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Optional fields to include when present (system, tool, subagent, metadata)
                 _OPTIONAL_LIVE_FIELDS = (
@@ -1173,11 +1095,11 @@ async def get_live_session(
                 attach_turn_profile_ids(session_id, messages)
 
         except Exception as e:
-            logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
+            logger.error(f"Failed to parse transcript for live session {session_id}: {e}")
             # A RAISED store parse is not an EMPTY store — see GET /{id}.
-            store_parse_failed = _postgres_only
+            store_parse_failed = True
 
-    # postgres_only legacy rescue: the store yielded nothing even after the
+    # Legacy rescue: the store yielded nothing even after the
     # lazy JSONL backfill inside parse_session_history_via_store had its
     # chance — a pre-cutover session whose transcript lives ONLY in the legacy
     # session_messages table (shared across installs). Serve that instead of
@@ -1186,40 +1108,19 @@ async def get_live_session(
     # legacy view then would resurface the user-rows-only "vanishing replies"
     # trap). Post-cutover sessions always have store rows, so the legacy view
     # can never shadow the store. Mirrors GET /{id}.
-    if _postgres_only and not messages and not store_parse_failed:
+    if not messages and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:
             db_messages, has_db = await run_sync(load_messages_from_db, session_id)
             if has_db:
                 messages = db_messages
                 logger.warning(
-                    "Live endpoint: postgres_only store empty for %s — serving "
+                    "Live endpoint: session store empty for %s — serving "
                     "legacy DB transcript (%d messages)",
                     session_id, len(messages),
                 )
         except Exception as e:
             logger.warning(f"Legacy DB fallback failed for live {session_id}: {e}")
-
-    # Fallback 2: SDK get_session_messages() — JSONL disk reader. HARD-CUT in
-    # postgres_only (the store is the single source of truth; the DB fast path
-    # + store-backed parser above already cover it). Runs in mirror/disabled.
-    if not _postgres_only and not messages and sdk_session_id and sdk_get_session_messages:
-        try:
-            sdk_msgs = sdk_get_session_messages(
-                session_id=sdk_session_id,
-                directory=working_dir,
-            )
-            if sdk_msgs:
-                messages = [
-                    {**m, "streaming": False}
-                    for m in _transform_sdk_messages(sdk_msgs)
-                ]
-                logger.debug(
-                    f"Live endpoint: loaded {len(messages)} messages via SDK "
-                    f"for session {session_id}"
-                )
-        except Exception as e:
-            logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
 
     # Registry reconcile: even with the buffer gone (or never present), a
     # sub-agent still running in the task registry must not render "completed".
@@ -1271,7 +1172,6 @@ async def get_live_session(
         },
         "activeTasks": active_tasks,
         "unpark_pending": unpark_pending,
-        "preserve_background_on_interrupt": preserve_background_on_interrupt,
         "v2_stream": v2_stream,
     }
     if session_meta:

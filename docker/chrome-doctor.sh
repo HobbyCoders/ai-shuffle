@@ -18,7 +18,7 @@ echo "------------------------------"
 if pgrep -f 'chrome.*--ozone-platform=headless' >/dev/null 2>&1; then
     pass "Chromium is running (headless)"
 else
-    fail "Chromium is not running" "start it: START_CHROME=1 (entrypoint), or run 'start-chrome' as appuser"
+    fail "Chromium is not running" "it should have been started by the entrypoint; run 'start-chrome' as appuser"
 fi
 
 # The loopback CDP port is the ONLY surface the browser-mcp server attaches to.

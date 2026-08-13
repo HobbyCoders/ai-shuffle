@@ -88,6 +88,13 @@ if exist "requirements-native.txt" (
     )
 )
 
+REM Database configuration (host/IP, username, password -> .env). Reuses the
+REM python implementation so the prompts and .env handling stay identical.
+venv\Scripts\python.exe -c "import run_local; run_local.configure_database()"
+if %errorlevel% neq 0 (
+    echo [WARN] Database configuration skipped - set POSTGRES_* in .env before starting
+)
+
 REM Build frontend if npm is available
 where npm >nul 2>&1
 if %errorlevel% equ 0 (

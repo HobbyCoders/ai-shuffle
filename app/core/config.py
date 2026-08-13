@@ -99,8 +99,22 @@ class Settings(BaseSettings):
     claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
     tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
-    # Database (required — PostgreSQL connection string)
-    database_url: Optional[str] = None
+    # Database (PostgreSQL). Set the individual connection pieces — the app
+    # assembles the connection URL itself, so nobody has to hand-build a
+    # postgresql:// DSN (or get percent-encoding of a password right).
+    #   POSTGRES_HOST     — hostname or IP. Defaults to "postgres" (the compose
+    #                       service) in Docker and "localhost" in local mode.
+    #   POSTGRES_PORT     — default 5432.
+    #   POSTGRES_USER     — default "ai_shuffle".
+    #   POSTGRES_PASSWORD — REQUIRED, no default. Collected during setup
+    #                       (run_local.py --setup writes it to .env; Docker
+    #                       compose fails fast if unset).
+    #   POSTGRES_DB       — default "ai_shuffle".
+    postgres_host: Optional[str] = None
+    postgres_port: int = 5432
+    postgres_user: str = "ai_shuffle"
+    postgres_password: Optional[str] = None
+    postgres_db: str = "ai_shuffle"
     db_pool_min: int = 2  # Min connections in PostgreSQL pool
     db_pool_max: int = 32  # Max connections in PostgreSQL pool
     # Headroom note: the rate-limit middleware does a synchronous DB auth
@@ -275,22 +289,11 @@ class Settings(BaseSettings):
     # keep marked processes alive across server restarts.
     reap_stray_cli_on_boot: bool = True
 
-    # SDK 0.1.65 SessionStore adapter (Postgres) — controls whether we mirror
-    # transcripts into Postgres and, eventually, treat Postgres as the single
-    # source of truth instead of reading JSONL files from ~/.claude/projects.
-    # Values:
-    #   "disabled"       — adapter never attached. Pre-migration behavior.
-    #   "mirror"         — attach adapter AND keep JSONL reads as primary.
-    #                      Used to backfill + diff-verify during rollout.
-    #   "postgres_only"  — Postgres is the single source of truth; JSONL
-    #                      reads are deleted. Final cutover.
-    # Default is "postgres_only": both production installs run this via the
-    # SESSION_STORE_MODE env var, and it is the ONLY mode that streams the
-    # transcript durably in near-real-time. Any lower mode ("disabled"/"mirror")
-    # reopens a full-turn data-loss window on a crash, so the safe default must
-    # be the durable one. A loud boot-warning fires if the effective mode is
-    # "disabled" outside of tests (see app/core/startup.py).
-    session_store_mode: str = "postgres_only"
+    # Session transcripts live in Postgres (the SessionStore adapter) — Postgres
+    # is the single source of truth and the only store that streams the
+    # transcript durably in near-real-time. The old SESSION_STORE_MODE flag
+    # ("disabled"/"mirror"/"postgres_only") was removed after the cutover:
+    # postgres_only is now the one and only behavior.
 
     # Cross-install agent-memory sync. When enabled, each session mirrors the
     # Claude Code CLI's per-project memory directory (MEMORY.md + per-fact .md
@@ -301,18 +304,6 @@ class Settings(BaseSettings):
     # (AGENT_MEMORY_SYNC=false) — it no-ops for project-less sessions and never
     # breaks a turn on error.
     agent_memory_sync: bool = True
-
-    # Preserve in-flight background sub-agents across a user "Stop"/interrupt.
-    # The bundled Claude CLI's interrupt is query-scoped, not task-scoped: a
-    # single interrupt() stops EVERY in-flight Task child, so a user Stop kills
-    # any running background sub-agents alongside the main turn. When this flag
-    # is ON, boot applies a deploy-time, same-length in-place patch to the
-    # bundled CLI binary (see app.core.cli_interrupt_patch) that neutralizes the
-    # one interrupt call site responsible, so Stop leaves background sub-agents
-    # running. OFF by default: no binary is touched unless explicitly opted in.
-    # Set via PRESERVE_BACKGROUND_ON_INTERRUPT (BaseSettings reads env vars by
-    # field name automatically).
-    preserve_background_on_interrupt: bool = False
 
     # Cross-provider ProviderAgent workers (multi-provider phase 3, chunk P3-A).
     # When ON, every non-worker session gets an in-process SDK MCP server
@@ -498,13 +489,33 @@ class Settings(BaseSettings):
         # In local mode, tools would be relative to install location
         return Path(__file__).parent.parent.parent / "tools"
 
+    @property
+    def effective_postgres_host(self) -> str:
+        """Postgres host: explicit POSTGRES_HOST, else a per-mode default."""
+        if self.postgres_host and self.postgres_host.strip():
+            return self.postgres_host.strip()
+        # Docker compose ships a "postgres" service; local installs talk to a
+        # database the user runs themselves.
+        return "localhost" if self.is_local_mode() else "postgres"
+
     def get_database_url(self) -> str:
-        """Get the PostgreSQL database URL."""
-        if self.database_url:
-            return self.database_url
-        raise ValueError(
-            "DATABASE_URL is required. Set it to a PostgreSQL connection string, e.g.: "
-            "DATABASE_URL=postgresql://REDACTED@localhost:5432/dbname"
+        """Assemble the PostgreSQL URL from the POSTGRES_* connection pieces.
+
+        Credentials are percent-encoded so passwords containing '@', '/', or
+        '%' survive the round-trip through app.db.base.parse_database_url.
+        """
+        if not self.postgres_password:
+            raise ValueError(
+                "POSTGRES_PASSWORD is required. Set the database connection in "
+                ".env (POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD — see "
+                ".env.example), or re-run setup: python run_local.py --setup"
+            )
+        from urllib.parse import quote
+        user = quote(self.postgres_user, safe="")
+        password = quote(self.postgres_password, safe="")
+        return (
+            f"postgresql://{user}:{password}@{self.effective_postgres_host}:"
+            f"{self.postgres_port}/{self.postgres_db}"
         )
 
     def is_local_mode(self) -> bool:

@@ -14,11 +14,6 @@ from app.core import query_persistence as qp
 from app.db import database
 
 
-@pytest.fixture(autouse=True)
-def _disable_session_store(monkeypatch):
-    monkeypatch.setattr(qp.settings, "session_store_mode", "disabled")
-
-
 @pytest.fixture
 def captured_updates(monkeypatch):
     """Replace run_sync so no DB is touched; record update_session kwargs."""

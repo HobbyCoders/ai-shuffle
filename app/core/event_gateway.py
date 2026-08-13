@@ -132,7 +132,7 @@ class EventGateway:
             try:
                 # Decompose the DSN like the pool does — a raw URL with a
                 # literal '@' in the password makes libpq mis-parse the host.
-                conn = psycopg2.connect(**parse_database_url(settings.database_url))
+                conn = psycopg2.connect(**parse_database_url(settings.get_database_url()))
                 # LISTEN must run outside a transaction.
                 conn.autocommit = True
                 cursor = conn.cursor()

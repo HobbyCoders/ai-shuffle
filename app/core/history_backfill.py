@@ -135,16 +135,12 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
     get_live_session):
 
       0. omni store (flag-on sessions) — short-circuits everything below
-      1. legacy ``session_messages`` via ``db_message_loader`` (non postgres_only)
-      2. JSONL parse — or the store-backed parser under postgres_only
-      3. postgres_only legacy rescue: empty store → legacy ``session_messages``
+      1. Postgres session store parse
+      2. legacy rescue: empty store → legacy ``session_messages``
     """
     session = sessions_db.get_session(session_id)
     if not session:
         return []
-
-    from app.core.config import settings
-    postgres_only = settings.session_store_mode == "postgres_only"
 
     sdk_session_id = session.get("sdk_session_id")
 
@@ -172,30 +168,14 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
                 exc_info=True,
             )
 
-    if not postgres_only:
-        try:
-            from app.core.db_message_loader import load_messages_from_db
-            msgs, has_db = load_messages_from_db(session_id)
-            if has_db:
-                return msgs
-        except Exception:
-            logger.warning(
-                "[history_backfill] db_message_loader failed for %s", session_id,
-                exc_info=True,
-            )
-
     if sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir
             working_dir = resolve_working_dir(dict(session))
-            if postgres_only:
-                from app.api.sessions_helpers import parse_session_history_via_store
-                msgs, _usage = parse_session_history_via_store(
-                    sdk_session_id, working_dir
-                )
-            else:
-                from app.core.jsonl_parser import parse_session_history
-                msgs, _usage = parse_session_history(sdk_session_id, working_dir)
+            from app.api.sessions_helpers import parse_session_history_via_store
+            msgs, _usage = parse_session_history_via_store(
+                sdk_session_id, working_dir
+            )
             if msgs:
                 return msgs
         except Exception:
@@ -204,19 +184,18 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
                 exc_info=True,
             )
 
-    if postgres_only:
-        # Store yielded nothing — pre-cutover session whose transcript lives only
-        # in the legacy shared session_messages table. Mirror /live's rescue.
-        try:
-            from app.core.db_message_loader import load_messages_from_db
-            msgs, has_db = load_messages_from_db(session_id)
-            if has_db:
-                return msgs
-        except Exception:
-            logger.warning(
-                "[history_backfill] legacy rescue failed for %s", session_id,
-                exc_info=True,
-            )
+    # Store yielded nothing — pre-cutover session whose transcript lives only
+    # in the legacy shared session_messages table. Mirror /live's rescue.
+    try:
+        from app.core.db_message_loader import load_messages_from_db
+        msgs, has_db = load_messages_from_db(session_id)
+        if has_db:
+            return msgs
+    except Exception:
+        logger.warning(
+            "[history_backfill] legacy rescue failed for %s", session_id,
+            exc_info=True,
+        )
 
     return []
 

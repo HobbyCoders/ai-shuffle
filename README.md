@@ -115,14 +115,13 @@ and you'll be guided through account setup and Claude authentication on first la
 
 | Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_PASSWORD` | — | **Required.** Password for the bundled PostgreSQL service — compose fails fast if unset |
-| `DATABASE_URL` | — | **Required.** PostgreSQL connection string the app connects with (compose wires this to the `postgres` service automatically) |
+| `POSTGRES_PASSWORD` | — | **Required.** Database password — compose fails fast if unset. The app builds its own connection URL from the `POSTGRES_*` pieces |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining connection pieces — only set them if your database lives outside the bundled compose service |
 | `ADMIN_PASSWORD` | — | Master secret; the at-rest encryption key for stored credentials is derived from it (PBKDF2) |
 | `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
 | `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
-| `START_CHROME` | `1` | Launch & supervise the headless browser the built-in `browser` MCP server drives (`0` to disable) |
 | `CHROME_CDP_PORT` | `9221` | Loopback DevTools (CDP) port the browser listens on and the tools attach to |
 | `CHROME_EXECUTABLE` | auto | Path to the Chrome / Chromium / Edge binary (auto-detected; set if yours is elsewhere) |
 | `BROWSER_MCP_ENTRY` | packaged | Override the browser-mcp entry point (defaults to the packaged Docker path, else `<repo>/browser-mcp/dist/index.js`) |
@@ -144,7 +143,8 @@ works once enabled.
   default `9221`). A per-session MCP server attaches to it.
 - **Native installs:** the backend auto-launches and supervises a local
   Chrome / Chromium / Edge the same way. Point `CHROME_EXECUTABLE` at your binary
-  if it isn't auto-detected, or set `START_CHROME=0` to run your own on the CDP port.
+  if it isn't auto-detected. To run your own browser instead, just start it on
+  the CDP port — if the port already answers, the app won't spawn another.
 
 Enable it under **Settings → Browser** (admin): a single toggle turns the tools on
 or off and a health dot shows whether the browser is reachable. The browser profile

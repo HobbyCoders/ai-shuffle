@@ -372,6 +372,17 @@ def rewind_env(mock_db, monkeypatch):
         )
     monkeypatch.setattr(cmd.jsonl_rewind_service, "truncate_to_checkpoint", _truncate)
 
+    # The Postgres session store is always truncated first (postgres_only is
+    # the one and only mode); stub it to succeed, and the emptiness probe to
+    # report a still-populated transcript.
+    async def _store_truncate(**kw):
+        return 2
+    monkeypatch.setattr(cmd, "truncate_session_store_to_checkpoint", _store_truncate)
+
+    async def _store_empty(sdk_session_id):
+        return False
+    monkeypatch.setattr(cmd, "main_transcript_is_empty", _store_empty)
+
     monkeypatch.setattr(cmd, "resolve_rewind_anchor", lambda **kw: 7)
     monkeypatch.setattr(cmd, "apply_rewind_delete", lambda **kw: 2)
     monkeypatch.setattr(cmd, "invalidate_parse_cache", lambda sdk: None)
@@ -384,7 +395,6 @@ def rewind_env(mock_db, monkeypatch):
     monkeypatch.setattr(
         cmd, "sync_engine", SimpleNamespace(broadcast_session_rewound=_broadcast)
     )
-    monkeypatch.setattr(cmd.settings, "session_store_mode", "disabled", raising=False)
     return state
 
 

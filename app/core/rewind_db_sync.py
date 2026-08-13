@@ -139,12 +139,6 @@ def _load_transcript_entries(
     except Exception as e:
         logger.debug("JSONL transcript load failed for %s: %s", sdk_session_id, e)
 
-    # The store tables (and their %s placeholders) exist only when the
-    # Postgres session store is active — never touch them otherwise.
-    from app.core.config import settings
-
-    if settings.session_store_mode not in ("mirror", "postgres_only"):
-        return []
     try:
         from app.core.pg_session_store import _load_entries_by_session_id_sync
 

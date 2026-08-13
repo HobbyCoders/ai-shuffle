@@ -37,29 +37,11 @@ os.environ["TESTING"] = "1"
 # for the live deployment, which must not leak into the test process.
 os.environ["CORS_ORIGINS"] = "*"
 
-# Same rationale as CORS_ORIGINS above: a deployment that has opted into the
-# bundled-CLI interrupt patch exports PRESERVE_BACKGROUND_ON_INTERRUPT=1 in its
-# real process environment, and this test process inherits it. Left alone, the
-# very first ``TestClient(app)``-based fixture (``client``/``authenticated_client``)
-# runs the REAL app lifespan (app/main.py), which sees
-# ``settings.preserve_background_on_interrupt`` as True and calls the REAL
-# ``cli_interrupt_patch.patch_cli_preserve_background`` against the actually
-# installed bundled ``claude`` binary — rewriting ~250MB on disk as a test side
-# effect AND permanently flipping the process-global
-# ``cli_interrupt_patch._PATCH_ACTIVE`` to True for the rest of the run (that
-# module deliberately never un-patches). Any later test asserting the exact
-# effective flag then sees a leaked True depending on suite ordering. Force
-# the flag off for the whole
-# test process; tests that need it True patch it explicitly and locally
-# (tests/api/test_chat_ws_stop_background.py, tests/core/test_config.py).
-os.environ["PRESERVE_BACKGROUND_ON_INTERRUPT"] = "false"
-
-
 # =============================================================================
 # SAFETY: forbid opening a real Postgres pool during tests
 # =============================================================================
-# The application is Postgres-only and DATABASE_URL frequently points at a
-# real/shared/production database. Multiple code paths will open a pool against
+# The application is Postgres-only and the configured POSTGRES_* settings
+# frequently point at a real/shared/production database. Multiple code paths will open a pool against
 # it if allowed to:
 #   * app.db.base.init_pool() — invoked by the FastAPI lifespan (entered by the
 #     TestClient fixtures) AND directly by the PgSessionStore conformance
@@ -83,9 +65,10 @@ if not ALLOW_REAL_PG:
     def _blocked_init_pool(*args, **kwargs):
         raise RuntimeError(
             "init_pool() is disabled in the test suite to prevent connecting to "
-            "the configured DATABASE_URL (which may be production). Tests run on "
-            "the in-memory SQLite shim. Set ALLOW_REAL_PG=1 to override, and only "
-            "point DATABASE_URL at a disposable test database when you do."
+            "the configured Postgres database (which may be production). Tests "
+            "run on the in-memory SQLite shim. Set ALLOW_REAL_PG=1 to override, "
+            "and only point the POSTGRES_* settings at a disposable test "
+            "database when you do."
         )
 
     _db_base._pg_pool = None
@@ -150,7 +133,7 @@ def _auto_db_shim(_raw_sqlite: sqlite3.Connection, request):
     mode in which touching a real database is sanctioned. In the default (safe)
     mode ``init_pool`` is blocked at import time and ``_pg_pool`` is kept None,
     so the shim always routes here and no test can reach the configured
-    DATABASE_URL. See the safety guard at the top of this file.
+    Postgres database. See the safety guard at the top of this file.
     """
     from app.db import base, database
     from tests.pg_shim import ShimConnection
@@ -167,7 +150,7 @@ def _auto_db_shim(_raw_sqlite: sqlite3.Connection, request):
     def _noop(*args, **kwargs):
         # SAFETY: neutralise real-pool init. The FastAPI lifespan (entered by
         # the TestClient-based fixtures) calls init_pool() with the process
-        # DATABASE_URL — which in a dev/CI sandbox points at the *live*
+        # POSTGRES_* settings — which in a dev/CI sandbox point at the *live*
         # database. Without this, entering TestClient would open a real
         # connection pool to production. Tests run entirely on the SQLite shim.
         return None
@@ -443,28 +426,6 @@ def reset_environment():
     yield
     os.environ.clear()
     os.environ.update(original_env)
-
-
-@pytest.fixture(autouse=True)
-def reset_cli_interrupt_patch_active():
-    """Reset ``cli_interrupt_patch._PATCH_ACTIVE`` before each test.
-
-    Defense-in-depth alongside the forced ``PRESERVE_BACKGROUND_ON_INTERRUPT``
-    override above: that override stops the app lifespan from ever calling the
-    REAL patcher during tests, but the flag is still a bare process-global with
-    no built-in reset (see that module's own docstring — it's deliberately
-    permanent for a real deployment). Reset BEFORE each test so any stray path
-    that does flip it for real (e.g. a future test exercising the lifespan
-    patch call directly) can never poison a later test's exact-body assertions.
-    tests/core/test_cli_interrupt_patch.py already resets it itself for its own
-    scope; this is a process-wide backstop.
-    """
-    try:
-        import app.core.cli_interrupt_patch as _cli_patch_mod
-        _cli_patch_mod._PATCH_ACTIVE = False
-    except Exception:
-        pass
-    yield
 
 
 @pytest.fixture(autouse=True)

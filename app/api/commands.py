@@ -1015,15 +1015,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     # Execute chat rewind. There are up to three storage layers to keep in sync:
     #   (a) the Postgres session store (``session_store_entries``) — the source
-    #       of truth the UI reads in ``postgres_only`` mode,
+    #       of truth the UI reads,
     #   (b) the on-disk JSONL transcript the SDK resumes from, and
     #   (c) the legacy ``session_messages`` rows.
-    # Which one is authoritative depends on ``session_store_mode``.
     elif request.restore_chat:
-        store_mode = settings.session_store_mode
-        postgres_only = store_mode == "postgres_only"
-        store_truncation_enabled = store_mode in ("mirror", "postgres_only")
-
         # (c) Resolve the legacy-DB anchor BEFORE truncating anything. The
         # fallback content-matcher needs the target uuid's text from a still-
         # intact transcript — the JSONL when present, else the session store
@@ -1047,39 +1042,35 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 exc_info=True,
             )
 
-        # (a) Truncate the Postgres session store. In postgres_only this is
-        # the authoritative chat the UI reads — skipping it is the exact bug
-        # where rewind "succeeds" but the message stays in chat because it still
-        # lives in the store and reappears on reload.
+        # (a) Truncate the Postgres session store — the authoritative chat the
+        # UI reads. Skipping it is the exact bug where rewind "succeeds" but
+        # the message stays in chat because it still lives in the store and
+        # reappears on reload.
         store_removed = 0
         store_truncated = False
-        if store_truncation_enabled:
-            try:
-                store_removed = await truncate_session_store_to_checkpoint(
-                    sdk_session_id=sdk_session_id,
-                    target_uuid=request.target_uuid,
-                    include_response=request.include_response,
-                    target_role=request.target_role,
-                )
-                store_truncated = True
-            except RewindTargetNotFound as store_nf:
-                logger.warning(
-                    f"Rewind store truncation: target not found for "
-                    f"session={session_id} target={request.target_uuid}: {store_nf}"
-                )
-                if postgres_only:
-                    errors.append(f"Store rewind failed: {store_nf}")
-            except Exception as store_err:
-                logger.error(
-                    f"Rewind store truncation failed for session {session_id}: {store_err}",
-                    exc_info=True,
-                )
-                if postgres_only:
-                    errors.append(f"Store rewind failed: {store_err}")
+        try:
+            store_removed = await truncate_session_store_to_checkpoint(
+                sdk_session_id=sdk_session_id,
+                target_uuid=request.target_uuid,
+                include_response=request.include_response,
+                target_role=request.target_role,
+            )
+            store_truncated = True
+        except RewindTargetNotFound as store_nf:
+            logger.warning(
+                f"Rewind store truncation: target not found for "
+                f"session={session_id} target={request.target_uuid}: {store_nf}"
+            )
+            errors.append(f"Store rewind failed: {store_nf}")
+        except Exception as store_err:
+            logger.error(
+                f"Rewind store truncation failed for session {session_id}: {store_err}",
+                exc_info=True,
+            )
+            errors.append(f"Store rewind failed: {store_err}")
 
-        # (b) Truncate the on-disk JSONL. Primary signal in disabled/mirror;
-        # best-effort in postgres_only, where the tmpfs transcript may be gone
-        # on a fresh server and the store is authoritative.
+        # (b) Truncate the on-disk JSONL. Best-effort: the tmpfs transcript may
+        # be gone on a fresh server and the store is authoritative.
         result = jsonl_rewind_service.truncate_to_checkpoint(
             sdk_session_id=sdk_session_id,
             target_uuid=request.target_uuid,
@@ -1095,8 +1086,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         # layer was actually truncated. Without this, rewind leaves orphan rows
         # the UI renders on reload (the original "rewind doesn't stick"
         # symptom). Gating it on jsonl_ok alone left the legacy rows intact
-        # whenever only the store could be truncated — e.g. mirror or
-        # postgres_only with the (tmpfs, often absent) JSONL gone — and they
+        # whenever only the store could be truncated — e.g. with the (tmpfs,
+        # often absent) JSONL gone — and they
         # then resurfaced through the empty-store legacy fallback after a full
         # rewind. Best-effort: a DB failure here does not invalidate a
         # successful transcript truncation.
@@ -1121,15 +1112,15 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                     )
                     errors.append(f"DB sync failed: {db_err}")
             else:
-                # No legacy anchor row could be resolved. Usually benign (in
-                # postgres_only, post-cutover session_messages holds user rows
-                # only, so an assistant-target anchor can miss legitimately) —
-                # EXCEPT after a full rewind that emptied the store: the read
-                # path's empty-store legacy fallback would then resurrect every
+                # No legacy anchor row could be resolved. Usually benign
+                # (post-cutover session_messages holds user rows only, so an
+                # assistant-target anchor can miss legitimately) — EXCEPT after
+                # a full rewind that emptied the store: the read path's
+                # empty-store legacy fallback would then resurrect every
                 # leftover session_messages row on reload. Nothing is left to
                 # anchor on, so wipe them all.
                 purged_legacy = False
-                if postgres_only and store_truncated:
+                if store_truncated:
                     try:
                         transcript_probe = await main_transcript_is_empty(
                             sdk_session_id
@@ -1151,8 +1142,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                         f"Legacy session_messages rows were left untouched; they "
                         f"only surface through the empty-store legacy fallback."
                     )
-                if not postgres_only:
-                    errors.append("DB sync skipped: could not resolve anchor row")
             logger.info(
                 f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
                 f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
@@ -1164,16 +1153,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 turn_diff = result.remaining_user_turns - current_turns
                 if turn_diff != 0:
                     database.update_session(session_id, turn_increment=turn_diff)
-        elif not postgres_only:
-            errors.append(f"Chat rewind failed: {result.error}")
 
-        # Overall chat-rewind success: in postgres_only the store is the chat;
-        # elsewhere the JSONL is. (Either succeeding counts everywhere else so a
-        # mirror-mode store hit isn't lost if the JSONL is unexpectedly absent.)
-        if postgres_only:
-            chat_rewound = store_truncated
-        else:
-            chat_rewound = jsonl_ok or store_truncated
+        # Overall chat-rewind success: the store is the chat.
+        chat_rewound = store_truncated
 
         if chat_rewound:
             # Report a non-zero count even when only the store was truncated.
@@ -1194,7 +1176,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             # with "No conversation found". Clear the pointer (empty string →
             # NULL) so the next message starts a fresh SDK session.
             transcript_empty = jsonl_ok and result.remaining_user_turns == 0
-            if not transcript_empty and postgres_only and store_truncated:
+            if not transcript_empty and store_truncated:
                 if transcript_probe is not None:
                     transcript_empty = transcript_probe
                 else:

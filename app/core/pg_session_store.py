@@ -30,15 +30,9 @@ synchronous, so every DB operation is dispatched to a worker thread via
 ``asyncio.to_thread``. This matches the pattern used elsewhere in the backend
 (see ``app/core/startup.py``).
 
-Feature flag
-------------
-``settings.session_store_mode`` gates the whole thing:
-
-* ``"disabled"`` — adapter never attached (PR A default; zero behavior change).
-* ``"mirror"``   — attach to ``ClaudeAgentOptions.session_store`` alongside the
-                   CLI's JSONL writer. Used to backfill + verify in PR B.
-* ``"postgres_only"`` — Postgres is the only source of truth; JSONL readers
-                       removed. PR C cutover target.
+Postgres is the only source of truth for session transcripts; the old
+SESSION_STORE_MODE feature flag ("disabled"/"mirror"/"postgres_only") was
+removed after the cutover.
 """
 
 from __future__ import annotations

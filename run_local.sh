@@ -201,6 +201,10 @@ run_setup() {
 
     setup_venv
     install_dependencies
+    # Database configuration (host/IP, username, password → .env). Reuses the
+    # python implementation so the prompts and .env handling stay identical.
+    venv/bin/python -c "import run_local; run_local.configure_database()" \
+        || print_status "Database configuration skipped - set POSTGRES_* in .env before starting" "warning"
     build_frontend || print_status "Frontend build skipped - you can build it later" "warning"
     check_claude_auth
 

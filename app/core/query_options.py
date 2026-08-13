@@ -165,29 +165,26 @@ COMPUTER_USE_GUIDANCE = (
 )
 
 # ─── Session store singleton (Phase 1.5) ────────────────────────────────────
-# Constructed once per process when session_store_mode != "disabled".
-# Wrapped in try/except so Postgres unavailability is non-fatal — callers
-# get None and behave identically to the disabled case.
+# Constructed once per process. Wrapped in try/except so Postgres
+# unavailability is non-fatal — callers get None and degrade gracefully.
 _session_store_singleton = None
 _session_store_init_attempted = False
 
 
 def _get_session_store():
-    """Return the module-level PgSessionStore singleton, or None if disabled / unavailable."""
+    """Return the module-level PgSessionStore singleton, or None if unavailable."""
     global _session_store_singleton, _session_store_init_attempted
     if _session_store_init_attempted:
         return _session_store_singleton
     _session_store_init_attempted = True
-    if settings.session_store_mode == "disabled":
-        return None
     try:
         from app.core.pg_session_store import PgSessionStore
         _session_store_singleton = PgSessionStore()
-        logger.info(f"PgSessionStore singleton created (mode={settings.session_store_mode})")
+        logger.info("PgSessionStore singleton created")
     except Exception:
         logger.warning(
             "PgSessionStore construction failed — proceeding without session_store. "
-            "Check DATABASE_URL and Postgres connectivity.",
+            "Check the POSTGRES_* settings and Postgres connectivity.",
             exc_info=True,
         )
         _session_store_singleton = None
@@ -1095,9 +1092,8 @@ def build_options_from_profile(
         if getattr(options, "enable_file_checkpointing", False):
             logger.warning(
                 "Disabling enable_file_checkpointing because a session_store is "
-                "attached (session_store_mode=%s) — the SDK rejects combining the "
-                "two, and the mirrored transcript supersedes local-disk checkpoints.",
-                settings.session_store_mode,
+                "attached — the SDK rejects combining the two, and the "
+                "mirrored transcript supersedes local-disk checkpoints."
             )
             options.enable_file_checkpointing = False
 

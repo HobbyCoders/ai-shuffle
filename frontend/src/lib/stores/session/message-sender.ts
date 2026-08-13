@@ -424,13 +424,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			return true;
 		},
 
-		stopGeneration(stopBackground = false) {
+		stopGeneration() {
 			const _state = getState();
 			if (_state.sessionId) {
-				// stop_background=true also tears down in-flight background sub-agents;
-				// false stops only the foreground turn (Claude Code's Esc). The backend
-				// ignores this field entirely when the preserve-background flag is off,
-				// so a default-false send is exactly today's full stop there.
+				// The interrupt is always a full stop (the query-scoped SDK interrupt
+				// tears down in-flight background sub-agents too).
 				// #585: carry the live turn id so the backend binds the stop to that
 				// turn — a stop that lands after its turn settled then no-ops instead
 				// of interrupting the successor. Omitted when the FE knows no live turn
@@ -438,7 +436,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				wsConn.send({
 					type: 'stop',
 					session_id: _state.sessionId,
-					stop_background: stopBackground,
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
 			} else if (internal.awaitingNewSession) {
@@ -446,9 +443,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// have nothing to address the stop to. Defer it: the session_created
 				// / start handlers send the stop once the id arrives, so the backend
 				// can discard the orphan turn instead of silently dropping the click.
-				// Carry the caller's choice through so the deferred stop matches.
 				internal.stopRequestedBeforeSession = true;
-				internal.stopBackgroundRequested = stopBackground;
 			}
 
 			const current = stopTimeout.get();
