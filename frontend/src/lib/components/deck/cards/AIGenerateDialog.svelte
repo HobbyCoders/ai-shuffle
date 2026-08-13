@@ -36,12 +36,12 @@
 		if (dialogState === 'clarifying') {
 			return 'A few quick questions...';
 		}
-		return type === 'profile' ? 'Generate Profile with AI' : 'Generate Sub-agent with AI';
+		return type === 'profile' ? 'Generate Agent with AI' : 'Generate Sub-agent with AI';
 	});
 
 	const placeholder = $derived(
 		type === 'profile'
-			? 'Describe the profile you want, e.g., "A Python development profile with extended thinking for complex debugging tasks"'
+			? 'Describe the agent you want, e.g., "A Python development agent with extended thinking for complex debugging tasks"'
 			: 'Describe the sub-agent you want, e.g., "A code review agent that checks for security vulnerabilities and follows best practices"'
 	);
 

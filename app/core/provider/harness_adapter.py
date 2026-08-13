@@ -38,7 +38,8 @@ HONORED:
   * ``mcp_servers``          → omni ``registry.connect_mcp`` (external stdio/sse/http)
   * ``include_partial_messages`` → omni always streams deltas (native); delegated
     passes ``--include-partial-messages`` (``extra["omni_partial"]`` overrides)
-  * ``extra["omni_store_dir"]`` / env ``AIH_OMNI_STORE_DIR`` → JsonlStore root
+  * session store: DERIVED, not configured — PgOmniStore when the app has a
+    database (always, in real deployments), MemoryStore in DB-less unit tests
   * ``extra["omni_inproc_servers"]`` → omni in-process tool servers (see omni_tool_bridge)
   * ``extra["omni_registry"]``       → caller-supplied prebuilt ToolRegistry (escape hatch)
   * ``extra["provider_id"]``         → the session's bound ``model_providers`` row;
@@ -61,7 +62,7 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``agents`` (subagents) — not configured on the omni engine here.
   * ``betas`` / ``extra_args`` / ``setting_sources`` — SDK/CLI-specific, ignored.
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
-    concepts; omni persistence is the JsonlStore/MemoryStore chosen above.
+    concepts; omni persistence is the Pg/Memory store chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
 
 HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
@@ -135,7 +136,6 @@ from omni.providers.openai_responses.client import (
 )
 from omni.providers.openrouter.client import OpenRouterClient
 from omni.store.base import MemoryStore
-from omni.store.jsonl import JsonlStore
 from omni.tools.registry import ToolCtx, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -258,11 +258,29 @@ class HarnessAdapter(ProviderAdapter):
                 cwd=options.cwd,
                 env=options.env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
+                # Ruling A6: the CLI's native subagent tools are BANNED — the
+                # app's Task tool (mcp__builtins__Task here) is the one
+                # orchestration surface. Profile-level disallows ride along.
+                disallowed_tools=sorted(
+                    {"Task", "Agent", "Workflow"} | set(options.disallowed_tools or [])
+                ),
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
             self._provider_http = provider_http
+            # omni's bare Task builtin needs the app's dispatcher injected
+            # (ruling A13: omni owns the shape, the app owns the spawning).
+            native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id)
+            if omni_session_id:
+                try:
+                    from app.core.task_dispatch import make_omni_dispatcher
+
+                    native_ctx.extra["task_dispatch"] = make_omni_dispatcher(
+                        omni_session_id
+                    )
+                except Exception:  # noqa: BLE001 — Task degrades to "unavailable"
+                    logger.debug("task_dispatch injection failed", exc_info=True)
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=self._store,
@@ -275,7 +293,7 @@ class HarnessAdapter(ProviderAdapter):
                 system=self._compile_prompt(system, append_system, options),
                 registry=self._registry,
                 permissions=permissions,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
+                ctx=native_ctx,
                 plan_mode=plan_mode,
                 session_id=omni_session_id,
             )
@@ -311,6 +329,7 @@ class HarnessAdapter(ProviderAdapter):
                 getattr(sdk_options, "include_partial_messages", False)
             ),
             add_dirs=getattr(sdk_options, "add_dirs", None),
+            disallowed_tools=getattr(sdk_options, "disallowed_tools", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -981,19 +1000,20 @@ class HarnessAdapter(ProviderAdapter):
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
-        # Postgres store (deployment default target): survives restarts and is
-        # shared across app instances, like the SDK path's PgSessionStore.
-        # Opt-in via AIH_OMNI_STORE=pg / extra["omni_store"]="pg" so unit tests
-        # and DB-less environments keep the file/memory stores.
-        store_kind = (
-            options.extra.get("omni_store") or os.environ.get("AIH_OMNI_STORE") or ""
-        ).lower()
-        if store_kind == "pg":
+        # Derived, not configured (2026-08-13 ruling: no permanent flags — the
+        # retired AIH_OMNI_STORE/AIH_OMNI_STORE_DIR env vars are ignored).
+        # Whenever the app has a database — which every real deployment does,
+        # a DB connection is required to boot — omni sessions persist in
+        # Postgres, exactly like the SDK path's PgSessionStore: cross-restart
+        # resume, fork, and event replay from any app instance sharing the DB.
+        # The only DB-less environments are unit tests, which get MemoryStore.
+        # "Has a database" means either the POSTGRES_* pieces (postgres_password
+        # is the one with no default) or a legacy pre-split DATABASE_URL.
+        from app.core.config import settings
+
+        if settings.database_url or settings.postgres_password:
             from app.core.provider.omni_pg_store import PgOmniStore
             return PgOmniStore()
-        store_dir = options.extra.get("omni_store_dir") or os.environ.get("AIH_OMNI_STORE_DIR")
-        if store_dir:
-            return JsonlStore(store_dir)
         return MemoryStore()
 
     async def _build_registry(
@@ -1029,7 +1049,15 @@ class HarnessAdapter(ProviderAdapter):
         # instance when patch_sdk_server assembled them; re-register the same
         # tools on omni's registry with the bridge's risk maps.
         from app.core.provider.omni_tool_bridge import register_recorded_sdk_servers
-        recorded = register_recorded_sdk_servers(registry, options.mcp_servers)
+        # Native legs run omni's bare-named Task builtin (ruling A13) — the
+        # bridged mcp__builtins__Task copy is excluded so the model sees ONE
+        # orchestration tool. The delegated leg keeps the MCP copy (the CLI
+        # can only receive external tools via --mcp-config).
+        recorded = register_recorded_sdk_servers(
+            registry,
+            options.mcp_servers,
+            skip_tools={"builtins": {"Task"}} if native else None,
+        )
         if recorded:
             logger.info(
                 "[HarnessAdapter] bridged in-proc sdk servers onto omni registry: %s",

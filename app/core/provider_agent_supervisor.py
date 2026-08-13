@@ -115,6 +115,11 @@ class WorkerRecord:
     #: message that says what actually happened instead of the default success
     #: it would otherwise derive from an empty event log.
     torn_down_reason: Optional[str] = None
+    #: Task-tool background mode (ruling A8): a background worker deliberately
+    #: OUTLIVES the caller's turn — its results are collected in a later turn
+    #: via the task tools — so the turn-end teardown skips it. stop-all and the
+    #: per-worker timeout still apply.
+    background: bool = False
 
 
 # parent_session_id -> {worker_session_id: WorkerRecord}
@@ -496,9 +501,17 @@ async def _teardown(
     summary: str,
     preview: str,
     note: Optional[str],
+    include_background: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Kill every live worker of ``parent_session_id``. Never raises."""
+    """Kill every live worker of ``parent_session_id``. Never raises.
+
+    ``include_background=False`` (the turn-end path) spares Task-tool
+    background workers (ruling A8): they outlive the caller's turn by design
+    and die on completion, timeout, or stop-all.
+    """
     records = live_workers(parent_session_id)
+    if not include_background:
+        records = [r for r in records if not getattr(r, "background", False)]
     if not records:
         return []
 
@@ -531,6 +544,7 @@ async def teardown_workers(parent_session_id: str) -> List[Dict[str, Any]]:
         return []
     return await _teardown(
         parent_session_id,
+        include_background=False,
         reason=TURN_END_REASON,
         summary=TURN_END_SUMMARY,
         preview="The parent turn ended before the worker finished.",

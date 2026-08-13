@@ -2,54 +2,51 @@
 	/**
 	 * BuildPage — the unified "Build" surface (Studio-v2 design).
 	 *
-	 * One page that hosts the agent-configuration tools (Profiles / Subagents /
-	 * MCP / Plugins / Hooks) under a single heading + underline sub-nav. Each
-	 * section renders a purpose-built, *header-less* UI so nothing stacks.
+	 * One page that hosts the agent-configuration tools (Agents / MCP / Plugins /
+	 * Hooks) under a single heading + underline sub-nav. Each section renders a
+	 * purpose-built, *header-less* UI so nothing stacks.
 	 *
-	 * Every section is now native: a card grid for Profiles and compact `.lrow`
-	 * lists for Subagents / MCP / Plugins / Hooks (each reuses its card's data +
-	 * editor and only replaces the list view). The editor takes the full canvas
-	 * via onDetailChange, which hides this page's heading + sub-nav.
+	 * Every section is now native: a card grid for Agents and compact `.lrow`
+	 * lists for MCP / Plugins / Hooks (each reuses its card's data + editor and
+	 * only replaces the list view). The editor takes the full canvas via
+	 * onDetailChange, which hides this page's heading + sub-nav.
 	 *
 	 * Styled with the app's existing theme tokens, not the mockup palette.
 	 */
 	import { browser } from '$app/environment';
 	import { untrack, onMount } from 'svelte';
-	import { Users, Bot, Server, Puzzle, Webhook } from 'lucide-svelte';
-	import { api } from '$lib/api/client';
+	import { Users, Server, Puzzle, Webhook } from 'lucide-svelte';
 	import { appData, profiles } from '$lib/stores/app-data.svelte';
 	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
 	import { plugins, installedPlugins } from '$lib/stores/plugins.svelte';
 	import { hooks, projectHooks } from '$lib/stores/hooks.svelte';
 	import ProfileCard from '$lib/components/deck/cards/ProfileCard.svelte';
-	import SubagentCard from '$lib/components/deck/cards/SubagentCard.svelte';
 	import McpManagerCard from '$lib/components/deck/cards/McpManagerCard.svelte';
 	import BuildPluginList from '$lib/components/layout/build/BuildPluginList.svelte';
 	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
 
-	type BuildSub = 'profile' | 'subagent' | 'mcp' | 'plugins' | 'hooks';
+	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
 
 	interface Props {
 		/** Deep-link target (e.g. "Configure agents →", "Manage plugins"). */
 		requestedSub?: BuildSub;
-		/** One-shot deep-link item id (profile/subagent) to open in its editor. */
+		/** One-shot deep-link item id (agent) to open in its editor. */
 		requestedItemId?: string | null;
 	}
 	let { requestedSub, requestedItemId }: Props = $props();
 
 	const STORAGE_KEY = 'ai-shuffle-build-subtab';
-	const SUBS: BuildSub[] = ['profile', 'subagent', 'mcp', 'plugins', 'hooks'];
+	const SUBS: BuildSub[] = ['profile', 'mcp', 'plugins', 'hooks'];
 
 	const items: { id: BuildSub; label: string; icon: typeof Users }[] = [
-		{ id: 'profile', label: 'Profiles', icon: Users },
-		{ id: 'subagent', label: 'Subagents', icon: Bot },
+		{ id: 'profile', label: 'Agents', icon: Users },
 		{ id: 'mcp', label: 'MCP Servers', icon: Server },
 		{ id: 'plugins', label: 'Plugins', icon: Puzzle },
 		{ id: 'hooks', label: 'Hooks', icon: Webhook }
 	];
 
 	// Every section is now a native, header-less UI (scroll inside the page body).
-	const NATIVE = new Set<BuildSub>(['profile', 'subagent', 'mcp', 'plugins', 'hooks']);
+	const NATIVE = new Set<BuildSub>(['profile', 'mcp', 'plugins', 'hooks']);
 
 	function loadStored(): BuildSub {
 		if (!browser) return 'profile';
@@ -92,22 +89,15 @@
 
 	// Per-section counts for the sub-nav badges. Trigger lightweight loads on mount
 	// so the numbers show even before a section is opened; badge hidden when 0.
-	let subagentCount = $state<number | null>(null);
-
 	onMount(() => {
 		appData.loadProfiles();
 		mcp.loadGlobalServers();
 		plugins.loadInstalled();
 		hooks.loadAppHooks();
-		api
-			.get<unknown[]>('/subagents')
-			.then((list) => { subagentCount = Array.isArray(list) ? list.length : 0; })
-			.catch(() => { /* count is best-effort */ });
 	});
 
 	const counts = $derived<Record<BuildSub, number>>({
 		profile: ($profiles ?? []).length,
-		subagent: subagentCount ?? 0,
 		mcp: ($globalMcpServers ?? []).length,
 		plugins: ($installedPlugins ?? []).length,
 		hooks: ($projectHooks ?? []).length
@@ -142,8 +132,6 @@
 		<div class="bp-inner">
 			{#if sub === 'profile'}
 				<ProfileCard embedded initialSelectedId={requestedItemId} onDetailChange={(d) => (detail = d)} />
-			{:else if sub === 'subagent'}
-				<SubagentCard embedded initialSelectedId={requestedItemId} onDetailChange={(d) => (detail = d)} />
 			{:else if sub === 'mcp'}
 				<McpManagerCard embedded onDetailChange={(d) => (detail = d)} />
 			{:else if sub === 'plugins'}

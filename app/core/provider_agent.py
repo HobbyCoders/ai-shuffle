@@ -590,7 +590,7 @@ def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
 
 
 async def _await_worker_idle(
-    worker_session_id: str, provider_id: str, timeout: float
+    worker_session_id: str, provider_id: Optional[str], timeout: float
 ) -> Tuple[bool, bool]:
     """Wait for a worker to go idle, bailing out early if its provider trips.
 
@@ -625,7 +625,9 @@ async def _await_worker_idle(
             done, _pending = await asyncio.wait({waiter}, timeout=WAIT_SLICE_SECONDS)
             if done:
                 return bool(waiter.result()), False
-            if rate_limit_breaker.is_tripped(provider_id):
+            # No provider binding (delegated Claude-leg worker) -> no breaker
+            # to consult; the CLI's own backoff handles subscription limits.
+            if provider_id and rate_limit_breaker.is_tripped(provider_id):
                 return False, True
     finally:
         if not waiter.done():
@@ -690,12 +692,14 @@ async def dispatch_worker(
     *,
     parent_session_id: str,
     profile_id: str,
-    provider_id: str,
-    model_id: str,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
     prompt: str,
     label: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
     tool_use_id: Optional[str] = None,
+    background: bool = False,
+    context_session_id: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -728,9 +732,13 @@ async def dispatch_worker(
     from app.core.task_registry import task_registry
     from app.db import database
 
+    # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
+    # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
+    # dispatch it is the ROOT session, whose UI renders the card and answers
+    # approvals (ruling A9 multi-level routing). They coincide for depth-1.
     parent_row: Optional[Dict[str, Any]] = None
     try:
-        parent_row = database.get_session(parent_session_id)
+        parent_row = database.get_session(context_session_id or parent_session_id)
     except Exception:  # noqa: BLE001 — inheritance is best-effort
         logger.debug("ProviderAgent: parent session read failed", exc_info=True)
         parent_row = None
@@ -740,8 +748,16 @@ async def dispatch_worker(
     worktree_branch = (parent_row or {}).get("worktree_branch")
     worktree_path = (parent_row or {}).get("worktree_path")
 
+    # Since P2c (Task tool, ruling A6) provider_id/model_id may be None: the
+    # worker then runs the TARGET agent's own binding — create_session resolves
+    # provider from the agent's config, and the turn inherits the agent's
+    # configured model. A None provider is the delegated Claude-subscription
+    # leg, which is a fully valid worker (the hard constraint is honored — it
+    # runs through the claude CLI like any other delegated session).
     worker_session_id = str(uuid.uuid4())
-    title = (label or "").strip() or f"ProviderAgent worker · {model_id}"
+    title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
+    provider_tag = provider_id or "agent"
+    model_tag = model_id or "inherit"
 
     try:
         database.create_session(
@@ -784,7 +800,11 @@ async def dispatch_worker(
     )
     # --- end chunk A3 -------------------------------------------------------
 
-    overrides: Dict[str, Any] = {"provider": provider_id, "model": model_id}
+    overrides: Dict[str, Any] = {}
+    if provider_id:
+        overrides["provider"] = provider_id
+    if model_id:
+        overrides["model"] = model_id
     cwd = _parent_cwd(parent_row)
     if cwd:
         overrides["cwd"] = cwd
@@ -802,7 +822,7 @@ async def dispatch_worker(
         worker_session_id,
         "agent",
         title,
-        summary=f"{provider_id} · {model_id}",
+        summary=f"{provider_tag} · {model_tag}",
         tool_use_id=tool_use_id or worker_session_id,
     )
 
@@ -828,10 +848,11 @@ async def dispatch_worker(
             worker_session_id=worker_session_id,
             task_id=worker_session_id,
             tool_use_id=tool_use_id or worker_session_id,
-            provider_id=provider_id,
-            model_id=model_id,
+            provider_id=provider_id or "",
+            model_id=model_id or "",
             label=label,
             feed=feed,
+            background=background,
         )
     )
 
@@ -1013,7 +1034,7 @@ async def dispatch_worker(
             await emit_shielded(feed.completed(
                 status,
                 result_preview=preview,
-                summary=f"{provider_id} · {model_id}",
+                summary=f"{provider_tag} · {model_tag}",
             ))
             try:
                 task_registry.complete_task(parent_session_id, worker_session_id, status)

@@ -141,6 +141,9 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "GetAppErrors": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",
+    "Memory": "safe",
+    # Dispatching an agent spawns a session that can act — gated like a write.
+    "Task": "write",
 }
 
 # Dynamic gateway tools (per-connector, e.g. sending messages through a linked
@@ -222,7 +225,10 @@ SERVER_DEFAULT_RISK: Mapping[str, str] = {
 
 
 def register_recorded_sdk_servers(
-    registry: ToolRegistry, mcp_servers: Optional[Mapping[str, Any]]
+    registry: ToolRegistry,
+    mcp_servers: Optional[Mapping[str, Any]],
+    *,
+    skip_tools: Optional[Mapping[str, Any]] = None,
 ) -> List[str]:
     """Register every recorded in-proc SDK server from an ``mcp_servers``
     mapping onto ``registry``. Returns the server names registered.
@@ -247,6 +253,14 @@ def register_recorded_sdk_servers(
                 name,
             )
             continue
+        # ``skip_tools``: {server_name: {tool names}} exclusions — used by the
+        # native leg to drop mcp__builtins__Task when omni's own bare-named
+        # Task builtin is registered (one orchestration tool, not two).
+        excluded = set((skip_tools or {}).get(name) or ())
+        if excluded:
+            tools = [t for t in tools if getattr(t, "name", "") not in excluded]
+            if not tools:
+                continue
         register_sdk_tools(
             registry,
             name,

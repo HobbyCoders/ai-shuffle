@@ -503,46 +503,16 @@ def build_options_from_profile(
             final_system_prompt += "\n\n" + override_append
 
     # Build agents dict from profile's enabled_agents
-    # Profile stores a list of subagent IDs that reference global subagents in the database
-    # The SDK expects AgentDefinition dataclass instances, not raw dicts
-    # All enabled agents are always sent — our definitions supersede CLI built-ins
+    # P2c (rulings A6/A10): subagents no longer exist as SDK AgentDefinitions.
+    # ``enabled_agents`` is now the OPTIONAL invoke allowlist for the unified
+    # Task tool (empty/None = any agent may be invoked) — it is read by
+    # ``app.core.task_dispatch`` at dispatch time, not projected onto the
+    # engine. The CLI's native Task/Agent/Workflow tools are banned on the
+    # delegated leg (harness_adapter passes --disallowed-tools), so nothing
+    # consumes agent definitions any more.
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
-    # Raw subagent rows keyed by id, for the S3 leg-map assembler + frontmatter
-    # stamping below. Declared unconditionally (the stamping block reads it even
-    # when no agents are enabled).
     enabled_subagents: Dict[str, Any] = {}
-    logger.debug(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
-    if enabled_agent_ids:
-        agents_dict = {}
-        for agent_id in enabled_agent_ids:
-            subagent = database.get_subagent(agent_id)
-            if subagent:
-                agent_kwargs = {
-                    "description": subagent.get("description", ""),
-                    "prompt": subagent.get("prompt", ""),
-                    "tools": subagent.get("tools"),
-                    "model": subagent.get("model"),
-                    "skills": subagent.get("skills"),
-                    "memory": subagent.get("memory"),
-                    "mcpServers": subagent.get("mcp_servers"),
-                }
-                # New AgentDefinition fields (SDK 0.1.51+)
-                if subagent.get("disallowed_tools"):
-                    agent_kwargs["disallowedTools"] = subagent["disallowed_tools"]
-                if subagent.get("max_turns") is not None:
-                    agent_kwargs["maxTurns"] = subagent["max_turns"]
-                if subagent.get("initial_prompt"):
-                    agent_kwargs["initialPrompt"] = subagent["initial_prompt"]
-                agent_def = AgentDefinition(**agent_kwargs)
-                agents_dict[agent_id] = agent_def
-                enabled_subagents[agent_id] = subagent
-                logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
-            else:
-                logger.warning(f"Subagent not found in database: {agent_id}")
-        if not agents_dict:
-            agents_dict = None
-        logger.debug(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
     # Per-agent memory (ruling A11): the profile's durable memory text rides
     # into the prompt on every leg — as append text on the preset shape (so the
@@ -563,18 +533,9 @@ def build_options_from_profile(
         else:
             final_system_prompt += "\n\n" + memory_block
 
-    # Inject built-in agent instructions into system prompt (only for enabled built-in agents)
-    if enabled_agent_ids:
-        from app.core.builtin_subagents import get_system_prompt_instructions
-        builtin_instructions = get_system_prompt_instructions(enabled_agent_ids)
-        if builtin_instructions:
-            if isinstance(final_system_prompt, dict):
-                # Append to the append field
-                current_append = final_system_prompt.get("append", "")
-                final_system_prompt["append"] = current_append + builtin_instructions
-            else:
-                # Append to string system prompt
-                final_system_prompt += builtin_instructions
+    # (P2c) The old built-in-subagent prompt instructions died with SDK
+    # AgentDefinitions — the Task tool's own description tells the model how
+    # to dispatch agents, and the agents themselves carry their prompts.
 
     # Inject app-config system prompt instructions when tools are enabled (admin only)
     if config.get("app_config_tools") and not api_user_id:
@@ -622,26 +583,9 @@ def build_options_from_profile(
     else:
         provider_id = overrides.get("provider") or config.get("provider")
 
-    # D4 (2026-08-12): gateway-based CROSS-PROVIDER SUBAGENT LEGS are removed as
-    # a feature along with the translator gateway that served them. There is no
-    # longer any mechanism to route one session's subagent to a different
-    # provider than its main — ProviderAgent cross-provider workers
-    # (``app/core/provider_agent.py``) are the replacement. The profile's
-    # ``subagent_provider``/``subagent_model`` fields and each subagent's stored
-    # ``prov:<pid>:<mid>`` composite are consequently INERT for routing: every
-    # session, native or provider-bound, now resolves subagent frontmatter with
-    # native semantics (composite → omit the ``model:`` line → inherit the main
-    # model; Claude alias/id → keep; unpinned → stays None). That is exactly the
-    # ``gateway_routed=False`` branch of the S2 resolver, which is why it is the
-    # only branch left.
-    for agent_id, agent_def in (agents_dict or {}).items():
-        agent_def.model = resolve_subagent_frontmatter_model(
-            enabled_subagents.get(agent_id, {}).get("model"),
-            gateway_routed=False,
-            honored_leg_models=(),
-            session_default=None,
-            main_serves_claude_ids=True,
-        )
+    # (P2c) The D4-era subagent frontmatter-model resolution died with SDK
+    # AgentDefinitions — the Task tool resolves the target agent's own binding
+    # at dispatch time instead.
 
     # True only for a provider-bound session whose MAIN model is NOT a Claude
     # model. PRESERVED ACROSS D4 (see PR #775): this used to read
@@ -716,10 +660,10 @@ def build_options_from_profile(
     from app.mcp.builtin_tools import get_builtin_tool_names
     mcp_allowed_tools.extend(get_builtin_tool_names())
 
-    # ProviderAgent cross-provider workers (multi-provider phase 3, P3-A).
-    # Flag-gated OFF by default, and never offered to a session that IS a
-    # ProviderAgent worker — one nesting level only (ruling P14). The server
-    # itself is registered under the same two gates further down.
+    # P2c: the standalone ProviderAgent tool is superseded by the unified Task
+    # tool (mcp__builtins__Task / omni's bare Task builtin), which is depth-
+    # gated in app.core.task_dispatch rather than denied to workers outright —
+    # workers may dispatch sub-workers up to settings.task_tool_max_depth (A9).
     if settings.provider_agent_enabled and session_id:
         try:
             from app.core.provider_agent import is_provider_agent_worker
@@ -729,18 +673,12 @@ def build_options_from_profile(
                 # parent, but ``AskUserQuestion`` is a different interaction
                 # kind with its own handler/TTL and is NOT redirected — a
                 # worker that asked would simply stall until
-                # ``user_question_timeout_seconds`` expired. Redirection was
-                # deliberately not built; the tool is removed instead, riding
-                # the same nesting-guard signal (in-process set OR persisted
-                # worker turn source) so it survives resume and cross-runner
-                # placement exactly like the ProviderAgent omission above.
+                # ``user_question_timeout_seconds`` expired. The tool stays
+                # removed for workers at every nesting depth.
                 if WORKER_DISALLOWED_TOOL not in disallowed_tools:
                     disallowed_tools = [*disallowed_tools, WORKER_DISALLOWED_TOOL]
-            else:
-                from app.mcp.provider_agent_sdk import get_provider_agent_tool_names
-                mcp_allowed_tools.extend(get_provider_agent_tool_names())
         except Exception:
-            logger.exception("Failed to add ProviderAgent tools to allowed_tools")
+            logger.exception("Failed to apply worker tool restrictions")
 
     # Built-in/managed MCP servers (e.g. the headless browser server) are
     # passed via mcp_servers (loaded through McpService inside
@@ -861,31 +799,11 @@ def build_options_from_profile(
     except Exception:
         logger.exception("Failed to create builtin bridge MCP server")
 
-    # Register the ProviderAgent server (cross-provider workers, P3-A) when the
-    # feature flag is on. Skipped for worker sessions so a worker can never
-    # dispatch a worker (P14) — the tool re-checks the same gate at call time.
-    # The gate is ``is_provider_agent_worker``: the PERSISTED turn source
-    # (cluster-safe, survives restarts) ORed with the in-process set, because a
-    # worker whose turn is claimed by another runner is absent from this
-    # process's set and would otherwise be offered the tool.
-    if settings.provider_agent_enabled and session_id:
-        try:
-            from app.core.provider_agent import is_provider_agent_worker
-            if is_provider_agent_worker(session_id):
-                logger.debug(
-                    "ProviderAgent MCP server skipped for worker session %s", session_id
-                )
-            else:
-                from app.mcp.provider_agent_sdk import create_provider_agent_server
-                pa_srv = create_provider_agent_server(
-                    session_id=session_id,
-                    profile_id=profile.get("id"),
-                )
-                if pa_srv:
-                    mcp_servers_dict["provider-agent"] = pa_srv
-                    logger.debug("ProviderAgent MCP server registered")
-        except Exception:
-            logger.exception("Failed to create ProviderAgent MCP server")
+    # (P2c) The standalone ProviderAgent MCP server is retired: the unified
+    # Task tool rides the builtins server above (mcp__builtins__Task) and, on
+    # native legs, omni's bare-named Task builtin. Workers get it too —
+    # nesting is depth-gated in app.core.task_dispatch (max_depth=5, A9)
+    # instead of denied at registration (the old P14 one-level rule).
 
     # Register the computer-use server (host desktop control) when enabled and
     # the host supports it. computer_use_enabled was already validated against

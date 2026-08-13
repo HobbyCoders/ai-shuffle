@@ -351,7 +351,7 @@
 			}),
 			registerShortcut({
 				id: 'open-profiles',
-				description: 'Open profiles',
+				description: 'Open agents',
 				key: 'p',
 				cmdOrCtrl: true,
 				shift: true,
@@ -417,13 +417,8 @@
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectProfile(id: string) {
+	function handleSpotlightSelectAgent(id: string) {
 		handleOpenFeature('profile', id);
-		showSpotlight = false;
-	}
-
-	function handleSpotlightSelectSubagent(id: string) {
-		handleOpenFeature('subagent', id);
 		showSpotlight = false;
 	}
 
@@ -489,8 +484,7 @@
 		currentProjectId={$activeSession?.project}
 		onClose={() => showSpotlight = false}
 		onSelectSession={handleSpotlightSelectSession}
-		onSelectProfile={handleSpotlightSelectProfile}
-		onSelectSubagent={handleSpotlightSelectSubagent}
+		onSelectAgent={handleSpotlightSelectAgent}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
 	/>

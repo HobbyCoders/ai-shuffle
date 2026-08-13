@@ -171,21 +171,21 @@ Controls which Claude Code configuration files are loaded. By default, all sourc
 ### List All Profiles
 
 ```bash
-curl http://localhost:8000/api/v1/profiles \
+curl http://localhost:8000/api/v1/agents \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 ### Get a Profile
 
 ```bash
-curl http://localhost:8000/api/v1/profiles/{profile_id} \
+curl http://localhost:8000/api/v1/agents/{profile_id} \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 ### Create a Profile
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/profiles \
+curl -X POST http://localhost:8000/api/v1/agents \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -209,7 +209,7 @@ If `id` is omitted, it is automatically derived from the name (e.g., "Code Revie
 ### Update a Profile
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/profiles/{profile_id} \
+curl -X PUT http://localhost:8000/api/v1/agents/{profile_id} \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -224,7 +224,7 @@ curl -X PUT http://localhost:8000/api/v1/profiles/{profile_id} \
 ### Delete a Profile
 
 ```bash
-curl -X DELETE http://localhost:8000/api/v1/profiles/{profile_id} \
+curl -X DELETE http://localhost:8000/api/v1/agents/{profile_id} \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
@@ -235,7 +235,7 @@ curl -X DELETE http://localhost:8000/api/v1/profiles/{profile_id} \
 Download a profile as a JSON file for sharing:
 
 ```bash
-curl http://localhost:8000/api/v1/profiles/{profile_id}/export \
+curl http://localhost:8000/api/v1/agents/{profile_id}/export \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -o my-profile.json
 ```
@@ -267,7 +267,7 @@ The exported JSON has this structure:
 Create a new profile from exported JSON:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/profiles/import \
+curl -X POST http://localhost:8000/api/v1/agents/import \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

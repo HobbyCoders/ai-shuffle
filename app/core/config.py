@@ -330,6 +330,12 @@ class Settings(BaseSettings):
     # field name).
     provider_agent_enabled: bool = True
 
+    # Task tool (agents-program P2c, rulings A8/A9): nesting depth for
+    # agent-invokes-agent chains and the live-worker budget per root session
+    # tree. Set via TASK_TOOL_MAX_DEPTH / TASK_TOOL_MAX_WORKERS.
+    task_tool_max_depth: int = 5
+    task_tool_max_workers: int = 8
+
     # Staged flip for the compiled system prompt on the delegated (claude CLI)
     # leg (agents-program ruling A3). False (default): the CLI keeps its own
     # Claude Code preset and receives the agent's configured prompt + app

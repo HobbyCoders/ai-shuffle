@@ -6,8 +6,7 @@
 	 * The parent (ProfileCard) owns the StudioEditorShell chrome, rail, and footer.
 	 */
 	import type { Profile } from '$lib/api/client';
-	import { layout } from '$lib/stores/layout.svelte';
-	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2 } from 'lucide-svelte';
+	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2, FileText, Brain } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
@@ -72,6 +71,14 @@
 		is_builtin: boolean;
 	}
 
+	interface AgentTemplate {
+		id: string;
+		name: string;
+		description: string;
+		prompt: string;
+		tools?: string[];
+	}
+
 	interface GroupState {
 		profiles?: {
 			groups?: { name: string }[];
@@ -86,15 +93,12 @@
 		model: string;
 		/** `model_providers.id` this profile's model belongs to, or `null` for native Anthropic. */
 		provider: string | null;
-		/** Optional cross-provider subagent leg: `model_providers.id`, or `null` to inherit. */
-		subagent_provider: string | null;
-		/** Subagent model id paired with `subagent_provider`, or `null` to inherit. */
-		subagent_model: string | null;
 		permission_mode: string;
 		max_turns: number | null;
 		allowed_tools: string[];
 		disallowed_tools: string[];
 		enabled_agents: string[];
+		memory: string;
 		include_partial_messages: boolean;
 		thinking_mode: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';
 		effort: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | null;
@@ -131,6 +135,8 @@
 		allSubagents: Subagent[];
 		builtinAgentIds: string[];
 		customAgents: Subagent[];
+		/** Built-in system-prompt templates (GET /agents/templates), for new agents. */
+		templates: AgentTemplate[];
 		sdkToolCategories: ToolCategory[];
 		aiToolCategories: AIToolCategory[];
 		aiToolsLoading: boolean;
@@ -148,6 +154,8 @@
 		onToggleAIToolCategory: (category: AIToolCategory) => void;
 		onToggleSection: (id: string) => void;
 		onToggleAgent: (agentId: string) => void;
+		/** Apply a system-prompt template by id (fills prompt + optional tools). */
+		onApplyTemplate: (templateId: string) => void;
 		onToggleSettingSource: (source: string) => void;
 		onAssignToGroup: (profileId: string, groupName: string) => void;
 		onRemoveFromGroup: (profileId: string) => void;
@@ -168,6 +176,7 @@
 		allSubagents,
 		builtinAgentIds,
 		customAgents,
+		templates,
 		sdkToolCategories,
 		aiToolCategories,
 		aiToolsLoading,
@@ -185,6 +194,7 @@
 		onToggleAIToolCategory,
 		onToggleSection,
 		onToggleAgent,
+		onApplyTemplate,
 		onToggleSettingSource,
 		onAssignToGroup,
 		onRemoveFromGroup,
@@ -225,11 +235,14 @@
 		{ id: 'local', label: 'Local' }
 	];
 
-	// Count of enabled custom (non-builtin) agents, for the summary note.
-	const enabledCustomCount = $derived(
-		profileForm.enabled_agents.filter(
-			(id) => !builtinAgentIds.includes(id) && customAgents.some((a) => a.id === id)
-		).length
+	// Invoke allowlist: every agent EXCEPT the one being edited (an agent can't
+	// dispatch itself). Empty selection = allow all.
+	const invocableAgents = $derived(
+		allSubagents.filter((a) => a.id !== editingProfile?.id)
+	);
+	const allInvocableSelected = $derived(
+		invocableAgents.length > 0 &&
+			invocableAgents.every((a) => profileForm.enabled_agents.includes(a.id))
 	);
 </script>
 
@@ -245,14 +258,14 @@
 				</div>
 			</div>
 			<div class="set-row stack">
-				<div class="lab"><h4>Description</h4><p>A short summary of what this profile is for.</p></div>
+				<div class="lab"><h4>Description</h4><p>A short summary of what this agent is for.</p></div>
 				<div class="ctl">
 					<textarea class="fld" rows={2} value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLTextAreaElement).value)} placeholder="A coding assistant for frontend work"></textarea>
 				</div>
 			</div>
 			{#if editingProfile}
 				<div class="set-row">
-					<div class="lab"><h4>Group</h4><p>Organize related profiles together.</p></div>
+					<div class="lab"><h4>Group</h4><p>Organize related agents together.</p></div>
 					<div class="ctl ctl-col">
 						<div class="grp-row">
 							<select
@@ -308,7 +321,7 @@
 		<div class="set-group">
 			<div class="set-grouphead"><h3><Settings />Model &amp; reasoning</h3></div>
 			<div class="set-row">
-				<div class="lab"><h4>Model</h4><p>The Claude model this profile runs on.</p></div>
+				<div class="lab"><h4>Model</h4><p>The Claude model this agent runs on.</p></div>
 				<div class="ctl ctl-col">
 					<div class="grp-row">
 						<ModelPicker
@@ -321,10 +334,6 @@
 								if (v === CUSTOM_VALUE) {
 									onCustomModelModeChange(true, '');
 									onFormChange('provider', null);
-									// Leaving a provider clears any subagent leg — a hidden
-									// stale cross-provider leg must never be saved.
-									onFormChange('subagent_provider', null);
-									onFormChange('subagent_model', null);
 								} else if (v.startsWith('prov:')) {
 									// Composite value: `prov:<providerId>:<modelId>`. Split on the
 									// first colon only — provider model ids (e.g. OpenRouter's
@@ -338,9 +347,6 @@
 								} else {
 									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model)));
 									onFormChange('provider', null);
-									// Native model → no provider → clear the subagent leg.
-									onFormChange('subagent_provider', null);
-									onFormChange('subagent_model', null);
 								}
 							}}
 						/>
@@ -356,37 +362,6 @@
 					{/if}
 				</div>
 			</div>
-			{#if profileForm.provider}
-				<!-- A2 UI gate: the cross-provider subagent leg is offered ONLY when
-				     the profile itself runs on a provider model. Native-Claude
-				     profiles never see this row. -->
-				<div class="set-row">
-					<div class="lab"><h4>Subagent model</h4><p>Optional. Runs this profile's subagents on a different provider's model. Inherit uses the provider default.</p></div>
-					<div class="ctl ctl-col">
-						<ModelPicker
-							allowInherit
-							providerModelsOnly
-							servableOnly
-							value={profileForm.subagent_provider ? `prov:${profileForm.subagent_provider}:${profileForm.subagent_model}` : ''}
-							onSelect={(v) => {
-								if (v.startsWith('prov:')) {
-									// Same first-colon decode as the main picker.
-									const rest = v.slice('prov:'.length);
-									const sep = rest.indexOf(':');
-									onFormChange('subagent_provider', rest.slice(0, sep));
-									onFormChange('subagent_model', rest.slice(sep + 1));
-								} else {
-									// Inherit ('') clears both. Native/custom entries are
-									// suppressed via providerModelsOnly, so any non-composite
-									// value here means "inherit".
-									onFormChange('subagent_provider', null);
-									onFormChange('subagent_model', null);
-								}
-							}}
-						/>
-					</div>
-				</div>
-			{/if}
 			<div class="set-row">
 				<div class="lab"><h4>Permission mode</h4><p>How the agent asks before taking actions.</p></div>
 				<div class="ctl">
@@ -448,13 +423,13 @@
 				</div>
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>App config via chat</h4><p>Allow AI to manage hooks, automations, MCP servers, and profiles through conversation. Admin only.</p></div>
+				<div class="lab"><h4>App config via chat</h4><p>Allow AI to manage hooks, automations, MCP servers, and agents through conversation. Admin only.</p></div>
 				<div class="ctl">
 					<button type="button" class="switch" class:on={profileForm.app_config_tools} role="switch" aria-checked={profileForm.app_config_tools} aria-label="Toggle app configuration tools" onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}><i></i></button>
 				</div>
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>Strict MCP config</h4><p>Fail-fast if any MCP server is misconfigured. Recommended for production profiles.</p></div>
+				<div class="lab"><h4>Strict MCP config</h4><p>Fail-fast if any MCP server is misconfigured. Recommended for production agents.</p></div>
 				<div class="ctl">
 					<button type="button" class="switch" class:on={profileForm.strict_mcp_config} role="switch" aria-checked={profileForm.strict_mcp_config} aria-label="Toggle strict MCP config" onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}><i></i></button>
 				</div>
@@ -500,50 +475,78 @@
 		/>
 
 	{:else if activeTab === 'agents'}
-		<!-- AGENTS TAB -->
+		<!-- AGENTS TAB — invoke allowlist -->
 		<div class="set-group">
 			<div class="set-grouphead grouphead-row">
 				<div>
-					<h3><Bot />Sub-agents</h3>
-					<p>Built-in agents are always available. Choose which custom agents to enable.</p>
+					<h3><Bot />Invocable agents</h3>
+					<p>Agents this agent may dispatch via the Task tool. Leave empty to allow all agents.</p>
 				</div>
-				{#if customAgents.length > 0}
+				{#if invocableAgents.length > 0}
 					<div class="head-acts">
-						<button type="button" class="lnk" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds, ...customAgents.map((a) => a.id)])}>Select all</button>
-						<button type="button" class="lnk muted" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds])}>Clear custom</button>
+						<button type="button" class="lnk" onclick={() => onFormChange('enabled_agents', invocableAgents.map((a) => a.id))}>Select all</button>
+						<button type="button" class="lnk muted" onclick={() => onFormChange('enabled_agents', [])}>Clear</button>
 					</div>
 				{/if}
 			</div>
-			{#if allSubagents.length === 0}
-				<div class="set-row"><div class="lab"><p>No agents configured.</p></div></div>
+			{#if invocableAgents.length === 0}
+				<div class="set-row"><div class="lab"><p>No other agents to invoke.</p></div></div>
 			{:else}
-				{#each allSubagents as agent (agent.id)}
-					{@const isBuiltin = agent.is_builtin}
-					{@const isSelected = isBuiltin || profileForm.enabled_agents.includes(agent.id)}
+				{@const allowAll = profileForm.enabled_agents.length === 0}
+				{#each invocableAgents as agent (agent.id)}
+					{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
 					<div class="set-row">
 						<div class="lab">
-							<h4>{agent.name}{#if isBuiltin}<span class="hint"> · Always on</span>{/if}</h4>
+							<h4>{agent.name}{#if allowAll}<span class="hint"> · Allowed (all)</span>{/if}</h4>
 							<p>{getModelDisplay(agent.model)}</p>
 						</div>
 						<div class="ctl">
-							<button type="button" class="switch" class:on={isSelected} disabled={isBuiltin} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} onclick={() => onToggleAgent(agent.id)}><i></i></button>
+							<button type="button" class="switch" class:on={isSelected} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} onclick={() => onToggleAgent(agent.id)}><i></i></button>
 						</div>
 					</div>
 				{/each}
 			{/if}
 		</div>
 
-		{#if allSubagents.length > 0}
+		{#if invocableAgents.length > 0}
 			<div class="ed-note">
 				<Bot />
 				<span>
-					{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {enabledCustomCount} of {customAgents.length} custom{/if} enabled.
-					<button type="button" class="lnk-inline" onclick={() => layout.openFeaturePage('subagent')}>Configure agents →</button>
+					{#if profileForm.enabled_agents.length === 0}
+						No restriction — this agent may invoke any of the {invocableAgents.length} agents.
+					{:else}
+						{profileForm.enabled_agents.length} of {invocableAgents.length} agents invocable{allInvocableSelected ? ' (all)' : ''}.
+					{/if}
 				</span>
 			</div>
 		{/if}
 
 	{:else if activeTab === 'prompt'}
+		{#if !editingProfile && templates.length > 0}
+			<div class="set-group">
+				<div class="set-grouphead"><h3><FileText />Start from a template</h3><p>Pick a built-in template to fill the prompt below (and its suggested tools). You can edit everything afterward.</p></div>
+				<div class="set-row">
+					<div class="lab"><h4>Template</h4><p>Optional. Choosing one replaces the current prompt.</p></div>
+					<div class="ctl">
+						<select
+							class="sel"
+							value=""
+							onchange={(e) => {
+								const target = e.target as HTMLSelectElement;
+								const id = target.value;
+								if (id) onApplyTemplate(id);
+								target.value = '';
+							}}
+						>
+							<option value="">Select a template…</option>
+							{#each templates as tpl}
+								<option value={tpl.id}>{tpl.name}</option>
+							{/each}
+						</select>
+					</div>
+				</div>
+			</div>
+		{/if}
 		<ProfileSystemPrompt
 			systemPromptType={profileForm.system_prompt_type}
 			systemPromptAppend={profileForm.system_prompt_append}
@@ -555,10 +558,28 @@
 			onSystemPromptInjectEnvToggle={() => onFormChange('system_prompt_inject_env', !profileForm.system_prompt_inject_env)}
 		/>
 
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Brain />Memory</h3><p>Persistent notes the agent maintains itself via its Memory tool at runtime. This text is injected into the agent's system prompt.</p></div>
+			<div class="set-row stack">
+				<div class="lab lab-row">
+					<h4>Agent memory</h4>
+					<span class="count">{profileForm.memory.length.toLocaleString()} chars</span>
+				</div>
+				<div class="ctl">
+					<textarea
+						class="fld code memory-area"
+						value={profileForm.memory}
+						oninput={(e) => onFormChange('memory', (e.target as HTMLTextAreaElement).value)}
+						placeholder="Empty by default. The agent writes here itself using its Memory tool; you can also seed or edit it manually."
+					></textarea>
+				</div>
+			</div>
+		</div>
+
 	{:else if activeTab === 'advanced'}
 		<!-- ADVANCED TAB -->
 		<div class="set-group">
-			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this profile.</p></div>
+			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this agent.</p></div>
 			<div class="set-row stack">
 				<div class="lab"><h4>Working directory</h4><p>Where the agent runs by default.</p></div>
 				<div class="ctl"><input class="inp mono" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
@@ -750,17 +771,6 @@
 		color: var(--muted-foreground);
 		font-weight: 500;
 	}
-	.lnk-inline {
-		background: none;
-		border: none;
-		padding: 0;
-		font: inherit;
-		font-weight: 600;
-		color: var(--foreground);
-		cursor: pointer;
-		text-decoration: underline;
-	}
-
 	/* Disabled toggle row (computer use unavailable) */
 	.set-row.disabled .lab h4 {
 		opacity: 0.6;
@@ -796,6 +806,23 @@
 		margin: 10px 0 0;
 		font-size: 12.5px;
 		color: var(--muted-foreground);
+	}
+
+	/* Memory section (prompt tab) */
+	.lab-row {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.count {
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+		color: var(--muted-foreground);
+		flex-shrink: 0;
+	}
+	textarea.memory-area {
+		min-height: 180px;
 	}
 
 	@media (max-width: 560px) {

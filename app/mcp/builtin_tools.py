@@ -415,6 +415,47 @@ def create_builtin_tools_server(
     all_tools.append(agent_memory)
 
     # ------------------------------------------------------------------
+    # Task — dispatch work to another agent (P2c, rulings A6/A8/A9/A10).
+    # Delegated-leg surface (mcp__builtins__Task); native legs get omni's
+    # bare-named Task builtin instead (the bridge filters this copy out).
+    # ------------------------------------------------------------------
+    @tool(
+        "Task",
+        "Dispatch work to another agent. The target agent runs in its own "
+        "session with its own configuration, memory, and tools, and reports "
+        "back. mode='sync' (default) waits for the result; mode='background' "
+        "returns immediately with the worker session id (poll with TaskList/"
+        "TaskOutput). Use background mode to fan out parallel work.",
+        {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "Target agent id (or unambiguous name)."},
+                "prompt": {"type": "string", "description": "Self-contained task for the target agent."},
+                "mode": {"type": "string", "enum": ["sync", "background"],
+                         "description": "sync (default) waits; background returns at once."},
+                "model": {"type": "string", "description": "Optional model override."},
+                "label": {"type": "string", "description": "Short display label."},
+            },
+            "required": ["agent", "prompt"],
+        },
+    )
+    async def task_tool(args: dict) -> dict:
+        if not session_id:
+            return _err("Task requires an active session context.")
+        from app.core.task_dispatch import dispatch_task_tool
+
+        payload = await dispatch_task_tool(
+            args, caller_session_id=session_id, caller_profile_id=profile_id
+        )
+        return _ok(payload) if payload.get("ok") else _err(
+            payload.get("error") or "Task dispatch failed.", **{
+                k: v for k, v in payload.items() if k not in ("ok", "error")
+            }
+        )
+
+    all_tools.append(task_tool)
+
+    # ------------------------------------------------------------------
     # NotifyDevices (formerly PushNotification; renamed for issue #610)
     # ------------------------------------------------------------------
     @tool(
@@ -752,18 +793,48 @@ def create_builtin_tools_server(
                 from app.core.task_registry import task_registry
                 record = task_registry.get_task(session_id, tid)
                 if record is not None:
-                    return _ok({
+                    payload = {
                         "task_id": tid,
                         "kind": record.get("kind"),
                         "status": record.get("status"),
                         "summary": record.get("summary"),
                         "lines": [],
-                        "note": (
+                    }
+                    # Task-tool workers (kind=agent, task id == worker session
+                    # id): serve the worker's report from its durable event
+                    # log so background dispatches are collectable (A8).
+                    if record.get("kind") == "agent":
+                        try:
+                            from app.core import provider_agent as pa
+
+                            outcome = pa.final_turn_outcome(tid)
+                            if outcome.get("terminal_found"):
+                                payload["worker_status"] = (
+                                    "interrupted" if outcome.get("interrupted")
+                                    else ("error" if outcome.get("error") else "completed")
+                                )
+                                if outcome.get("error"):
+                                    payload["worker_error"] = outcome["error"]
+                                report = pa.final_assistant_text(tid)
+                                if report:
+                                    payload["report"], payload["truncated"] = pa.bound_report(report)
+                            else:
+                                payload["note"] = (
+                                    "Worker still running or no report yet — "
+                                    "poll again."
+                                )
+                        except Exception:  # noqa: BLE001
+                            payload["note"] = (
+                                "Background agent task — report unavailable; "
+                                "see the worker session transcript."
+                            )
+                    else:
+                        payload["note"] = (
                             "Background agent task — output is delivered via "
                             "<task-notification> and the subagent transcript; no "
                             "buffered stdout is available here."
-                        ),
-                    })
+                        )
+                    return _ok(payload)
             return _err("task not found.", task_id=tid)
         lines = task.lines
         since = int(args.get("since_line") or 0)
@@ -1047,6 +1118,8 @@ def get_builtin_tool_names() -> List[str]:
     """Return MCP tool names so they can be added to ``allowed_tools``."""
     names = [
         "mcp__builtins__ScheduleWakeup",
+        "mcp__builtins__Memory",
+        "mcp__builtins__Task",
         "mcp__builtins__NotifyDevices",
         "mcp__builtins__EnterWorktree",
         "mcp__builtins__ExitWorktree",

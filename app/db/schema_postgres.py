@@ -808,7 +808,7 @@ def create_postgres_schema(cursor) -> None:
 
     # omni harness session store (v69): branching node-tree sessions + durable
     # event log, mirroring omni.store.base.SessionStore / JsonlStore semantics.
-    # Used only when the omni backend runs with AIH_OMNI_STORE=pg.
+    # Used whenever the app has a database (the omni pg store is derived, not flagged).
     # cli_session_id (v70): the delegated engine's ``claude --resume`` handle —
     # a CLI uuid, NOT the omni session id — so a restart can reconnect to the
     # same CLI conversation instead of resuming a handle the CLI never issued.

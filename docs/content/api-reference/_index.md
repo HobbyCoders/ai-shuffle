@@ -115,12 +115,11 @@ The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": 
 | [Sessions](/docs/api-reference/sessions) | `/sessions` | Chat session CRUD, search, export |
 | [Query & Execution](/docs/api-reference/query-execution) | `/query`, `/conversation` | One-shot queries, conversations, streaming |
 | [WebSocket](/docs/api-reference/websocket) | `/ws` | Real-time chat and CLI bridge |
-| [Profiles](/docs/api-reference/profiles) | `/profiles` | Profile configuration CRUD |
+| [Agents](/docs/api-reference/agents) | `/agents` | Agent configuration CRUD and nested-agent management |
 | [Projects](/docs/api-reference/projects) | `/projects` | Project CRUD, files, git |
 | [Connectors](/docs/api-reference/connectors) | `/connectors` | Platform connector management |
 | [Automations](/docs/api-reference/automations) | `/automations` | Scheduled/triggered workflows |
 | [Hooks](/docs/api-reference/hooks) | `/hooks` | Event hook management |
 | [MCP](/docs/api-reference/mcp) | `/mcp` | MCP server configuration |
-| [Subagents](/docs/api-reference/subagents) | `/subagents` | Subagent management |
 | [API Users](/docs/api-reference/api-users) | `/api-users` | API key management |
 | [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, search, analytics, git, files |

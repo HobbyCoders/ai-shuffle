@@ -332,11 +332,11 @@ class TestRouterRegistration:
         # May also be under /api/v1/auth
         assert has_auth or any("/api/v1/" in path for path in route_paths)
 
-    def test_profiles_router_registered(self):
-        """Profiles router should be registered."""
-        from app.api import profiles
+    def test_agents_router_registered(self):
+        """Agents router should be registered."""
+        from app.api import agents
         # Verify router was included
-        assert profiles.router is not None
+        assert agents.router is not None
 
     def test_sessions_router_registered(self):
         """Sessions router should be registered."""
@@ -346,11 +346,11 @@ class TestRouterRegistration:
     def test_all_api_routers_imported(self):
         """All API routers should be importable."""
         from app.api import (
-            auth, profiles, system
+            auth, agents, system
         )
         # All imports successful
         assert auth.router is not None
-        assert profiles.router is not None
+        assert agents.router is not None
         assert system.router is not None
 
 

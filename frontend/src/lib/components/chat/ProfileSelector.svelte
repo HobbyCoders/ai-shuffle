@@ -15,7 +15,7 @@
 	// Driven by the shared store so opening this closes the branch/status dropdowns.
 	const showProfileDropdown = $derived($openHeaderDropdown === 'profile');
 
-	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
+	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Agent');
 
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
@@ -60,7 +60,7 @@
 		type="button"
 		class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
 		onclick={handleProfileClick}
-		title="Change profile"
+		title="Change agent"
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}
 	>
@@ -76,14 +76,14 @@
 	</button>
 
 	{#if showProfileDropdown}
-		<div class="selector-dropdown" role="menu" aria-label="Profile selection">
+		<div class="selector-dropdown" role="menu" aria-label="Agent selection">
 			<GroupedSelector
 				bind:this={groupedSelector}
 				items={$profiles}
 				entityType="profiles"
 				selectedId={$activeSession.profile}
 				onSelect={selectProfile}
-				emptyMessage="No profiles available"
+				emptyMessage="No agents available"
 			/>
 		</div>
 	{/if}

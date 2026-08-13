@@ -70,7 +70,7 @@
 		try {
 			const [usersData, profilesData, projectsData] = await Promise.all([
 				getApiUsers(),
-				api.get<Profile[]>('/profiles'),
+				api.get<Profile[]>('/agents'),
 				api.get<Project[]>('/projects')
 			]);
 			apiUsers = usersData;
@@ -417,10 +417,10 @@
 						<p class="text-xs text-muted-foreground mt-1">Restrict this user to a specific project workspace</p>
 					</div>
 
-					<!-- Profiles -->
+					<!-- Agents -->
 					{#if profiles.length > 0}
 						<div>
-							<span class="block text-xs text-muted-foreground mb-2">Profiles</span>
+							<span class="block text-xs text-muted-foreground mb-2">Agents</span>
 							<div class="space-y-1.5 max-h-40 overflow-y-auto">
 								{#each profiles as profile}
 									<label class="flex items-center gap-2 cursor-pointer">
@@ -437,7 +437,7 @@
 									</label>
 								{/each}
 							</div>
-							<p class="text-xs text-muted-foreground mt-1">Which agent profiles this user can access</p>
+							<p class="text-xs text-muted-foreground mt-1">Which agents this user can access</p>
 						</div>
 					{/if}
 
@@ -516,7 +516,7 @@
 									{/if}
 									{#if user.profile_ids && user.profile_ids.length > 0}
 										<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-xs rounded">
-											{user.profile_ids.length} profile{user.profile_ids.length !== 1 ? 's' : ''}
+											{user.profile_ids.length} agent{user.profile_ids.length !== 1 ? 's' : ''}
 										</span>
 									{/if}
 									{#if user.web_login_allowed}

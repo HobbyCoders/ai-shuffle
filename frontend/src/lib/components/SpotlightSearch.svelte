@@ -1,13 +1,11 @@
 <script lang="ts">
-  import { Users, Bot } from 'lucide-svelte';
+  import { Users } from 'lucide-svelte';
   import type { Session } from '$lib/api/client';
-  import type { Profile } from '$lib/api/client';
   import { searchSessionsPaginated, type SessionSearchResult } from '$lib/api/sessions';
   import { api } from '$lib/api/client';
-  import { profiles as profilesStore } from '$lib/stores/app-data.svelte';
   import { sanitizeHtml } from '$lib/utils/sanitize';
 
-  interface Subagent {
+  interface Agent {
     id: string;
     name: string;
     description: string;
@@ -19,8 +17,7 @@
     currentProjectId?: string;
     onClose: () => void;
     onSelectSession: (session: Session) => void;
-    onSelectProfile: (id: string) => void;
-    onSelectSubagent: (id: string) => void;
+    onSelectAgent: (id: string) => void;
     onNewChat: () => void;
     onOpenSettings: () => void;
   }
@@ -31,8 +28,7 @@
     currentProjectId,
     onClose,
     onSelectSession,
-    onSelectProfile,
-    onSelectSubagent,
+    onSelectAgent,
     onNewChat,
     onOpenSettings
   }: Props = $props();
@@ -50,11 +46,9 @@
   // Monotonic token so a stale in-flight search can't clobber a newer one.
   let searchToken = 0;
 
-  // Profiles + subagents: loaded once when the palette opens, filtered client-side.
-  let subagents = $state<Subagent[]>([]);
+  // Agents: loaded once when the palette opens, filtered client-side.
+  let agents = $state<Agent[]>([]);
   let dataLoaded = false;
-
-  const profiles = $derived<Profile[]>($profilesStore ?? []);
 
   // Quick actions (derived so prop references stay reactive)
   const quickActions = $derived([
@@ -77,23 +71,13 @@
     return sessionResults;
   });
 
-  const filteredProfiles = $derived.by(() => {
-    if (!trimmedQuery) return profiles;
+  const filteredAgents = $derived.by(() => {
+    if (!trimmedQuery) return agents;
     const q = trimmedQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.description ?? '').toLowerCase().includes(q)
-    );
-  });
-
-  const filteredSubagents = $derived.by(() => {
-    if (!trimmedQuery) return subagents;
-    const q = trimmedQuery.toLowerCase();
-    return subagents.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        (s.description ?? '').toLowerCase().includes(q)
+    return agents.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) ||
+        (a.description ?? '').toLowerCase().includes(q)
     );
   });
 
@@ -104,11 +88,10 @@
   });
 
   // Ordered group list drives both rendering and keyboard navigation.
-  type ItemType = 'session' | 'profile' | 'subagent' | 'action';
+  type ItemType = 'session' | 'agent' | 'action';
   const groups = $derived<Array<{ type: ItemType; items: unknown[] }>>([
     { type: 'session', items: displaySessions },
-    { type: 'profile', items: filteredProfiles },
-    { type: 'subagent', items: filteredSubagents },
+    { type: 'agent', items: filteredAgents },
     { type: 'action', items: filteredQuickActions }
   ]);
 
@@ -171,10 +154,10 @@
     if (dataLoaded) return;
     dataLoaded = true;
     try {
-      subagents = await api.get<Subagent[]>('/subagents');
+      agents = await api.get<Agent[]>('/agents');
     } catch (error) {
-      console.error('Failed to load subagents:', error);
-      subagents = [];
+      console.error('Failed to load agents:', error);
+      agents = [];
     }
   }
 
@@ -245,11 +228,8 @@
       case 'session':
         onSelectSession(item.data);
         break;
-      case 'profile':
-        onSelectProfile(item.data.id);
-        break;
-      case 'subagent':
-        onSelectSubagent(item.data.id);
+      case 'agent':
+        onSelectAgent(item.data.id);
         break;
       case 'action':
         item.data.action();
@@ -317,7 +297,7 @@
           bind:this={searchInput}
           bind:value={searchQuery}
           type="text"
-          placeholder="Search chats, profiles, subagents..."
+          placeholder="Search chats, agents..."
           class="flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-none text-base"
         />
         <kbd class="hidden sm:inline-flex items-center px-2 py-1 text-xs text-muted-foreground bg-muted rounded">
@@ -384,50 +364,23 @@
             </div>
           {/if}
 
-          <!-- Profiles -->
-          {#if filteredProfiles.length > 0}
+          <!-- Agents -->
+          {#if filteredAgents.length > 0}
             <div class="px-4 py-2 {displaySessions.length > 0 ? 'border-t border-border' : ''}">
               <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Profiles
+                Agents
               </h3>
             </div>
-            {#each filteredProfiles as profile, index}
-              {@const globalIndex = getGlobalIndex('profile', index)}
+            {#each filteredAgents as agent, index}
+              {@const globalIndex = getGlobalIndex('agent', index)}
               <button
                 type="button"
                 data-index={globalIndex}
                 class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
-                onclick={() => { onSelectProfile(profile.id); onClose(); }}
+                onclick={() => { onSelectAgent(agent.id); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
                 <Users class="w-5 h-5 text-blue-400 flex-shrink-0" strokeWidth={1.8} />
-                <div class="flex-1 min-w-0">
-                  <p class="text-sm text-foreground truncate">{profile.name}</p>
-                  {#if profile.description}
-                    <p class="text-xs text-muted-foreground truncate">{profile.description}</p>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          {/if}
-
-          <!-- Subagents -->
-          {#if filteredSubagents.length > 0}
-            <div class="px-4 py-2 {displaySessions.length > 0 || filteredProfiles.length > 0 ? 'border-t border-border' : ''}">
-              <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Subagents
-              </h3>
-            </div>
-            {#each filteredSubagents as agent, index}
-              {@const globalIndex = getGlobalIndex('subagent', index)}
-              <button
-                type="button"
-                data-index={globalIndex}
-                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
-                onclick={() => { onSelectSubagent(agent.id); onClose(); }}
-                onmouseenter={() => selectedIndex = globalIndex}
-              >
-                <Bot class="w-5 h-5 text-purple-400 flex-shrink-0" strokeWidth={1.8} />
                 <div class="flex-1 min-w-0">
                   <p class="text-sm text-foreground truncate">{agent.name}</p>
                   {#if agent.description}
@@ -440,7 +393,7 @@
 
           <!-- Quick Actions -->
           {#if filteredQuickActions.length > 0}
-            <div class="px-4 py-2 {displaySessions.length > 0 || filteredProfiles.length > 0 || filteredSubagents.length > 0 ? 'border-t border-border' : ''}">
+            <div class="px-4 py-2 {displaySessions.length > 0 || filteredAgents.length > 0 ? 'border-t border-border' : ''}">
               <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Quick Actions
               </h3>

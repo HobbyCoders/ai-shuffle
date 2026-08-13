@@ -1,21 +1,15 @@
 """
 Resolve the ``claude`` CLI binary this deployment actually runs.
 
-Two callers share this resolver:
-
-  * omni's ``DelegatedLoop`` (via ``app/core/provider/harness_adapter.py``),
-    which SPAWNS the CLI for the delegated Claude leg. It prefers a ``claude``
-    on PATH (dev machines with a global install) and falls back to the bundled
-    copy this module locates.
-  * the deploy-time interrupt patcher (``app/core/cli_interrupt_patch.py``),
-    which byte-patches that same bundled binary so a user "Stop" spares
-    in-flight background sub-agents.
+Caller: omni's ``DelegatedLoop`` (via ``app/core/provider/harness_adapter.py``),
+which SPAWNS the CLI for the delegated Claude leg. It prefers a ``claude``
+on PATH (dev machines with a global install) and falls back to the bundled
+copy this module locates.
 
 The bundled copy is the Docker fallback: in the image the CLI is not on PATH —
 only the ~257MB Bun binary shipped inside the installed ``claude_agent_sdk``
-package files exists. Keeping the resolver here (rather than inside the
-interrupt patcher) means CLI resolution does not depend on the opt-in patch
-module.
+package files exists. (The deploy-time interrupt patcher that also used this
+resolver was removed along with PRESERVE_BACKGROUND_ON_INTERRUPT.)
 """
 
 import platform

@@ -1021,7 +1021,7 @@
 					<p class="text-muted-foreground mb-4">Ask anything - code, questions, ideas, or just chat.</p>
 					{#if currentProfile}
 						<div class="text-sm text-muted-foreground">
-							<span>Profile:</span>
+							<span>Agent:</span>
 							<span class="text-foreground ml-1">{currentProfile.name}</span>
 						</div>
 					{/if}

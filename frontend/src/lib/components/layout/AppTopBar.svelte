@@ -58,7 +58,7 @@
 
 	// Build group members — the agent-config tools live inside the Build page.
 	// Listed so the "Build" tab highlights when a member view (deep-link) is active.
-	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'subagent', 'mcp', 'plugins', 'hooks'];
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
 
 	// "Account & more" dropdown — Projects now lives in the main nav row.
 	const overflowItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [

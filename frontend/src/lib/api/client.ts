@@ -283,8 +283,6 @@ export interface AuthStatus {
 export interface ProfileConfig {
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
-	subagent_provider?: string | null;  // optional cross-provider subagent leg: model_providers.id; unset/null = inherit
-	subagent_model?: string | null;  // subagent model id paired with subagent_provider; unset/null = inherit
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
@@ -298,7 +296,8 @@ export interface ProfileConfig {
 	effort?: 'low' | 'medium' | 'high' | 'max';  // Effort level for reasoning depth (independent of thinking config)
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
-	enabled_agents?: string[];  // Subagents enabled for this profile
+	enabled_agents?: string[];  // Optional invoke allowlist: agents this agent may dispatch via the Task tool; empty/unset = any
+	memory?: string;  // Per-agent memory (plain text); agent-editable at runtime via the Memory tool, injected into the system prompt
 	setting_sources?: string[];  // Where to load settings from (e.g., 'claude_code')
 	cwd?: string;  // Working directory override
 	add_dirs?: string[];  // Additional directories to include
@@ -503,21 +502,21 @@ export interface AgentImportRequest extends AgentExport {
  * Export an agent/profile as JSON and trigger download
  */
 export async function exportAgent(profileId: string): Promise<void> {
-	await fetchAndDownload(`/profiles/${profileId}/export`, `${profileId}-agent.json`);
+	await fetchAndDownload(`/agents/${profileId}/export`, `${profileId}-agent.json`);
 }
 
 /**
  * Get agent export data without downloading (for preview)
  */
 export async function getAgentExportData(profileId: string): Promise<AgentExport> {
-	return api.get<AgentExport>(`/profiles/${profileId}/export`);
+	return api.get<AgentExport>(`/agents/${profileId}/export`);
 }
 
 /**
  * Import an agent from JSON data
  */
 export async function importAgent(data: AgentImportRequest): Promise<Profile> {
-	return api.post<Profile>('/profiles/import', data);
+	return api.post<Profile>('/agents/import', data);
 }
 
 /** One rate-limit window in a usage snapshot. */
@@ -612,7 +611,7 @@ export async function getSubagentsForAutocomplete(
 	if (search) params.set('search', search);
 	params.set('limit', limit.toString());
 
-	return api.get<AutocompleteSubagent[]>(`/profiles/${profileId}/subagents/all?${params.toString()}`);
+	return api.get<AutocompleteSubagent[]>(`/agents/${profileId}/subagents/all?${params.toString()}`);
 }
 
 // ============================================================================
