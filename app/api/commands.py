@@ -856,6 +856,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     files_rewound = False
     messages_removed = 0
     errors = []
+    # Set by the omni branch below (ruling R5): the outcome of re-seeding the
+    # delegated CLI from omni's post-rewind context. None = never attempted.
+    reseed_result = None
 
     # CRITICAL: evict any live pooled CLI subprocess for this session BEFORE we
     # touch the transcript. A pooled ``ClaudeSDKClient`` keeps the JSONL file
@@ -920,7 +923,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # these sessions today — omitting that is the "rewind succeeded but the
     # message is still in chat" bug.
     if request.restore_chat and omni_session:
-        from app.core.provider.omni_transcript import rewind_omni_session
+        from app.core.provider.omni_transcript import (
+            rewind_omni_session,
+            reseed_delegated_cli_session,
+        )
 
         anchor_id: Optional[int] = None
         try:
@@ -983,6 +989,24 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                     f"Omni rewind DB sync skipped: no anchor row resolved for "
                     f"session={session_id} target={request.target_uuid}"
                 )
+            # Ruling R5: omni owns the context, so the DELEGATED (claude CLI)
+            # engine must not be left resuming its own pre-rewind history.
+            # Materialize the post-rewind path as a CLI session file under a
+            # fresh uuid and store it as the session's --resume handle; the
+            # adapter's _resolve_cli_session_id picks it up on the next turn
+            # with no further plumbing. A no-op for native-engine sessions
+            # (nothing stored to re-seed). Best-effort: a failure downgrades to
+            # the #815 divergence warning below, it never fails the rewind.
+            reseed_result = await asyncio.to_thread(
+                reseed_delegated_cli_session, sdk_session_id, working_dir
+            )
+            logger.info(
+                f"Omni rewind CLI re-seed: session={session_id}, "
+                f"status={reseed_result.status}, "
+                f"entries={reseed_result.entries_written}, "
+                f"error={reseed_result.error}"
+            )
+
             # The sdk_session_id pointer is NOT cleared even when the rewind
             # emptied the transcript: an omni session with a NULL head is a
             # perfectly resumable session (the next turn appends a root node),
@@ -1213,20 +1237,26 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     if partial_success:
         warning = "Chat rewound successfully. File restore unavailable - no checkpoint exists for this point."
 
-    # Honesty guard for omni sessions running the DELEGATED (claude CLI) engine:
-    # the store-side rewind and the visible transcript are correct, but the CLI
-    # keeps its OWN conversation history and omni cannot truncate it
+    # Honesty guard for omni sessions running the DELEGATED (claude CLI) engine.
+    # The CLI keeps its OWN conversation history and omni cannot truncate it
     # (``DelegatedLoop.caps`` declares rewind=False; ``--resume`` is its only
-    # history control). The model may therefore still carry the rewound-away
-    # turns into the next reply. Surfaced rather than swallowed — a rewind that
-    # silently lied about context would be worse than one that refuses.
-    if omni_session and chat_rewound:
-        divergence = (
-            "Transcript rewound. Note: on the delegated claude-CLI engine the "
-            "model's own history is not truncated, so it may still recall the "
-            "removed turns."
-        )
-        warning = f"{warning} {divergence}" if warning else divergence
+    # history control), so before ruling R5 every omni rewind carried a warning
+    # that the model might still recall the removed turns.
+    #
+    # The re-seed above now removes that divergence at the source: the session's
+    # ``--resume`` handle points at a freshly materialized transcript that ends
+    # at the checkpoint (or is dropped entirely when the rewind emptied the
+    # conversation), and a native-engine session never had CLI history to begin
+    # with. The warning is therefore reserved for the one case where the context
+    # really can still diverge: the re-seed itself failed.
+    if omni_session and chat_rewound and reseed_result is not None:
+        if not reseed_result.context_is_authoritative:
+            divergence = (
+                "Transcript rewound, but the delegated claude-CLI history could "
+                "not be re-seeded, so the model may still recall the removed "
+                "turns."
+            )
+            warning = f"{warning} {divergence}" if warning else divergence
 
     # Build result message
     if success and not partial_success:
