@@ -14,6 +14,8 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             then behaves like (a) echoing the resumed session id
   d  partial streaming:     init → stream_event(deltas) → assistant(full text)
                             → result  (drives the dedupe path)
+  e  stale wake burst:      like (a), but after the first turn's result it emits
+                            an unsolicited assistant+result burst (no prompt)
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -168,6 +170,7 @@ def main() -> int:
     emit({"type": "system", "subtype": "init", "session_id": session_id,
           "model": "claude-fake", "tools": [], "mcp_servers": []})
 
+    wake_emitted = False
     while True:
         msg = read_line()
         if msg is None:
@@ -178,6 +181,12 @@ def main() -> int:
             turn_tool(session_id)
         elif scenario == "d":
             turn_partial(session_id)
+        elif scenario == "e":
+            turn_simple(session_id)
+            if not wake_emitted:
+                wake_emitted = True
+                emit(assistant_frame(session_id, [{"type": "text", "text": "WAKE: unsolicited"}], "end_turn"))
+                emit(result_frame(session_id))
         else:  # a and c share the simple turn
             turn_simple(session_id)
 

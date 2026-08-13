@@ -196,6 +196,37 @@ async def test_store_persistence_reloadable() -> None:
         await loop.aclose()
 
 
+async def test_stale_between_turn_frames_discarded() -> None:
+    """Frames the CLI emits while no turn is active (e.g. a scheduled wake)
+    must be drained at the next turn's start — a stale buffered ``result``
+    frame must never terminate a fresh turn early."""
+    loop = _make_loop("e")
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        await asyncio.sleep(0.2)  # let the unsolicited burst reach the reader
+        await loop.submit(UserTurn(content="again"))
+        await loop.wait_turn()
+        sid = loop.session_id
+        events = loop.bus.log(sid)
+
+        assert not any(isinstance(e, ErrorEvent) for e in events)
+        # both turns ran to completion with the real reply, not the wake text
+        assert [e.text for e in events if isinstance(e, TextDelta)] == [
+            "Hello from fake.", "Hello from fake.",
+        ]
+        assert [type(e).__name__ for e in events] == [
+            "TurnStarted", "BlockStart", "TextDelta", "BlockStop", "Usage", "TurnComplete",
+        ] * 2
+        assert [e.seq for e in events] == list(range(1, len(events) + 1))
+
+        path = await loop.store.load_path(sid)
+        assert [n.message.role for n in path] == ["user", "assistant", "user", "assistant"]
+        assert all("WAKE" not in n.message.text() for n in path)
+    finally:
+        await loop.aclose()
+
+
 # ─── Permission round-trip (allow + deny) ────────────────────────────────────
 
 

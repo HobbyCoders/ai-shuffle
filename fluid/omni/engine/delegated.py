@@ -325,11 +325,14 @@ class DelegatedLoop:
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
+        reused = self._proc is not None and self._proc.returncode is None
         try:
             proc = await self._ensure_process()
         except Exception as exc:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"))
             return
+        if reused:
+            await self._discard_stale_stdout()
 
         content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         user_node = SessionNode(
@@ -392,6 +395,32 @@ class DelegatedLoop:
         exc = task.exception()
         if exc is not None:
             logger.debug("failed to persist cli_session_id: %r", exc)
+
+    async def _discard_stale_stdout(self) -> None:
+        """Drop frames the CLI emitted while no turn was active.
+
+        ``_read_until_result`` only runs during a turn, so anything the CLI wrote
+        between turns (e.g. an unsolicited wake) sits buffered in the
+        StreamReader and would be consumed by the next turn's reader under that
+        turn's mapper — and a stale ``result`` frame would end the fresh turn
+        early. Draining here is race-free: the CLI cannot emit this turn's
+        frames until the user frame is written, so every line read before that
+        is stale by construction. ``wait_for`` cancelling ``readline`` on
+        timeout is safe — ``readuntil`` only consumes from the buffer when a
+        complete line is returned.
+        """
+        assert self._proc is not None and self._proc.stdout is not None
+        for _ in range(1000):  # backstop against a continuously-spewing child
+            try:
+                line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=0.05)
+            except asyncio.TimeoutError:
+                return
+            if not line:  # EOF — let the turn's reader surface the closed stream
+                return
+            text = line.decode(errors="replace").strip()
+            if text:
+                logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+        logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
 
     async def _read_until_result(
         self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
