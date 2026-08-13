@@ -2190,6 +2190,22 @@ async def _stream_to_websocket_impl(
                         # clears once every outstanding prompt in this session resolves.
                         await _bump_attention(-1, "question")
 
+                    # The user closed the question modal ("X") instead of
+                    # answering. There is no "no answer" value the
+                    # AskUserQuestion tool accepts, so resolve the pending tool
+                    # call by denying it — the SDK turns the deny message into
+                    # the tool_result, which is exactly the outcome we want the
+                    # model to read. (Per-question SKIPS are not this: they come
+                    # back as ordinary answer strings and flow through below.)
+                    from app.core.user_question_handler import (
+                        DISMISSED_KEY,
+                        DISMISS_MESSAGE,
+                    )
+
+                    if isinstance(answers, dict) and answers.get(DISMISSED_KEY):
+                        logger.debug(f"[WS] Question {request_id} dismissed by user")
+                        return PermissionResultDeny(message=DISMISS_MESSAGE)
+
                     logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
                     return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 

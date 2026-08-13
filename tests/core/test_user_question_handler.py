@@ -981,3 +981,153 @@ class TestEdgeCases(TestUserQuestionHandler):
     # patching hang risk as above; forcing a real timeout to exercise this
     # "respond after settle" case would need a dedicated short-TTL test, out of
     # scope for this flag-removal change.
+
+
+class TestDismissAndSkipEnvelope:
+    """The AskUserQuestion modal's "X" (dismiss) and per-question "Skip".
+
+    Neither outcome is expressible in the flat ``{question_text: answer}`` map
+    the SDK tool consumes, so both ride as reserved marker keys inside the
+    stored ``pending_interactions.answer`` payload and are resolved back out
+    before the answers ever reach the tool.
+    """
+
+    def test_plain_answers_pass_through_untouched(self):
+        from app.core.user_question_handler import (
+            build_answer_envelope,
+            resolve_answer_envelope,
+        )
+
+        envelope = build_answer_envelope({"Which db?": "Postgres"})
+        assert envelope == {"Which db?": "Postgres"}
+        assert resolve_answer_envelope(envelope) == {"Which db?": "Postgres"}
+
+    def test_dismiss_envelope_ignores_any_answers(self):
+        from app.core.user_question_handler import (
+            DISMISSED_KEY,
+            DISMISS_MESSAGE,
+            build_answer_envelope,
+            resolve_answer_envelope,
+        )
+
+        envelope = build_answer_envelope({"Which db?": "Postgres"}, dismissed=True)
+        assert envelope == {DISMISSED_KEY: True}
+
+        resolved = resolve_answer_envelope(envelope)
+        assert resolved[DISMISSED_KEY] is True
+        assert resolved["error"] == DISMISS_MESSAGE
+
+    def test_skipped_questions_resolve_to_skip_text(self):
+        from app.core.user_question_handler import (
+            SKIPPED_KEY,
+            SKIP_ANSWER_TEXT,
+            build_answer_envelope,
+            resolve_answer_envelope,
+        )
+
+        envelope = build_answer_envelope(
+            {"Which db?": "Postgres"}, skipped=["Which cache?"]
+        )
+        assert envelope[SKIPPED_KEY] == ["Which cache?"]
+
+        resolved = resolve_answer_envelope(envelope)
+        assert resolved == {
+            "Which db?": "Postgres",
+            "Which cache?": SKIP_ANSWER_TEXT,
+        }
+        # The marker itself never leaks into what the tool sees.
+        assert SKIPPED_KEY not in resolved
+
+    def test_all_questions_skipped_still_produces_answers(self):
+        from app.core.user_question_handler import (
+            SKIP_ANSWER_TEXT,
+            build_answer_envelope,
+            resolve_answer_envelope,
+        )
+
+        resolved = resolve_answer_envelope(
+            build_answer_envelope({}, skipped=["Q1", "Q2"])
+        )
+        assert resolved == {"Q1": SKIP_ANSWER_TEXT, "Q2": SKIP_ANSWER_TEXT}
+
+    def test_client_supplied_marker_keys_are_stripped(self):
+        """A forged marker in the answers map must not fake a dismissal."""
+        from app.core.user_question_handler import (
+            DISMISSED_KEY,
+            SKIPPED_KEY,
+            build_answer_envelope,
+            resolve_answer_envelope,
+        )
+
+        envelope = build_answer_envelope(
+            {DISMISSED_KEY: True, SKIPPED_KEY: ["x"], "Real?": "yes"}
+        )
+        assert envelope == {"Real?": "yes"}
+        assert resolve_answer_envelope(envelope) == {"Real?": "yes"}
+
+    def test_empty_skip_list_adds_no_marker(self):
+        from app.core.user_question_handler import SKIPPED_KEY, build_answer_envelope
+
+        assert SKIPPED_KEY not in build_answer_envelope({"Q": "a"}, skipped=[])
+
+    @pytest.mark.asyncio
+    async def test_respond_dismissed_round_trips_to_the_waiting_tool_call(self):
+        """A dismissal answers the pending interaction and comes back out of
+        request_answers carrying the dismiss marker, which query_engine turns
+        into a denied tool call."""
+        from app.core.user_question_handler import DISMISSED_KEY, DISMISS_MESSAGE
+
+        handler = UserQuestionHandler()
+        mock_broadcast = AsyncMock(return_value=True)
+
+        async def dismiss():
+            await asyncio.sleep(0.01)
+            await handler.respond("req-dismiss", "session-1", {}, dismissed=True)
+
+        asyncio.create_task(dismiss())
+
+        result = await handler.request_answers(
+            request_id="req-dismiss",
+            tool_use_id="tool-1",
+            session_id="session-1",
+            questions=[{"question": "Which db?", "header": "DB"}],
+            broadcast_func=mock_broadcast,
+        )
+
+        assert result[DISMISSED_KEY] is True
+        assert result["error"] == DISMISS_MESSAGE
+
+    @pytest.mark.asyncio
+    async def test_respond_with_partial_skips_round_trips(self):
+        """Skipping some questions while answering others submits cleanly."""
+        from app.core.user_question_handler import SKIP_ANSWER_TEXT
+
+        handler = UserQuestionHandler()
+        mock_broadcast = AsyncMock(return_value=True)
+
+        async def answer():
+            await asyncio.sleep(0.01)
+            await handler.respond(
+                "req-skip",
+                "session-1",
+                {"Which db?": "Postgres"},
+                skipped=["Which cache?"],
+            )
+
+        asyncio.create_task(answer())
+
+        result = await handler.request_answers(
+            request_id="req-skip",
+            tool_use_id="tool-1",
+            session_id="session-1",
+            questions=[
+                {"question": "Which db?", "header": "DB"},
+                {"question": "Which cache?", "header": "Cache"},
+            ],
+            broadcast_func=mock_broadcast,
+        )
+
+        assert result == {
+            "Which db?": "Postgres",
+            "Which cache?": SKIP_ANSWER_TEXT,
+        }

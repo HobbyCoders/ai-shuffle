@@ -64,19 +64,34 @@ export function createPermissionHandler(deps: PermissionHandlerDeps) {
 			});
 		},
 
+		/**
+		 * Answer (or dismiss) an AskUserQuestion prompt.
+		 *
+		 * `options.dismissed` is the modal's "X": the dialog closed with nothing
+		 * answered, and the backend resolves the tool call with a "user
+		 * dismissed" tool_result. `options.skipped` lists question keys the user
+		 * explicitly skipped; the backend fills each with its own
+		 * "user skipped this question" answer so a partially-answered form still
+		 * submits. Both are omitted from the payload when unset so the ordinary
+		 * answer frame stays byte-identical to before.
+		 */
 		sendUserQuestionResponse(
 			requestId: string,
 			toolUseId: string,
 			answers: Record<string, string | string[]>,
-			sessionId?: string
+			sessionId?: string,
+			options?: { dismissed?: boolean; skipped?: string[] }
 		) {
-			wsSend({
+			const payload: Record<string, unknown> = {
 				type: 'user_question_response',
 				request_id: requestId,
 				session_id: sessionId,
 				tool_use_id: toolUseId,
 				answers,
-			});
+			};
+			if (options?.dismissed) payload.dismissed = true;
+			if (options?.skipped && options.skipped.length > 0) payload.skipped = options.skipped;
+			wsSend(payload);
 		},
 
 		syncPendingPermissions() {

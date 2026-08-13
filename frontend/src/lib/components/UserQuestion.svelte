@@ -25,6 +25,10 @@
 			request_id: string;
 			tool_use_id: string;
 			answers: Record<string, string | string[]>;
+			/** The user closed the dialog ("X") without answering anything. */
+			dismissed?: boolean;
+			/** Question keys the user explicitly chose to skip. */
+			skipped?: string[];
 		}) => void;
 	}
 
@@ -40,6 +44,10 @@
 	let answers = $state<Record<number, string | string[]>>({});
 	let showOther = $state<Record<number, boolean>>({});
 	let otherText = $state<Record<number, string>>({});
+	// Per-question "skip": the user declines to answer THIS question but still
+	// submits the form. Mutually exclusive with having a selection — picking an
+	// option (or "Other") clears the skip, and skipping clears the selection.
+	let skipped = $state<Record<number, boolean>>({});
 
 	// Initialize answers when a NEW question arrives (tracked by request_id).
 	// IMPORTANT: Do NOT depend on `data` directly — only on `data.request_id`.
@@ -64,6 +72,7 @@
 		answers = initial;
 		showOther = {};
 		otherText = {};
+		skipped = {};
 		currentStep = 0;
 		isReviewStep = false;
 	});
@@ -79,6 +88,9 @@
 	function toggleOption(questionIdx: number, optionLabel: string) {
 		const question = data.questions?.[questionIdx];
 		if (!question) return;
+
+		// Making a selection is an implicit un-skip.
+		skipped[questionIdx] = false;
 
 		if (question.multiSelect) {
 			const current = answers[questionIdx] as string[];
@@ -103,12 +115,30 @@
 		const question = data.questions?.[questionIdx];
 		if (!question) return;
 		showOther[questionIdx] = true;
+		skipped[questionIdx] = false;
 
 		if (question.multiSelect) {
 			answers[questionIdx] = [];
 		} else {
 			answers[questionIdx] = '';
 		}
+	}
+
+	/** Toggle "skip this question". Skipping discards any in-progress answer. */
+	function toggleSkip(questionIdx: number) {
+		const question = data.questions?.[questionIdx];
+		if (!question) return;
+		const next = !skipped[questionIdx];
+		skipped[questionIdx] = next;
+		if (next) {
+			showOther[questionIdx] = false;
+			otherText[questionIdx] = '';
+			answers[questionIdx] = question.multiSelect ? [] : '';
+		}
+	}
+
+	function isSkipped(questionIdx: number): boolean {
+		return skipped[questionIdx] === true;
 	}
 
 	function isSelected(questionIdx: number, optionLabel: string): boolean {
@@ -124,6 +154,8 @@
 	}
 
 	function canProceed(questionIdx: number): boolean {
+		// A skipped question is "resolved" for navigation/submit purposes.
+		if (skipped[questionIdx]) return true;
 		if (showOther[questionIdx]) {
 			return (otherText[questionIdx] || '').trim().length > 0;
 		}
@@ -173,6 +205,9 @@
 	}
 
 	function getAnswerDisplay(questionIdx: number): string {
+		if (skipped[questionIdx]) {
+			return 'Skipped';
+		}
 		if (showOther[questionIdx]) {
 			return otherText[questionIdx];
 		}
@@ -190,9 +225,18 @@
 		// multi-select selections must be comma-separated. Sending header-keyed
 		// answers or raw arrays makes the tool report "did not answer".
 		const finalAnswers: Record<string, string> = {};
+		// Skipped questions carry no answer of their own — they ride out-of-band
+		// as keys so the backend can fill in its own "user skipped this question"
+		// text. Sending an empty string instead would make the tool report the
+		// whole form as unanswered.
+		const skippedKeys: string[] = [];
 
 		questions.forEach((q, idx) => {
 			const key = q.question || q.header || `question_${idx}`;
+			if (skipped[idx]) {
+				skippedKeys.push(key);
+				return;
+			}
 			if (showOther[idx]) {
 				finalAnswers[key] = (otherText[idx] || '').trim();
 			} else {
@@ -204,7 +248,22 @@
 		onRespond?.({
 			request_id: data.request_id,
 			tool_use_id: data.tool_use_id,
-			answers: finalAnswers
+			answers: finalAnswers,
+			skipped: skippedKeys
+		});
+	}
+
+	/**
+	 * Close the dialog without answering. Resolves the pending AskUserQuestion
+	 * tool call with a "user dismissed" outcome rather than leaving it hanging
+	 * until the question TTL expires.
+	 */
+	function handleDismiss() {
+		onRespond?.({
+			request_id: data.request_id,
+			tool_use_id: data.tool_use_id,
+			answers: {},
+			dismissed: true
 		});
 	}
 
@@ -311,6 +370,19 @@
 				{/if}
 			</div>
 		{/if}
+
+		<!-- Dismiss: closes the dialog and resolves the tool call as unanswered. -->
+		<button
+			type="button"
+			onclick={handleDismiss}
+			class="uq-close-btn flex-shrink-0"
+			aria-label="Dismiss question without answering"
+			title="Dismiss without answering"
+		>
+			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+			</svg>
+		</button>
 	</div>
 
 	<!-- Content Area with Slide Animation -->
@@ -335,7 +407,11 @@
 									</span>
 								{/if}
 								<p class="text-xs text-muted-foreground">{question.question}</p>
-								<p class="text-sm font-medium text-foreground mt-1 break-words">
+								<p
+									class="text-sm font-medium mt-1 break-words"
+									class:text-foreground={!isSkipped(idx)}
+									class:uq-skipped-answer={isSkipped(idx)}
+								>
 									{getAnswerDisplay(idx) || '—'}
 								</p>
 							</div>
@@ -454,6 +530,26 @@
 							></textarea>
 						</div>
 					{/if}
+				</div>
+
+				<!-- Per-question skip: a lightweight opt-out, deliberately not
+				     styled as a primary action. Reported to the tool as
+				     "user skipped this question" so the rest of the form can
+				     still submit. -->
+				<div class="mt-3 flex justify-end">
+					<button
+						type="button"
+						onclick={() => toggleSkip(currentStep)}
+						class="uq-skip-btn"
+						class:active={isSkipped(currentStep)}
+						aria-pressed={isSkipped(currentStep)}
+					>
+						{#if isSkipped(currentStep)}
+							Skipped — undo
+						{:else}
+							Skip this question
+						{/if}
+					</button>
 				</div>
 			</div>
 			{/key}
@@ -761,6 +857,86 @@
 
 		.option-card {
 			padding: 1rem;
+		}
+	}
+
+	/* Dismiss ("X") button — ghost, matching .uq-edit-btn's translucent hover
+	   so it never paints an opaque fill that sticks after a tap on touch. */
+	.uq-close-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 0.5rem;
+		color: var(--muted-foreground);
+		background: transparent;
+		transition: color 0.15s ease, background 0.15s ease;
+	}
+
+	.uq-close-btn:hover {
+		color: var(--foreground);
+		background: var(--hover-overlay);
+	}
+
+	.uq-close-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	/* Per-question skip — a quiet text control, never a primary button. */
+	.uq-skip-btn {
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		line-height: 1rem;
+		border-radius: 0.5rem;
+		color: var(--muted-foreground);
+		background: transparent;
+		border: 1px solid transparent;
+		cursor: pointer;
+		transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+	}
+
+	.uq-skip-btn:hover {
+		color: var(--foreground);
+		background: var(--hover-overlay);
+	}
+
+	.uq-skip-btn.active {
+		color: var(--foreground);
+		border-color: var(--border);
+	}
+
+	.uq-skip-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.uq-skipped-answer {
+		color: var(--muted-foreground);
+		font-style: italic;
+	}
+
+	/* Touch (handhelds ≤1080px included): tap targets stay comfortable and no
+	   hover fill is left stuck after a tap. */
+	@media (hover: none) {
+		.uq-close-btn {
+			width: 2rem;
+			height: 2rem;
+		}
+
+		.uq-close-btn:hover,
+		.uq-skip-btn:hover {
+			color: var(--muted-foreground);
+			background: transparent;
+		}
+
+		.uq-skip-btn {
+			padding: 0.375rem 0.625rem;
+		}
+
+		.uq-skip-btn.active {
+			color: var(--foreground);
 		}
 	}
 

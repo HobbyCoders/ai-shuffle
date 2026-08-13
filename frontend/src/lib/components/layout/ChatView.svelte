@@ -21,7 +21,6 @@
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import ActiveTasks from '$lib/components/chat/ActiveTasks.svelte';
-	import StopButton from '$lib/components/chat/StopButton.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -95,13 +94,18 @@
 		request_id: string;
 		tool_use_id: string;
 		answers: Record<string, string | string[]>;
+		dismissed?: boolean;
+		skipped?: string[];
 	}) {
-		const { request_id, tool_use_id, answers } = detail;
+		const { request_id, tool_use_id, answers, dismissed, skipped } = detail;
 		const sessionId =
 			$activeSession.pendingQuestions.find(q => q.request_id === request_id)?.session_id ??
 			$activeSession.sessionId ??
 			undefined;
-		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId);
+		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId, {
+			dismissed,
+			skipped
+		});
 	}
 
 	// Stop one in-flight background task (the "x" on the ActiveTasks strip).
@@ -291,24 +295,12 @@
 					</div>
 				{/if}
 			</div>
-
-			{#if $activeSession.isStreaming}
-				<!-- The backdrop deliberately blocks the whole composer (see the
-				     comment above) while a permission/question prompt is open, but
-				     that traps the composer's own Stop button along with everything
-				     else — leaving no way to abort a turn the user doesn't want to
-				     grant permissions for. Rather than punch a pointer-events hole in
-				     the backdrop (which would also reopen the send box, model
-				     picker, etc.), float a second, purpose-built Stop control above
-				     it. Every other composer control stays inert as designed. -->
-				<div class="modal-stop-dock">
-					<StopButton
-						activeTasks={$activeSession.activeTasks}
-						preserveBackground={$activeSession.preserveBackgroundOnInterrupt}
-						onStop={(bg) => activeSession.stopGeneration(bg)}
-					/>
-				</div>
-			{/if}
+			<!-- No floating Stop control lives here. #789 (c6082dd2) used to dock a
+			     second StopButton above the backdrop so the composer's own Stop
+			     stayed reachable during a prompt; it read as a stray control
+			     punching through the dialog, so it is gone for BOTH the permission
+			     prompt and the question modal. A modal is answered or dismissed
+			     first; the composer's normal Stop takes over once it clears. -->
 		</div>
 	{/if}
 </div>
@@ -560,17 +552,6 @@
 		box-shadow: var(--shadow-l);
 		max-height: calc(100vh - 8rem);
 		overflow-y: auto;
-	}
-
-	/* Floats above .modal-backdrop (unpositioned) and .modal-content (z-index: 1)
-	   within the same .modal-overlay stacking context, roughly where the
-	   composer's own Stop button sits, so it reads as "the same control, still
-	   reachable" rather than a stray new affordance. */
-	.modal-stop-dock {
-		position: absolute;
-		z-index: 2;
-		right: 1.5rem;
-		bottom: 1.5rem;
 	}
 
 	@keyframes modalFadeIn {

@@ -23,6 +23,60 @@ logger = logging.getLogger(__name__)
 # 3600s).
 QUESTION_KIND = "question"
 
+# Dismiss / skip envelope (AskUserQuestion modal "X" and per-question "Skip").
+#
+# The stored ``pending_interactions.answer`` payload is normally a flat
+# ``{question_text: answer_string}`` map — exactly the shape the SDK's
+# AskUserQuestion tool consumes. Dismissal and per-question skips are two
+# outcomes that map cannot express, so they ride as reserved marker keys that
+# ``_request_answers_v2`` resolves before the answers ever reach the tool:
+#
+#   ``{DISMISSED_KEY: True}``            → whole dialog closed unanswered
+#   ``{..., SKIPPED_KEY: [q1, q3]}``     → those questions answered with
+#                                          SKIP_ANSWER_TEXT, the rest verbatim
+#
+# The markers are deliberately dunder-ish so they cannot collide with a real
+# question's text (the map is keyed by the full question string).
+DISMISSED_KEY = "__dismissed__"
+SKIPPED_KEY = "__skipped__"
+DISMISS_MESSAGE = "User dismissed the question dialog without answering."
+SKIP_ANSWER_TEXT = "User skipped this question."
+
+
+def build_answer_envelope(
+    answers: Optional[Dict[str, Any]],
+    dismissed: bool = False,
+    skipped: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Normalize a frontend question response into the stored answer envelope."""
+    if dismissed:
+        return {DISMISSED_KEY: True}
+    envelope: Dict[str, Any] = dict(answers or {})
+    # Never let a client-supplied key masquerade as a marker.
+    envelope.pop(DISMISSED_KEY, None)
+    envelope.pop(SKIPPED_KEY, None)
+    skipped_keys = [str(k) for k in (skipped or []) if str(k)]
+    if skipped_keys:
+        envelope[SKIPPED_KEY] = skipped_keys
+    return envelope
+
+
+def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
+    """Expand a stored envelope into what the AskUserQuestion tool should see.
+
+    Returns either the flat answer map (skips materialized as
+    ``SKIP_ANSWER_TEXT``) or, for a dismissal, a dict still carrying
+    ``DISMISSED_KEY`` so the caller can deny the tool call outright.
+    """
+    if not isinstance(envelope, dict):
+        return {"error": "No answers received"}
+    if envelope.get(DISMISSED_KEY):
+        return {DISMISSED_KEY: True, "error": DISMISS_MESSAGE}
+    resolved = {k: v for k, v in envelope.items() if k != SKIPPED_KEY}
+    for key in envelope.get(SKIPPED_KEY) or []:
+        resolved[str(key)] = SKIP_ANSWER_TEXT
+    return resolved
+
 
 def _question_ttl_seconds() -> int:
     return int(getattr(settings, "user_question_timeout_seconds", 3600))
@@ -220,7 +274,7 @@ class UserQuestionHandler:
 
         answers = result_row.get("answer")
         if answers:
-            return answers
+            return resolve_answer_envelope(answers)
         return {"error": "No answers received"}
 
     async def _respond_v2(
@@ -229,6 +283,8 @@ class UserQuestionHandler:
         session_id: str,
         answers: Dict[str, Any],
         answered_by_device: Optional[str],
+        dismissed: bool = False,
+        skipped: Optional[List[str]] = None,
     ) -> bool:
         from app.core import interaction_wait
         from app.db import interactions
@@ -244,16 +300,20 @@ class UserQuestionHandler:
         if row is None:
             logger.warning(f"Question request not found: {request_id}")
             return False
-        answered = interactions.answer_interaction(row["id"], answers, answered_by_device)
+        envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
+        answered = interactions.answer_interaction(row["id"], envelope, answered_by_device)
         if answered:
             interaction_wait.notify_changed(session_id)
-            logger.debug(f"User question answered: {request_id}")
+            logger.debug(
+                f"User question answered: {request_id}"
+                + (" (dismissed)" if dismissed else "")
+            )
             # Durable lifecycle event (#653): guarded answer won → emit exactly
             # one interaction.answered. AFTER notify_changed.
             from app.core import interaction_events
 
             await interaction_events.emit_interaction_answered(
-                session_id, row["id"], request_id, answers,
+                session_id, row["id"], request_id, envelope,
             )
         return answered
 
@@ -263,6 +323,8 @@ class UserQuestionHandler:
         session_id: str,
         answers: Dict[str, Any],
         answered_by_device: Optional[str] = None,
+        dismissed: bool = False,
+        skipped: Optional[List[str]] = None,
     ) -> bool:
         """
         Respond to a user question request.
@@ -270,15 +332,26 @@ class UserQuestionHandler:
         Args:
             request_id: The question request ID
             session_id: The session ID
-            answers: Dict of answers keyed by question header
+            answers: Dict of answers keyed by the full question text
             answered_by_device: Device id of the answering install (V2 Phase 4,
                 Q4-6).
+            dismissed: The user closed the dialog (the modal's "X") without
+                answering. Resolves the tool call with ``DISMISS_MESSAGE``;
+                ``answers`` is ignored.
+            skipped: Question keys the user explicitly skipped. Each is answered
+                with ``SKIP_ANSWER_TEXT`` so a partially-answered multi-question
+                form still submits cleanly.
 
         Returns:
             True if response was processed, False if request not found
         """
         return await self._respond_v2(
-            request_id, session_id, answers, answered_by_device
+            request_id,
+            session_id,
+            answers,
+            answered_by_device,
+            dismissed=dismissed,
+            skipped=skipped,
         )
 
     def get_pending_questions(self, session_id: str) -> List[Dict[str, Any]]:

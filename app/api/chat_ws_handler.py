@@ -1317,8 +1317,19 @@ class ChatWebSocketHandler:
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
         answers = data.get("answers", {})
+        # The modal's "X" dismisses without answers, and per-question "Skip"
+        # sends the skipped question keys out-of-band (they carry no answer of
+        # their own). Both still resolve the pending interaction, so neither may
+        # be gated on `answers` being non-empty.
+        dismissed = bool(data.get("dismissed"))
+        raw_skipped = data.get("skipped")
+        skipped = (
+            [str(k) for k in raw_skipped if str(k)]
+            if isinstance(raw_skipped, list)
+            else []
+        )
 
-        if response_session_id and request_id and answers:
+        if response_session_id and request_id and (answers or dismissed or skipped):
             # The question is a shared ``pending_interactions`` row — answer it
             # directly against the table (no cloud_relay); the owning runner's
             # awaiting SDK callback wakes via NOTIFY. Stamp the answering device
@@ -1328,6 +1339,8 @@ class ChatWebSocketHandler:
                 session_id=response_session_id,
                 answers=answers,
                 answered_by_device=self.device_id,
+                dismissed=dismissed,
+                skipped=skipped,
             )
             logger.debug(f"User question response processed (v2): {request_id} -> {result}")
             ack = {
