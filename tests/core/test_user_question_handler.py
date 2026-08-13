@@ -23,6 +23,59 @@ from app.core.user_question_handler import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Deterministic registration sync
+#
+# These tests used to synchronise with a bare ``await asyncio.sleep(0.01)``
+# before calling ``respond()`` / ``cancel_all()``. That is a race, not a
+# barrier: ``request_answers`` registers the durable ``pending_interactions``
+# row through ``asyncio.to_thread`` (a thread-pool hop), so on a slow/contended
+# runner — Python 3.12 CI in particular — the row may not exist yet when the
+# sleep expires. ``respond()`` then finds nothing, returns False, and the
+# request resolves as an error/timeout instead of with the answers, producing
+# the rotating CI failures (KeyError 'index', pg_shim row-mapping errors, and
+# "no response from user" where an answer was expected).
+#
+# In production a response can only ever arrive AFTER the question was
+# broadcast to the frontend, so respond-before-register is not a real flow.
+# ``_wait_for_broadcast`` reproduces that ordering deterministically: the
+# broadcast is issued only after ``create_interaction`` has committed, so a
+# recorded broadcast for a request_id proves ``respond()`` can find its row.
+# ---------------------------------------------------------------------------
+
+REGISTRATION_TIMEOUT = 5.0
+
+
+def _broadcast_seen(broadcast_mock, request_id: str) -> bool:
+    """True once ``broadcast_mock`` has been called for ``request_id``."""
+    for call in list(broadcast_mock.call_args_list):
+        args = call[0]
+        payload = args[0] if args else None
+        if isinstance(payload, dict) and payload.get("request_id") == request_id:
+            return True
+    return False
+
+
+async def _wait_for_broadcast(broadcast_mock, *request_ids, timeout=REGISTRATION_TIMEOUT):
+    """Block until every ``request_id`` has been broadcast (bounded wait).
+
+    Replaces the old sleep-based synchronisation: returns as soon as the
+    pending row(s) are registered, and fails loudly instead of hanging if the
+    registration never happens.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        missing = [r for r in request_ids if not _broadcast_seen(broadcast_mock, r)]
+        if not missing:
+            return
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"question(s) {missing!r} were never registered/broadcast within {timeout}s"
+            )
+        await asyncio.sleep(0.005)
+
+
 class TestQuestionRequest:
     """Test QuestionRequest dataclass."""
 
@@ -104,9 +157,9 @@ class TestRequestAnswers(TestUserQuestionHandler):
     @pytest.mark.asyncio
     async def test_request_answers_broadcasts_question(self, handler, sample_questions, mock_broadcast):
         """request_answers should broadcast the question to WebSocket."""
-        # Set up a task to respond quickly
+        # Set up a task to respond as soon as the request is registered
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"Approval": "yes"})
 
         asyncio.create_task(respond_quickly())
@@ -139,7 +192,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
         fanout = AsyncMock()
 
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"Approval": "yes"})
 
         asyncio.create_task(respond_quickly())
@@ -169,24 +222,24 @@ class TestRequestAnswers(TestUserQuestionHandler):
         dead_broadcast = AsyncMock(return_value=False)
         fanout = AsyncMock()
 
-        async def check_and_respond():
-            await asyncio.sleep(0.01)
-            # The question is discoverable even though the origin socket "failed".
-            pending = handler.get_pending_questions("session-1")
-            assert len(pending) == 1
-            assert pending[0]["request_id"] == "req-123"
-            await handler.respond("req-123", "session-1", {"answer": "ok"})
-
-        asyncio.create_task(check_and_respond())
-
-        result = await handler.request_answers(
+        request_task = asyncio.create_task(handler.request_answers(
             request_id="req-123",
             tool_use_id="tool-456",
             session_id="session-1",
             questions=sample_questions,
             broadcast_func=dead_broadcast,
             fanout_func=fanout,
-        )
+        ))
+
+        await _wait_for_broadcast(dead_broadcast, "req-123")
+
+        # The question is discoverable even though the origin socket "failed".
+        pending = handler.get_pending_questions("session-1")
+        assert len(pending) == 1
+        assert pending[0]["request_id"] == "req-123"
+        await handler.respond("req-123", "session-1", {"answer": "ok"})
+
+        result = await request_task
 
         assert result == {"answer": "ok"}
         fanout.assert_awaited_once()
@@ -197,7 +250,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
         fanout = AsyncMock(side_effect=RuntimeError("no watchers reachable"))
 
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"answer": "ok"})
 
         asyncio.create_task(respond_quickly())
@@ -217,7 +270,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
     async def test_request_answers_no_fanout_func_is_backward_compatible(self, handler, sample_questions, mock_broadcast):
         """fanout_func is optional — omitting it preserves the old behavior."""
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"answer": "ok"})
 
         asyncio.create_task(respond_quickly())
@@ -238,7 +291,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
         answers = {"Approval": "yes", "Options": ["A", "C"]}
 
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", answers)
 
         asyncio.create_task(respond_quickly())
@@ -268,25 +321,25 @@ class TestRequestAnswers(TestUserQuestionHandler):
     @pytest.mark.asyncio
     async def test_request_answers_adds_to_pending(self, handler, sample_questions, mock_broadcast):
         """request_answers should add request to pending questions."""
-        # We'll check pending before respond is called
-        async def check_and_respond():
-            await asyncio.sleep(0.01)
-            # Check pending questions exist
-            pending = handler.get_pending_questions("session-1")
-            assert len(pending) == 1
-            assert pending[0]["request_id"] == "req-123"
-            # Now respond
-            await handler.respond("req-123", "session-1", {"answer": "test"})
-
-        asyncio.create_task(check_and_respond())
-
-        await handler.request_answers(
+        request_task = asyncio.create_task(handler.request_answers(
             request_id="req-123",
             tool_use_id="tool-456",
             session_id="session-1",
             questions=sample_questions,
             broadcast_func=mock_broadcast
-        )
+        ))
+
+        # We check pending before respond is called
+        await _wait_for_broadcast(mock_broadcast, "req-123")
+
+        # Check pending questions exist
+        pending = handler.get_pending_questions("session-1")
+        assert len(pending) == 1
+        assert pending[0]["request_id"] == "req-123"
+        # Now respond
+        await handler.respond("req-123", "session-1", {"answer": "test"})
+
+        await request_task
 
     # NOTE: test_request_answers_no_answers_returns_error used to manually flip
     # handler._pending_questions / _lock state to simulate "answered with no
@@ -301,7 +354,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
     async def test_request_answers_creates_session_if_not_exists(self, handler, sample_questions, mock_broadcast):
         """request_answers should create session entry if it doesn't exist."""
         async def respond_quickly():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "new-session", {"answer": "test"})
 
         asyncio.create_task(respond_quickly())
@@ -320,13 +373,13 @@ class TestRequestAnswers(TestUserQuestionHandler):
     @pytest.mark.asyncio
     async def test_request_answers_multiple_concurrent(self, handler, sample_questions, mock_broadcast):
         """request_answers should handle multiple concurrent requests."""
-        async def respond_to(request_id, session_id, delay):
-            await asyncio.sleep(delay)
+        async def respond_to(request_id, session_id):
+            await _wait_for_broadcast(mock_broadcast, request_id)
             await handler.respond(request_id, session_id, {"request_id": request_id})
 
         # Start multiple requests
-        asyncio.create_task(respond_to("req-1", "session-1", 0.02))
-        asyncio.create_task(respond_to("req-2", "session-1", 0.01))
+        asyncio.create_task(respond_to("req-1", "session-1"))
+        asyncio.create_task(respond_to("req-2", "session-1"))
 
         task1 = asyncio.create_task(handler.request_answers(
             request_id="req-1",
@@ -365,8 +418,8 @@ class TestRespond(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        # Wait a bit for request to be registered
-        await asyncio.sleep(0.01)
+        # Wait for the request to be registered
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Respond
         result = await handler.respond("req-123", "session-1", {"answer": "yes"})
@@ -388,12 +441,6 @@ class TestRespond(TestUserQuestionHandler):
     async def test_respond_request_not_found(self, handler, sample_questions, mock_broadcast):
         """respond should return False when request not found."""
         # Start a request to create the session
-        async def auto_respond():
-            await asyncio.sleep(0.02)
-            await handler.respond("req-123", "session-1", {"answer": "yes"})
-
-        asyncio.create_task(auto_respond())
-
         request_task = asyncio.create_task(handler.request_answers(
             request_id="req-123",
             tool_use_id="tool-456",
@@ -402,7 +449,7 @@ class TestRespond(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Try to respond to wrong request ID
         result = await handler.respond("wrong-request-id", "session-1", {"answer": "yes"})
@@ -410,6 +457,7 @@ class TestRespond(TestUserQuestionHandler):
         assert result is False
 
         # Clean up the actual request
+        await handler.respond("req-123", "session-1", {"answer": "yes"})
         await request_task
 
     @pytest.mark.asyncio
@@ -424,7 +472,7 @@ class TestRespond(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Verify it's pending
         pending = handler.get_pending_questions("session-1")
@@ -459,7 +507,7 @@ class TestRespond(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
         await handler.respond("req-123", "session-1", answers)
 
         result = await request_task
@@ -481,13 +529,6 @@ class TestGetPendingQuestions(TestUserQuestionHandler):
         questions1 = [{"question": "Q1", "header": "H1"}]
         questions2 = [{"question": "Q2", "header": "H2"}]
 
-        async def auto_respond_later():
-            await asyncio.sleep(0.1)
-            await handler.respond("req-1", "session-1", {"answer": "1"})
-            await handler.respond("req-2", "session-1", {"answer": "2"})
-
-        asyncio.create_task(auto_respond_later())
-
         task1 = asyncio.create_task(handler.request_answers(
             request_id="req-1",
             tool_use_id="tool-1",
@@ -504,10 +545,10 @@ class TestGetPendingQuestions(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        # V2 creates each durable row via asyncio.to_thread, so sleep(0.01) can
-        # be too short for BOTH rows to land under load (flaky); 0.05 gives
-        # margin for two thread-pool hops.
-        await asyncio.sleep(0.05)
+        # V2 creates each durable row via asyncio.to_thread, so wait until BOTH
+        # rows have actually landed rather than guessing a sleep long enough for
+        # two thread-pool hops.
+        await _wait_for_broadcast(mock_broadcast, "req-1", "req-2")
 
         pending = handler.get_pending_questions("session-1")
         assert len(pending) == 2
@@ -516,17 +557,13 @@ class TestGetPendingQuestions(TestUserQuestionHandler):
         assert request_ids == {"req-1", "req-2"}
 
         # Clean up
+        await handler.respond("req-1", "session-1", {"answer": "1"})
+        await handler.respond("req-2", "session-1", {"answer": "2"})
         await asyncio.gather(task1, task2)
 
     @pytest.mark.asyncio
     async def test_get_pending_questions_format(self, handler, sample_questions, mock_broadcast):
         """get_pending_questions should return correctly formatted data."""
-        async def auto_respond():
-            await asyncio.sleep(0.05)
-            await handler.respond("req-123", "session-1", {"answer": "yes"})
-
-        asyncio.create_task(auto_respond())
-
         task = asyncio.create_task(handler.request_answers(
             request_id="req-123",
             tool_use_id="tool-456",
@@ -535,7 +572,7 @@ class TestGetPendingQuestions(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         pending = handler.get_pending_questions("session-1")
         assert len(pending) == 1
@@ -548,6 +585,7 @@ class TestGetPendingQuestions(TestUserQuestionHandler):
         # Verify created_at is ISO format
         datetime.fromisoformat(item["created_at"])
 
+        await handler.respond("req-123", "session-1", {"answer": "yes"})
         await task
 
     # NOTE: test_get_pending_questions_different_sessions used to seed
@@ -574,7 +612,7 @@ class TestCancelAll(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Cancel all
         await handler.cancel_all("session-1")
@@ -595,7 +633,7 @@ class TestCancelAll(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Verify pending exists
         assert len(handler.get_pending_questions("session-1")) == 1
@@ -637,10 +675,10 @@ class TestCancelAll(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        # V2 creates each durable row via asyncio.to_thread, so sleep(0.01) can
-        # be too short for BOTH rows to land under load (flaky); 0.05 gives
-        # margin for two thread-pool hops.
-        await asyncio.sleep(0.05)
+        # V2 creates each durable row via asyncio.to_thread, so wait until BOTH
+        # rows have actually landed rather than guessing a sleep long enough for
+        # two thread-pool hops.
+        await _wait_for_broadcast(mock_broadcast, "req-1", "req-2")
 
         # Verify both are pending
         assert len(handler.get_pending_questions("session-1")) == 2
@@ -656,12 +694,6 @@ class TestCancelAll(TestUserQuestionHandler):
     async def test_cancel_all_doesnt_affect_other_sessions(self, handler, mock_broadcast):
         """cancel_all should only affect the specified session."""
         questions = [{"question": "Test?"}]
-
-        async def respond_to_session2():
-            await asyncio.sleep(0.05)
-            await handler.respond("req-2", "session-2", {"answer": "yes"})
-
-        asyncio.create_task(respond_to_session2())
 
         task1 = asyncio.create_task(handler.request_answers(
             request_id="req-1",
@@ -679,7 +711,9 @@ class TestCancelAll(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        # Both questions must be registered before the cancel, otherwise the
+        # test proves nothing about cross-session isolation.
+        await _wait_for_broadcast(mock_broadcast, "req-1", "req-2")
 
         # Cancel only session-1
         await handler.cancel_all("session-1")
@@ -687,6 +721,10 @@ class TestCancelAll(TestUserQuestionHandler):
         # session-1 task should complete with error
         result1 = await task1
         assert "error" in result1
+
+        # session-2's pending question survived the cancel and is still
+        # answerable afterwards.
+        await handler.respond("req-2", "session-2", {"answer": "yes"})
 
         # session-2 task should complete normally
         result2 = await task2
@@ -716,7 +754,7 @@ class TestThreadSafety(TestUserQuestionHandler):
 
         async def make_request(i):
             async def respond():
-                await asyncio.sleep(0.01)
+                await _wait_for_broadcast(mock_broadcast, f"req-{i}")
                 await handler.respond(f"req-{i}", "session-1", {"index": i})
 
             asyncio.create_task(respond())
@@ -750,7 +788,7 @@ class TestThreadSafety(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         # Try both respond and cancel concurrently
         respond_task = asyncio.create_task(
@@ -772,7 +810,7 @@ class TestLogging(TestUserQuestionHandler):
     async def test_request_answers_logs_info(self, handler, sample_questions, mock_broadcast):
         """request_answers should log info when question is sent."""
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"answer": "yes"})
 
         asyncio.create_task(respond())
@@ -808,7 +846,7 @@ class TestLogging(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         with patch("app.core.user_question_handler.logger") as mock_logger:
             await handler.respond("req-123", "session-1", {"answer": "yes"})
@@ -838,7 +876,7 @@ class TestLogging(TestUserQuestionHandler):
             broadcast_func=mock_broadcast
         ))
 
-        await asyncio.sleep(0.01)
+        await _wait_for_broadcast(mock_broadcast, "req-123")
 
         with patch("app.core.user_question_handler.logger") as mock_logger:
             await handler.cancel_all("session-1")
@@ -857,7 +895,7 @@ class TestEdgeCases(TestUserQuestionHandler):
     async def test_empty_questions_list(self, handler, mock_broadcast):
         """Handler should handle empty questions list and return error for empty answers."""
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             # Empty dict is falsy, so handler will return error
             await handler.respond("req-123", "session-1", {})
 
@@ -878,7 +916,7 @@ class TestEdgeCases(TestUserQuestionHandler):
     async def test_empty_answers(self, handler, sample_questions, mock_broadcast):
         """Handler should return error for empty answers dict (falsy value)."""
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             # Empty dict is falsy in Python
             await handler.respond("req-123", "session-1", {})
 
@@ -901,7 +939,7 @@ class TestEdgeCases(TestUserQuestionHandler):
         special_id = "req-123/test:special@chars#!"
 
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, special_id)
             await handler.respond(special_id, "session-1", {"answer": "yes"})
 
         asyncio.create_task(respond())
@@ -923,7 +961,7 @@ class TestEdgeCases(TestUserQuestionHandler):
         answers = {"Name": "Test User"}
 
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", answers)
 
         asyncio.create_task(respond())
@@ -947,7 +985,7 @@ class TestEdgeCases(TestUserQuestionHandler):
         ]
 
         async def respond():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-123")
             await handler.respond("req-123", "session-1", {"answer": "completed"})
 
         asyncio.create_task(respond())
@@ -1081,7 +1119,7 @@ class TestDismissAndSkipEnvelope:
         mock_broadcast = AsyncMock(return_value=True)
 
         async def dismiss():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-dismiss")
             await handler.respond("req-dismiss", "session-1", {}, dismissed=True)
 
         asyncio.create_task(dismiss())
@@ -1106,7 +1144,7 @@ class TestDismissAndSkipEnvelope:
         mock_broadcast = AsyncMock(return_value=True)
 
         async def answer():
-            await asyncio.sleep(0.01)
+            await _wait_for_broadcast(mock_broadcast, "req-skip")
             await handler.respond(
                 "req-skip",
                 "session-1",

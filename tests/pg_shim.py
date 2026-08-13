@@ -565,8 +565,18 @@ def new_sqlite_connection() -> sqlite3.Connection:
     ``create_postgres_schema`` through :class:`ShimCursor`, so it stays in
     lockstep with the production schema definition.
     """
+    # ``cached_statements=0`` disables the per-connection prepared-statement
+    # cache.  That cache is keyed by SQL text, and ``execute()`` resets a cached
+    # statement even while it is still busy, so two threads sharing this single
+    # connection and running *identical* SQL reset/rebind each other's in-flight
+    # statements -- corrupting concurrent reads (phantom ``None`` rows, rows
+    # belonging to another thread's query, or ``IndexError: tuple index out of
+    # range`` at fetch time).  The cache is disabled here for correctness.
     raw = sqlite3.connect(
-        ":memory:", check_same_thread=False, factory=_ShimSQLiteConnection
+        ":memory:",
+        check_same_thread=False,
+        factory=_ShimSQLiteConnection,
+        cached_statements=0,
     )
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA foreign_keys = ON")
