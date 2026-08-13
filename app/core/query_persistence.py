@@ -421,10 +421,13 @@ async def _persist_turn_results(
                 database.update_session,
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
-                cost_increment=metadata.get("total_cost_usd", 0),
-                tokens_in_increment=metadata.get("tokens_in", 0),
-                tokens_out_increment=metadata.get("tokens_out", 0),
-                turn_increment=metadata.get("num_turns", 0),
+                # `or 0` (not a .get default): these keys can be PRESENT with a
+                # None value on the omni path, so the default never fires and a
+                # None would poison the additive SQL update.
+                cost_increment=metadata.get("total_cost_usd") or 0,
+                tokens_in_increment=metadata.get("tokens_in") or 0,
+                tokens_out_increment=metadata.get("tokens_out") or 0,
+                turn_increment=metadata.get("num_turns") or 0,
                 # Persist per-turn context-window values so /live can render
                 # the context bar on session reload without scanning JSONL.
                 last_input_tokens=last_input_tokens,

@@ -234,6 +234,92 @@ async def test_error_is_terminal():
     assert got[0].subtype == "error_during_execution"
 
 
+# ─── 1b. Cost / usage accounting on terminal events ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_none_cost_becomes_zero():
+    """omni may report cost_usd=None (NativeLoop never sets it; the delegated
+    leg can too). None would flow into `total_cost_usd = total_cost_usd + NULL`
+    and NULL the session row, so the adapter coerces it to 0.0."""
+    events = [
+        lm.TurnComplete(
+            session_id=SID, stop_reason="end_turn", num_model_calls=1,
+            usage={"input_tokens": 11, "output_tokens": 4,
+                   "cache_read_input_tokens": 3, "cache_creation_input_tokens": 1},
+            cost_usd=None,
+        ),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    assert len(got) == 1 and isinstance(got[0], ResultMessage)
+    assert got[0].total_cost_usd == 0.0
+    # Token counts still ride through in the SDK's key names, which is what the
+    # query loop reads off ResultMessage.usage for the session-row increments.
+    assert got[0].usage["input_tokens"] == 11
+    assert got[0].usage["output_tokens"] == 4
+    assert got[0].usage["cache_read_input_tokens"] == 3
+    assert got[0].usage["cache_creation_input_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_zero_cost_is_preserved():
+    events = [lm.TurnComplete(session_id=SID, stop_reason="end_turn",
+                              num_model_calls=1, cost_usd=0.0)]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    assert got[0].total_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_non_turn_complete_terminals_carry_float_cost():
+    """Interrupted / ErrorEvent synthesize their own ResultMessage; the SDK path
+    always carries a float there, so these must not inherit the None default."""
+    got = await _collect(_adapter_with(FakeEngine([
+        lm.Interrupted(session_id=SID, message="stopped")])))
+    assert got[0].total_cost_usd == 0.0
+
+    got = await _collect(_adapter_with(FakeEngine([
+        lm.ErrorEvent(session_id=SID, message="boom", retriable=True)])))
+    assert got[0].total_cost_usd == 0.0
+
+
+# ─── 1c. Context usage ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_none_without_engine():
+    assert await HarnessAdapter().get_context_usage() is None
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_none_when_engine_cannot_answer():
+    """No omni engine implements the CLI's get_context_usage control request
+    today; callers all tolerate None, so the adapter degrades instead of
+    raising AttributeError (which used to 500 GET .../context-usage)."""
+    adapter = _adapter_with(FakeEngine([]))
+    assert not hasattr(adapter._engine, "get_context_usage")
+    assert await adapter.get_context_usage() is None
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_forwards_when_engine_supports_it():
+    payload = {"totalTokens": 1234, "maxTokens": 200000, "percentage": 0.6}
+
+    class CapableEngine(FakeEngine):
+        async def get_context_usage(self):
+            return payload
+
+    assert await _adapter_with(CapableEngine([])).get_context_usage() is payload
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_swallows_engine_errors():
+    class ExplodingEngine(FakeEngine):
+        async def get_context_usage(self):
+            raise RuntimeError("control request timed out")
+
+    assert await _adapter_with(ExplodingEngine([])).get_context_usage() is None
+
+
 # ─── 2. Permission round-trip ────────────────────────────────────────────────
 
 

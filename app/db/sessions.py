@@ -573,16 +573,20 @@ def update_session(
     if status is not None:
         updates.append(f"status = {_ph}")
         values.append(status)
-    if cost_increment != 0:
+    # Truthiness (not `!= 0`) on purpose: a None increment passes `!= 0` and
+    # emits `col = col + NULL`, which NULLs the column for good — that is what
+    # broke GET /api/v1/sessions/cursor (pydantic float validation on
+    # total_cost_usd) once a provider started reporting None usage/cost.
+    if cost_increment:
         updates.append(f"total_cost_usd = total_cost_usd + {_ph}")
         values.append(cost_increment)
-    if tokens_in_increment != 0:
+    if tokens_in_increment:
         updates.append(f"total_tokens_in = total_tokens_in + {_ph}")
         values.append(tokens_in_increment)
-    if tokens_out_increment != 0:
+    if tokens_out_increment:
         updates.append(f"total_tokens_out = total_tokens_out + {_ph}")
         values.append(tokens_out_increment)
-    if turn_increment != 0:
+    if turn_increment:
         updates.append(f"turn_count = turn_count + {_ph}")
         values.append(turn_increment)
     if worktree_id is not None:

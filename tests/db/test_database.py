@@ -407,6 +407,37 @@ class TestSessionOperations:
         assert result["total_tokens_in"] == 100
         assert result["total_tokens_out"] == 200
 
+    def test_update_session_ignores_none_increments(self, mock_db, setup_profile):
+        """None increments must be skipped entirely.
+
+        A None passes `!= 0`, so the old guards emitted
+        `total_cost_usd = total_cost_usd + NULL`, which NULLs the column for
+        good and then fails pydantic validation on GET /sessions/cursor.
+        Providers that report no cost/usage (e.g. the omni delegated leg) hit
+        this on every turn.
+        """
+        db.create_session("session-1", setup_profile)
+        db.update_session(
+            "session-1",
+            cost_increment=0.25,
+            tokens_in_increment=10,
+            tokens_out_increment=20,
+            turn_increment=1,
+        )
+
+        result = db.update_session(
+            "session-1",
+            cost_increment=None,
+            tokens_in_increment=None,
+            tokens_out_increment=None,
+            turn_increment=None,
+        )
+
+        assert result["total_cost_usd"] == 0.25
+        assert result["total_tokens_in"] == 10
+        assert result["total_tokens_out"] == 20
+        assert result["turn_count"] == 1
+
     def test_delete_session(self, mock_db, setup_profile):
         """delete_session should delete session."""
         db.create_session("session-1", setup_profile)

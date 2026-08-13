@@ -424,6 +424,42 @@ class HarnessAdapter(ProviderAdapter):
             if hasattr(self._engine, "plan_mode"):
                 self._engine.plan_mode = mode == "plan"
 
+    async def get_context_usage(self) -> Optional[Dict[str, Any]]:
+        """Context-window usage by category, or None when unavailable.
+
+        SDK parity (see ClaudeAdapter.get_context_usage): every caller —
+        ``shielded_get_context_usage`` in query_persistence, the
+        ``/context-usage`` endpoint, and compact_continue's live check —
+        tolerates None and falls back to stored usage. Returning None is the
+        contract for "the backend can't answer", not an error.
+
+        No omni engine answers this today:
+
+        * ``NativeLoop`` owns the conversation itself and has no equivalent of
+          the CLI's per-category ``/context`` breakdown.
+        * ``DelegatedLoop`` delegates to the ``claude`` CLI, which *does*
+          understand the ``{"subtype": "get_context_usage"}`` control_request
+          the SDK uses — but the engine has no request/response correlation for
+          control frames (``_send_control`` is fire-and-forget and
+          ``StreamJsonMapper`` drops ``control_response``), so there is nothing
+          to forward the call through. Wiring that up is an omni-side change.
+
+        The method probes the engine anyway so that it starts forwarding for
+        free once an engine grows the capability. It never estimates from
+        stored usage — a fabricated breakdown would be worse than None.
+        """
+        engine = self._engine
+        if engine is None:
+            return None
+        get_usage = getattr(engine, "get_context_usage", None)
+        if get_usage is None:
+            return None
+        try:
+            return await get_usage()
+        except Exception as exc:  # pragma: no cover — defensive, mirrors the SDK adapter
+            logger.warning(f"[HarnessAdapter] get_context_usage() failed: {exc}")
+            return None
+
     # ─── Session Identity ─────────────────────────────────────────────
 
     @property
@@ -722,7 +758,10 @@ class HarnessAdapter(ProviderAdapter):
                     num_turns=event.num_model_calls,
                     session_id=event.session_id,
                     stop_reason=event.stop_reason,
-                    total_cost_usd=event.cost_usd,
+                    # omni can report cost_usd=None (e.g. the delegated-Claude
+                    # leg on subscription auth); the sessions row and the
+                    # response model both require a float, so coerce here.
+                    total_cost_usd=event.cost_usd if event.cost_usd is not None else 0.0,
                     usage=dict(event.usage),
                     uuid=self._uuid(event),
                     terminal_reason="completed",
@@ -739,6 +778,11 @@ class HarnessAdapter(ProviderAdapter):
                     is_error=False,
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
+                    # ResultMessage.total_cost_usd defaults to None; the SDK path
+                    # always carries a float here (the CLI's result frame makes
+                    # total_cost_usd mandatory), and the session-row update does
+                    # `col + value`, so a None would NULL the column.
+                    total_cost_usd=0.0,
                     uuid=self._uuid(event),
                     terminal_reason="aborted_streaming",
                 )
@@ -752,6 +796,7 @@ class HarnessAdapter(ProviderAdapter):
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     errors=[event.message],
+                    total_cost_usd=0.0,  # see the Interrupted branch above
                     uuid=self._uuid(event),
                 )
             ]
