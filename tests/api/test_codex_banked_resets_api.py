@@ -15,7 +15,7 @@ from app.core import (
     encryption,
     http_client,
 )
-from app.core.translator_gateway.upstream import CODEX_USER_AGENT
+from app.core.codex_rate_limit_resets import CODEX_USER_AGENT
 from app.db import database as db
 
 

@@ -11,19 +11,13 @@ import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, NamedTuple, Sequence, List, Tuple, TYPE_CHECKING
+from typing import Optional, Dict, Any
 
 from app.db import database
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
 from app.core.model_registry import has_1m_context
-
-if TYPE_CHECKING:
-    # Type-only import (no runtime coupling): the leg-map assembler and the
-    # apply_provider_env signature annotate with LegEntry, but the routing module
-    # is imported lazily at call time to match the existing lazy pattern.
-    from app.core.translator_gateway.routing import LegEntry
 
 logger = logging.getLogger(__name__)
 
@@ -418,17 +412,20 @@ def apply_context_window_env(env: Dict[str, str], model: Optional[str]) -> None:
     # preset) still flows through env untouched.
 
 
-def is_gateway_servable(provider: Optional[Dict[str, Any]]) -> bool:
-    """Whether the translator gateway can serve a provider row.
+def is_provider_servable(provider: Optional[Dict[str, Any]]) -> bool:
+    """Whether the app can serve a provider row as a first-class model source.
 
     True iff ``provider_type`` is one of ``openai`` / ``chatgpt`` / ``anthropic``
-    (or ``auth_mode == "chatgpt"``). This MIRRORS
-    :func:`app.core.translator_gateway.upstream.provider_mode`'s accepted set —
-    kept in sync by hand (a ``provider_type`` outside this set raises there). Used
-    by the Chunk F cross-provider subagent leg: both the main and the subagent
-    provider must be gateway-servable for the leg to route, and an anthropic-type
-    main with a servable leg is pulled onto the gateway (anthropic_passthrough)
-    rather than the direct-base_url path.
+    (or ``auth_mode == "chatgpt"``).
+
+    Formerly ``is_gateway_servable``: the accepted set was defined by what the
+    translator gateway could translate. The gateway is gone, but the predicate
+    outlived it as the admission rule for cross-provider MODEL selection —
+    ProviderAgent worker models (``provider_agent.validate_provider_model``) and
+    the profile-level subagent-leg validator both gate on it. The accepted set is
+    deliberately unchanged by the retirement: loosening it (e.g. to admit
+    ``openrouter``, which omni can now serve natively) is a product decision, not
+    a mechanical consequence of deleting the gateway.
     """
     if not provider:
         return False
@@ -456,190 +453,20 @@ def _small_fast_model(provider: Optional[Dict[str, Any]]) -> Optional[str]:
     )
 
 
-class SubagentLegPlan(NamedTuple):
-    """The result of assembling a gateway session's subagent leg-map (S3).
-
-    ``honored_legs`` is the ordered N-leg map handed to ``apply_provider_env`` /
-    the routing token — the profile-default leg FIRST, then per-enabled-subagent
-    composite legs, deduped on the exact ``(mid, pid, acct)`` tuple. ``dropped``
-    records non-servable/disabled candidates for a single aggregate log (ids
-    only). ``session_default`` is the frontmatter fallback stamped on any
-    unpinned / not-honored subagent (the honored default-leg model if present,
-    else the main provider's small/fast id). ``main_serves_claude_ids`` is True
-    only for an anthropic-type main (its gateway can route bare Claude ids).
-    """
-
-    honored_legs: List["LegEntry"]      # default leg FIRST, then enabled-subagent legs
-    dropped: List[Tuple[str, str]]      # (subagent_id | "<profile-default-leg>", provider_id)
-    session_default: Optional[str]      # honored default-leg mid if honored, else main small_fast
-    main_serves_claude_ids: bool        # main provider_type == "anthropic"
-
-
-def assemble_subagent_legs(
-    *,
-    main_provider_row: Optional[Dict[str, Any]],
-    default_leg_provider: Optional[str],
-    default_leg_model: Optional[str],
-    enabled_subagents: Dict[str, Dict[str, Any]],
-) -> SubagentLegPlan:
-    """Build the gateway leg-map for a provider session from the profile-default
-    subagent leg + each enabled subagent's ``prov:<pid>:<mid>`` composite.
-
-    The default leg is emitted FIRST, then each enabled subagent whose stored
-    model is a servable+enabled ``prov:`` composite. Same-model-id collisions are
-    resolved deterministically here: for each upstream model id at most ONE leg
-    survives — the profile-default leg wins for its mid; otherwise the entry with
-    the lexicographically-smallest provider id. Exact-duplicate tuples of the
-    winner drop silently; any non-exact-dup losers are named in one aggregate
-    ``warning`` (ids only). Legs are pre-honored here (servable + enabled, accounts resolved) so
-    ``apply_provider_env`` trusts them without re-gating. If the MAIN provider is
-    not gateway-servable, the WHOLE map is dropped (A2). Non-servable/disabled
-    candidates are collected and logged ONCE (ids only, never tokens).
-    """
-    from app.core.translator_gateway.routing import LegEntry
-
-    main_servable = is_gateway_servable(main_provider_row)
-    small_fast = _small_fast_model(main_provider_row)
-    main_serves_claude_ids = (main_provider_row or {}).get("provider_type") == "anthropic"
-
-    honored_legs: List[LegEntry] = []
-    dropped: List[Tuple[str, str]] = []
-    default_leg_mid: Optional[str] = None
-    # Tracks whether the default leg was actually APPENDED to honored_legs (as
-    # opposed to only feeding session_default via the same-provider collapse
-    # below). The S5 collision logic below must only treat honored_legs[0] as
-    # the "default leg wins" entry when this is True — otherwise, in the
-    # same-provider case (no route-leg minted), honored_legs[0] would be the
-    # first per-agent composite instead, and would be wrongly given
-    # default-leg priority.
-    default_leg_in_honored = False
-
-    if not main_servable:
-        # A2: a non-servable main cannot host ANY gateway leg — drop the whole map.
-        if default_leg_provider:
-            dropped.append(("<profile-default-leg>", default_leg_provider))
-        for agent_id, subagent in enabled_subagents.items():
-            raw = subagent.get("model")
-            if raw and raw.startswith("prov:"):
-                remainder = raw[len("prov:"):]
-                pid, sep, mid = remainder.partition(":")
-                if sep and mid:
-                    dropped.append((agent_id, pid))
-        if dropped:
-            logger.error(
-                "Dropping %d non-servable/disabled subagent leg(s): %s",
-                len(dropped),
-                dropped,
-            )
-        return SubagentLegPlan([], dropped, small_fast, main_serves_claude_ids)
-
-    # Main is servable: build the DEFAULT leg first, then per-subagent composites.
-    if default_leg_provider and default_leg_model:
-        dl_row = database.get_model_provider(default_leg_provider, include_token=False)
-        if dl_row and is_gateway_servable(dl_row) and dl_row.get("enabled"):
-            # Same-provider default leg: the main-leg fallthrough already routes
-            # a bare model id to this provider, so a separate route-leg entry
-            # would be redundant — but the profile's chosen model must still
-            # win as ``session_default`` (previously this case was collapsed
-            # upstream in ``query_options.py`` by nulling BOTH the provider and
-            # the model, which silently replaced the configured default with
-            # the main provider's small_fast/default model instead).
-            if dl_row.get("id") != (main_provider_row or {}).get("id"):
-                acct = (
-                    dl_row.get("codex_account_id")
-                    if (dl_row.get("provider_type") == "chatgpt" or dl_row.get("auth_mode") == "chatgpt")
-                    else None
-                )
-                honored_legs.append((default_leg_model, default_leg_provider, acct))
-                default_leg_in_honored = True
-            default_leg_mid = default_leg_model
-        else:
-            dropped.append(("<profile-default-leg>", default_leg_provider))
-
-    for agent_id, subagent in enabled_subagents.items():
-        raw = subagent.get("model")
-        if not raw or not raw.startswith("prov:"):
-            continue
-        remainder = raw[len("prov:"):]
-        pid, sep, mid = remainder.partition(":")
-        if not sep or not mid:
-            continue
-        pid_row = database.get_model_provider(pid, include_token=False)
-        if pid_row and is_gateway_servable(pid_row) and pid_row.get("enabled"):
-            acct = (
-                pid_row.get("codex_account_id")
-                if (pid_row.get("provider_type") == "chatgpt" or pid_row.get("auth_mode") == "chatgpt")
-                else None
-            )
-            honored_legs.append((mid, pid, acct))
-        else:
-            dropped.append((agent_id, pid))
-
-    session_default = default_leg_mid if default_leg_mid is not None else small_fast
-
-    # S5: resolve same-model-id collisions deterministically. Group by mid; for
-    # each mid with >1 entry exactly ONE survives — the profile-default leg
-    # (always index 0 when present) wins for its mid, else the entry with the
-    # lexicographically-smallest provider id. Exact-duplicate tuples of the winner
-    # drop silently; non-exact-dup losers are named in one aggregate warning.
-    default_leg_entry = honored_legs[0] if default_leg_in_honored else None
-
-    winners: Dict[str, LegEntry] = {}
-    for leg in honored_legs:
-        mid = leg[0]
-        current = winners.get(mid)
-        if current is None:
-            winners[mid] = leg
-        elif current is default_leg_entry:
-            # Profile-default leg already holds this mid — it always wins.
-            pass
-        elif leg[1] < current[1]:
-            winners[mid] = leg
-
-    survivors: List[LegEntry] = []
-    losers: List[Tuple[str, str]] = []
-    for leg in honored_legs:
-        winner = winners[leg[0]]
-        if leg is winner:
-            survivors.append(leg)
-        elif leg != winner:
-            # A genuine collision loser (an exact-dup of the winner drops silently).
-            losers.append((leg[0], leg[1]))
-    honored_legs = survivors
-
-    if losers:
-        logger.warning(
-            "Resolved %d same-model-id leg collision(s); dropped loser(s): %s",
-            len(losers),
-            losers,
-        )
-
-    if dropped:
-        logger.error(
-            "Dropping %d non-servable/disabled subagent leg(s): %s",
-            len(dropped),
-            dropped,
-        )
-
-    return SubagentLegPlan(honored_legs, dropped, session_default, main_serves_claude_ids)
-
-
 def apply_provider_env(
     env: Dict[str, str],
     provider_id: str,
     model: Optional[str],
     session_id: Optional[str] = None,
-    *,
-    subagent_legs: "Sequence[LegEntry]" = (),
 ) -> Dict[str, str]:
-    """Overlay a non-Anthropic model-provider's gateway env vars onto ``env``
-    (in place) so the bundled Claude Code CLI talks to that gateway instead of
+    """Overlay a non-Anthropic model-provider's env vars onto ``env`` (in place)
+    so the bundled Claude Code CLI talks to that provider's endpoint instead of
     api.anthropic.com. Returns the same dict for convenience.
 
     Looks up the enabled provider row (with its encrypted token) and applies the
     officially-supported LLM-gateway env vars:
 
-    - ``ANTHROPIC_BASE_URL`` — the gateway (CLI appends ``/v1/messages``)
+    - ``ANTHROPIC_BASE_URL`` — the provider endpoint (CLI appends ``/v1/messages``)
     - ``ANTHROPIC_AUTH_TOKEN`` — the decrypted key (sent as ``Authorization: Bearer``)
     - ``ANTHROPIC_API_KEY=""`` — MUST be explicitly empty to prevent an
       Anthropic fallback
@@ -681,40 +508,27 @@ def apply_provider_env(
 
     Codex/OpenAI-subscription providers (``provider_type`` in
     ``{"openai", "chatgpt"}`` or ``auth_mode == "chatgpt"``) do NOT speak the
-    Anthropic wire protocol, so their sessions are pointed at the in-process
-    translator gateway (Chunk A) instead: ``ANTHROPIC_BASE_URL`` becomes the
-    loopback gateway and ``ANTHROPIC_AUTH_TOKEN`` a per-session opaque routing
-    token (G4) — the gateway holds/decrypts the REAL upstream credentials at
-    request time. All guard/mitigation/small-fast env is applied identically.
-    openrouter/custom keep the direct-decrypted-token path unchanged.
+    Anthropic wire protocol. They used to be pointed at the loopback translator
+    gateway with a per-session routing token; the gateway is retired and the omni
+    harness now serves them natively, resolving their REAL credentials itself
+    (``provider/omni_credentials.resolve_provider_credentials`` reads the row /
+    the Codex OAuth bundle). So no upstream secret belongs in the CLI env for
+    these rows: ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN`` are left empty
+    (their credentials are not Anthropic-wire usable anyway) while every
+    guard/mitigation/window/small-fast key is applied identically.
+    openrouter/custom/anthropic keep the direct-decrypted-token path unchanged.
 
     R5 (binding): a missing/disabled provider, or a token that cannot be
     decrypted (encryption not ready / corrupt), raises :class:`ProviderConfigError`
     — surfaced to the user as a spawn/config error. We NEVER silently fall back
-    to native Anthropic. A provider with NO stored token is allowed only when a
-    ``base_url`` is set (some self-hosted gateways are unauthenticated); the
-    token is then the empty string.
+    to native Anthropic. On the direct path a provider with NO stored token is
+    allowed only when a ``base_url`` is set (some self-hosted gateways are
+    unauthenticated); the token is then the empty string. The
+    no-token-and-no-base_url check does NOT apply to a translated row, whose
+    credentials legitimately live outside those two columns.
 
-    S3 (ruling A2/G2-r): an OPTIONAL N-leg subagent map, ``subagent_legs`` — an
-    ordered sequence of ``LegEntry`` = ``(upstream_model, provider_id,
-    account_id)``. The caller (query_options) assembles and PRE-HONORS these legs
-    via :func:`assemble_subagent_legs` (servable + enabled, accounts resolved,
-    whole-map dropped for a non-servable main), so this function trusts them and
-    does not re-gate. When ``subagent_legs`` is non-empty the session is routed
-    through the gateway and the routing token carries the whole map (so a request
-    for any leg's ``upstream_model`` routes to that leg's provider); every other
-    request stays on the main ``provider_id``. ``ANTHROPIC_SMALL_FAST_MODEL``
-    keeps its existing main-provider chain (small/fast probes stay on the main).
-
-    This is what makes the flagship mixed case work: an anthropic-type MAIN
-    (real Anthropic API key) with one or more foreign (e.g. Codex) subagent legs.
-    A bare anthropic main is servable but NOT ``is_translated``, so without a leg
-    it keeps the direct-base_url path (byte-identical to today); a non-empty leg
-    map pulls it onto the gateway, where the main is served by
-    anthropic_passthrough at request time (reading the real key from the provider
-    row — never env). Per-agent frontmatter (stamped by the caller via the S2
-    resolver) is what points each subagent at its leg's model; this function only
-    threads the leg map into the routing token.
+    ``session_id`` is retained for signature stability (the routing token it used
+    to key is gone); it no longer affects the overlay.
     """
     provider = database.get_model_provider(provider_id, include_token=True)
     if not provider:
@@ -729,45 +543,25 @@ def apply_provider_env(
         )
 
     # A Codex/OpenAI-subscription provider does NOT speak the Anthropic wire
-    # protocol, so its session must talk to the in-process translator gateway
-    # (Chunk A) rather than the provider's own endpoint. We hand the CLI the
-    # LOOPBACK gateway base URL and a per-session opaque routing token (G4) as
-    # ``ANTHROPIC_AUTH_TOKEN``; the gateway holds and decrypts the REAL upstream
-    # credentials (Codex OAuth / OpenAI key) at request time. The CLI never sees
-    # a real upstream secret. openrouter/custom keep the direct-gateway path
-    # below UNCHANGED (they are already Anthropic-compatible endpoints).
+    # protocol. Its session is served by the omni harness's NATIVE
+    # openai_responses leg, which resolves the row's real credentials itself
+    # (decrypted API key, or the Codex OAuth bundle) — so nothing usable, and no
+    # secret, goes into the CLI env here. Before the translator gateway was
+    # retired these two keys pointed at the loopback gateway plus a per-session
+    # routing token; now they are simply blank. openrouter/custom/anthropic keep
+    # the direct-decrypted-token path below UNCHANGED (they are already
+    # Anthropic-compatible endpoints).
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     is_translated = provider_type in ("openai", "chatgpt") or auth_mode == "chatgpt"
 
-    # Route through the loopback translator gateway when the main provider is
-    # itself translated (openai/chatgpt) OR the caller supplied a non-empty
-    # subagent leg map that needs the gateway to serve its extra legs. The latter
-    # is the flagship anthropic-main + foreign-subagent case: the main leg is
-    # served via anthropic_passthrough at request time, which reads the REAL
-    # Anthropic API key straight from the provider row — so we deliberately do NOT
-    # put that key in env in this mode. A bare anthropic/custom main with no legs
-    # keeps the direct path below, byte-identical to pre-Chunk-F behavior. The
-    # legs are already pre-honored (servable + enabled) by the caller's
-    # assemble_subagent_legs, so we do not re-gate them here.
-    route_through_gateway = is_translated or bool(subagent_legs)
-
-    if route_through_gateway:
-        from app.core.translator_gateway import routing
-
-        gateway_port = settings.translator_gateway_port
-        base_url = f"http://127.0.0.1:{gateway_port}"
-        token = routing.mint_session_token(
-            session_id,
-            provider_id,
-            provider.get("codex_account_id"),
-            # Only pass the main model for remap when the MAIN provider is itself
-            # translated; on an anthropic-passthrough main (anthropic main + foreign
-            # subagent legs), claude-* ids ARE servable by the main leg and must NOT
-            # be remapped.
-            main_upstream_model=(model if is_translated else None),
-            legs=tuple(subagent_legs),
-        )
+    if is_translated:
+        # NOTE: deliberately NOT subject to the "neither token nor base_url"
+        # guard below — a ChatGPT-subscription row legitimately carries neither
+        # (its credentials live in the Codex token bundle), and raising here
+        # would make every Codex session unspawnable.
+        base_url = provider.get("base_url") or ""
+        token = ""
     else:
         base_url = provider.get("base_url")
         raw_token = provider.get("auth_token")
@@ -892,11 +686,12 @@ def apply_provider_env(
         # injection ≈ 200k real tokens estimated as ~280k). The same
         # ceiling also blocks the reactive-compaction request itself, so
         # autocompact can't rescue the turn either. Lift the local ceiling
-        # to 2x the window: the translator gateway runs an ACCURATE
-        # tiktoken guard on every request and 400s cleanly before
-        # upstream, so the local estimate adds no protection here — it
-        # only misfires. Autocompaction thresholds are unaffected (they
-        # key off CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
+        # to 2x the window: the local estimate is protecting against an
+        # overflow the UPSTREAM already rejects cleanly (and, before it
+        # was retired, the translator gateway rejected with an accurate
+        # tiktoken count), so it adds nothing here — it only misfires.
+        # Autocompaction thresholds are unaffected (they key off
+        # CLAUDE_CODE_AUTO_COMPACT_WINDOW above).
         env.setdefault("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", str(cw * 2))
     else:
         # No advertised window — fall back to the app's Claude-specific ``[1m]``

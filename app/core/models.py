@@ -94,15 +94,17 @@ class ProfileConfig(BaseModel):
     model: Optional[str] = DEFAULT_MODEL
     # Model provider (multi-provider support). References ``model_providers.id``;
     # None = native Anthropic. When set, the spawned session's env is overlaid
-    # with the gateway's ANTHROPIC_BASE_URL / auth token and mitigation flags
+    # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
     # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
     provider: Optional[str] = None  # model_providers.id; None = native Anthropic
-    # Chunk F (ruling A2): an OPTIONAL cross-provider SUBAGENT leg. When set,
-    # subagents that request ``subagent_model`` are routed to ``subagent_provider``
-    # (a model_providers.id) through the translator gateway, while the main model
-    # stays on ``provider``. Null/absent = subagents inherit the main provider.
-    # A cross-provider subagent requires ``provider`` to be set too (a native
-    # Claude-subscription main cannot mix providers, F1) — enforced at save time.
+    # Chunk F (ruling A2): an OPTIONAL cross-provider SUBAGENT leg.
+    # INERT since 2026-08-12 (ruling D4): the leg was served by the translator
+    # gateway, which is retired — ProviderAgent cross-provider workers replace
+    # it. These two fields are still accepted, stored and validated (see
+    # ``app/api/profiles.py::_validate_subagent_leg``) so saved profiles and the
+    # API contract keep working, but NOTHING routes off them any more: every
+    # subagent inherits the main provider. Removing the fields and their UI is
+    # tracked as follow-up.
     subagent_provider: Optional[str] = None  # model_providers.id for the subagent leg
     subagent_model: Optional[str] = None     # upstream model id served by the leg
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions

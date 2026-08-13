@@ -1,4 +1,17 @@
-"""Install-wide per-provider circuit breaker for the translator gateway.
+"""Install-wide per-provider rate-limit circuit breaker.
+
+RELOCATION NOTE (2026-08-12)
+----------------------------
+This module was ``app/core/translator_gateway/circuit_breaker.py`` until the
+translator gateway was retired (omni now serves every provider natively). The
+state machine below is unchanged; only its RECORDING seam moved. 429s are now
+observed by the omni harness's usage-capture response hook
+(``app/core/provider/harness_adapter.py::_usage_capture_http_client``), which
+sees every native-leg response — the forensics below still describe exactly
+what the breaker is for, with "the gateway" now meaning "the app process that
+owns the native provider leg". ACCEPTED GAP: the delegated (claude CLI) leg is
+not covered, because its HTTP traffic happens inside the CLI child process
+where the app has no response hook.
 
 WHY THIS EXISTS (2026-07-22 rate-limit storm, forensics 2026-07-25)
 -------------------------------------------------------------------
@@ -33,13 +46,19 @@ DESIGN (decided, not to be redesigned here)
   honoured when present (both the delta-seconds and the HTTP-date forms). When
   absent/unusable a default is used. The cooldown is CAPPED so a hostile or
   malformed value cannot lock a provider out indefinitely.
-* **While tripped:** the router fails fast WITHOUT calling upstream, surfacing a
-  normal ``UpstreamError``-shaped 429 through the existing error path.
 * **The breaker REFUSES; it never reroutes.** No account rotation, no failover,
   no provider switching (standing ruling P10).
+* **While tripped (current consumers):**
+  :func:`app.core.provider_agent` stops waiting on a ProviderAgent worker whose
+  provider is rate limited and reports it to the parent immediately. The
+  gateway's request-level pre-flight refusal died with the gateway — under omni
+  there is no single in-app chokepoint in front of the CLI's own retry loop, so
+  today the breaker is a RECORD + SIGNAL surface rather than a hard request
+  gate. Re-adding a pre-dispatch refusal in the omni adapter is deliberately
+  left as follow-up work, not smuggled into the retirement.
 
 State is in-memory and process-local, which is sufficient for the failure mode
-above (all the traffic arrives at this one gateway process). Persisting the
+above (all the traffic arrives at this one app process). Persisting the
 cooldown beside the credential so it survives a restart and is shared across
 installs is a later chunk (P3-G): the persistence seam is the
 :class:`ProviderCircuitBreaker` class — swap the ``_state`` dict for a
@@ -321,16 +340,16 @@ def reset(provider_id: Optional[str] = None) -> None:
 # ─── User-facing refusal text ────────────────────────────────────────────────
 
 def refusal_message(trip: BreakerTrip, *, now: Optional[float] = None) -> str:
-    """The message surfaced to the CLI when a request is refused.
+    """The message surfaced to a caller whose request is refused.
 
     States the provider, that it is rate-limited, and exactly when it clears —
-    and says the request was NOT sent upstream, so a human reading the CLI
-    output knows no further quota was spent.
+    and says the request was NOT sent upstream, so a human reading the output
+    knows no further quota was spent.
     """
     remaining = trip.remaining_seconds(now)
     return (
         f"Provider '{trip.provider_id}' is rate limited: the upstream returned "
-        f"HTTP 429, so this gateway has stopped sending it requests "
-        f"install-wide. This request was NOT sent upstream. The block clears in "
+        f"HTTP 429, so this install has stopped sending it requests. This "
+        f"request was NOT sent upstream. The block clears in "
         f"{remaining:.0f}s (at {trip.until_iso()}); retry after that."
     )

@@ -1107,24 +1107,37 @@ def _require_env_credential(env_var: str, kind: str) -> None:
 
 
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
-    """An ``httpx.AsyncClient`` that passively captures usage/quota headers.
+    """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
+    records upstream rate limits.
 
-    Flag-on native legs talk to the upstream provider directly (the omni client
-    owns the HTTP call), so the translator gateway's header capture in
-    ``app/core/translator_gateway/upstream.py`` never runs and
-    ``provider_usage_snapshots`` goes stale. Injecting this client into the omni
-    client restores the same capture: httpx fires the ``response`` event hook
-    with headers populated before the streamed body is consumed, so the hook
-    mirrors the gateway call sites exactly (``capture_codex_headers`` for the
-    Codex backend, ``capture_openai_headers`` for the OpenAI platform one).
+    Native legs talk to the upstream provider directly (the omni client owns the
+    HTTP call), so injecting this client is what keeps
+    ``provider_usage_snapshots`` fresh: httpx fires the ``response`` event hook
+    with headers populated before the streamed body is consumed
+    (``capture_codex_headers`` for the Codex backend, ``capture_openai_headers``
+    for the OpenAI platform one).
 
-    Deliberately no status-code guard: ``capture_*`` already no-ops when no
-    allowlisted header is present, and error responses (notably 429) carry the
-    freshest quota headers of all. ``timeout=600.0`` matches the vendored omni
-    client's own default, which it bypasses whenever a client is injected.
+    Deliberately no status-code guard on the capture: ``capture_*`` already
+    no-ops when no allowlisted header is present, and error responses (notably
+    429) carry the freshest quota headers of all. ``timeout=600.0`` matches the
+    vendored omni client's own default, which it bypasses whenever a client is
+    injected.
 
-    ``provider_usage`` is imported inside the hook (mirroring the legacy call
-    sites) to keep the module import graph cycle-free.
+    RATE-LIMIT BREAKER (ruling D2, 2026-08-12). This hook is also the app's
+    replacement seam for the retired translator gateway's 429 detection: it sees
+    every native-leg response, and ``provider_id`` — the session's bound
+    ``model_providers`` row id, i.e. the exact key the breaker is scoped on — is
+    already in scope here. An HTTP 429 trips
+    :mod:`app.core.rate_limit_breaker` install-wide for that provider, honouring
+    ``Retry-After``, exactly as the gateway's ``_note_rate_limit`` did. ONLY 429
+    trips it (401 is a credential/rotation signal, 5xx a transient fault).
+    ACCEPTED GAP: the delegated (claude CLI) leg makes its HTTP calls inside the
+    CLI child process and is therefore not covered.
+
+    Both side effects are best-effort and swallow every exception — neither
+    capture nor breaker bookkeeping may ever break a turn. ``provider_usage`` is
+    imported inside the hook (mirroring the legacy call sites) to keep the
+    module import graph cycle-free.
     """
 
     async def _on_response(resp: httpx.Response) -> None:
@@ -1137,6 +1150,16 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
                 provider_usage.capture_openai_headers(provider_id, resp.headers)
         except Exception:  # noqa: BLE001 — capture must never break a turn
             pass
+
+        if resp.status_code == 429:
+            try:
+                from app.core import rate_limit_breaker
+
+                rate_limit_breaker.record_rate_limited(
+                    provider_id, resp.headers.get("retry-after")
+                )
+            except Exception:  # noqa: BLE001 — bookkeeping must never break a turn
+                pass
 
     return httpx.AsyncClient(timeout=600.0, event_hooks={"response": [_on_response]})
 

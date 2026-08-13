@@ -132,19 +132,6 @@ class Settings(BaseSettings):
     cluster_secret: Optional[str] = None
     cluster_advertise_url: Optional[str] = None
 
-    # Translator gateway (multi-provider phase-2 Chunk A). The in-process
-    # Anthropic<->OpenAI-Responses translation gateway runs as a SEPARATE uvicorn
-    # server bound to loopback ONLY; a Codex/OpenAI-subscription session's spawn
-    # env points ANTHROPIC_BASE_URL at http://127.0.0.1:<this port>. Loopback-only
-    # by construction (the server always binds 127.0.0.1 — the port is the sole
-    # tunable). Default 8788.
-    translator_gateway_port: int = Field(
-        default=8788,
-        validation_alias=AliasChoices(
-            "TRANSLATOR_GATEWAY_PORT", "translator_gateway_port"
-        ),
-    )
-
     # Session
     session_secret: Optional[str] = None
     session_expire_days: int = 30
@@ -404,17 +391,16 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Per-provider circuit breaker at the translator gateway. The first upstream
-    # HTTP 429 for a provider trips the breaker for that provider INSTALL-WIDE:
-    # every subsequent gateway request routed to it is refused without touching
-    # the network until a time-based cooldown elapses. Motivation: the 2026-07-22
-    # rate-limit storm (3,172 upstream POSTs in ~11 minutes, 1,750 of them 429s,
-    # all after the parent turn had ended) came from retry loops INSIDE the CLI
-    # processes, so the gateway is the only chokepoint that can stop it. The
-    # breaker only ever REFUSES — it never reroutes or fails over (ruling P10).
-    # ON by default: this is a safety feature. Set
-    # PROVIDER_CIRCUIT_BREAKER_ENABLED=false to restore the previous behavior
-    # exactly. See app.core.translator_gateway.circuit_breaker.
+    # Per-provider rate-limit circuit breaker. The first upstream HTTP 429 for a
+    # provider trips the breaker for that provider INSTALL-WIDE for a time-based
+    # cooldown. Motivation: the 2026-07-22 rate-limit storm (3,172 upstream POSTs
+    # in ~11 minutes, 1,750 of them 429s, all after the parent turn had ended)
+    # came from retry loops INSIDE the CLI processes. 429s are observed by the
+    # omni harness's usage-capture response hook (they were the translator
+    # gateway's job until it was retired). The breaker only ever REFUSES — it
+    # never reroutes or fails over (ruling P10). ON by default: this is a safety
+    # feature. Set PROVIDER_CIRCUIT_BREAKER_ENABLED=false to restore the previous
+    # behavior exactly. See app.core.rate_limit_breaker.
     provider_circuit_breaker_enabled: bool = True
     # Cooldown applied when the upstream 429 carries no usable Retry-After.
     provider_circuit_breaker_cooldown_seconds: int = 60

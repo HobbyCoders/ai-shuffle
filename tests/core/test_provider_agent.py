@@ -185,11 +185,11 @@ class TestValidateProviderModel:
 
         assert not result.ok
         assert result.code == pa.PROVIDER_NOT_SERVABLE
-        assert "gateway" in result.reason
+        assert "not servable" in result.reason
 
     def test_chatgpt_auth_mode_is_servable(self):
         """``auth_mode == 'chatgpt'`` is servable even with an odd type — mirrors
-        is_gateway_servable."""
+        is_provider_servable."""
         row = _provider(provider_type="custom")
         row["auth_mode"] = "chatgpt"
 
@@ -743,7 +743,7 @@ class TestDispatchWorkerRateLimitFailFast:
 
     @pytest.fixture(autouse=True)
     def _clean_breaker(self):
-        from app.core.translator_gateway import circuit_breaker
+        from app.core import rate_limit_breaker as circuit_breaker
 
         circuit_breaker.reset()
         yield
@@ -766,7 +766,7 @@ class TestDispatchWorkerRateLimitFailFast:
 
         from app.core import provider_agent_supervisor as sup
         from app.core.task_registry import task_registry
-        from app.core.translator_gateway import circuit_breaker
+        from app.core import rate_limit_breaker as circuit_breaker
 
         monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
         self._hanging_wait(monkeypatch)
@@ -807,7 +807,7 @@ class TestDispatchWorkerRateLimitFailFast:
 
         from app.core import provider_agent_supervisor as sup
         from app.core.task_registry import task_registry
-        from app.core.translator_gateway import circuit_breaker
+        from app.core import rate_limit_breaker as circuit_breaker
 
         swept = []
         monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
@@ -856,7 +856,7 @@ class TestDispatchWorkerRateLimitFailFast:
 
     def test_another_providers_trip_is_ignored(self, dispatch_env, monkeypatch):
         from app.core.task_registry import task_registry
-        from app.core.translator_gateway import circuit_breaker
+        from app.core import rate_limit_breaker as circuit_breaker
 
         circuit_breaker.record_rate_limited("prov-someone-else", "120")
 

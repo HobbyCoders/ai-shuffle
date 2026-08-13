@@ -1,8 +1,8 @@
 """ProviderAgent — cross-provider worker sessions (multi-provider phase 3, P3-A).
 
 Option C of ``docs/MULTI_PROVIDER_PHASE3_PLAN.md`` §2: keep the Claude main
-FULLY native (subscription OAuth, direct to Anthropic, translator gateway
-untouched — ruling P1/F1) and provide other-provider workers not as CLI-native
+FULLY native (subscription OAuth, direct to Anthropic — ruling P1/F1) and
+provide other-provider workers not as CLI-native
 Task-tool subagents but as an ai-shuffle-provided tool that dispatches a brief
 to a SEPARATE session bound to a different provider and returns its report.
 Because the two halves are different processes, the "one ``ANTHROPIC_BASE_URL``
@@ -40,7 +40,7 @@ Scope notes (deliberate — later chunks own these):
   and answered from — the PARENT session's UI, tagged with the worker's label.
 * Turn-lifetime teardown, stop-all and attribution (chunk A4) live in
   :mod:`app.core.provider_agent_supervisor`; the per-provider circuit
-  breaker lives in the translator gateway.
+  breaker lives in :mod:`app.core.rate_limit_breaker`.
 * The whole capability is gated on ``settings.provider_agent_enabled``, which
   is OFF by default until that safety work lands.
 
@@ -60,7 +60,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from app.core.translator_gateway import circuit_breaker
+from app.core import rate_limit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +344,7 @@ def validate_provider_model(
     """Whether ``model_id`` is legally servable by ``provider_id``.
 
     Checks, in order: the provider row exists, it is ``enabled``, it is
-    :func:`~app.core.environment.is_gateway_servable`, and ``model_id`` is in
+    :func:`~app.core.environment.is_provider_servable`, and ``model_id`` is in
     its curated ``models_json`` ids. This is the ONE implementation of the
     rules ``app/api/subagents.py`` used to inline.
 
@@ -389,16 +389,16 @@ def validate_provider_model(
             provider_label=label,
         )
 
-    from app.core.environment import is_gateway_servable
+    from app.core.environment import is_provider_servable
 
-    if not is_gateway_servable(row):
+    if not is_provider_servable(row):
         return ModelValidation(
             ok=False,
             code=PROVIDER_NOT_SERVABLE,
             reason=(
-                f"The provider '{label}' is not gateway-servable: a cross-provider "
+                f"The provider '{label}' is not servable: a cross-provider "
                 f"model requires an OpenAI-, ChatGPT-, or Anthropic-API-type "
-                f"provider (the model routes through the translator gateway)."
+                f"provider."
             ),
             provider=dict(row),
             provider_label=label,
@@ -606,10 +606,14 @@ async def _await_worker_idle(
 
     SCOPE LIMITATION (accepted until P3-B): the breaker is in-process state, and
     a worker turn claimed by ANOTHER runner trips THAT runner's breaker, which
-    is invisible here — such a worker still fails only at the timeout. The
-    gateway-side refusal still protects the quota either way; this is purely
-    about how fast the parent hears about it. A shared/persisted breaker (P3-G)
-    closes the gap.
+    is invisible here — such a worker still fails only at the timeout. This is
+    purely about how fast the parent hears about it. A shared/persisted breaker
+    (P3-G) closes the gap.
+
+    NOTE (2026-08-12): this ``is_tripped()`` read is currently the breaker's only
+    consumer. The translator gateway's pre-dispatch refusal — which actually
+    stopped the requests — died with the gateway; see
+    :mod:`app.core.rate_limit_breaker`.
     """
     from app.core import turn_manager
 
@@ -621,7 +625,7 @@ async def _await_worker_idle(
             done, _pending = await asyncio.wait({waiter}, timeout=WAIT_SLICE_SECONDS)
             if done:
                 return bool(waiter.result()), False
-            if circuit_breaker.is_tripped(provider_id):
+            if rate_limit_breaker.is_tripped(provider_id):
                 return False, True
     finally:
         if not waiter.done():

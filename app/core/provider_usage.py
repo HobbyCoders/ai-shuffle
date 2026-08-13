@@ -4,23 +4,23 @@ plus the #757 follow-up: passive OpenAI/Anthropic API-key header capture).
 Four data paths land in this module, per ``docs/PROVIDER_USAGE_CONTEXT_PLAN.md``
 (Codex/OpenRouter) and GitHub issue #757 (OpenAI/Anthropic API-key providers):
 
-**Codex passive capture (U2).** The translator gateway's Codex upstream leg
-(``upstream.py::stream_responses_events``) receives ``x-codex-*``
-plan/rate-limit headers on every 200 response. ``capture_codex_headers``
-normalizes those headers into the shared ``provider_usage_snapshots`` row
-shape and persists them fire-and-forget, off the streaming hot path.
+**Codex passive capture (U2).** The omni harness's native Codex leg receives
+``x-codex-*`` plan/rate-limit headers on every response. The response event
+hook installed by ``provider/harness_adapter.py::_usage_capture_http_client``
+calls ``capture_codex_headers``, which normalizes those headers into the shared
+``provider_usage_snapshots`` row shape and persists them fire-and-forget, off
+the streaming hot path. (Before the translator gateway was retired the same
+capture ran inside its Codex upstream leg.)
 
-**OpenAI passive capture (#757).** The translator gateway's OpenAI-platform
-upstream leg (same ``stream_responses_events``, ``mode == "openai"``) receives
-standard ``x-ratelimit-*`` headers on every 200 response. ``capture_openai_headers``
-follows the exact same fire-and-forget pattern as the Codex capture above,
-persisting ``provider_type="openai"``.
+**OpenAI passive capture (#757).** The omni harness's native OpenAI-platform
+leg receives standard ``x-ratelimit-*`` headers; the same response hook calls
+``capture_openai_headers``, which follows the exact same fire-and-forget
+pattern as the Codex capture above, persisting ``provider_type="openai"``.
 
-**Anthropic passive capture (#757).** The translator gateway's Anthropic
-passthrough leg (``upstream.py::anthropic_passthrough_stream`` /
-``anthropic_passthrough_json``) receives ``anthropic-ratelimit-*`` headers on
-every successful response. ``capture_anthropic_headers`` follows the same
-pattern, persisting ``provider_type="anthropic"``.
+**Anthropic passive capture (#757).** An Anthropic leg receives
+``anthropic-ratelimit-*`` headers on every successful response.
+``capture_anthropic_headers`` follows the same pattern, persisting
+``provider_type="anthropic"``.
 
 **OpenRouter poller (U3).** ``ProviderUsageMonitor`` polls every enabled
 ``openrouter`` model-provider's key-info endpoint
@@ -53,10 +53,25 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.core.translator_gateway.upstream import _decrypt_provider_auth_token
+from app.core import encryption
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
+
+
+def _decrypt_provider_auth_token(provider: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Decrypt a provider row's ``auth_token`` blob (or pass plaintext through).
+
+    Relocated here from the retired translator gateway's ``upstream.py`` (it was
+    that module's only remaining consumer besides this one). Never log the
+    return value.
+    """
+    raw = (provider or {}).get("auth_token")
+    if not raw:
+        return None
+    if encryption.is_encrypted(raw):
+        return encryption.decrypt_value(raw)
+    return raw  # plaintext (migration compatibility)
 
 
 # ---------------------------------------------------------------------------

@@ -15,9 +15,6 @@ claude-agent-sdk==0.2.126
 # repo is private (Quickkill0/omni-harness): the Docker image vendors it via CI
 # (see Dockerfile vendor/ stage); dev installs use
 # `pip install -e ./vendor/omni-harness`. Requires Python >=3.12.
-# Real BPE tokenizer for the translator_gateway count_tokens endpoint (o200k_base).
-# Falls back to a chars/token heuristic if the BPE vocab fetch fails offline.
-tiktoken>=0.7.0
 # Native git reads (pygit2/libgit2) — falls back to CLI subprocess if unavailable
 pygit2>=1.19.0
 # Mobile support dependencies

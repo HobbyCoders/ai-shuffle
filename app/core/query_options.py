@@ -47,7 +47,6 @@ from app.core.environment import (  # noqa: F401
     _build_env_with_ai_tools,
     apply_context_window_env,
     apply_provider_env,
-    assemble_subagent_legs,
     generate_environment_details,
 )
 
@@ -607,86 +606,44 @@ def build_options_from_profile(
     else:
         provider_id = overrides.get("provider") or config.get("provider")
 
-    # Chunk F (ruling A2 / G2-r): an optional cross-provider SUBAGENT leg. It is
-    # derived from the PROFILE config ONLY (no per-query override in v1 — a
-    # deliberate scope decision); the session never stores it (G2-r). Null/absent
-    # inherits today's single-leg behavior exactly.
-    subagent_provider = config.get("subagent_provider")
-    subagent_model = config.get("subagent_model")
-    if subagent_provider:
-        if not provider_id:
-            # A2 legality: a cross-provider subagent leg requires the MAIN leg to
-            # be gateway-routed. A native (Claude-subscription) session cannot
-            # host cross-provider subagents (F1). Drop the leg and continue
-            # native rather than raise.
-            logger.error(
-                "Dropping cross-provider subagent leg for a native session: "
-                "profile names subagent provider %r but the session has no "
-                "gateway provider. A native Claude-subscription main cannot mix "
-                "providers; put the main model on a provider (e.g. a Claude "
-                "API-key provider) to use a cross-provider subagent.",
-                subagent_provider,
-            )
-            subagent_provider = None
-            subagent_model = None
-        # NOTE: a same-provider default leg (``subagent_provider == provider_id``)
-        # is intentionally NOT nulled out here — it used to be, which silently
-        # discarded the profile's chosen default model in favor of the main
-        # provider's small_fast/default model (the bug this comment replaces).
-        # ``assemble_subagent_legs`` still skips minting a redundant route-leg
-        # for the same-provider case (main-leg fallthrough already serves it)
-        # but now correctly keeps the configured model as ``session_default``.
+    # D4 (2026-08-12): gateway-based CROSS-PROVIDER SUBAGENT LEGS are removed as
+    # a feature along with the translator gateway that served them. There is no
+    # longer any mechanism to route one session's subagent to a different
+    # provider than its main — ProviderAgent cross-provider workers
+    # (``app/core/provider_agent.py``) are the replacement. The profile's
+    # ``subagent_provider``/``subagent_model`` fields and each subagent's stored
+    # ``prov:<pid>:<mid>`` composite are consequently INERT for routing: every
+    # session, native or provider-bound, now resolves subagent frontmatter with
+    # native semantics (composite → omit the ``model:`` line → inherit the main
+    # model; Claude alias/id → keep; unpinned → stays None). That is exactly the
+    # ``gateway_routed=False`` branch of the S2 resolver, which is why it is the
+    # only branch left.
+    for agent_id, agent_def in (agents_dict or {}).items():
+        agent_def.model = resolve_subagent_frontmatter_model(
+            enabled_subagents.get(agent_id, {}).get("model"),
+            gateway_routed=False,
+            honored_leg_models=(),
+            session_default=None,
+            main_serves_claude_ids=True,
+        )
 
-    # S3: on a PROVIDER (non-native) session, build the subagent leg-map from the
-    # profile-default leg + each enabled subagent's composite, and STAMP each
-    # enabled subagent's frontmatter model via the S2 resolver. The native branch
-    # below (``else``) also runs the resolver, but with ``gateway_routed=False``
-    # (ruling S8-R2): composites are omitted (inherit main) and Claude aliases/ids
-    # are kept — a native CLI cannot serve a ``prov:...`` composite, so it must
-    # never be stamped verbatim into frontmatter. ``honored_legs`` defaults to
-    # ``()`` so ``apply_provider_env`` gets an empty map on the native path.
-    honored_legs = ()
-    # True only for a gateway-routed session whose MAIN model is NOT a Claude
-    # model. Reuses the existing provider-shape signal (``SubagentLegPlan
-    # .main_serves_claude_ids`` = the main provider row's ``provider_type ==
-    # "anthropic"``) rather than sniffing model-id prefixes: a native session
-    # (no binding) and an anthropic-type provider row both serve real ``claude-*``
-    # ids and stay False. Consumed by the ``claude-api`` skill exclusion below.
+    # True only for a provider-bound session whose MAIN model is NOT a Claude
+    # model. PRESERVED ACROSS D4 (see PR #775): this used to read
+    # ``SubagentLegPlan.main_serves_claude_ids``, but that field was only ever
+    # the main provider row's ``provider_type == "anthropic"`` — the leg-map
+    # assembly contributed nothing to it, so it survives the leg removal
+    # verbatim off the session's bound provider row. Deliberately a provider-
+    # SHAPE signal, not a model-id prefix sniff: a native session (no binding)
+    # and an anthropic-type provider row both serve real ``claude-*`` ids and
+    # stay False. Consumed by the ``claude-api`` skill exclusion below.
     is_non_claude_provider_session = False
     if provider_id:
         main_provider_row = database.get_model_provider(
             provider_id, include_token=False
         )
-        plan = assemble_subagent_legs(
-            main_provider_row=main_provider_row,
-            default_leg_provider=subagent_provider,
-            default_leg_model=subagent_model,
-            enabled_subagents=enabled_subagents,
+        is_non_claude_provider_session = (
+            (main_provider_row or {}).get("provider_type") != "anthropic"
         )
-        honored_legs = plan.honored_legs
-        is_non_claude_provider_session = not plan.main_serves_claude_ids
-        honored_leg_models = {mid for mid, _pid, _acct in plan.honored_legs}
-        for agent_id, agent_def in (agents_dict or {}).items():
-            agent_def.model = resolve_subagent_frontmatter_model(
-                enabled_subagents.get(agent_id, {}).get("model"),
-                gateway_routed=True,
-                honored_leg_models=honored_leg_models,
-                session_default=plan.session_default,
-                main_serves_claude_ids=plan.main_serves_claude_ids,
-            )
-    else:
-        # S8-R2: a NATIVE session must also run the S2 resolver — the stored
-        # subagent model may be a provider composite (`prov:...`), which the
-        # CLI cannot serve natively. Native semantics: composite → omit
-        # (inherit main), Claude alias/id → keep, unpinned → stays None.
-        for agent_id, agent_def in (agents_dict or {}).items():
-            agent_def.model = resolve_subagent_frontmatter_model(
-                enabled_subagents.get(agent_id, {}).get("model"),
-                gateway_routed=False,
-                honored_leg_models=(),
-                session_default=None,
-                main_serves_claude_ids=True,
-            )
 
     betas_to_use = []
 
@@ -835,9 +792,8 @@ def build_options_from_profile(
         # apply_provider_env owns the window vars there.
         apply_context_window_env(full_env, model_to_use)
     else:
-        # Overlay the model-provider gateway env (base URL, bearer token,
-        # mitigation flags, small-fast model, optional window/output caps) and
-        # thread the pre-honored subagent leg map into the routing token. Raises
+        # Overlay the model-provider env (base URL, bearer token, mitigation
+        # flags, small-fast model, optional window/output caps). Raises
         # ProviderConfigError (a ValueError) for a missing/disabled provider or an
         # undecryptable token — the query engines convert it into a user-visible
         # error rather than silently running native Anthropic.
@@ -846,7 +802,6 @@ def build_options_from_profile(
             provider_id,
             model_to_use,
             session_id=session_id,
-            subagent_legs=honored_legs,
         )
 
     ai_tool_env = full_env if full_env else None

@@ -24,7 +24,6 @@ from app.core import encryption
 from app.core.environment import (
     ProviderConfigError,
     apply_provider_env,
-    assemble_subagent_legs,
     inject_claude_code_auth,
 )
 from app.core.generation_options import build_generation_options
@@ -155,7 +154,7 @@ class TestApplyProviderEnv:
         provider window get hard-blocked locally — and the same ceiling blocks
         the reactive-compaction rescue request. CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
         is pinned to 2x the true window so oversize protection defers to the
-        gateway's accurate tiktoken guard."""
+        upstream's own limit check."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         _mk_provider(db, context_window=272000)
@@ -251,10 +250,8 @@ class TestApplyProviderEnv:
         """A translated (codex/chatgpt-mode) provider with a foreign model id gets
         DISABLE_1M="1"; with no context_window on the row, the auto-compact
         window is left to the CLI (no hardcoded universal pin)."""
-        from app.core.translator_gateway import routing
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
         db.create_model_provider(
             provider_id="gw", name="Codex", provider_type="chatgpt",
             base_url="", auth_token=None,
@@ -369,10 +366,8 @@ class TestApplyProviderEnv:
     def test_translated_main_marker_set_for_chatgpt(self, mock_db):
         """S8-R1: a chatgpt-type (translated) main sets AIH_GATEWAY_TRANSLATED_MAIN
         so attach_hooks_to_options wires the Agent-arg-strip PreToolUse hook."""
-        from app.core.translator_gateway import routing
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
         db.create_model_provider(
             provider_id="gw", name="Codex", provider_type="chatgpt",
             base_url="", auth_token=None,
@@ -407,83 +402,52 @@ class TestApplyProviderEnv:
         it as a user-visible error."""
         assert issubclass(ProviderConfigError, ValueError)
 
-    # ── S3: pre-honored subagent leg map (ruling A2/G2-r) ────────────────────
+    # ── translated (Codex/OpenAI) rows after the gateway retirement ─────────
     #
-    # apply_provider_env now receives an already-honored ``subagent_legs`` map
-    # (the caller's assemble_subagent_legs did the servability/enabled gating and
-    # account resolution). It threads the whole map into the routing token, routes
-    # through the gateway when the map is non-empty, and NEVER emits
-    # CLAUDE_CODE_SUBAGENT_MODEL (subagent model selection is frontmatter now).
+    # These rows used to be pointed at the loopback translator gateway with a
+    # per-session routing token. The gateway is gone and omni serves them
+    # natively, so the CLI env carries NO upstream credential for them — but the
+    # overlay must still apply every guard/window/small-fast key, and must NOT
+    # raise for a row that has neither an auth_token nor a base_url (a ChatGPT
+    # subscription row legitimately has neither).
 
-    def test_honored_leg_mints_token_carries_legs_no_subagent_key(self, mock_db):
-        """A translated (chatgpt) main + a pre-honored leg: the minted routing
-        token carries the leg map verbatim; ANTHROPIC_SMALL_FAST_MODEL keeps the
-        MAIN provider's chain; CLAUDE_CODE_SUBAGENT_MODEL is NOT emitted."""
-        from app.core.translator_gateway import routing
+    def test_translated_row_gets_blank_base_url_and_token(self, mock_db):
         from app.db import database as db
-
         encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
         db.create_model_provider(
             provider_id="gw", name="Codex", provider_type="chatgpt",
             base_url="", auth_token=None,
             models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
         )
-        legs = [("sub/model", "sub", "acct-sub")]
-        env = apply_provider_env(
-            {}, "gw", "gpt-5-codex", session_id="sess-leg",
-            subagent_legs=legs,
-        )
-        binding = routing.resolve(env[AUTH_TOKEN_KEY])
-        assert binding is not None
-        assert binding.provider_id == "gw"
-        assert binding.legs == (("sub/model", "sub", "acct-sub"),)
-        # small/fast falls back to the main provider's first curated model; the
-        # subagent env var is gone entirely.
-        assert env[SMALL_FAST_KEY] == "gpt-5-codex"
-        assert SUBAGENT_KEY not in env
-
-    def test_anthropic_main_with_leg_routes_through_gateway(self, mock_db):
-        """anthropic-main + a pre-honored (Codex) leg → the session is routed
-        through the loopback gateway: base URL is the gateway, a routing token
-        carrying the leg map is minted, and the REAL Anthropic API key is NOT
-        placed in env (the gateway reads it from the provider row at request
-        time). CLAUDE_CODE_SUBAGENT_MODEL is not emitted."""
-        from app.core.config import settings
-        from app.core.translator_gateway import routing
-        from app.db import database as db
-
-        encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
-        db.create_model_provider(
-            provider_id="an", name="Claude API", provider_type="anthropic",
-            base_url="https://api.anthropic.com",
-            auth_token=encryption.encrypt_value("sk-ant-real"),
-            models=[{"id": "claude-sonnet-4", "label": "Sonnet"}],
-        )
-        env = apply_provider_env(
-            {}, "an", "claude-sonnet-4", session_id="sess-an",
-            subagent_legs=[("gpt-5-codex", "sub", "acct-sub")],
-        )
-        assert env[BASE_URL_KEY] == f"http://127.0.0.1:{settings.translator_gateway_port}"
-        binding = routing.resolve(env[AUTH_TOKEN_KEY])
-        assert binding is not None
-        assert binding.provider_id == "an"
-        assert binding.legs == (("gpt-5-codex", "sub", "acct-sub"),)
-        # The real Anthropic API key must NEVER be exposed in env in this mode.
-        assert "sk-ant-real" not in env.values()
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert env[BASE_URL_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
         assert env[API_KEY] == ""
+        for k in MITIGATION_KEYS:
+            assert env[k] == "1"
+        assert env[SMALL_FAST_KEY] == "gpt-5-codex"   # first curated id
         assert SUBAGENT_KEY not in env
 
-    def test_anthropic_main_no_leg_keeps_direct_env(self, mock_db):
-        """Regression: a bare anthropic-type main (no legs) keeps the DIRECT
-        base_url path byte-identical to today — real key in env, no gateway, no
-        routing token. An explicit empty leg map must match omitting it."""
-        from app.core.translator_gateway import routing
+    def test_translated_row_without_token_or_base_url_does_not_raise(self, mock_db):
+        """Regression guard for the retirement: the direct path's "neither token
+        nor base URL" error must never fire for a translated row, or every Codex
+        session becomes unspawnable."""
         from app.db import database as db
-
         encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex")
+        assert env[BASE_URL_KEY] == ""
+
+    def test_anthropic_row_keeps_the_direct_key_path(self, mock_db):
+        """An anthropic-type row is NOT translated: it keeps its real decrypted
+        key and its own base_url (this used to be diverted onto the gateway as
+        soon as a subagent leg was configured; legs are gone)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
         db.create_model_provider(
             provider_id="an", name="Claude API", provider_type="anthropic",
             base_url="https://api.anthropic.com",
@@ -492,357 +456,61 @@ class TestApplyProviderEnv:
         )
         env = apply_provider_env({}, "an", "claude-sonnet-4", session_id="sess-an")
         assert env[BASE_URL_KEY] == "https://api.anthropic.com"
-        assert env[AUTH_TOKEN_KEY] == "sk-ant-real"   # direct decrypted key
+        assert env[AUTH_TOKEN_KEY] == "sk-ant-real"
         assert env[API_KEY] == ""
-        # No routing token minted on the direct path.
-        assert routing.resolve("sk-ant-real") is None
-        # Explicit empty leg map is inert → identical env.
-        env_empty = apply_provider_env(
-            {}, "an", "claude-sonnet-4", session_id="sess-an",
-            subagent_legs=(),
-        )
-        assert env_empty == env
-
-    def test_empty_legs_leaves_subagent_key_unset_no_token(self, mock_db):
-        """A bare provider session with an empty leg map: no CLAUDE_CODE_SUBAGENT_MODEL,
-        no routing token, direct base_url path preserved."""
-        from app.core.translator_gateway import routing
-        from app.db import database as db
-
-        encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
-        _mk_provider(db, provider_id="op", token="gw-secret", small_fast_model="op/small")
-        env = apply_provider_env({}, "op", "op/main", subagent_legs=())
-        assert env[SMALL_FAST_KEY] == "op/small"
         assert SUBAGENT_KEY not in env
-        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # direct kept
-        assert routing.resolve(env[AUTH_TOKEN_KEY]) is None      # token is the raw key
 
 
 # ---------------------------------------------------------------------------
-# assemble_subagent_legs (S3 leg-map assembler)
+# D4: cross-provider subagent legs are REMOVED
 # ---------------------------------------------------------------------------
 
-class TestAssembleSubagentLegs:
-    def test_union_default_leg_first_then_subagent_composite(self, mock_db):
-        """Servable main + honored default leg + one enabled-subagent composite on
-        a distinct servable provider → default leg FIRST, then the composite leg;
-        accounts resolved for chatgpt providers."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="dl", name="DL", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "dl/model", "label": "DL"}],
-        )
-        db.set_codex_token_bundle("dl", access_token=None, refresh_token=None, account_id="acct-dl")
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "Sub"}],
-        )
-        db.set_codex_token_bundle("sub", access_token=None, refresh_token=None, account_id="acct-sub")
-        main_row = db.get_model_provider("main", include_token=False)
-        plan = assemble_subagent_legs(
-            main_provider_row=main_row,
-            default_leg_provider="dl",
-            default_leg_model="dl/model",
-            enabled_subagents={"agent-x": {"model": "prov:sub:sub/model"}},
-        )
-        assert plan.honored_legs == [
-            ("dl/model", "dl", "acct-dl"),
-            ("sub/model", "sub", "acct-sub"),
-        ]
-        assert plan.session_default == "dl/model"
-        assert plan.main_serves_claude_ids is False
-        assert plan.dropped == []
+class TestSubagentLegsRemoved:
+    """The gateway-served cross-provider subagent leg is gone as a feature.
 
-    def test_non_servable_main_drops_whole_map_single_error(self, mock_db, caplog):
-        """A non-servable (openrouter) main drops the ENTIRE map (A2): honored_legs
-        empty, every candidate in dropped, session_default = the main small/fast,
-        and exactly ONE aggregate error logged."""
+    ``apply_provider_env`` no longer accepts a leg map, and ``query_options``
+    no longer assembles one — a profile that still carries
+    ``subagent_provider``/``subagent_model`` is inert config, not a route.
+    ProviderAgent workers are the replacement.
+    """
+
+    def test_apply_provider_env_rejects_a_leg_map(self, mock_db):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="OR", provider_type="openrouter",
-            base_url="https://openrouter.ai/api", auth_token=None,
-            small_fast_model="op/small", models=[{"id": "op/main", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "Sub"}],
-        )
-        main_row = db.get_model_provider("op", include_token=False)
-        with caplog.at_level(logging.ERROR):
-            plan = assemble_subagent_legs(
-                main_provider_row=main_row,
-                default_leg_provider="dl",
-                default_leg_model="dl/model",
-                enabled_subagents={"agent-x": {"model": "prov:sub:sub/model"}},
+        _mk_provider(db, token="gw-secret")
+        with pytest.raises(TypeError):
+            apply_provider_env(
+                {}, "op", "openai/gpt-5.6",
+                subagent_legs=[("sub/model", "sub", None)],  # type: ignore[call-arg]
             )
-        assert plan.honored_legs == []
-        assert ("<profile-default-leg>", "dl") in plan.dropped
-        assert ("agent-x", "sub") in plan.dropped
-        assert plan.session_default == "op/small"
-        errs = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(errs) == 1
 
-    def test_per_entry_drop_single_aggregate_error(self, mock_db, caplog):
-        """Servable main; one enabled-subagent composite on a DISABLED provider →
-        that entry dropped, the other honored, exactly ONE aggregate error naming
-        the subagent id + provider id (no token)."""
+    def test_query_options_threads_no_leg_map(self, mock_db, tmp_path):
+        """Even with a fully-configured cross-provider leg on the profile, the
+        overlay call carries no leg argument."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="good", name="Good", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "good/model", "label": "G"}],
-        )
-        db.create_model_provider(
-            provider_id="bad", name="Bad", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "bad/model", "label": "B"}],
-            enabled=False,
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        with caplog.at_level(logging.ERROR):
-            plan = assemble_subagent_legs(
-                main_provider_row=main_row,
-                default_leg_provider=None,
-                default_leg_model=None,
-                enabled_subagents={
-                    "agent-good": {"model": "prov:good:good/model"},
-                    "agent-bad": {"model": "prov:bad:bad/model"},
-                },
-            )
-        assert ("good/model", "good", None) in plan.honored_legs
-        assert ("agent-bad", "bad") in plan.dropped
-        assert all(pid != "bad" for _mid, pid, _a in plan.honored_legs)
-        errs = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(errs) == 1
-        msg = errs[0].getMessage()
-        assert "agent-bad" in msg and "bad" in msg
-
-    def test_session_default_small_fast_fallback_chain(self, mock_db):
-        """No default leg → session_default falls back through
-        small_fast_model → default_model → first curated model id."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None,
-            models=[{"id": "first/curated", "label": "F"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        plan = assemble_subagent_legs(
-            main_provider_row=main_row,
-            default_leg_provider=None, default_leg_model=None, enabled_subagents={},
-        )
-        assert plan.session_default == "first/curated"
-        assert plan.honored_legs == []
-
-    def test_main_serves_claude_ids_true_only_for_anthropic(self, mock_db):
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="an", name="An", provider_type="anthropic",
-            base_url="https://api.anthropic.com", auth_token=None,
-            models=[{"id": "c", "label": "C"}],
-        )
-        db.create_model_provider(
-            provider_id="cg", name="Cg", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "g", "label": "G"}],
-        )
-        an = db.get_model_provider("an", include_token=False)
-        cg = db.get_model_provider("cg", include_token=False)
-        p_an = assemble_subagent_legs(
-            main_provider_row=an, default_leg_provider=None,
-            default_leg_model=None, enabled_subagents={},
-        )
-        p_cg = assemble_subagent_legs(
-            main_provider_row=cg, default_leg_provider=None,
-            default_leg_model=None, enabled_subagents={},
-        )
-        assert p_an.main_serves_claude_ids is True
-        assert p_cg.main_serves_claude_ids is False
-
-    def test_account_resolution_non_chatgpt_leg_is_none(self, mock_db):
-        """A servable non-chatgpt (anthropic) leg provider carries account None."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="ansub", name="AnSub", provider_type="anthropic",
-            base_url="https://api.anthropic.com", auth_token=None,
-            models=[{"id": "an/model", "label": "A"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        plan = assemble_subagent_legs(
-            main_provider_row=main_row,
-            default_leg_provider=None, default_leg_model=None,
-            enabled_subagents={"a": {"model": "prov:ansub:an/model"}},
-        )
-        assert plan.honored_legs == [("an/model", "ansub", None)]
-
-    def test_malformed_and_non_composite_produce_no_leg(self, mock_db):
-        """Malformed composites (no second colon), non-composites, and unpinned
-        subagent models are skipped (not dropped)."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        plan = assemble_subagent_legs(
-            main_provider_row=main_row,
-            default_leg_provider=None, default_leg_model=None,
-            enabled_subagents={
-                "a": {"model": "prov:onlyprovider"},  # malformed
-                "b": {"model": "sonnet"},              # non-composite
-                "c": {"model": None},                  # unpinned
-            },
-        )
-        assert plan.honored_legs == []
-        assert plan.dropped == []
-
-    def test_exact_duplicate_legs_deduped(self, mock_db):
-        """Two enabled subagents pinned to the SAME (mid, pid, acct) → a single leg."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
+            provider_id="op", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "op/main", "label": "M"}],
         )
         db.create_model_provider(
             provider_id="sub", name="Sub", provider_type="chatgpt",
             base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
         )
-        main_row = db.get_model_provider("main", include_token=False)
-        plan = assemble_subagent_legs(
-            main_provider_row=main_row,
-            default_leg_provider=None, default_leg_model=None,
-            enabled_subagents={
-                "a": {"model": "prov:sub:sub/model"},
-                "b": {"model": "prov:sub:sub/model"},
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
+                "subagent_provider": "sub", "subagent_model": "sub/model",
             },
-        )
-        assert plan.honored_legs == [("sub/model", "sub", None)]
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            _build_options(profile)
+        assert "subagent_legs" not in m.call_args.kwargs
 
-    def test_default_leg_wins_same_mid_collision(self, mock_db, caplog):
-        """Profile-default leg and a per-subagent entry collide on the SAME mid
-        (different pids) → the default-leg entry survives, the subagent entry is
-        gone, and one aggregate warning names the losing pid."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="dl", name="DL", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "DL"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "Sub"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        with caplog.at_level(logging.WARNING):
-            plan = assemble_subagent_legs(
-                main_provider_row=main_row,
-                default_leg_provider="dl",
-                default_leg_model="shared/mid",
-                enabled_subagents={"agent-x": {"model": "prov:sub:shared/mid"}},
-            )
-        assert plan.honored_legs == [("shared/mid", "dl", None)]
-        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warns) == 1
-        assert "sub" in warns[0].getMessage()
-
-    def test_lexicographic_pid_wins_same_mid_collision(self, mock_db, caplog):
-        """Two per-subagent entries collide on the SAME mid (different pids, no
-        default-leg collision) → the lexicographically-smallest pid survives; the
-        aggregate warning names the loser."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="aaa", name="Aaa", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "A"}],
-        )
-        db.create_model_provider(
-            provider_id="zzz", name="Zzz", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "shared/mid", "label": "Z"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        with caplog.at_level(logging.WARNING):
-            plan = assemble_subagent_legs(
-                main_provider_row=main_row,
-                default_leg_provider=None, default_leg_model=None,
-                enabled_subagents={
-                    "agent-z": {"model": "prov:zzz:shared/mid"},
-                    "agent-a": {"model": "prov:aaa:shared/mid"},
-                },
-            )
-        assert plan.honored_legs == [("shared/mid", "aaa", None)]
-        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warns) == 1
-        assert "zzz" in warns[0].getMessage()
-
-    def test_exact_duplicate_collision_no_warning(self, mock_db, caplog):
-        """Exact-duplicate tuples (same mid+pid+acct from two subagents) → a single
-        survivor and NO warning (an exact dup is not a genuine collision loser)."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="main", name="Main", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="m/small",
-            models=[{"id": "m", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
-        )
-        main_row = db.get_model_provider("main", include_token=False)
-        with caplog.at_level(logging.WARNING):
-            plan = assemble_subagent_legs(
-                main_provider_row=main_row,
-                default_leg_provider=None, default_leg_model=None,
-                enabled_subagents={
-                    "a": {"model": "prov:sub:sub/model"},
-                    "b": {"model": "prov:sub:sub/model"},
-                },
-            )
-        assert plan.honored_legs == [("sub/model", "sub", None)]
-        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warns == []
-
-
-# ---------------------------------------------------------------------------
-# query_options: subagent leg resolution (config-only) + A2 legality
-# ---------------------------------------------------------------------------
-
-class TestQueryOptionsSubagentLeg:
-    def test_native_session_drops_leg_and_logs_error(self, mock_db, tmp_path, caplog):
-        """A2: a native (no-provider) main cannot host a cross-provider subagent.
-        The leg is DROPPED with a logged error (never raised), env stays native."""
+    def test_native_session_with_a_configured_leg_stays_native(self, mock_db, tmp_path):
+        """A native (no-provider) profile that still names a subagent provider is
+        simply ignored — no overlay, native window guard intact."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         profile = {
@@ -852,80 +520,11 @@ class TestQueryOptionsSubagentLeg:
                 "subagent_provider": "sub", "subagent_model": "sub/model",
             },
         }
-        with patch.object(qo, "apply_provider_env") as m, \
-                caplog.at_level(logging.ERROR):
+        with patch.object(qo, "apply_provider_env") as m:
             env = _build_options(profile).env
-        m.assert_not_called()               # native path → no gateway overlay
-        assert env[DISABLE_1M_KEY] == "1"   # native window guard still applied
-        assert any("subagent" in r.getMessage().lower() for r in caplog.records)
+        m.assert_not_called()
+        assert env[DISABLE_1M_KEY] == "1"
 
-    def test_same_provider_leg_inherits(self, mock_db, tmp_path):
-        """A subagent provider equal to the main provider is redundant (the
-        small/fast chain already routes subagents there) → collapsed to inherit,
-        so no leg is threaded into apply_provider_env."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "op/main", "label": "M"}],
-        )
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "subagent_provider": "op", "subagent_model": "op/model",
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            _build_options(profile)
-        assert tuple(m.call_args.kwargs["subagent_legs"]) == ()
-
-    def test_cross_provider_leg_threaded_into_overlay(self, mock_db, tmp_path):
-        """A legal cross-provider default leg (servable provider main + a different
-        servable subagent provider) is assembled and threaded into
-        apply_provider_env as the leg map."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "op/main", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "Sub"}],
-        )
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "subagent_provider": "sub", "subagent_model": "sub/model",
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            _build_options(profile)
-        assert list(m.call_args.kwargs["subagent_legs"]) == [("sub/model", "sub", None)]
-
-    def test_no_leg_threads_empty_map(self, mock_db, tmp_path):
-        """Regression: a provider profile with no subagent leg threads an empty
-        leg map."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "op/main", "label": "M"}],
-        )
-        profile = {
-            "id": "t",
-            "config": {"model": "op/main", "provider": "op", "cwd": str(tmp_path)},
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            _build_options(profile)
-        assert tuple(m.call_args.kwargs["subagent_legs"]) == ()
-
-
-# ---------------------------------------------------------------------------
-# inject_claude_code_auth
-# ---------------------------------------------------------------------------
 
 class TestInjectClaudeCodeAuth:
     def test_provider_set_skips_anthropic_key(self, mock_db):
@@ -1054,11 +653,10 @@ def _mk_subagent(db, agent_id, model):
 
 
 class TestSubagentFrontmatterStamping:
-    def test_gateway_composite_pin_and_unpinned_stamped(self, mock_db, tmp_path):
-        """Gateway (chatgpt) main + one composite-pinned enabled subagent (honored)
-        + one unpinned: the pinned agent's model becomes the bare upstream id, the
-        unpinned agent's model becomes the session default, and apply_provider_env
-        is threaded the honored leg."""
+    def test_provider_session_composite_pin_is_omitted(self, mock_db, tmp_path):
+        """D4: with legs removed, a provider session resolves subagent frontmatter
+        with NATIVE semantics — a ``prov:`` composite can no longer be routed, so
+        the ``model:`` line is omitted and the agent inherits the main model."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         db.create_model_provider(
@@ -1079,41 +677,33 @@ class TestSubagentFrontmatterStamping:
                 "enabled_agents": ["pinned", "unpinned"],
             },
         }
-        with patch.object(qo, "apply_provider_env") as m:
+        with patch.object(qo, "apply_provider_env"):
             opts = _build_options(profile)
-        assert opts.agents["pinned"].model == "sub/model"
-        assert opts.agents["unpinned"].model == "op/small"   # session default
-        assert list(m.call_args.kwargs["subagent_legs"]) == [("sub/model", "sub", None)]
+        assert opts.agents["pinned"].model is None      # inherit main
+        assert opts.agents["unpinned"].model is None
 
-    def test_same_provider_default_leg_stamped_not_small_fast(self, mock_db, tmp_path):
-        """Regression: a profile-level default leg on the SAME provider as main
-        (e.g. main=op/main, subagent default=op/mini, both provider "op") used to
-        be nulled out entirely upstream in query_options.py, silently replacing
-        the configured default with the provider's small_fast_model instead. The
-        chosen default model must win as the unpinned subagent's stamped model —
-        no separate route-leg is needed (main-leg fallthrough already serves the
-        same provider), so subagent_legs stays empty, but session_default must be
-        the configured "op/mini", not "op/small"."""
+    def test_provider_session_claude_alias_pin_is_kept(self, mock_db, tmp_path):
+        """Native semantics keep a Claude alias verbatim on a provider session
+        too. (Under the gateway a chatgpt main replaced it with the session
+        default; there is no session default to substitute any more.)"""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         db.create_model_provider(
             provider_id="op", name="Codex", provider_type="chatgpt",
             base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}, {"id": "op/mini", "label": "Mini"}],
+            models=[{"id": "op/main", "label": "M"}],
         )
-        _mk_subagent(db, "unpinned", None)
+        _mk_subagent(db, "cl", "sonnet")
         profile = {
             "id": "t",
             "config": {
                 "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "subagent_provider": "op", "subagent_model": "op/mini",
-                "enabled_agents": ["unpinned"],
+                "enabled_agents": ["cl"],
             },
         }
-        with patch.object(qo, "apply_provider_env") as m:
+        with patch.object(qo, "apply_provider_env"):
             opts = _build_options(profile)
-        assert opts.agents["unpinned"].model == "op/mini"
-        assert tuple(m.call_args.kwargs["subagent_legs"]) == ()
+        assert opts.agents["cl"].model == "sonnet"
 
     def test_claude_alias_pin_kept_on_anthropic_main(self, mock_db, tmp_path):
         """anthropic main serves Claude ids → a Claude-alias-pinned subagent keeps
@@ -1138,86 +728,6 @@ class TestSubagentFrontmatterStamping:
         with patch.object(qo, "apply_provider_env"):
             opts = _build_options(profile)
         assert opts.agents["cl"].model == "sonnet"
-
-    def test_claude_alias_pin_replaced_on_chatgpt_main(self, mock_db, tmp_path):
-        """chatgpt main does NOT serve Claude ids → a Claude-alias-pinned subagent
-        is replaced by the session default."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}],
-        )
-        _mk_subagent(db, "cl", "sonnet")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["cl"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env"):
-            opts = _build_options(profile)
-        assert opts.agents["cl"].model == "op/small"
-
-    def test_composite_non_servable_provider_stamped_session_default(self, mock_db, tmp_path):
-        """A composite whose provider is non-servable (openrouter) → not honored →
-        the agent is stamped the session default and the leg is absent."""
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="orr", name="OpenRouter", provider_type="openrouter",
-            base_url="https://openrouter.ai/api",
-            auth_token=encryption.encrypt_value("or-secret"),
-            models=[{"id": "orr/model", "label": "OR"}],
-        )
-        _mk_subagent(db, "foreign", "prov:orr:orr/model")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["foreign"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env") as m:
-            opts = _build_options(profile)
-        assert opts.agents["foreign"].model == "op/small"
-        assert tuple(m.call_args.kwargs["subagent_legs"]) == ()
-
-    def test_token_minted_with_expected_legs(self, mock_db, tmp_path):
-        """End-to-end (real apply_provider_env): a chatgpt main + composite-pinned
-        subagent mints a routing token whose binding carries the honored leg."""
-        from app.core.translator_gateway import routing
-        from app.db import database as db
-        encryption.set_encryption_key("pw", db)
-        routing.get_registry().clear()
-        db.create_model_provider(
-            provider_id="op", name="Codex", provider_type="chatgpt",
-            base_url="", auth_token=None, small_fast_model="op/small",
-            models=[{"id": "op/main", "label": "M"}],
-        )
-        db.create_model_provider(
-            provider_id="sub", name="Sub", provider_type="chatgpt",
-            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
-        )
-        _mk_subagent(db, "pinned", "prov:sub:sub/model")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["pinned"],
-            },
-        }
-        env = _build_options(profile).env
-        binding = routing.resolve(env[AUTH_TOKEN_KEY])
-        assert binding is not None
-        assert binding.legs == (("sub/model", "sub", None),)
 
     def test_native_session_leaves_subagent_models_untouched(self, mock_db, tmp_path):
         """Native (no-provider) session: enabled-subagent models are left exactly
@@ -1292,20 +802,55 @@ class TestSubagentFrontmatterStamping:
         m.assert_not_called()
         assert opts.agents["unp"].model is None
 
-    def test_behavior_delta_openrouter_main_sonnet_sub_to_small_fast(self, mock_db, tmp_path):
-        """Behavior delta: on an openrouter (non-Claude-serving) provider main, a
-        `sonnet`-pinned subagent is stamped the provider small/fast (not sonnet)."""
+
+# ---------------------------------------------------------------------------
+# PR #775 guard: Skill(claude-api) stays blocked on non-Claude provider sessions
+# ---------------------------------------------------------------------------
+
+class TestClaudeApiSkillGuardSurvivesLegRemoval:
+    """The guard used to key off ``SubagentLegPlan.main_serves_claude_ids``.
+
+    That field was only ever ``provider_type == "anthropic"`` on the session's
+    bound provider row, so removing the leg assembler must not change ANY of
+    these outcomes.
+    """
+
+    def _opts(self, tmp_path, provider_id=None):
+        config = {"model": "m", "cwd": str(tmp_path)}
+        if provider_id:
+            config["provider"] = provider_id
+        with patch.object(qo, "apply_provider_env"):
+            return _build_options({"id": "t", "config": config})
+
+    def test_blocked_on_a_chatgpt_provider_session(self, mock_db, tmp_path):
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
-        _mk_provider(db, provider_id="op", token="gw-secret", small_fast_model="op/small")
-        _mk_subagent(db, "cl", "sonnet")
-        profile = {
-            "id": "t",
-            "config": {
-                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
-                "enabled_agents": ["cl"],
-            },
-        }
-        with patch.object(qo, "apply_provider_env"):
-            opts = _build_options(profile)
-        assert opts.agents["cl"].model == "op/small"
+        db.create_model_provider(
+            provider_id="op", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "m", "label": "M"}],
+        )
+        opts = self._opts(tmp_path, "op")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL in opts.disallowed_tools
+
+    def test_blocked_on_an_openrouter_provider_session(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", token="gw-secret")
+        opts = self._opts(tmp_path, "op")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL in opts.disallowed_tools
+
+    def test_allowed_on_an_anthropic_provider_session(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant"),
+            models=[{"id": "m", "label": "M"}],
+        )
+        opts = self._opts(tmp_path, "an")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL not in opts.disallowed_tools
+
+    def test_allowed_on_a_native_session(self, mock_db, tmp_path):
+        opts = self._opts(tmp_path)
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL not in opts.disallowed_tools

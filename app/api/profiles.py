@@ -21,7 +21,7 @@ from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
 from app.core.config import settings
-from app.core.environment import is_gateway_servable
+from app.core.environment import is_provider_servable
 from app.core.model_registry import DEFAULT_MODEL
 from app.core.profiles import get_builtin_profile_defaults
 
@@ -69,14 +69,21 @@ class UnifiedSubagentItem(BaseModel):
 def _validate_subagent_leg(config: ProfileConfig) -> None:
     """Validate an optional cross-provider subagent leg (Chunk F, ruling A2).
 
+    NOTE (D4, 2026-08-12): the leg itself no longer routes anything. The
+    translator gateway that served cross-provider subagent legs was retired and
+    the feature removed with it (ProviderAgent workers are the replacement), so
+    ``subagent_provider``/``subagent_model`` are now inert profile config. This
+    validator is kept so a stored profile still cannot describe a combination the
+    app never supported, and so the API contract does not change under callers;
+    it does NOT imply the leg will be honored at spawn time.
+
     A configured ``subagent_provider`` requires:
       * a non-empty ``subagent_model``,
       * the main model on a provider too (``provider`` set) — a native
         Claude-subscription main cannot mix providers (F1),
-      * the MAIN provider to exist and be gateway-servable (OpenAI-, ChatGPT-,
-        or Anthropic-API-type) — the leg can only route through the translator
-        gateway, so a custom/unknown main type cannot host it,
-      * the subagent provider to exist, be enabled, and be gateway-servable.
+      * the MAIN provider to exist and be servable (OpenAI-, ChatGPT-, or
+        Anthropic-API-type),
+      * the subagent provider to exist, be enabled, and be servable.
 
     Raises HTTP 400 otherwise. No-op when no subagent leg is configured.
     """
@@ -104,13 +111,12 @@ def _validate_subagent_leg(config: ProfileConfig) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"The main provider '{main_provider}' does not exist.",
         )
-    if not is_gateway_servable(main_row):
+    if not is_provider_servable(main_row):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"A cross-provider subagent requires the main model on an OpenAI-, "
-                f"ChatGPT-, or Anthropic-API-type provider (the leg routes through "
-                f"the translator gateway); provider "
+                f"ChatGPT-, or Anthropic-API-type provider; provider "
                 f"'{main_row.get('name') or main_provider}' cannot host a "
                 f"cross-provider subagent."
             ),
@@ -129,13 +135,12 @@ def _validate_subagent_leg(config: ProfileConfig) -> None:
                 f"disabled; enable it or pick a different provider."
             ),
         )
-    if not is_gateway_servable(row):
+    if not is_provider_servable(row):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"A cross-provider subagent requires the subagent model on an "
-                f"OpenAI-, ChatGPT-, or Anthropic-API-type provider (the leg routes "
-                f"through the translator gateway); provider "
+                f"OpenAI-, ChatGPT-, or Anthropic-API-type provider; provider "
                 f"'{row.get('name') or sub_provider}' cannot serve a cross-provider "
                 f"subagent."
             ),
