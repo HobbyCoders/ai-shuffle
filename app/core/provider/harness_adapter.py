@@ -190,10 +190,14 @@ class HarnessAdapter(ProviderAdapter):
         """Build the omni engine from SessionOptions and prime its session."""
         self._options = options
         self._store = self._build_store(options)
-        self._registry = await self._build_registry(options)
 
+        # Decide the leg BEFORE building the registry: the native legs need
+        # omni's builtin file/shell tools registered, the delegated leg must not
+        # get them (the claude CLI ships its own).
         kind = _decide_provider_kind(options)
         self._is_delegated = kind == "delegated"
+
+        self._registry = await self._build_registry(options, native=not self._is_delegated)
 
         omni_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
@@ -921,8 +925,11 @@ class HarnessAdapter(ProviderAdapter):
             return JsonlStore(store_dir)
         return MemoryStore()
 
-    async def _build_registry(self, options: SessionOptions) -> Optional[ToolRegistry]:
-        # Escape hatch: a caller may hand a fully-built registry.
+    async def _build_registry(
+        self, options: SessionOptions, *, native: bool
+    ) -> Optional[ToolRegistry]:
+        # Escape hatch: a caller may hand a fully-built registry — its contents
+        # are then entirely the caller's responsibility (builtins included).
         prebuilt = options.extra.get("omni_registry")
         if isinstance(prebuilt, ToolRegistry):
             return prebuilt
@@ -931,6 +938,21 @@ class HarnessAdapter(ProviderAdapter):
         external_mcp = _external_mcp_servers(options.mcp_servers)
 
         registry = ToolRegistry()
+        # Constraint: native legs (anthropic / openai_responses / openrouter)
+        # get omni's builtin Read/Grep/Write/Edit/Bash/Skill/Note as first-class
+        # tools — without them a native session can only reach the app's bridged
+        # MCP servers and has no file/shell access at all. The delegated leg must
+        # NOT get them: the claude CLI supplies its own copies. Conversely the
+        # CLI must never be relied on for tools outside the Claude-subscription
+        # case, which is exactly why the native leg registers its own here.
+        builtins_registered = False
+        if native:
+            from omni.tools.builtins import register_builtins
+
+            register_builtins(registry)
+            builtins_registered = True
+            logger.info("[HarnessAdapter] registered omni builtin tools for native leg")
+
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per
         # instance when patch_sdk_server assembled them; re-register the same
@@ -951,7 +973,7 @@ class HarnessAdapter(ProviderAdapter):
             except Exception as exc:  # best-effort; a bad MCP server must not fail connect
                 logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
 
-        if not recorded and not inproc_servers and not external_mcp:
+        if not builtins_registered and not recorded and not inproc_servers and not external_mcp:
             return None
         return registry
 

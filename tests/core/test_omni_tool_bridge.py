@@ -109,7 +109,7 @@ async def test_build_registry_bridges_recorded_servers_and_dispatches():
 
     adapter = HarnessAdapter()
     options = SessionOptions(model="fake", mcp_servers={"builtins": cfg})
-    registry = await adapter._build_registry(options)
+    registry = await adapter._build_registry(options, native=False)
     assert registry is not None
 
     outcome = await registry.dispatch("mcp__builtins__Monitor", {"x": 1})

@@ -754,6 +754,111 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
     assert captured["partial"] is False
 
 
+# ─── 7. Builtin file/shell tools on the native leg ───────────────────────────
+
+_OMNI_BUILTINS = {"Read", "Grep", "Write", "Edit", "Bash", "Skill", "Note"}
+
+
+class _FakeInprocTool:
+    name = "Ping"
+    description = "ping"
+    input_schema = {"type": "object"}
+    risk = "safe"
+
+    def as_handler(self):
+        async def handler(inp, ctx):
+            return "pong"
+
+        return handler
+
+
+class _FakeInprocServer:
+    name = "fake"
+    tools = [_FakeInprocTool()]
+
+
+def _names(registry) -> set:
+    return {spec.name for spec in registry.list_tools(loaded_only=False)}
+
+
+@pytest.mark.asyncio
+async def test_native_leg_registry_has_omni_builtins():
+    """Native legs talk to the provider API directly — without omni's builtins
+    the model has no file/shell tools at all."""
+    adapter = HarnessAdapter()
+    registry = await adapter._build_registry(SessionOptions(model="gpt-4o"), native=True)
+    assert registry is not None
+    assert _OMNI_BUILTINS <= _names(registry)
+
+
+@pytest.mark.asyncio
+async def test_delegated_leg_registry_has_no_omni_builtins():
+    """The claude CLI ships its own Read/Bash/... — registering omni's here
+    would double up on the delegated leg."""
+    adapter = HarnessAdapter()
+    options = SessionOptions(
+        model="fable", extra={"omni_inproc_servers": [_FakeInprocServer()]}
+    )
+    registry = await adapter._build_registry(options, native=False)
+    assert registry is not None
+    names = _names(registry)
+    assert "mcp__fake__Ping" in names
+    assert not (_OMNI_BUILTINS & names)
+
+    # With nothing to bridge at all the delegated leg still gets no registry.
+    assert await adapter._build_registry(SessionOptions(model="fable"), native=False) is None
+
+
+@pytest.mark.asyncio
+async def test_connect_native_leg_passes_builtin_registry_to_native_loop(monkeypatch):
+    """connect() must decide the leg BEFORE building the registry, so the
+    NativeLoop receives one carrying the builtins."""
+    import app.core.provider.harness_adapter as ha
+
+    captured: dict = {}
+
+    class FakeNativeLoop:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+        async def _ensure_session(self):
+            class _Meta:
+                session_id = "ses_native"
+
+            return _Meta()
+
+        async def aclose(self):
+            pass
+
+    async def fake_client(kind, options):
+        return FakeProvider([])
+
+    monkeypatch.setattr(ha, "NativeLoop", FakeNativeLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", fake_client)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(model="gpt-4o", extra={"omni_provider": "openai_responses"})
+    )
+    assert adapter._is_delegated is False
+    assert _OMNI_BUILTINS <= _names(captured["registry"])
+
+
+@pytest.mark.asyncio
+async def test_on_write_policy_gates_builtin_bash_but_not_read():
+    """The permission prompt only becomes reachable once the builtins exist:
+    Bash is risk='write' (ask), Read is risk='safe' (allow)."""
+    from omni.permissions.engine import PermissionEngine
+
+    adapter = HarnessAdapter()
+    registry = await adapter._build_registry(SessionOptions(model="gpt-4o"), native=True)
+    engine = PermissionEngine(approval_policy="on_write")
+
+    assert engine.evaluate(registry.get("Bash"), {"command": "ls"}) == "ask"
+    assert engine.evaluate(registry.get("Read"), {"file_path": "/tmp/x"}) == "allow"
+
+
 def test_requires_reconnect():
     a = HarnessAdapter()
     a._options = SessionOptions(model="m", system_prompt="S", cwd="/w")
