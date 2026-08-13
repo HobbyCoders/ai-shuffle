@@ -1547,3 +1547,142 @@ async def test_disconnect_closes_capture_http_client():
     assert closed["count"] == 1
     assert adapter._provider_http is None
     assert adapter._connected is False
+
+
+# ─── 9. Bus seq seeding on resume (durable-event-loss regression) ────────────
+#
+# omni's EventBus numbers events off its IN-MEMORY log (seq = len(log) + 1). A
+# freshly built engine over a resumed session starts with an empty log, so it
+# re-uses seq 1..N — and the durable append is idempotent per (session_id, seq),
+# so those events are silently dropped. Headless one-shot turns (ScheduleWakeup
+# wakes, automations) build a new adapter per turn and hit this EVERY turn, so
+# whole wake turns never reached omni_session_events (and the live feed).
+# connect() now seeds the bus log from the store, restoring seq continuity.
+
+_SEED_CHUNKS = [
+    StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+    StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+    StreamChunk("text_delta", {"index": 0, "text": "fresh reply"}),
+    StreamChunk("block_stop", {"index": 0}),
+    StreamChunk("usage", {"usage": {"output_tokens": 2}, "stop_reason": "end_turn"}),
+]
+
+
+def _old_event(sid: str, seq: int) -> "lm.TextDelta":
+    return lm.TextDelta(session_id=sid, index=0, text=f"old-{seq}", seq=seq)
+
+
+async def _seeded_store(sid: str, seqs: list[int]) -> MemoryStore:
+    store = MemoryStore()
+    await store.create_session(sid)
+    for seq in seqs:
+        await store.append_event(sid, _old_event(sid, seq))
+    return store
+
+
+async def _connect_native(monkeypatch, store, tmp_path, **option_kwargs) -> HarnessAdapter:
+    """connect() a REAL NativeLoop (real EventBus) over a fake provider."""
+    import app.core.provider.harness_adapter as ha
+
+    async def fake_client(kind, options):
+        return FakeProvider(list(_SEED_CHUNKS)), None
+
+    monkeypatch.setattr(ha, "_build_provider_client", fake_client)
+    monkeypatch.setattr(HarnessAdapter, "_build_store", staticmethod(lambda _o: store))
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(
+        SessionOptions(
+            model="gpt-4o",
+            cwd=str(tmp_path),
+            include_partial_messages=True,
+            extra={"omni_provider": "openai_responses"},
+            **option_kwargs,
+        )
+    )
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_resume_seeds_bus_log_and_continues_seq(monkeypatch, tmp_path):
+    """A resumed session's new events must persist — i.e. continue at N+1."""
+    sid = "ses_seed"
+    store = await _seeded_store(sid, [1, 2, 3])
+
+    adapter = await _connect_native(monkeypatch, store, tmp_path, resume_session_id=sid)
+    try:
+        # The bus log is primed with the durable history, and the replay cursor
+        # sits past it so receive_events() will not re-yield old turns.
+        assert adapter._event_cursor == 3
+        assert [e.seq for e in adapter._engine.bus.log(sid)] == [1, 2, 3]
+        assert [e.text for e in adapter._engine.bus.log(sid)] == [
+            "old-1", "old-2", "old-3",
+        ]
+
+        await adapter.send_query("hi")
+        got = await _collect(adapter)
+
+        # (i) no historical event leaks into this turn's stream
+        delta_texts = [
+            e.event["delta"]["text"]
+            for e in got
+            if isinstance(e, StreamEvent) and e.event.get("delta", {}).get("type")
+            == "text_delta"
+        ]
+        assert delta_texts == ["fresh reply"]
+        assert not any("old-" in t for t in delta_texts)
+
+        # (ii) the turn's events landed durably, numbered strictly after the
+        # stored tail — the seq collision that dropped them is gone.
+        seqs = [e.seq for e in store._events[sid]]
+        assert seqs[:3] == [1, 2, 3]
+        new_seqs = seqs[3:]
+        assert new_seqs and new_seqs[0] == 4
+        assert new_seqs == sorted(new_seqs) and len(set(new_seqs)) == len(new_seqs)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_fresh_session_starts_at_seq_one(monkeypatch, tmp_path):
+    """Nothing stored → nothing to seed; numbering starts at 1 as before."""
+    store = MemoryStore()
+    adapter = await _connect_native(monkeypatch, store, tmp_path)
+    try:
+        assert adapter._event_cursor == 0
+        sid = adapter._engine.session_id
+        assert adapter._engine.bus.log(sid) == []
+
+        await adapter.send_query("hi")
+        await _collect(adapter)
+
+        seqs = [e.seq for e in store._events[sid]]
+        assert seqs and seqs[0] == 1
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, caplog):
+    """A holed durable log (the fingerprint of prior drops) seeds only its
+    contiguous prefix — the bus indexes its log positionally, so seeding past a
+    hole would mis-number everything after it."""
+    import logging
+
+    sid = "ses_holed"
+    store = await _seeded_store(sid, [1, 2, 5])
+
+    with caplog.at_level(logging.WARNING, logger="app.core.provider.harness_adapter"):
+        adapter = await _connect_native(
+            monkeypatch, store, tmp_path, resume_session_id=sid
+        )
+    try:
+        assert [e.seq for e in adapter._engine.bus.log(sid)] == [1, 2]
+        assert adapter._event_cursor == 2
+        assert any(
+            "non-contiguous durable event log" in r.getMessage() and sid in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        await adapter.disconnect()

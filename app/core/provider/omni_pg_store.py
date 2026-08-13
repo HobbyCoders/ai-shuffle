@@ -120,11 +120,22 @@ def _set_cli_session_id_sync(session_id: str, cli_session_id: Optional[str]) -> 
 
 def _append_event_sync(session_id: str, event_dict: Dict[str, Any], seq: int) -> None:
     with get_db() as conn:
-        conn.cursor().execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO omni_session_events (session_id, seq, event) "
             "VALUES (%s, %s, %s) ON CONFLICT (session_id, seq) DO NOTHING",
             (session_id, seq, Json(event_dict)),
         )
+        # The conflict clause is there for legitimate bus replays, but it also
+        # hides real loss: an engine whose in-memory log restarted at seq 1 for
+        # a resumed session re-uses numbers that already exist, and its events
+        # vanish. Never let that be silent again.
+        if cur.rowcount == 0:
+            logger.warning(
+                "omni event DROPPED by seq collision: session=%s seq=%s "
+                "type=%s (a row with that seq already exists)",
+                session_id, seq, event_dict.get("_cls"),
+            )
 
 
 # ─── Async SessionStore ──────────────────────────────────────────────────────
