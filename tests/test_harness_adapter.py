@@ -859,6 +859,164 @@ async def test_on_write_policy_gates_builtin_bash_but_not_read():
     assert engine.evaluate(registry.get("Read"), {"file_path": "/tmp/x"}) == "allow"
 
 
+# ─── P1 prompt compiler integration (rulings A1/A3/A12) ──────────────────────
+
+
+class _CapturingLoop:
+    """Shared fake for NativeLoop/DelegatedLoop kwarg capture."""
+
+    captured: dict = {}
+
+    def __init__(self, **kwargs):
+        type(self).captured = dict(kwargs)
+
+    async def _ensure_session(self):
+        class _Meta:
+            session_id = "ses_x"
+
+        return _Meta()
+
+    async def aclose(self):
+        pass
+
+
+async def _fake_provider_client(kind, options):
+    return FakeProvider([]), None
+
+
+@pytest.mark.asyncio
+async def test_native_leg_system_prompt_is_compiled(monkeypatch, tmp_path):
+    """Native legs always run the omni-compiled prompt: base first, append
+    text as a block, env gathered by omni."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            system_prompt="I am the configured agent prompt.",
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert system.startswith("I am the configured agent prompt.")
+    assert "# Environment" in system
+    assert f"Working directory: {tmp_path.resolve()}" in system
+
+
+@pytest.mark.asyncio
+async def test_native_leg_preset_append_rides_as_block(monkeypatch, tmp_path):
+    """A preset-shaped profile has no base; its append text (security +
+    instructions) must still appear in the compiled output, after env."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            system_prompt={"type": "preset", "preset": "claude_code", "append": "SECURITY BLOCK"},
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert "SECURITY BLOCK" in system
+    assert system.index("# Environment") < system.index("SECURITY BLOCK")
+
+
+@pytest.mark.asyncio
+async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
+    """inject_env_details profiles already carry the app's <env> block —
+    omni's env section must be skipped, not doubled."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    base = "PROMPT\n\n<env>\nWorking directory: /w\n</env>"
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="gpt-4o",
+            system_prompt=base,
+            cwd=str(tmp_path),
+            extra={"omni_provider": "openai_responses"},
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert "<env>" in system
+    assert "# Environment" not in system
+
+
+@pytest.mark.asyncio
+async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
+    """Flag off (default): the delegated leg's system/append pass through
+    byte-identically — the CLI gathers its own env/instructions."""
+    import app.core.provider.harness_adapter as ha
+    from omni.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            system_prompt={"type": "preset", "append": "APPEND TEXT"},
+            cwd=str(tmp_path),
+            extra={"omni_registry": ToolRegistry()},
+        )
+    )
+    assert _CapturingLoop.captured["system"] is None
+    assert _CapturingLoop.captured["append_system_prompt"] == "APPEND TEXT"
+
+
+@pytest.mark.asyncio
+async def test_delegated_full_replace_compiles(monkeypatch, tmp_path):
+    """PROMPT_FULL_REPLACE=true: the delegated leg gets the compiled prompt
+    via --system-prompt and no append."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+    from omni.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", True)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            system_prompt={"type": "preset", "append": "APPEND TEXT"},
+            cwd=str(tmp_path),
+            extra={"omni_registry": ToolRegistry()},
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    assert "APPEND TEXT" in system
+    assert "# Environment" in system
+
+
+@pytest.mark.asyncio
+async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
+    """add_dirs (notes dir et al.) must reach the CLI as --add-dir dirs."""
+    import app.core.provider.harness_adapter as ha
+    from omni.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            cwd=str(tmp_path),
+            add_dirs=["/notes", "/extra"],
+            extra={"omni_registry": ToolRegistry()},
+        )
+    )
+    assert _CapturingLoop.captured["add_dirs"] == ["/notes", "/extra"]
+
+
 def test_requires_reconnect():
     a = HarnessAdapter()
     a._options = SessionOptions(model="m", system_prompt="S", cwd="/w")

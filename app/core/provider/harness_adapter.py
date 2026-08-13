@@ -63,6 +63,14 @@ DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``task_budget`` / ``session_store`` / ``session_store_flush`` — SDK session-store
     concepts; omni persistence is the JsonlStore/MemoryStore chosen above.
   * ``enable_file_checkpointing`` / ``stderr`` / ``max_buffer_size`` / ``user`` — ignored.
+
+HONORED SINCE THE P1 COMPILER LANDED (2026-08-13):
+  * ``add_dirs`` — projected onto SessionOptions and passed to the delegated
+    leg as repeated ``--add-dir`` flags (native-leg omni tools are not
+    path-sandboxed, so no equivalent is needed there).
+  * system prompts on native legs (and the delegated leg under
+    PROMPT_FULL_REPLACE) run through ``omni.context.compiler`` — instruction
+    files, skills index, and environment are omni-gathered (ruling A1).
 """
 
 from __future__ import annotations
@@ -210,11 +218,24 @@ class HarnessAdapter(ProviderAdapter):
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(omni_session_id, options)
+            # Staged flip (ruling A3): append mode (default) keeps the CLI's
+            # own preset + env/instruction gathering and passes our text
+            # through untouched; full-replace hands the CLI the omni-compiled
+            # prompt instead. Compiling env/instructions in append mode would
+            # duplicate what the CLI gathers itself, so the compiler is only
+            # invoked under full-replace.
+            from app.core.config import settings
+
+            if settings.prompt_full_replace:
+                delegated_system = self._compile_prompt(system, append_system, options)
+                delegated_append = None
+            else:
+                delegated_system, delegated_append = system, append_system
             self._engine = DelegatedLoop(
                 store=self._store,
                 model=options.model,
-                system=system,
-                append_system_prompt=append_system,
+                system=delegated_system,
+                append_system_prompt=delegated_append,
                 permission_mode=options.permission_mode,
                 registry=self._registry,
                 ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
@@ -236,6 +257,7 @@ class HarnessAdapter(ProviderAdapter):
                 mcp_servers=_external_mcp_servers(options.mcp_servers),
                 cwd=options.cwd,
                 env=options.env,
+                add_dirs=list(options.add_dirs) if options.add_dirs else None,
                 claude_cmd=_resolve_claude_cmd(),
             )
         else:
@@ -245,10 +267,12 @@ class HarnessAdapter(ProviderAdapter):
                 provider=provider_client,
                 store=self._store,
                 model=options.model,
-                # Native legs have no Claude Code preset to append to — the
-                # preset form's append text (security + profile instructions)
-                # becomes the system prompt itself.
-                system=system if system is not None else append_system,
+                # Native legs have no Claude Code preset — they always run the
+                # omni-compiled prompt: the profile's configured prompt as the
+                # base (a preset-shaped profile has none) with the append text
+                # (security + profile instructions) riding as an extra block,
+                # plus omni's own instruction-file/skills/env gathering.
+                system=self._compile_prompt(system, append_system, options),
                 registry=self._registry,
                 permissions=permissions,
                 ctx=ToolCtx(cwd=options.cwd or ".", session_id=omni_session_id),
@@ -286,6 +310,7 @@ class HarnessAdapter(ProviderAdapter):
             include_partial_messages=bool(
                 getattr(sdk_options, "include_partial_messages", False)
             ),
+            add_dirs=getattr(sdk_options, "add_dirs", None),
         )
         # The session's bound model provider (``sessions.provider_id``) rides on
         # the SDK options object as ``aih_provider_id`` (stamped by
@@ -919,6 +944,40 @@ class HarnessAdapter(ProviderAdapter):
         return []
 
     # ─── Internal builders ────────────────────────────────────────────
+
+    @staticmethod
+    def _compile_prompt(
+        system: Optional[str],
+        append_system: Optional[str],
+        options: SessionOptions,
+    ) -> Optional[str]:
+        """Run the omni prompt compiler over the app's system-prompt parts.
+
+        ``system`` (a custom/plain-string profile prompt) is the base — the
+        agent's configured prompt, ruling A12. ``append_system`` (the preset
+        shape's security+instructions text) rides as an extra block. The
+        compiler adds omni's own gathering: instruction files, skills index,
+        environment. Never raises — a compiler failure falls back to the
+        pre-compiler string so a session can always start.
+        """
+        try:
+            from omni.context.compiler import PromptInputs, compile_system_prompt
+
+            # A profile with ``inject_env_details`` on already carries the
+            # app's <env> block (which knows worktree/execution mode omni
+            # doesn't) — skip omni's env section rather than injecting twice.
+            has_app_env = bool(system) and "<env>" in system
+            return compile_system_prompt(
+                PromptInputs(
+                    base=system,
+                    extra_blocks=[append_system] if append_system else [],
+                    cwd=options.cwd or ".",
+                    include_env=not has_app_env,
+                )
+            )
+        except Exception:
+            logger.exception("prompt compiler failed; falling back to raw parts")
+            return system if system is not None else append_system
 
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:

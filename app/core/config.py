@@ -329,6 +329,16 @@ class Settings(BaseSettings):
     # field name).
     provider_agent_enabled: bool = True
 
+    # Staged flip for the compiled system prompt on the delegated (claude CLI)
+    # leg (agents-program ruling A3). False (default): the CLI keeps its own
+    # Claude Code preset and receives the agent's configured prompt + app
+    # blocks via --append-system-prompt (byte-identical to pre-compiler
+    # behavior). True: the omni compiler's full output (base + instruction
+    # files + skills + env + blocks) replaces the CLI preset via
+    # --system-prompt. Native legs always run the compiled prompt; this flag
+    # only affects the delegated leg. Set via PROMPT_FULL_REPLACE.
+    prompt_full_replace: bool = False
+
     # Hard ceiling, in seconds, on a single ProviderAgent worker. When the
     # worker session has not gone idle by then the tool interrupts it and
     # returns a FAILED result — the parent turn must never hang on a worker
