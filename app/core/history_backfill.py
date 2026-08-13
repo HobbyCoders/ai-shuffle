@@ -134,6 +134,7 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
     Mirrors the ``/live`` persistent fallback chain (``app.api.sessions``
     get_live_session):
 
+      0. omni store (flag-on sessions) — short-circuits everything below
       1. legacy ``session_messages`` via ``db_message_loader`` (non postgres_only)
       2. JSONL parse — or the store-backed parser under postgres_only
       3. postgres_only legacy rescue: empty store → legacy ``session_messages``
@@ -144,6 +145,32 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
 
     from app.core.config import settings
     postgres_only = settings.session_store_mode == "postgres_only"
+
+    sdk_session_id = session.get("sdk_session_id")
+
+    # Step 0 — omni (flag-on) session: the transcript is omni's parent-linked
+    # node DAG, which EVERY loader below is blind to (they read
+    # session_messages / JSONL / session_store_entries). Without this the chain
+    # returns [] for a forked or reloaded omni session, the event log gets
+    # seeded with nothing, and the V2 frontend — which renders from the event
+    # feed, not from /live — shows an EMPTY conversation. Same branch (and same
+    # lazy import) the /live read path already carries.
+    if sdk_session_id:
+        try:
+            from app.core.provider.omni_transcript import (
+                is_omni_session,
+                omni_live_messages,
+            )
+            if is_omni_session(sdk_session_id):
+                from app.core.message_resolver import resolve_working_dir
+                working_dir = resolve_working_dir(dict(session))
+                msgs, _usage = omni_live_messages(sdk_session_id, working_dir)
+                return msgs
+        except Exception:
+            logger.warning(
+                "[history_backfill] omni transcript load failed for %s", session_id,
+                exc_info=True,
+            )
 
     if not postgres_only:
         try:
@@ -157,7 +184,6 @@ def _load_legacy_history(session_id: str) -> List[Dict[str, Any]]:
                 exc_info=True,
             )
 
-    sdk_session_id = session.get("sdk_session_id")
     if sdk_session_id:
         try:
             from app.core.message_resolver import resolve_working_dir

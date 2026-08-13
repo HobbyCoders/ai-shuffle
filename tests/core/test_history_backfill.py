@@ -17,6 +17,7 @@ import pytest
 import app.core.history_backfill as hb
 from app.core.history_backfill import convert_messages_to_events, ensure_backfilled
 from app.db import session_events as se
+from app.db import sessions as sessions_db
 
 SID = "sess-backfill"
 
@@ -365,6 +366,109 @@ async def test_lost_race_is_silent(mock_db, monkeypatch):
     )
     await ensure_backfilled(SID)  # must not raise
     assert se.get_events(SID) == []
+
+
+# ---------------------------------------------------------------------------
+# omni (flag-on) sessions — the transcript no legacy loader can see
+# ---------------------------------------------------------------------------
+
+OMNI_SID = "sess-omni-backfill"
+OMNI_SDK_ID = "ses_backfill01"
+
+
+def _omni_message(role, text):
+    return {
+        "role": role,
+        "content": [{"kind": "text", "text": text}],
+        "provider_meta": {},
+    }
+
+
+def _seed_omni_session(app_session_id=OMNI_SID, sdk_session_id=OMNI_SDK_ID):
+    """A session row bound to a two-node omni transcript (user + assistant).
+
+    Rows are written exactly as ``PgOmniStore`` writes them (see
+    tests/core/test_omni_transcript.py, which pins the fixture shape against
+    omni's real serializer).
+    """
+    from psycopg2.extras import Json
+
+    from app.db.base import get_cursor, get_db
+
+    sessions_db.create_session(app_session_id, "default")
+    sessions_db.update_session(app_session_id, sdk_session_id=sdk_session_id)
+
+    nodes = [
+        ("n1", None, _omni_message("user", "omni prompt")),
+        ("n2", "n1", _omni_message("assistant", "omni reply")),
+    ]
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            "INSERT INTO omni_sessions (session_id, head_node_id, created_at) "
+            "VALUES (%s, %s, %s)",
+            (sdk_session_id, nodes[-1][0], 1000.0),
+        )
+        for i, (node_id, parent_id, message) in enumerate(nodes):
+            cursor.execute(
+                "INSERT INTO omni_session_nodes "
+                "(session_id, node_id, parent_id, ts, message) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (sdk_session_id, node_id, parent_id, 1000.0 + i, Json(message)),
+            )
+    return app_session_id
+
+
+async def test_omni_session_seeds_the_event_feed_from_the_omni_store(mock_db):
+    """The V2 frontend renders from the event feed, so an omni session whose
+    backfill found nothing rendered as an EMPTY conversation (forked/reloaded
+    omni sessions in production). The loader must read omni's node tree."""
+    _seed_omni_session()
+
+    await ensure_backfilled(OMNI_SID)
+
+    rows = se.get_events(OMNI_SID)
+    assert [r["event_type"] for r in rows] == [
+        "message.user", "message.assistant",
+    ]
+    assert [r["payload"]["content"] for r in rows] == [
+        "omni prompt", "omni reply",
+    ]
+    assert all(r["turn_id"] == "backfill" for r in rows)
+    assert all(r["run_id"] is None for r in rows)
+
+
+def test_omni_branch_short_circuits_the_db_loader_fast_path(mock_db, monkeypatch):
+    """The omni lookup is hoisted ABOVE the db_message_loader fast path: for an
+    omni session the legacy table only ever holds a partial (user-rows-only)
+    view, and letting it win would shadow the real transcript."""
+    _seed_omni_session()
+    import app.core.db_message_loader as dml
+    monkeypatch.setattr(
+        dml, "load_messages_from_db",
+        lambda sid: ([{"role": "user", "type": "text", "content": "LEGACY TRAP"}], True),
+    )
+
+    messages = hb._load_legacy_history(OMNI_SID)
+
+    assert [m["content"] for m in messages] == ["omni prompt", "omni reply"]
+
+
+def test_legacy_session_still_uses_the_db_loader(mock_db, monkeypatch):
+    """Flag-off safety: a CLI-UUID session never enters the omni branch."""
+    sessions_db.create_session("sess-legacy-bf", "default")
+    sessions_db.update_session(
+        "sess-legacy-bf", sdk_session_id="8f1c2a34-0000-4000-8000-000000000001"
+    )
+    import app.core.db_message_loader as dml
+    monkeypatch.setattr(
+        dml, "load_messages_from_db",
+        lambda sid: ([{"role": "user", "type": "text", "content": "legacy row"}], True),
+    )
+
+    messages = hb._load_legacy_history("sess-legacy-bf")
+
+    assert [m["content"] for m in messages] == ["legacy row"]
 
 
 # ---------------------------------------------------------------------------
