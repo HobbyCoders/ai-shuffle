@@ -99,6 +99,7 @@ BUILTIN_TOOLS = [
     {"name": "TaskUpdate", "category": "task_management", "description": "Update a task's status"},
 
     # Scheduling tools
+    {"name": "Memory", "category": "task_management", "description": "Read and update the agent's persistent memory"},
     {"name": "ScheduleWakeup", "category": "scheduling", "description": "Pause and resume the session after a delay"},
     {"name": "CronCreate", "category": "scheduling", "description": "Create a recurring scheduled task"},
     {"name": "CronList", "category": "scheduling", "description": "List scheduled tasks"},
@@ -142,6 +143,7 @@ TOOL_DESCRIPTIONS = {
     "TaskGet": "Get a task from the task list",
     "TaskList": "List tracked tasks",
     "TaskUpdate": "Update a task's status",
+    "Memory": "Read and update the agent's persistent memory",
     "ScheduleWakeup": "Pause and resume the session after a delay",
     "CronCreate": "Create a recurring scheduled task",
     "CronList": "List scheduled tasks",
@@ -165,7 +167,7 @@ TOOL_CATEGORY_RULES = {
     "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput", "ToolSearch"],
     "edit": ["Edit", "Write", "NotebookEdit"],
     "execution": ["Bash", "PowerShell", "Agent", "Workflow", "Monitor", "TaskStop", "Task", "KillShell"],
-    "task_management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"],
+    "task_management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite", "Memory"],
     "scheduling": ["ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "RemoteTrigger"],
     "worktree": ["EnterWorktree", "ExitWorktree"],
     "notification": ["SendUserFile"],

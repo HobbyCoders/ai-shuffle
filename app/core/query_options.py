@@ -547,6 +547,25 @@ def build_options_from_profile(
             agents_dict = None
         logger.debug(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
+    # Per-agent memory (ruling A11): the profile's durable memory text rides
+    # into the prompt on every leg — as append text on the preset shape (so the
+    # delegated CLI sees it) and as part of the string prompt otherwise (the
+    # omni compiler folds it into the compiled output on native legs). The
+    # Memory builtin tool is the write path.
+    agent_memory = (config.get("memory") or "").strip()
+    if agent_memory:
+        memory_block = (
+            "# Agent memory\n"
+            "Yours, persistent across sessions. Update it with the Memory tool "
+            "when you learn something durable about the user or your work.\n\n"
+            + agent_memory
+        )
+        if isinstance(final_system_prompt, dict):
+            current_append = final_system_prompt.get("append", "")
+            final_system_prompt["append"] = current_append + "\n\n" + memory_block
+        else:
+            final_system_prompt += "\n\n" + memory_block
+
     # Inject built-in agent instructions into system prompt (only for enabled built-in agents)
     if enabled_agent_ids:
         from app.core.builtin_subagents import get_system_prompt_instructions

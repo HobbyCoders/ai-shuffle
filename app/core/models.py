@@ -165,6 +165,13 @@ class ProfileConfig(BaseModel):
     # Enabled subagent IDs - references global subagents by ID
     enabled_agents: Optional[List[str]] = None
 
+    # Per-agent memory (agents-program ruling A11): durable text owned by THIS
+    # agent, injected into the compiled system prompt whenever the agent runs,
+    # in any session — "the same agent learning and growing with you". Written
+    # by the agent itself through the Memory builtin tool; edited in the
+    # agents UI. Size-capped at write time (see app/mcp/builtin_tools.py).
+    memory: Optional[str] = None
+
     # Plugins - list of plugin paths to load
     # Each entry should be a path to a plugin directory containing .claude-plugin/plugin.json
     # Paths can be relative (resolved from workspace) or absolute
