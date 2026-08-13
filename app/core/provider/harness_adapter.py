@@ -1047,14 +1047,16 @@ class HarnessAdapter(ProviderAdapter):
         # instance when patch_sdk_server assembled them; re-register the same
         # tools on omni's registry with the bridge's risk maps.
         from app.core.provider.omni_tool_bridge import register_recorded_sdk_servers
-        # Native legs run omni's bare-named Task builtin (ruling A13) — the
-        # bridged mcp__builtins__Task copy is excluded so the model sees ONE
-        # orchestration tool. The delegated leg keeps the MCP copy (the CLI
-        # can only receive external tools via --mcp-config).
+        # Native legs run omni's bare-named Task builtin (ruling A13) and its
+        # ToolSearch (the functional deferred-schema loader for THIS registry)
+        # — the bridged mcp__builtins__ copies are excluded so the model sees
+        # ONE of each. The delegated leg keeps the MCP copies (the CLI can
+        # only receive external tools via --mcp-config, and its own native
+        # ToolSearch serves the CLI-side registry).
         recorded = register_recorded_sdk_servers(
             registry,
             options.mcp_servers,
-            skip_tools={"builtins": {"Task"}} if native else None,
+            skip_tools={"builtins": {"Task", "ToolSearch"}} if native else None,
         )
         if recorded:
             logger.info(
