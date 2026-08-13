@@ -24,7 +24,7 @@
 		compact?: boolean;
 		onRespond?: (detail: {
 			request_id: string;
-			decision: 'allow' | 'deny' | 'defer';
+			decision: 'allow' | 'deny';
 			remember?: 'none' | 'session' | 'profile';
 			pattern?: string;
 		}) => void;
@@ -33,9 +33,13 @@
 	let { request, isFirst = true, queueCount = 1, compact = false, onRespond }: Props = $props();
 
 	let showDetails = $state(false);
-	let rememberChoice = $state<'none' | 'session' | 'profile'>('none');
-	let customPattern = $state('');
-	let isEditingPattern = $state(false);
+	/**
+	 * "Always do this for this tool" — a single opt-in that applies to whichever
+	 * action button is pressed next (Approve → always allow, Deny → always deny).
+	 * It maps to the existing profile-scoped remember rule with NO input pattern,
+	 * so the saved rule matches every future call of this tool.
+	 */
+	let alwaysForTool = $state(false);
 	// Slice D: collapse/expand state for long descriptions + reason/blocked details
 	let descriptionExpanded = $state(false);
 	let enrichmentDetailsExpanded = $state(false);
@@ -172,99 +176,43 @@
 		return result;
 	}
 
-	// Get suggested pattern based on tool type
-	function getSuggestedPattern(): string {
-		const input = request.tool_input;
-
-		switch (request.tool_name) {
-			case 'Bash': {
-				const cmd = (input.command as string) || '';
-				const firstWord = cmd.split(' ')[0];
-				return `${firstWord} *`;
-			}
-			case 'Read':
-			case 'Write':
-			case 'Edit': {
-				const path = (input.file_path as string) || '';
-				const dir = path.substring(0, path.lastIndexOf('/'));
-				return dir ? `${dir}/*` : '*';
-			}
-			case 'Glob':
-			case 'Grep': {
-				const path = (input.path as string) || '';
-				return path || '*';
-			}
-			case 'WebFetch': {
-				const url = (input.url as string) || '';
-				try {
-					const parsed = new URL(url);
-					return `${parsed.origin}/*`;
-				} catch {
-					return '*';
-				}
-			}
-			default:
-				return '*';
-		}
-	}
-
-	// Get the pattern to use (custom or suggested)
-	function getActivePattern(): string {
-		return customPattern || getSuggestedPattern();
+	/** Remember scope for the decision about to be sent. The checkbox is a
+	 *  tool-wide "always" — profile-scoped and pattern-less. Plan approvals
+	 *  never remember. */
+	function currentRemember(): 'none' | 'profile' {
+		return !isExitPlanMode && alwaysForTool ? 'profile' : 'none';
 	}
 
 	function handleAllow() {
-		const remember = isExitPlanMode ? 'none' : rememberChoice;
 		onRespond?.({
 			request_id: request.request_id,
 			decision: 'allow',
-			remember,
-			pattern: remember !== 'none' ? getActivePattern() : undefined
+			remember: currentRemember()
 		});
 	}
 
 	function handleDeny() {
-		const remember = isExitPlanMode ? 'none' : rememberChoice;
 		onRespond?.({
 			request_id: request.request_id,
 			decision: 'deny',
-			remember,
-			pattern: remember !== 'none' ? getActivePattern() : undefined
-		});
-	}
-
-	// Slice B: Defer — backend ignores remember/pattern for defer decisions.
-	function handleDefer() {
-		onRespond?.({
-			request_id: request.request_id,
-			decision: 'defer',
+			remember: currentRemember()
 		});
 	}
 
 	// Keyboard shortcuts
 	function handleKeydown(e: KeyboardEvent) {
-		if (isEditingPattern) return;
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			handleAllow();
 		} else if (e.key === 'Escape') {
 			e.preventDefault();
 			handleDeny();
-		} else if ((e.key === 'd' || e.key === 'D') && !isExitPlanMode && !e.metaKey && !e.ctrlKey && !e.altKey) {
-			// Skip if user is typing in another input; <svelte:window> handler still
-			// fires when textarea has focus, so guard against contentEditable / inputs.
-			const target = e.target as HTMLElement | null;
-			const tag = target?.tagName;
-			if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
-			e.preventDefault();
-			handleDefer();
 		}
 	}
 
 	const config = $derived(getToolConfig(request.tool_name));
 	const summary = $derived(getToolSummary());
 	const formattedInput = $derived(formatToolInput(request.tool_input));
-	const suggestedPattern = $derived(getSuggestedPattern());
 
 	// Slice D: SDK 0.1.81 enrichment — prefer title, then display_name, then the
 	// existing tool config label. Existing label remains the final fallback.
@@ -638,131 +586,20 @@
 		{/if}
 	</div>
 
-	<!-- Remember Options - Always Visible -->
+	<!-- Remember Option — one checkbox that applies to whichever button is pressed -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/30">
-		<div class="space-y-2">
-			<!-- Just Once -->
-			<label class="remember-option {rememberChoice === 'none' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="none"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'none'}
-							<div class="radio-dot"></div>
-						{/if}
-					</div>
-					<div class="flex-1">
-						<span class="text-sm font-medium text-foreground">Just this once</span>
-					</div>
-				</div>
-			</label>
-
-			<!-- This Session -->
-			<label class="remember-option {rememberChoice === 'session' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="session"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'session'}
-							<div class="radio-dot"></div>
-						{/if}
-					</div>
-					<div class="flex-1 flex items-center justify-between gap-2">
-						<span class="text-sm font-medium text-foreground">This session</span>
-						{#if rememberChoice === 'session'}
-							<div class="pattern-display">
-								{#if isEditingPattern}
-									<input
-										type="text"
-										bind:value={customPattern}
-										placeholder={suggestedPattern}
-										onfocus={() => isEditingPattern = true}
-										onblur={() => isEditingPattern = false}
-										onkeydown={(e) => e.key === 'Enter' && (isEditingPattern = false)}
-										class="pattern-input"
-									/>
-								{:else}
-									<button
-										type="button"
-										onclick={() => isEditingPattern = true}
-										class="pattern-badge"
-									>
-										<code>{customPattern || suggestedPattern}</code>
-										<svg class="w-3 h-3 ml-1 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-										</svg>
-									</button>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			</label>
-
-			<!-- Always -->
-			<label class="remember-option {rememberChoice === 'profile' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="profile"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'profile'}
-							<div class="radio-dot"></div>
-						{/if}
-					</div>
-					<div class="flex-1 flex items-center justify-between gap-2">
-						<span class="text-sm font-medium text-foreground">Always allow</span>
-						{#if rememberChoice === 'profile'}
-							<div class="pattern-display">
-								{#if isEditingPattern}
-									<input
-										type="text"
-										bind:value={customPattern}
-										placeholder={suggestedPattern}
-										onfocus={() => isEditingPattern = true}
-										onblur={() => isEditingPattern = false}
-										onkeydown={(e) => e.key === 'Enter' && (isEditingPattern = false)}
-										class="pattern-input"
-									/>
-								{:else}
-									<button
-										type="button"
-										onclick={() => isEditingPattern = true}
-										class="pattern-badge"
-									>
-										<code>{customPattern || suggestedPattern}</code>
-										<svg class="w-3 h-3 ml-1 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-										</svg>
-									</button>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			</label>
-		</div>
-
-		<!-- Pattern Help Text -->
-		{#if rememberChoice !== 'none'}
-			<p class="mt-2 text-[11px] text-muted-foreground">
-				Use <code class="px-1 py-0.5 bg-muted/50 rounded text-[10px]">*</code> as wildcard to match multiple inputs
-			</p>
-		{/if}
+		<label class="always-option {alwaysForTool ? 'selected' : ''}">
+			<input
+				type="checkbox"
+				bind:checked={alwaysForTool}
+				class="always-checkbox"
+				aria-describedby="always-hint-{request.request_id}"
+			/>
+			<span class="always-label">Always do this for {request.tool_name}</span>
+			<span id="always-hint-{request.request_id}" class="always-hint">
+				Remembers the next choice — Approve saves an always-allow rule, Deny saves an always-deny rule.
+			</span>
+		</label>
 	</div>
 
 	<!-- Action Buttons -->
@@ -777,24 +614,13 @@
 				Deny
 			</button>
 
-			<!-- Slice B: Defer Button — amber neutral, skip-for-later. -->
-			<button
-				type="button"
-				onclick={handleDefer}
-				class="defer-btn"
-				title="Skip this tool call; review later."
-				aria-label="Defer this permission request"
-			>
-				Defer
-			</button>
-
-			<!-- Allow Button -->
+			<!-- Approve Button -->
 			<button
 				type="button"
 				onclick={handleAllow}
 				class="allow-btn"
 			>
-				{rememberChoice === 'none' ? 'Allow' : rememberChoice === 'session' ? 'Allow (Session)' : 'Allow Always'}
+				Approve
 			</button>
 		</div>
 
@@ -802,11 +628,7 @@
 		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
-				<span>Allow</span>
-			</span>
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">D</kbd>
-				<span>Defer</span>
+				<span>Approve</span>
 			</span>
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
@@ -848,9 +670,16 @@
 		}
 	}
 
-	/* Remember Option Styling */
-	.remember-option {
-		display: block;
+	/* Remember Option — single "always for this tool" checkbox row. Mirrors the
+	   card convention used by the old remember rows: bordered surface, subtle
+	   tinted (never opaque) hover, 44px tap target on touch. */
+	.always-option {
+		display: grid;
+		grid-template-columns: 1rem 1fr;
+		grid-template-rows: auto auto;
+		gap: 0.25rem 0.75rem;
+		align-items: center;
+		min-height: 44px;
 		padding: 0.625rem 0.75rem;
 		border-radius: var(--radius, 0.75rem);
 		border: 1px solid var(--border);
@@ -859,104 +688,45 @@
 		transition: all 0.15s ease;
 	}
 
-	.remember-option:hover {
+	.always-option:hover {
 		border-color: var(--accent);
 		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
-	.remember-option.selected {
+	.always-option.selected {
 		border-color: var(--selection-ring);
 		background: color-mix(in oklch, var(--selection) 8%, var(--card));
 		box-shadow: var(--selection-shadow-subtle);
 	}
 
-	.remember-option:focus-within {
+	.always-option:focus-within {
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
 	}
 
-	.radio-indicator {
+	.always-checkbox {
+		grid-row: 1;
+		grid-column: 1;
 		width: 1rem;
 		height: 1rem;
-		border-radius: 50%;
-		border: 2px solid var(--muted-foreground);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: all 0.15s ease;
-		flex-shrink: 0;
-	}
-
-	.remember-option.selected .radio-indicator {
-		border-color: var(--selection);
-	}
-
-	.radio-dot {
-		width: 0.5rem;
-		height: 0.5rem;
-		border-radius: 50%;
-		background: var(--primary);
-		animation: dot-pop 0.15s ease;
-	}
-
-	@keyframes dot-pop {
-		from {
-			transform: scale(0);
-		}
-		to {
-			transform: scale(1);
-		}
-	}
-
-	/* Pattern Display */
-	.pattern-display {
-		flex-shrink: 0;
-	}
-
-	.pattern-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.7rem;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: 0.5rem;
-		color: var(--foreground);
+		margin: 0;
+		accent-color: var(--primary);
 		cursor: pointer;
-		transition: all 0.15s ease;
 	}
 
-	.pattern-badge:hover {
-		border-color: var(--accent);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
-	}
-
-	.pattern-badge:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.pattern-badge code {
-		font-family: var(--font-mono);
-	}
-
-	.pattern-input {
-		width: 120px;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.7rem;
-		font-family: var(--font-mono);
-		background: var(--input);
-		border: 1px solid var(--ring);
-		border-radius: 0.5rem;
+	.always-label {
+		grid-row: 1;
+		grid-column: 2;
+		font-size: 0.875rem;
+		font-weight: 500;
 		color: var(--foreground);
 	}
 
-	.pattern-input:focus {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.pattern-input::placeholder {
+	.always-hint {
+		grid-row: 2;
+		grid-column: 2;
+		font-size: 0.6875rem;
+		line-height: 1.4;
 		color: var(--muted-foreground);
 	}
 
@@ -1014,36 +784,7 @@
 		outline-offset: 2px;
 	}
 
-	/* Slice B: Defer button — amber/yellow neutral tone, between deny and allow. */
-	.defer-btn {
-		flex: 1 1 0%;
-		min-height: 44px;
-		padding: 0.625rem 1rem;
-		font-size: 0.875rem;
-		font-weight: 500;
-		border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--warning, #d97706) 12%, var(--card));
-		color: var(--warning, #d97706);
-		border: 1px solid color-mix(in oklch, var(--warning, #d97706) 35%, var(--border));
-		transition: all 0.15s ease;
-	}
-
-	.defer-btn:hover {
-		background: color-mix(in oklch, var(--warning, #d97706) 18%, var(--card));
-		border-color: color-mix(in oklch, var(--warning, #d97706) 50%, var(--border));
-		box-shadow: 0 0 12px color-mix(in oklch, var(--warning, #d97706) 20%, transparent);
-	}
-
-	.defer-btn:active {
-		transform: scale(0.98);
-	}
-
-	.defer-btn:focus-visible {
-		outline: 2px solid var(--warning, #d97706);
-		outline-offset: 2px;
-	}
-
-	/* Ensure all three action buttons clear the 44px mobile tap target. */
+	/* Ensure both action buttons clear the 44px mobile tap target. */
 	.deny-btn,
 	.allow-btn {
 		min-height: 44px;
@@ -1111,9 +852,6 @@
 
 	@media (min-width: 640px) {
 		.deny-btn {
-			flex: 0 0 auto;
-		}
-		.defer-btn {
 			flex: 0 0 auto;
 		}
 	}
@@ -1191,10 +929,6 @@
 		.permission-panel {
 			border-radius: 1.25rem 1.25rem 0 0;
 			border-bottom: none;
-		}
-
-		.pattern-input {
-			width: 100px;
 		}
 
 		.plan-permission-prompt {

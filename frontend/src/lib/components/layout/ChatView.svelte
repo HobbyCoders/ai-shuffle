@@ -75,28 +75,19 @@
 		}
 	});
 
-	// Handle permission response — Slice B widens decision to include 'defer'.
+	// Handle permission response — approve/deny only (defer was dropped from the UI).
 	function handlePermissionResponse(detail: {
 		request_id: string;
-		decision: 'allow' | 'deny' | 'defer';
+		decision: 'allow' | 'deny';
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
 	}) {
 		const { request_id, decision, remember, pattern } = detail;
 		const sessionId =
 			$activeSession.pendingPermissions.find(req => req.request_id === request_id)?.session_id ??
-			$activeSession.deferredPermissions.find(req => req.request_id === request_id)?.session_id ??
 			$activeSession.sessionId ??
 			undefined;
 		activeSession.sendPermissionResponse(request_id, decision, remember, pattern, sessionId);
-	}
-
-	// Slice B: ask the server to re-broadcast every previously-deferred
-	// permission request as fresh `permission_request` events.
-	function handleRequeueDeferred() {
-		const sessionId = $activeSession.sessionId;
-		if (!sessionId) return;
-		activeSession.requeueDeferredPermissions(sessionId);
 	}
 
 	// Handle question response
@@ -261,19 +252,6 @@
 					<ActiveTasks tasks={$activeSession.activeTasks} onStop={handleStopTask} />
 				</div>
 			{/if}
-			<!-- Slice B: deferred-only strip when there are no active requests to
-			     review (when there are, the strip is rendered inside the modal
-			     PermissionQueue below). -->
-			{#if (!$activeSession.pendingPermissions || $activeSession.pendingPermissions.length === 0) && $activeSession.deferredPermissions && $activeSession.deferredPermissions.length > 0}
-				<div class="inline-deferred-strip">
-					<PermissionQueue
-						requests={[]}
-						deferred={$activeSession.deferredPermissions}
-						onRespond={handlePermissionResponse}
-						onRequeueDeferred={handleRequeueDeferred}
-					/>
-				</div>
-			{/if}
 		{/if}
 		<ChatInput compact={!isEmptyState} />
 	</div>
@@ -297,9 +275,7 @@
 					<div class="modal-card-wrapper">
 						<PermissionQueue
 							requests={$activeSession.pendingPermissions}
-							deferred={$activeSession.deferredPermissions ?? []}
 							onRespond={handlePermissionResponse}
-							onRequeueDeferred={handleRequeueDeferred}
 						/>
 					</div>
 				{/if}
@@ -410,10 +386,6 @@
 	.connection-banner {
 		flex-shrink: 0;
 		padding: 6px 12px 0;
-	}
-
-	.inline-deferred-strip {
-		padding: 4px 12px 0;
 	}
 
 	.active-tasks-strip {

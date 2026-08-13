@@ -3,27 +3,22 @@
 
 	interface Props {
 		requests: PermissionRequestData[];
-		/** Slice B: items the user previously deferred — rendered as a separate strip. */
-		deferred?: PermissionRequestData[];
 		onRespond?: (detail: {
 			request_id: string;
-			decision: 'allow' | 'deny' | 'defer';
+			decision: 'allow' | 'deny';
 			remember?: 'none' | 'session' | 'profile';
 			pattern?: string;
 		}) => void;
 		onDismissAll?: () => void;
-		/** Slice B: emit a `requeue_deferred_permissions` WS message. */
-		onRequeueDeferred?: () => void;
 	}
 
-	let { requests, deferred = [], onRespond, onDismissAll, onRequeueDeferred }: Props = $props();
+	let { requests, onRespond, onDismissAll }: Props = $props();
 
 	let showPendingList = $state(false);
-	let showDeferredList = $state(false);
 
 	function handleRespond(detail: {
 		request_id: string;
-		decision: 'allow' | 'deny' | 'defer';
+		decision: 'allow' | 'deny';
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
 	}) {
@@ -50,18 +45,6 @@
 				remember: 'none'
 			});
 		}
-	}
-
-	function handleReviewDeferred() {
-		onRequeueDeferred?.();
-	}
-
-	function getDeferredLabel(req: PermissionRequestData): string {
-		return (
-			(req.title && req.title.trim()) ||
-			(req.display_name && req.display_name.trim()) ||
-			req.tool_name
-		);
 	}
 
 	// Get a short summary for queued items
@@ -111,7 +94,7 @@
 	}
 </script>
 
-{#if requests.length > 0 || deferred.length > 0}
+{#if requests.length > 0}
 	<div class="permission-queue space-y-3">
 		<!-- Queue Header (when multiple requests) -->
 		{#if requests.length > 1}
@@ -205,45 +188,6 @@
 			/>
 		{/if}
 
-		<!-- Slice B: Deferred queue strip — collapsible pill summarizing every
-		     request the user previously chose to "Defer". Tapping "Review" tells
-		     the backend to re-broadcast each deferred item as a fresh
-		     permission_request, which flows through the existing handler. -->
-		{#if deferred.length > 0}
-			<div class="deferred-strip" role="region" aria-label="Deferred permission requests">
-				<button
-					type="button"
-					class="deferred-pill"
-					onclick={() => (showDeferredList = !showDeferredList)}
-					aria-expanded={showDeferredList}
-				>
-					<span class="deferred-dot" aria-hidden="true"></span>
-					<span class="deferred-count">{deferred.length} deferred</span>
-					<span class="deferred-sep" aria-hidden="true">·</span>
-					<span class="deferred-cta">{showDeferredList ? 'hide' : 'review'} →</span>
-				</button>
-
-				{#if showDeferredList}
-					<div class="deferred-list">
-						<ul class="deferred-items">
-							{#each deferred as req (req.request_id)}
-								<li class="deferred-item">
-									<span class="deferred-tool" title={req.tool_name}>{getDeferredLabel(req)}</span>
-									<span class="deferred-tool-sub">{req.tool_name}</span>
-								</li>
-							{/each}
-						</ul>
-						<button
-							type="button"
-							class="deferred-review-btn"
-							onclick={handleReviewDeferred}
-						>
-							Review all
-						</button>
-					</div>
-				{/if}
-			</div>
-		{/if}
 	</div>
 {/if}
 
@@ -337,161 +281,4 @@
 		border-color: color-mix(in oklch, var(--tool-default) 30%, transparent);
 	}
 
-	/* ─── Slice B: deferred queue strip ─────────────────────────── */
-
-	.deferred-strip {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.deferred-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		align-self: flex-start;
-		min-height: 36px;
-		padding: 6px 12px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--warning, #d97706) 12%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--warning, #d97706) 35%, var(--border));
-		color: var(--foreground);
-		font-size: 0.75rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.deferred-pill:hover {
-		background: color-mix(in oklch, var(--warning, #d97706) 18%, var(--card));
-		border-color: color-mix(in oklch, var(--warning, #d97706) 50%, var(--border));
-	}
-
-	.deferred-pill:focus-visible {
-		outline: 2px solid var(--warning, #d97706);
-		outline-offset: 2px;
-	}
-
-	.deferred-dot {
-		display: inline-block;
-		width: 6px;
-		height: 6px;
-		border-radius: 999px;
-		background: var(--warning, #d97706);
-	}
-
-	.deferred-count {
-		font-variant-numeric: tabular-nums;
-		font-weight: 600;
-	}
-
-	.deferred-sep {
-		color: var(--muted-foreground);
-	}
-
-	.deferred-cta {
-		color: var(--warning, #d97706);
-		font-weight: 600;
-	}
-
-	.deferred-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 10px 12px;
-		border-radius: var(--radius, 0.75rem);
-		border: 1px solid color-mix(in oklch, var(--warning, #d97706) 25%, var(--border));
-		background: color-mix(in oklch, var(--warning, #d97706) 5%, var(--card));
-		animation: deferred-expand 0.18s ease-out;
-	}
-
-	@keyframes deferred-expand {
-		from {
-			opacity: 0;
-			transform: translateY(-4px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	.deferred-items {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		max-height: 220px;
-		overflow-y: auto;
-	}
-
-	.deferred-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 8px;
-		border-radius: 8px;
-		background: var(--card);
-		border: 1px solid var(--border);
-		font-size: 0.75rem;
-	}
-
-	.deferred-tool {
-		flex: 1;
-		min-width: 0;
-		font-weight: 500;
-		color: var(--foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.deferred-tool-sub {
-		flex-shrink: 0;
-		font-family: var(--font-mono);
-		font-size: 0.625rem;
-		color: var(--muted-foreground);
-		padding: 2px 6px;
-		background: var(--muted);
-		border-radius: 4px;
-	}
-
-	.deferred-review-btn {
-		align-self: flex-end;
-		min-height: 36px;
-		padding: 6px 14px;
-		font-size: 0.75rem;
-		font-weight: 600;
-		border-radius: var(--radius, 0.75rem);
-		background: var(--warning, #d97706);
-		color: var(--primary-foreground, #fff);
-		border: 0;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.deferred-review-btn:hover {
-		filter: brightness(1.08);
-	}
-
-	.deferred-review-btn:active {
-		transform: scale(0.98);
-	}
-
-	.deferred-review-btn:focus-visible {
-		outline: 2px solid var(--warning, #d97706);
-		outline-offset: 2px;
-	}
-
-	@media (max-width: 639px) {
-		.deferred-pill {
-			min-height: 44px;
-		}
-		.deferred-review-btn {
-			min-height: 44px;
-			width: 100%;
-		}
-	}
 </style>
