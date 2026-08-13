@@ -203,7 +203,8 @@ class SessionState:
         state.client.receive_response(), etc. Will be removed once they
         migrate to adapter methods.
         """
-        return self.adapter.sdk_client
+        # Omni adapters have no SDK client; callers must handle None.
+        return getattr(self.adapter, "sdk_client", None)
 
 
 def is_subprocess_alive(state: SessionState) -> bool:

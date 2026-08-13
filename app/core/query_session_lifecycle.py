@@ -295,7 +295,17 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
 
     # 2) Background sub-agent — ask the SDK to stop it.
     state = get_session_pool().peek(session_id)
-    if not state or not state.is_connected or not state.client:
+    # Omni/harness adapters expose no SDK client at all, so the SDK stop_task
+    # path is simply unavailable there. Treat that exactly like a torn-down
+    # client (reap the registry row / report honestly) instead of letting the
+    # missing attribute blow up the stop request.
+    client = state.client if state is not None else None
+    if state is not None and state.is_connected and client is None:
+        logger.warning(
+            "stop_task unavailable: no sdk client on this adapter "
+            f"[session={session_id} task={task_id}]"
+        )
+    if not state or not state.is_connected or not client:
         # Outside forces tore down the live session / SDK client, but the task
         # can still be parked "running" in the registry — a ghost the UI shows
         # forever with no client left to stop it. Reap it so the close button
@@ -325,7 +335,7 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
         return {"ok": False, "kind": "agent", "detail": "session not connected"}
 
     try:
-        await state.client.stop_task(task_id)
+        await client.stop_task(task_id)
         logger.debug(f"Requested SDK stop_task for {task_id} in session {session_id}")
         # Record the terminal transition on the registry row OURSELVES rather than
         # waiting for a CLI "stopped" frame to flow back through the streaming loop.

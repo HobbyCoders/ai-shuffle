@@ -249,6 +249,13 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
         return
     client = state.client
     if client is None:
+        # Omni/harness adapters expose no SDK client, so there is no
+        # receive_messages() stream to drain between turns. Porting the drain to
+        # the omni engine is a known follow-up; skip quietly for now.
+        logger.debug(
+            "idle drain skipped: adapter has no sdk client (omni) [session=%s]",
+            session_id,
+        )
         return
 
     logger.info(
