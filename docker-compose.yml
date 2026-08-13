@@ -44,7 +44,9 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      - DATABASE_URL=postgresql://ai_shuffle:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (set it in .env)}@postgres:5432/ai_shuffle
+      # The app builds its own connection URL from these pieces (host defaults
+      # to the "postgres" service; user/db default to ai_shuffle).
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (set it in .env)}
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
       # Instance ID isolates projects/sessions when multiple devices share one DB.
       # Defaults to SERVICE_NAME. Set a unique value per device if needed.

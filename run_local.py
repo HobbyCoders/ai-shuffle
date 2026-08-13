@@ -390,6 +390,164 @@ def build_browser_mcp():
         return False
 
 
+def _read_env_file(env_path: Path) -> dict:
+    """Parse KEY=VALUE lines from .env (best-effort, comments preserved elsewhere)."""
+    values = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _write_env_values(env_path: Path, updates: dict, retire_keys: tuple = ()):
+    """Update KEY=VALUE pairs in .env in place, appending keys that are new.
+
+    Keys in ``retire_keys`` are commented out instead of kept — used to
+    disarm the legacy DATABASE_URL (which takes precedence over the
+    POSTGRES_* pieces) once setup has collected new values, so the freshly
+    entered connection details actually take effect.
+    """
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.partition("=")[0].strip()
+        if key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}"
+        elif key in retire_keys:
+            lines[i] = f"# retired by setup (superseded by POSTGRES_*): {line}"
+
+    if remaining:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# Database connection (written by run_local.py --setup)")
+        for key, value in remaining.items():
+            lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def configure_database():
+    """Collect the PostgreSQL connection details and write them to .env.
+
+    The app assembles its own connection URL from these pieces
+    (POSTGRES_HOST/PORT/USER/PASSWORD/DB), so nobody has to hand-build a
+    postgresql:// string.
+    """
+    print(f"\n{Colors.BOLD}Database configuration (PostgreSQL){Colors.END}")
+    print_status("AI Hub stores its data in a PostgreSQL database.", "info")
+    print_status("Enter the connection details below (press Enter to keep the default).", "info")
+
+    project_root = Path(__file__).parent
+    env_path = project_root / ".env"
+    existing = _read_env_file(env_path)
+
+    # A pre-split install carries a legacy DATABASE_URL instead of POSTGRES_*
+    # values. Parse it so the prompts default to the connection the user
+    # already had, instead of making them re-derive host/user/password.
+    legacy_parts = {}
+    legacy_url = existing.get("DATABASE_URL", "")
+    if legacy_url:
+        try:
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(
+                legacy_url if "://" in legacy_url else f"postgresql://{legacy_url}"
+            )
+            legacy_parts = {
+                "host": parsed.hostname or "",
+                "port": str(parsed.port) if parsed.port else "",
+                "user": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
+                "db": parsed.path.lstrip("/"),
+            }
+            print_status("Found a legacy DATABASE_URL — defaults below are taken from it", "info")
+        except Exception:
+            legacy_parts = {}
+
+    def ask(prompt: str, default: str) -> str:
+        try:
+            answer = input(f"   {prompt} [{default}]: ").strip()
+        except EOFError:
+            answer = ""
+        return answer or default
+
+    host = ask("Host / IP address",
+               existing.get("POSTGRES_HOST") or legacy_parts.get("host") or "localhost")
+    port = ask("Port",
+               existing.get("POSTGRES_PORT") or legacy_parts.get("port") or "5432")
+    user = ask("Username",
+               existing.get("POSTGRES_USER") or legacy_parts.get("user") or "ai_shuffle")
+    db_name = ask("Database name",
+                  existing.get("POSTGRES_DB") or legacy_parts.get("db") or "ai_shuffle")
+
+    stored_password = existing.get("POSTGRES_PASSWORD") or legacy_parts.get("password") or ""
+    password = ""
+    while not password:
+        try:
+            import getpass
+            prompt = "   Password (input hidden{}): ".format(
+                ", Enter keeps current" if stored_password else ""
+            )
+            password = getpass.getpass(prompt).strip()
+        except EOFError:
+            break
+        if not password and stored_password:
+            password = stored_password
+            print_status("Keeping the existing password", "info")
+            break
+        if not password:
+            print_status("A password is required", "warning")
+
+    if not password:
+        print_status("No password entered — set POSTGRES_PASSWORD in .env before starting", "warning")
+        return False
+
+    _write_env_values(env_path, {
+        "POSTGRES_HOST": host,
+        "POSTGRES_PORT": port,
+        "POSTGRES_USER": user,
+        "POSTGRES_PASSWORD": password,
+        "POSTGRES_DB": db_name,
+    }, retire_keys=("DATABASE_URL",))
+    if existing.get("DATABASE_URL"):
+        print_status("Legacy DATABASE_URL commented out — the POSTGRES_* values above now apply", "info")
+    print_status(f"Database settings saved to {env_path}", "success")
+
+    # Best-effort connectivity check via the venv's psycopg2 (installed with
+    # the app requirements). A failure is a warning, not a setup blocker —
+    # the database might simply not be running yet.
+    venv_python = get_venv_python()
+    if venv_python.exists():
+        check = subprocess.run(
+            [str(venv_python), "-c", (
+                "import psycopg2,sys;"
+                "psycopg2.connect(host=sys.argv[1],port=int(sys.argv[2]),"
+                "user=sys.argv[3],password=sys.argv[4],dbname=sys.argv[5],"
+                "connect_timeout=5).close()"
+            ), host, port, user, password, db_name],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            print_status("Connected to PostgreSQL successfully", "success")
+        else:
+            err = (check.stderr or "").strip().splitlines()
+            print_status(
+                f"Could not connect to PostgreSQL yet: {err[-1] if err else 'unknown error'}",
+                "warning",
+            )
+            print_status("  Make sure the server is running and reachable, then start the app", "info")
+    return True
+
+
 def check_claude_auth():
     """Check if Claude is authenticated (credentials exist from in-app setup)"""
     creds_file = Path.home() / ".claude" / ".credentials.json"
@@ -412,11 +570,13 @@ def run_setup():
     if not install_dependencies():
         return False
 
+    configure_database()
+
     # Browser automation uses the bundled browser-mcp server + a local Chrome or
-    # Edge in headless mode, auto-launched by the backend over CDP. No Claude
-    # account, browser extension, or Playwright Chromium download is involved.
-    # Knobs: CHROME_EXECUTABLE (pick a specific binary), CHROME_CDP_PORT (default
-    # 9221), START_CHROME=0 (opt out of auto-launch). See LOCAL_SETUP.md →
+    # Edge in headless mode, always auto-launched by the backend over CDP. No
+    # Claude account, browser extension, or Playwright Chromium download is
+    # involved. Knobs: CHROME_EXECUTABLE (pick a specific binary),
+    # CHROME_CDP_PORT (default 9221). See LOCAL_SETUP.md →
     # "Browser automation (native installs)".
     print_status(
         "Browser automation: bundled browser-mcp + auto-launched headless Chrome/Edge",
@@ -566,6 +726,19 @@ def start_server(host: str, port: int, open_browser: bool):
     static_dir = project_root / "app" / "static"
     if not static_dir.exists() or not (static_dir / "index.html").exists():
         print_status("Frontend not built. Run with --setup first.", "error")
+        sys.exit(1)
+
+    # Database credentials come from .env (written by --setup) or the process
+    # env. A legacy DATABASE_URL from a pre-split install also counts — the
+    # app still honors it, so an upgraded install starts without re-running
+    # setup.
+    env_values = _read_env_file(project_root / ".env")
+    db_configured = any(
+        env.get(key) or env_values.get(key)
+        for key in ("POSTGRES_PASSWORD", "DATABASE_URL")
+    )
+    if not db_configured:
+        print_status("Database not configured (no POSTGRES_PASSWORD). Run with --setup first.", "error")
         sys.exit(1)
 
     url = f"http://{host}:{port}"

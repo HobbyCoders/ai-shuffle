@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.api.sessions import get_live_session
-from app.core.config import settings
 
 LEGACY_MSGS = [
     {"id": 1, "role": "user", "content": "old question", "type": "text"},
@@ -56,8 +55,7 @@ async def _poll_live(session, store_result, legacy_result, store_side_effect=Non
     for p in patches:
         p.start()
     try:
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-             patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
              patch("app.core.cost_utils.attach_cost_metadata"), \
              patch("app.core.cost_utils.attach_user_message_metadata"), \
              patch("app.api.sessions.parse_session_history_via_store",

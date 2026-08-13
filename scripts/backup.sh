@@ -13,8 +13,7 @@
 # backup name patterns are pruned after a successful run.
 #
 # Configuration (env vars):
-#   DATABASE_URL           postgres connection string (preferred; parsed for pg_dump)
-#   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE   standard libpq vars (fallback/override)
+#   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE   standard libpq vars
 #   BACKUP_DIR             where backups are written (default: /data/backups)
 #   BACKUP_RETENTION_DAYS  days to keep (default: 7)
 #   WORKSPACE_DIR          generated media root (default: /workspace)
@@ -74,15 +73,9 @@ run mkdir -p "$BACKUP_DIR"
 # ---------------------------------------------------------------------------
 # 1) Database dump (pg_dump custom format)
 # ---------------------------------------------------------------------------
-# Prefer DATABASE_URL; pg_dump accepts a connection URI directly. If only the
-# discrete PG* vars are set, pg_dump reads them from the environment.
-if [ -n "${DATABASE_URL:-}" ]; then
-  log "Dumping database via DATABASE_URL"
-  run pg_dump --format=custom --no-owner --no-privileges --file="$DB_DUMP" "$DATABASE_URL"
-else
-  log "Dumping database via PG* environment variables"
-  run pg_dump --format=custom --no-owner --no-privileges --file="$DB_DUMP"
-fi
+# pg_dump reads the standard libpq PG* vars from the environment.
+log "Dumping database via PG* environment variables"
+run pg_dump --format=custom --no-owner --no-privileges --file="$DB_DUMP" 
 log "DB dump -> ${DB_DUMP}"
 
 # ---------------------------------------------------------------------------

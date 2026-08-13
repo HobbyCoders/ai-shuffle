@@ -140,15 +140,6 @@ export interface ActiveSessionState {
 	 * background task(s)" parked indicator.
 	 */
 	activeTasks: Task[];
-	/**
-	 * When true, a user "Stop" leaves background sub-agents running (Claude
-	 * Code's Esc semantics) and stops only the foreground turn; the Stop confirm
-	 * dialog then defaults to preserving agents with an opt-in to also stop them.
-	 * Effective = backend flag on AND scoped-interrupt patch verified — the
-	 * server collapses both into this one boolean on each /live response.
-	 * Default false → Stop behaves exactly as before (full stop, agents down).
-	 */
-	preserveBackgroundOnInterrupt: boolean;
 	draft: string;
 	scrollTop: number;
 	streamStartTime: number | null;
@@ -255,7 +246,6 @@ function defaultState(): ActiveSessionState {
 		pendingQuestions: [],
 		queuedMessages: [],
 		activeTasks: [],
-		preserveBackgroundOnInterrupt: false,
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
@@ -368,7 +358,6 @@ const internal: InternalMutableState = {
 	awaitingNewSession: false,
 	pendingRequestId: null,
 	stopRequestedBeforeSession: false,
-	stopBackgroundRequested: false,
 	worktreeCreationGeneration: 0,
 	worktreeCreateAbort: null,
 	interruptConfirmResolve: null,
@@ -625,7 +614,7 @@ export const activeSession = {
 	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) =>
 		messageSender.sendMessage(prompt, options),
 
-	stopGeneration: (stopBackground = false) => messageSender.stopGeneration(stopBackground),
+	stopGeneration: () => messageSender.stopGeneration(),
 
 	// ── Permission & Question Responses (delegated to permission-handler) ──
 

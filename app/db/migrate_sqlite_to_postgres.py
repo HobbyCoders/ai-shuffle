@@ -10,8 +10,9 @@ Usage:
     python -m app.db.migrate_sqlite_to_postgres --sqlite-path /data/app.db --postgres-url postgresql://...
 
 Environment:
-    DATABASE_URL must be set to the PostgreSQL connection string.
-    The SQLite database path is auto-detected from settings.
+    The PostgreSQL connection is built from the POSTGRES_* settings
+    (POSTGRES_HOST/PORT/USER/PASSWORD/DB). The SQLite database path is
+    auto-detected from settings.
 """
 
 import argparse
@@ -399,7 +400,7 @@ def main() -> None:
         "--postgres-url",
         default=None,
         help="PostgreSQL connection URL. "
-             "Defaults to DATABASE_URL from environment / settings.",
+             "Defaults to the URL built from the POSTGRES_* settings.",
     )
     parser.add_argument(
         "--dry-run",
@@ -421,17 +422,18 @@ def main() -> None:
             if sqlite_path is None:
                 sqlite_path = str(settings.db_path)
             if postgres_url is None:
-                url = settings.database_url
-                if url and (url.startswith("postgresql://") or url.startswith("postgres://")):
-                    postgres_url = url
+                try:
+                    postgres_url = settings.get_database_url()
+                except ValueError:
+                    pass
 
     if sqlite_path is None:
         print("ERROR: SQLite path not provided and could not be "
               "auto-detected. Use --sqlite-path.")
         sys.exit(1)
     if postgres_url is None:
-        print("ERROR: PostgreSQL URL not provided and DATABASE_URL "
-              "is not set. Use --postgres-url.")
+        print("ERROR: PostgreSQL URL not provided and the POSTGRES_* "
+              "settings are incomplete. Use --postgres-url.")
         sys.exit(1)
 
     migrate(sqlite_path, postgres_url, dry_run=args.dry_run)

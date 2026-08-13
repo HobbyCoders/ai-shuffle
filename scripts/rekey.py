@@ -43,7 +43,8 @@ Safety properties
 
 Usage
 -----
-From the repo root, with DATABASE_URL pointing at the target Postgres::
+From the repo root, with the POSTGRES_* settings pointing at the target
+Postgres (POSTGRES_HOST/PORT/USER/PASSWORD/DB — see .env.example)::
 
     # Preview only, touch nothing:
     python -m scripts.rekey --old-password OLD --new-password NEW --dry-run

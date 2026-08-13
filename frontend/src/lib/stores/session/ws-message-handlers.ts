@@ -47,12 +47,6 @@ export interface InternalMutableState {
 	 *  by the session_created/start handlers: once the id is known they send the
 	 *  deferred stop so the backend can discard the orphan (no-output) turn. */
 	stopRequestedBeforeSession: boolean;
-	/** The `stop_background` choice captured when Stop was clicked before the
-	 *  sessionId existed (see stopRequestedBeforeSession). true also tears down
-	 *  in-flight background sub-agents; false stops only the foreground turn.
-	 *  Defaults false so a deferred stop never kills agents unless the user
-	 *  explicitly opted in. Consumed alongside the deferred stop send. */
-	stopBackgroundRequested: boolean;
 	/** Monotonic counter incremented on every session switch / new-chat.
 	 *  autoCreateWorktree captures the value at start and bails if it changes
 	 *  during an await, preventing the async callback from clobbering the
@@ -507,8 +501,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// backend can interrupt and discard the no-output orphan turn.
 					if (internal.stopRequestedBeforeSession) {
 						internal.stopRequestedBeforeSession = false;
-						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
-						internal.stopBackgroundRequested = false;
+						wsSend({ type: 'stop', session_id: sessionId, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
 					}
 					// Adopt a freshly-minted session by starting the SSE feed
 					// (idempotent — start() no-ops if already feeding this id).
@@ -549,8 +542,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// double-send.
 					if (internal.stopRequestedBeforeSession) {
 						internal.stopRequestedBeforeSession = false;
-						wsSend({ type: 'stop', session_id: sessionId, stop_background: internal.stopBackgroundRequested, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
-						internal.stopBackgroundRequested = false;
+						wsSend({ type: 'stop', session_id: sessionId, ...(getState().liveTurnId ? { turn_id: getState().liveTurnId } : {}) });
 					}
 					// The SSE feed owns the transcript and streaming state. Adopt the
 					// sessionId and start the feed; the feed's replay renders the turn.

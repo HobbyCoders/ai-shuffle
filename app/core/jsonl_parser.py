@@ -42,13 +42,12 @@ _PARSE_CACHE_MAX_SIZE = 50
 _parse_cache: OrderedDict = OrderedDict()
 _parse_cache_lock = threading.Lock()
 
-# Separate cache namespace for the postgres_only store-backed parse path.
-# Keyed by sdk_session_id, value is (messages_json, usage_json). Kept ENTIRELY
-# separate from _parse_cache so flipping session_store_mode (mirror ->
-# postgres_only) without a process restart can never serve a JSONL-derived
-# result for a postgres_only read, or vice-versa. There is no on-disk mtime to
-# validate a store result against, so entries are invalidated alongside the
-# JSONL cache via invalidate_parse_cache().
+# Separate cache namespace for the store-backed parse path. Keyed by
+# sdk_session_id, value is (messages_json, usage_json). Kept ENTIRELY separate
+# from _parse_cache so a store read can never serve a JSONL-derived result, or
+# vice-versa. There is no on-disk mtime to validate a store result against, so
+# entries are invalidated alongside the JSONL cache via
+# invalidate_parse_cache().
 _store_parse_cache: OrderedDict = OrderedDict()
 _store_parse_cache_lock = threading.Lock()
 

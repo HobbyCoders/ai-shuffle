@@ -690,15 +690,12 @@
 										</svg>
 									</button>
 								{:else}
-									<!-- Stop is an informed choice when background agents are live.
-									     With the preserve-background flag OFF the SDK interrupt
-									     cancels the agents too (StopButton confirms first). With it
-									     ON, Stop keeps agents running by default (Claude Code's Esc)
-									     and offers an opt-in to also stop them. -->
+									<!-- Stop is an informed choice when background agents are live:
+									     the SDK interrupt cancels the agents too, so StopButton
+									     confirms first. -->
 									<StopButton
 										activeTasks={$activeSession.activeTasks}
-										preserveBackground={$activeSession.preserveBackgroundOnInterrupt}
-										onStop={(bg) => activeSession.stopGeneration(bg)}
+										onStop={() => activeSession.stopGeneration()}
 									/>
 								{/if}
 							{:else}

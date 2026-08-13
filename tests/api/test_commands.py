@@ -76,6 +76,26 @@ def mock_jsonl_rewind_service():
         yield mock_jrs
 
 
+@pytest.fixture(autouse=True)
+def mock_session_store_truncation():
+    """Stub the always-on Postgres session-store truncation.
+
+    execute_rewind truncates session_store_entries first on every chat rewind
+    (the store is the single source of truth). Default the stub to success with
+    a still-populated transcript; tests that pin store-specific behavior
+    re-patch these names inside their own ``with patch(...)`` blocks, which
+    nests over this fixture.
+    """
+    with patch(
+        "app.api.commands.truncate_session_store_to_checkpoint",
+        new=AsyncMock(return_value=1),
+    ) as mock_truncate, patch(
+        "app.api.commands.main_transcript_is_empty",
+        new=AsyncMock(return_value=False),
+    ):
+        yield mock_truncate
+
+
 @pytest.fixture
 def mock_sync_engine():
     """Mock the sync engine."""
@@ -981,11 +1001,13 @@ class TestExecuteRewindDbSync:
         assert bound["include_response"] is True
 
     @pytest.mark.asyncio
-    async def test_rewind_does_not_truncate_db_when_jsonl_truncation_fails(
+    async def test_rewind_does_not_truncate_db_when_store_truncation_fails(
         self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
     ):
-        """If JSONL truncation fails, DB must not be touched (no partial state)."""
+        """If the session-store truncation fails (and the JSONL layer also
+        yields nothing), the DB must not be touched (no partial state)."""
         from app.api.commands import execute_rewind, RewindRequestV2
+        from app.core.pg_session_store import RewindTargetNotFound
 
         mock_database.get_session.return_value = {
             "id": "session-1",
@@ -1009,7 +1031,10 @@ class TestExecuteRewindDbSync:
             include_response=False,
         )
 
-        with patch("app.api.commands.resolve_rewind_anchor", return_value=42), \
+        with patch(
+            "app.api.commands.truncate_session_store_to_checkpoint",
+            new=AsyncMock(side_effect=RewindTargetNotFound("no store entries")),
+        ), patch("app.api.commands.resolve_rewind_anchor", return_value=42), \
                 patch("app.api.commands.apply_rewind_delete", return_value=0) as mock_delete:
             response = await execute_rewind("session-1", request)
 

@@ -77,12 +77,6 @@ from app.db import database
 
 
 @pytest.fixture(autouse=True)
-def _postgres_only(monkeypatch):
-    """Pin the mode under test (the code default; env could override)."""
-    monkeypatch.setattr(settings, "session_store_mode", "postgres_only")
-
-
-@pytest.fixture(autouse=True)
 def _fresh_parse_caches():
     jp.invalidate_parse_cache()
     yield
@@ -526,10 +520,9 @@ async def test_interrupt_mid_turn_no_dupes(test_db, store_read, tmp_path):
 
 
 async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monkeypatch):
-    """Pin the MECHANISM: _persist_turn_results skips the message batch under
-    postgres_only (mirror is the single writer) and is idempotent across a
-    crash-retry double call; the SAME payload under 'disabled' mode DOES write
-    rows (non-store modes still rely on turn-end persistence)."""
+    """Pin the MECHANISM: _persist_turn_results never writes the legacy message
+    batch (the store mirror is the single writer) and is idempotent across a
+    crash-retry double call."""
     session_id = _new_session()
     sdk_sid = str(uuid.uuid4())
     turn_events = [
@@ -566,20 +559,6 @@ async def test_persist_turn_results_gate_is_the_no_dupe_mechanism(test_db, monke
     # The sessions-row aggregate update ran both times (idempotent by design:
     # increments reflect exactly what each ResultMessage reported).
     assert database.get_session(session_id)["sdk_session_id"] == sdk_sid
-
-    # Contrast: 'disabled' mode has no mirror — the batch MUST be written.
-    monkeypatch.setattr(settings, "session_store_mode", "disabled")
-    legacy_session = _new_session()
-    await qp._persist_turn_results(
-        session_id=legacy_session,
-        sdk_session_id=str(uuid.uuid4()),
-        tool_messages=[],
-        response_text=["Hello"],
-        metadata={"model": "claude-test"},
-        profile_id="default",
-        turn_events=turn_events,
-    )
-    assert len(_assistant_rows_in_legacy_table(legacy_session)) == 3
 
 
 # ═════════════════════════════════════════════════════════════════════════════

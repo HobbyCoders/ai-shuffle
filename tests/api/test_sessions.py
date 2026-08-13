@@ -720,16 +720,12 @@ class TestGetSession:
         data = response.json()
         assert data["id"] == "test-session-id"
 
-    def test_get_session_with_jsonl_messages(self, client, mock_database, sample_session):
-        """Should load messages from the JSONL parser in mirror/disabled mode.
+    def test_get_session_with_store_messages(self, client, mock_database, sample_session):
+        """Should load messages from the Postgres session store parser.
 
-        Pins session_store_mode='disabled' so the read path uses the JSONL parser
-        (the postgres_only cutover uses parse_session_history_via_store instead).
-        The ambient SESSION_STORE_MODE env can be 'postgres_only' in a deployment
-        sandbox, so the mode is set explicitly rather than relied upon. Pool-touching
-        helpers (resolve_working_dir, cost_utils) are patched to stay off Postgres.
+        Pool-touching helpers (resolve_working_dir, cost_utils) are patched to
+        stay off Postgres.
         """
-        from app.core.config import settings
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
 
@@ -738,11 +734,10 @@ class TestGetSession:
             {"id": 2, "role": "assistant", "content": "Hi there!", "type": "text", "metadata": {}}
         ]
 
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
-                patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
+                patch("app.api.sessions.parse_session_history_via_store") as mock_parse:
             mock_parse.return_value = (jsonl_messages, {
                 "cache_creation_tokens": 100,
                 "cache_read_tokens": 50,
@@ -758,22 +753,16 @@ class TestGetSession:
         assert len(data["messages"]) == 2
 
     def test_get_session_falls_back_to_database(self, client, mock_database, sample_session):
-        """Should fall back to database messages when there is no JSONL sdk id.
-
-        The legacy DB fallback (Fallback 3) only runs in mirror/disabled mode; the
-        postgres_only cutover is a hard-cut that never falls through to the
-        session_messages table. Pin the mode so the ambient SESSION_STORE_MODE env
-        does not suppress the fallback under test.
+        """Should fall back to legacy database messages when there is no sdk id
+        (pre-cutover session whose transcript lives only in session_messages).
         """
-        from app.core.config import settings
         sample_session["sdk_session_id"] = None
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
             {"id": 1, "role": "user", "content": "Hello", "tool_name": None}
         ]
 
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.cost_utils.attach_cost_metadata"):
+        with patch("app.core.cost_utils.attach_cost_metadata"):
             response = client.get("/api/v1/sessions/test-session-id")
 
         assert response.status_code == 200
@@ -821,17 +810,14 @@ class TestSessionMessageProfileId:
     }
 
     def _get_jsonl(self, client, mock_database, sample_session, jsonl_messages, profile_map):
-        """Drive the JSONL read path (disabled mode) with a fixed profile map."""
-        from app.core.config import settings
-
+        """Drive the store-parser read path with a fixed profile map."""
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
 
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.get_cached_profile_map", return_value=profile_map), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
-                patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
+                patch("app.api.sessions.parse_session_history_via_store") as mock_parse:
             mock_parse.return_value = (jsonl_messages, dict(self.USAGE))
             resp = client.get("/api/v1/sessions/test-session-id")
         return resp
@@ -947,12 +933,10 @@ class TestSessionMessageProfileId:
     ):
         """Legacy session_messages rows expose each row's own profile_id.
 
-        The legacy fallback runs when there is no JSONL sdk id (mirror/disabled).
+        The legacy fallback runs when there is no sdk id (pre-cutover session).
         Each row already stores profile_id; the response must surface it (camel
         + snake), including a mid-session profile change across rows.
         """
-        from app.core.config import settings
-
         sample_session["sdk_session_id"] = None
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
@@ -961,8 +945,7 @@ class TestSessionMessageProfileId:
             {"id": 3, "role": "user", "content": "Second", "tool_name": None, "profile_id": "profile-b"},
         ]
 
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.cost_utils.attach_cost_metadata"):
+        with patch("app.core.cost_utils.attach_cost_metadata"):
             resp = client.get("/api/v1/sessions/test-session-id")
 
         assert resp.status_code == 200
@@ -978,16 +961,14 @@ class TestSessionMessageProfileId:
         """Legacy ``session_messages`` rows surface each row's own created_at.
 
         Regression guard for the "every message shows the same wall-clock time
-        after a reload" bug: the legacy fallback (Fallback 3, used in
-        mirror/disabled when JSONL yields nothing, and in postgres_only for
-        pre-cutover sessions) must expose each row's ``created_at`` as
+        after a reload" bug: the legacy fallback (used for pre-cutover
+        sessions) must expose each row's ``created_at`` as
         ``metadata.timestamp`` so the frontend renders the original send time
         instead of falling back to ``now``. Datetime columns must be normalized
         to ISO strings (mirroring db_message_loader) so the value survives JSON
         serialization identically to the /live path.
         """
         from datetime import datetime
-        from app.core.config import settings
 
         ts1 = datetime(2024, 1, 15, 19, 50, 0)
         ts2 = datetime(2024, 1, 15, 20, 30, 0)
@@ -1004,8 +985,7 @@ class TestSessionMessageProfileId:
              "profile_id": None, "created_at": ts3},
         ]
 
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.cost_utils.attach_cost_metadata"):
+        with patch("app.core.cost_utils.attach_cost_metadata"):
             resp = client.get("/api/v1/sessions/test-session-id")
 
         assert resp.status_code == 200
@@ -1020,20 +1000,15 @@ class TestSessionMessageProfileId:
 
 
 # =============================================================================
-# Test session_store_mode read-cutover isolation (PR C.1)
+# Test session-store read isolation (postgres_only cutover, PR C.1)
 # =============================================================================
 
-class TestSessionStoreModeIsolation:
-    """The postgres_only read cutover must be entered ONLY when
-    settings.session_store_mode == 'postgres_only'. In mirror/disabled the read
-    path stays byte-identical to today: it uses the JSONL parser and never calls
-    the store-backed parser; in postgres_only it uses the store-backed parser
-    and never falls through to the legacy DB table (Fallback-3 hard-cut).
+class TestSessionStoreReadIsolation:
+    """The read path uses the store-backed parser and never falls through to
+    the legacy DB table on a populated or raised store result (the legacy
+    rescue fires only on a genuinely EMPTY store).
     """
 
-    JSONL_MSGS = [
-        {"id": 1, "role": "user", "content": "Hello", "type": "text", "metadata": {}},
-    ]
     STORE_MSGS = [
         {"id": 9, "role": "assistant", "content": "From store", "type": "text", "metadata": {}},
     ]
@@ -1045,53 +1020,31 @@ class TestSessionStoreModeIsolation:
         "total_tokens_out": 0,
     }
 
-    def _run(self, client, mode):
-        """Patch both parsers + the mode, GET the session, return (resp, mocks).
+    def _run(self, client):
+        """Patch the store parser, GET the session, return (resp, mock).
 
         ``resolve_working_dir`` is patched to avoid the DB pool (this sandbox has
-        no Postgres); the cutover branch is purely about which parser runs.
+        no Postgres).
         """
-        from app.core.config import settings
-
-        with patch.object(settings, "session_store_mode", mode), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
-                patch("app.core.jsonl_parser.parse_session_history") as mock_file, \
                 patch("app.api.sessions.parse_session_history_via_store") as mock_store:
-            mock_file.return_value = (list(self.JSONL_MSGS), dict(self.USAGE))
             mock_store.return_value = (list(self.STORE_MSGS), dict(self.USAGE))
             resp = client.get("/api/v1/sessions/test-session-id")
-        return resp, mock_file, mock_store
+        return resp, mock_store
 
-    @pytest.mark.parametrize("mode", ["disabled", "mirror"])
-    def test_non_postgres_only_uses_jsonl_parser(
-        self, client, mock_database, sample_session, mode
-    ):
-        """disabled/mirror: JSONL parser used, store parser NEVER called."""
-        sample_session["sdk_session_id"] = "sdk-session-123"
-        mock_database.get_session.return_value = sample_session
-
-        resp, mock_file, mock_store = self._run(client, mode)
-
-        assert resp.status_code == 200
-        mock_file.assert_called_once()
-        mock_store.assert_not_called()
-        data = resp.json()
-        assert data["messages"][0]["content"] == "Hello"
-
-    def test_postgres_only_uses_store_parser(
+    def test_uses_store_parser(
         self, client, mock_database, sample_session
     ):
-        """postgres_only: store parser used, JSONL parser NEVER called."""
+        """The store parser serves the transcript."""
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
 
-        resp, mock_file, mock_store = self._run(client, "postgres_only")
+        resp, mock_store = self._run(client)
 
         assert resp.status_code == 200
         mock_store.assert_called_once()
-        mock_file.assert_not_called()
         data = resp.json()
         assert data["messages"][0]["content"] == "From store"
 
@@ -1102,21 +1055,15 @@ class TestSessionStoreModeIsolation:
         session_messages transcript. Pre-cutover sessions (created before the
         store existed, never bulk-backfilled, JSONL possibly on another
         install) hold their FULL transcript only in the legacy table — the
-        original hard-cut rendered them as empty chats in production. The SDK
-        JSONL disk reader (Fallback 2) stays hard-cut: only the legacy DB
-        fallback is allowed through."""
-        from app.core.config import settings
-
+        original hard-cut rendered them as empty chats in production."""
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
             {"id": 99, "role": "user", "content": "legacy transcript", "tool_name": None}
         ]
 
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
-                patch("app.api.sessions.sdk_get_session_messages") as mock_sdk, \
                 patch("app.api.sessions.parse_session_history_via_store") as mock_store:
             mock_store.return_value = ([], {})
             resp = client.get("/api/v1/sessions/test-session-id")
@@ -1126,7 +1073,6 @@ class TestSessionStoreModeIsolation:
         assert len(data["messages"]) == 1
         assert data["messages"][0]["content"] == "legacy transcript"
         mock_database.get_session_messages.assert_called_once()
-        mock_sdk.assert_not_called()
 
     def test_postgres_only_populated_store_never_touches_legacy_db(
         self, client, mock_database, sample_session
@@ -1135,16 +1081,13 @@ class TestSessionStoreModeIsolation:
         store (every post-cutover session) must never consult session_messages —
         that table holds user-rows-only for post-cutover sessions and serving it
         was the 'assistant replies vanish' bug."""
-        from app.core.config import settings
-
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
             {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
         ]
 
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
                 patch("app.api.sessions.parse_session_history_via_store") as mock_store:
@@ -1163,16 +1106,13 @@ class TestSessionStoreModeIsolation:
         Falling through to the legacy table would render a post-cutover session
         as the user-rows-only legacy view (the 'vanishing replies' trap) —
         serve 200 + empty messages instead."""
-        from app.core.config import settings
-
         sample_session["sdk_session_id"] = "sdk-session-123"
         mock_database.get_session.return_value = sample_session
         mock_database.get_session_messages.return_value = [
             {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
         ]
 
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
                 patch("app.core.cost_utils.attach_cost_metadata"), \
                 patch("app.api.sessions.parse_session_history_via_store") as mock_store:
             mock_store.side_effect = RuntimeError("db pool exhausted")
@@ -1181,34 +1121,6 @@ class TestSessionStoreModeIsolation:
         assert resp.status_code == 200
         assert resp.json()["messages"] == []
         mock_database.get_session_messages.assert_not_called()
-
-    def test_disabled_empty_jsonl_falls_back_to_legacy_db(
-        self, client, mock_database, sample_session
-    ):
-        """Mirror/disabled behavior is unchanged: an empty JSONL result still
-        falls through to the legacy DB table (the contrast to the hard-cut)."""
-        from app.core.config import settings
-
-        sample_session["sdk_session_id"] = "sdk-session-123"
-        mock_database.get_session.return_value = sample_session
-        mock_database.get_session_messages.return_value = [
-            {"id": 7, "role": "user", "content": "legacy", "tool_name": None}
-        ]
-
-        with patch.object(settings, "session_store_mode", "disabled"), \
-                patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
-                patch("app.core.cost_utils.attach_cost_metadata"), \
-                patch("app.core.jsonl_parser.parse_session_history") as mock_file, \
-                patch("app.api.sessions.sdk_get_session_messages", None):
-            mock_file.return_value = ([], {})
-            resp = client.get("/api/v1/sessions/test-session-id")
-
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["messages"]) == 1
-        assert data["messages"][0]["content"] == "legacy"
-        mock_database.get_session_messages.assert_called_once()
-
 
 # =============================================================================
 # Test Update Session Endpoint

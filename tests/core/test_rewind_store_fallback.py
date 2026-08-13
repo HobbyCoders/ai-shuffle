@@ -62,8 +62,7 @@ def no_jsonl():
 @pytest.fixture
 def store_entries():
     """Session store main transcript, loadable by session_id."""
-    with patch.object(settings, "session_store_mode", "postgres_only"), \
-         patch("app.core.pg_session_store._load_entries_by_session_id_sync",
+    with patch("app.core.pg_session_store._load_entries_by_session_id_sync",
                return_value=list(TRANSCRIPT)) as loader:
         yield loader
 
@@ -94,19 +93,8 @@ class TestLoadTranscriptEntries:
         assert got == TRANSCRIPT
         store_entries.assert_called_once_with(SDK_SID, None)
 
-    def test_no_store_query_when_store_mode_disabled(self, no_jsonl):
-        """The store tables (and %s placeholders) are Postgres-only — a
-        filesystem-mode install must never touch them."""
-        with patch.object(settings, "session_store_mode", "disabled"), \
-             patch("app.core.pg_session_store._load_entries_by_session_id_sync") as loader:
-            got = rds._load_transcript_entries(SDK_SID, "/workspace")
-
-        assert got == []
-        loader.assert_not_called()
-
     def test_store_failure_returns_empty(self, no_jsonl):
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-             patch("app.core.pg_session_store._load_entries_by_session_id_sync",
+        with patch("app.core.pg_session_store._load_entries_by_session_id_sync",
                    side_effect=RuntimeError("pg down")):
             assert rds._load_transcript_entries(SDK_SID, "/workspace") == []
 
@@ -157,8 +145,7 @@ class TestAnchorFromStoreEntries:
         assert anchor is None
 
     def test_no_transcript_anywhere_returns_none(self, no_jsonl, mock_db):
-        with patch.object(settings, "session_store_mode", "postgres_only"), \
-             patch("app.core.pg_session_store._load_entries_by_session_id_sync",
+        with patch("app.core.pg_session_store._load_entries_by_session_id_sync",
                    return_value=[]), \
              patch.object(rds, "_resolve_anchor_by_uuid", return_value=None):
             anchor = rds.resolve_rewind_anchor(

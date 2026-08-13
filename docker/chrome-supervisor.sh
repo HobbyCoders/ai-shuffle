@@ -1,7 +1,7 @@
 #!/bin/bash
 # Supervises the headless browser-automation Chromium (docker/start-chrome.sh)
 # inside the ai-shuffle container so a crash auto-restarts. Launched backgrounded
-# by entrypoint.sh (START_CHROME=1) with its stdout/stderr redirected to
+# by entrypoint.sh with its stdout/stderr redirected to
 # /home/appuser/.config/chrome.log. Installed in the image as
 # /usr/local/bin/chrome-supervisor (mirrors docker/start-chrome.sh).
 #
@@ -130,7 +130,7 @@ while true; do
         echo "!!! rc=133 (SIGTRAP) was previously caused by suppressing Chromium 150's first-run flow on headless — fixed in start-chrome.sh; this is now a defense-in-depth path for any other crash cause."
         echo "!!! Chrome will keep retrying every ${CHROME_SLOW_RETRY_SECS}s and auto-recover if the cause is transient (a healthy run resets it)."
         echo "!!! Diagnose with: docker exec -u appuser -e HOME=/home/appuser <container> chrome-doctor"
-        echo "!!! (CHROME_MAX_RESTARTS=0 fast-retries forever; START_CHROME=0 disables Chrome entirely.)"
+        echo "!!! (CHROME_MAX_RESTARTS=0 fast-retries forever.)"
         slow_mode=1
         slow_attempts=0
         sleep "$CHROME_SLOW_RETRY_SECS"

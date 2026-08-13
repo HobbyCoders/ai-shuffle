@@ -147,21 +147,6 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting AI Hub v{settings.version}")
     logger.info("=" * 60)
 
-    # Opt-in deploy-time patch: neutralize the bundled CLI's kill-all-tasks
-    # interrupt call site so a user "Stop" spares in-flight background
-    # sub-agents. Gated on the flag — no binary is touched by default. The
-    # patcher logs its own outcome and never raises.
-    if settings.preserve_background_on_interrupt:
-        try:
-            from app.core.claude_cli_path import resolve_bundled_cli_path
-            from app.core.cli_interrupt_patch import patch_cli_preserve_background
-
-            _bundled_cli = resolve_bundled_cli_path()
-            if _bundled_cli:
-                patch_cli_preserve_background(_bundled_cli)
-        except Exception:  # noqa: BLE001 — startup must never break on a patch hiccup
-            logger.exception("[CLI patch] preserve-background patch failed at startup; continuing")
-
     # Startup phases
     init_core()
     # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so

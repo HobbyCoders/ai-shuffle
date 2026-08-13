@@ -1003,13 +1003,15 @@ class HarnessAdapter(ProviderAdapter):
         # Derived, not configured (2026-08-13 ruling: no permanent flags — the
         # retired AIH_OMNI_STORE/AIH_OMNI_STORE_DIR env vars are ignored).
         # Whenever the app has a database — which every real deployment does,
-        # DATABASE_URL is required to boot — omni sessions persist in Postgres,
-        # exactly like the SDK path's PgSessionStore: cross-restart resume,
-        # fork, and event replay from any app instance sharing the DB. The
-        # only DB-less environments are unit tests, which get MemoryStore.
+        # a DB connection is required to boot — omni sessions persist in
+        # Postgres, exactly like the SDK path's PgSessionStore: cross-restart
+        # resume, fork, and event replay from any app instance sharing the DB.
+        # The only DB-less environments are unit tests, which get MemoryStore.
+        # "Has a database" means either the POSTGRES_* pieces (postgres_password
+        # is the one with no default) or a legacy pre-split DATABASE_URL.
         from app.core.config import settings
 
-        if settings.database_url:
+        if settings.database_url or settings.postgres_password:
             from app.core.provider.omni_pg_store import PgOmniStore
             return PgOmniStore()
         return MemoryStore()

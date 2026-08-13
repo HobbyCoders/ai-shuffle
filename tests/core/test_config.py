@@ -84,12 +84,13 @@ class TestSettingsDefaults:
 
     def test_default_path_settings_are_none(self):
         """Path settings should default to None before model_post_init."""
-        # The deployment env exports DATABASE_URL; clear it so the class-level
-        # default (None) is what this test exercises rather than the leaked value.
-        # _env_file=None also blocks pydantic-settings from re-reading a repo-root
-        # .env — popping the env var alone is not hermetic.
+        # The deployment env exports POSTGRES_* values; clear them so the
+        # class-level defaults are what this test exercises rather than leaked
+        # values. _env_file=None also blocks pydantic-settings from re-reading a
+        # repo-root .env — popping the env vars alone is not hermetic.
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DATABASE_URL", None)
+            os.environ.pop("POSTGRES_HOST", None)
+            os.environ.pop("POSTGRES_PASSWORD", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
@@ -100,7 +101,8 @@ class TestSettingsDefaults:
                     assert settings.workspace_dir == Path("/mock/workspace")
                     assert settings.claude_projects_dir is None
                     assert settings.tools_dir is None
-                    assert settings.database_url is None
+                    assert settings.postgres_host is None
+                    assert settings.postgres_password is None
 
 
 class TestSettingsFromEnvironment:
@@ -296,30 +298,109 @@ class TestDatabasePaths:
                 assert settings.db_path == Path("/mock/data/db.sqlite")
 
     def test_get_database_url_requires_configuration(self):
-        """get_database_url raises when unset: the app is Postgres-only (no SQLite fallback)."""
-        # Clear the deployment-leaked DATABASE_URL so the unconfigured path runs.
-        # _env_file=None also blocks pydantic-settings from re-reading a repo-root
-        # .env — popping the env var alone is not hermetic.
+        """get_database_url raises when neither the POSTGRES_* pieces nor a
+        legacy DATABASE_URL are set — the app is Postgres-only and there is no
+        insecure default."""
+        # Clear the deployment-leaked values so the unconfigured path runs.
+        # _env_file=None also blocks pydantic-settings from re-reading a
+        # repo-root .env — popping the env vars alone is not hermetic.
         with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("POSTGRES_PASSWORD", None)
             os.environ.pop("DATABASE_URL", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
                     settings = Settings(_env_file=None)
 
+                    assert settings.postgres_password is None
                     assert settings.database_url is None
-                    with pytest.raises(ValueError, match="DATABASE_URL"):
+                    with pytest.raises(ValueError, match="POSTGRES_HOST"):
                         settings.get_database_url()
 
-    def test_get_database_url_custom(self):
-        """get_database_url should return custom URL when set."""
-        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://localhost/mydb"}, clear=False):
+    def test_get_database_url_legacy_database_url_fallback(self):
+        """A legacy DATABASE_URL from a pre-split install keeps working
+        verbatim — upgraded installs have no way to re-run setup."""
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://REDACTED@10.0.0.9:5433/olddb",
+        }, clear=False):
+            os.environ.pop("POSTGRES_PASSWORD", None)
             with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
                 with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
                     from app.core.config import Settings
-                    settings = Settings()
+                    settings = Settings(_env_file=None)
 
-                    assert settings.get_database_url() == "postgresql://localhost/mydb"
+                    assert settings.get_database_url() == (
+                        "postgresql://REDACTED@10.0.0.9:5433/olddb"
+                    )
+
+    def test_get_database_url_legacy_url_wins_over_components(self):
+        """When BOTH are configured the legacy DATABASE_URL wins: it captures
+        the user's complete previous config (custom user/db/host) that the
+        POSTGRES_* defaults would get wrong. A boot warning flags the
+        shadowing (see app/core/startup.py)."""
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://REDACTED@external-db:5432/legacydb",
+            "POSTGRES_PASSWORD": "component-pw",
+            "POSTGRES_HOST": "postgres",
+        }, clear=False):
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings(_env_file=None)
+
+                    assert settings.get_database_url() == (
+                        "postgresql://REDACTED@external-db:5432/legacydb"
+                    )
+
+    def test_get_database_url_built_from_components(self):
+        """get_database_url assembles the URL from the POSTGRES_* pieces."""
+        with patch.dict(os.environ, {
+            "POSTGRES_HOST": "10.0.0.5",
+            "POSTGRES_PORT": "5433",
+            "POSTGRES_USER": "alice",
+            "POSTGRES_PASSWORD": "secret",
+            "POSTGRES_DB": "mydb",
+        }, clear=False):
+            os.environ.pop("DATABASE_URL", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings(_env_file=None)
+
+                    assert settings.get_database_url() == (
+                        "postgresql://REDACTED@10.0.0.5:5433/mydb"
+                    )
+
+    def test_get_database_url_percent_encodes_password(self):
+        """Passwords with URL-special characters survive the round-trip through
+        parse_database_url."""
+        with patch.dict(os.environ, {
+            "POSTGRES_HOST": "localhost",
+            "POSTGRES_PASSWORD": "p@ss/w%rd",
+        }, clear=False):
+            os.environ.pop("DATABASE_URL", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    from app.db.base import parse_database_url
+                    settings = Settings(_env_file=None)
+
+                    parsed = parse_database_url(settings.get_database_url())
+                    assert parsed["password"] == "p@ss/w%rd"
+                    assert parsed["host"] == "localhost"
+
+    def test_get_database_url_default_hosts(self):
+        """Host defaults to localhost in local mode and postgres in Docker."""
+        with patch.dict(os.environ, {"POSTGRES_PASSWORD": "pw"}, clear=False):
+            os.environ.pop("POSTGRES_HOST", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    local = Settings(_env_file=None, local_mode=True)
+                    docker = Settings(_env_file=None, local_mode=False)
+
+                    assert local.effective_postgres_host == "localhost"
+                    assert docker.effective_postgres_host == "postgres"
 
 
 class TestClaudeProjectsDir:
@@ -687,27 +768,3 @@ class TestSettingsConfigClass:
         assert Settings.model_config.get('env_file') == '.env'
         assert Settings.model_config.get('env_file_encoding') == 'utf-8'
 
-
-class TestPreserveBackgroundOnInterrupt:
-    """The opt-in flag that gates the deploy-time bundled-CLI interrupt patch."""
-
-    def test_default_is_false(self):
-        """No binary is touched unless the operator opts in."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("PRESERVE_BACKGROUND_ON_INTERRUPT", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
-
-                    assert settings.preserve_background_on_interrupt is False
-
-    def test_env_var_true_enables(self):
-        """PRESERVE_BACKGROUND_ON_INTERRUPT=true → True (picked up by field name)."""
-        with patch.dict(os.environ, {"PRESERVE_BACKGROUND_ON_INTERRUPT": "true"}, clear=False):
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings()
-
-                    assert settings.preserve_background_on_interrupt is True

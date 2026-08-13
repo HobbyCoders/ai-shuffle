@@ -101,10 +101,8 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
             gateway._stop = True
 
     record = MagicMock()
-    if not getattr(eg.settings, "database_url", None):
-        monkeypatch.setattr(
-            eg.settings, "database_url", "postgresql://REDACTED@localhost:5432/test"
-        )
+    if not getattr(eg.settings, "postgres_password", None):
+        monkeypatch.setattr(eg.settings, "postgres_password", "p")
     monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
     monkeypatch.setattr(eg.select, "select", fake_select)
     monkeypatch.setattr(gateway, "_sleep", fake_sleep)
@@ -118,10 +116,10 @@ def test_listen_loop_connects_with_parsed_dsn_kwargs(monkeypatch, gw):
     a literal '@' in the password makes libpq mis-parse the host."""
     import app.core.event_gateway as eg
 
-    monkeypatch.setattr(
-        eg.settings, "database_url",
-        "postgresql://REDACTED@10.0.0.200:5432/aihub",
-    )
+    monkeypatch.setattr(eg.settings, "postgres_host", "10.0.0.200")
+    monkeypatch.setattr(eg.settings, "postgres_user", "aihub")
+    monkeypatch.setattr(eg.settings, "postgres_password", "p@ssPwd")
+    monkeypatch.setattr(eg.settings, "postgres_db", "aihub")
     calls, _ = _drive_listen_loop(monkeypatch, gw, ["fail"], max_sleeps=1)
 
     assert len(calls) == 1
@@ -165,9 +163,7 @@ def test_stop_joins_running_listener_thread_promptly(monkeypatch):
     import app.core.event_gateway as eg
 
     g = EventGateway()
-    monkeypatch.setattr(
-        eg.settings, "database_url", "postgresql://REDACTED@localhost:5432/test"
-    )
+    monkeypatch.setattr(eg.settings, "postgres_password", "p")
 
     # Every connect fails immediately, so the loop parks in the (interruptible)
     # backoff sleep between attempts.

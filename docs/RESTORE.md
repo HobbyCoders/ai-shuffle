@@ -63,7 +63,7 @@ docker compose -f docker-compose.yml -f docker-compose.backup.yml \
   --dbname=ai_shuffle --clean --if-exists --no-owner --no-privileges \
   /data/backups/ai-shuffle-db-<ts>.dump
 ```
-(The sidecar sets `PGPASSWORD` via `DATABASE_URL`; pass `-e PGPASSWORD` if
+(The sidecar sets `PGPASSWORD` from `POSTGRES_PASSWORD`; pass `-e PGPASSWORD` if
 `pg_restore` prompts.)
 
 ## 2. Restore the media
@@ -98,7 +98,7 @@ exact mirror, clear those three dirs before extracting.
 3. **Row-count sanity** — confirm core tables have rows:
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.backup.yml \
-     run --rm backup psql "$DATABASE_URL" -c \
+     run --rm backup psql -c \
      "SELECT (SELECT count(*) FROM sessions) AS sessions,
              (SELECT count(*) FROM system_settings) AS settings,
              (SELECT count(*) FROM admin) AS admins;"

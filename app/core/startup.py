@@ -59,7 +59,7 @@ def _auto_migrate_sqlite_to_postgres() -> None:
         from app.db.migrate_sqlite_to_postgres import migrate
         results = migrate(
             sqlite_path=str(sqlite_path),
-            postgres_url=settings.database_url,
+            postgres_url=settings.get_database_url(),
             dry_run=False,
         )
         total = sum(results.values())
@@ -286,35 +286,46 @@ def check_prerequisites() -> None:
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
-    _check_session_store_durability()
     _check_browser_mcp_prereqs()
+    _warn_removed_env_vars()
 
 
-def _check_session_store_durability() -> None:
-    """Scream (once, at boot) if session-transcript durability is degraded.
+def _warn_removed_env_vars() -> None:
+    """Log (once, at boot) about legacy / removed env vars that are still set.
 
-    Only "postgres_only" streams the SDK transcript into Postgres in
-    near-real-time; any other effective mode reverts to turn-boundary
-    persistence, which reopens a full-turn data-loss window if the process
-    crashes mid-turn. The code default is "postgres_only", so reaching
-    "disabled" here means an install explicitly (mis)configured it — surface
-    that loudly so a misconfigured prod node is obvious in the logs.
-
-    Suppressed under TESTING (conftest sets TESTING=1), where the disabled
-    default is expected and harmless.
+    DATABASE_URL was replaced by the POSTGRES_HOST/PORT/USER/PASSWORD/DB
+    pieces but is still honored as a legacy fallback — an existing install has
+    no way to re-run setup, so its old .env must keep working. It takes
+    precedence when set, which deserves a note (and a louder one when
+    POSTGRES_* values are ALSO configured, since those are then shadowed).
+    SESSION_STORE_MODE, PRESERVE_BACKGROUND_ON_INTERRUPT and START_CHROME were
+    removed outright (their enabled behavior is now always-on / their feature
+    retired), so setting them would be silently ignored — say so.
     """
+    if settings.database_url and settings.database_url.strip():
+        if settings.postgres_password:
+            logger.warning(
+                "Both the legacy DATABASE_URL and the POSTGRES_* settings are "
+                "configured — DATABASE_URL takes precedence and the POSTGRES_* "
+                "values are IGNORED. Remove DATABASE_URL from .env to switch "
+                "to the POSTGRES_* pieces."
+            )
+        else:
+            logger.info(
+                "Using the legacy DATABASE_URL connection string. This keeps "
+                "working, but consider migrating to the POSTGRES_HOST/"
+                "POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB "
+                "settings in .env (see .env.example)."
+            )
+
     import os
 
-    if os.environ.get("TESTING") == "1":
-        return
-
-    if settings.session_store_mode == "disabled":
-        logger.warning(
-            "DURABILITY DEGRADED: session_store_mode=disabled — session "
-            "transcripts persist only at turn boundaries, so a mid-turn crash "
-            "loses the whole in-progress turn. Set SESSION_STORE_MODE=postgres_only "
-            "for near-real-time durable transcript persistence."
-        )
+    for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT", "START_CHROME"):
+        if os.environ.get(removed):
+            logger.warning(
+                "%s is set but no longer read — the flag was removed. "
+                "Remove it from your environment/.env.", removed
+            )
 
 
 def _check_browser_mcp_prereqs() -> None:

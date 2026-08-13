@@ -29,7 +29,14 @@ Or double-click `run_local.bat`
 ### Required
 - **Python 3.10+** — [Download](https://www.python.org/downloads/)
 - **Node.js 18+** — [Download](https://nodejs.org/) (for building frontend)
+- **PostgreSQL 14+** — [Download](https://www.postgresql.org/download/) (or any reachable Postgres server on your network)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
+
+During `--setup` you'll be asked for the database connection: the host/IP of
+your Postgres server, the username, and the password (port and database name
+have sensible defaults). The answers are saved to `.env` — the app assembles
+the connection URL itself, so you never have to hand-build a `postgresql://`
+string.
 
 ## Manual Setup
 
@@ -59,7 +66,15 @@ pip install -r requirements.txt
 pip install -r requirements-native.txt
 ```
 
-### 4. Build Frontend
+### 4. Configure the Database
+```bash
+# Prompts for host/IP, username, and password; saves them to .env
+python -c "import run_local; run_local.configure_database()"
+```
+Or add them to `.env` by hand (see `.env.example`): `POSTGRES_HOST`,
+`POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`.
+
+### 5. Build Frontend
 ```bash
 cd frontend
 npm install
@@ -74,7 +89,7 @@ rm -rf app/static/_app && cp -r frontend/build/_app app/static/_app && cp fronte
 rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
-### 5. Start the Server
+### 6. Start the Server
 ```bash
 # Set local mode
 export LOCAL_MODE=true  # or set LOCAL_MODE=true on Windows
@@ -101,6 +116,13 @@ PORT=8000
 
 # Disable secure cookies for HTTP
 COOKIE_SECURE=false
+
+# Database connection (written by the setup prompts; edit here to change)
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=ai_shuffle
+POSTGRES_PASSWORD=your-strong-password
+POSTGRES_DB=ai_shuffle
 ```
 
 ### Data Locations
@@ -148,7 +170,6 @@ MCP admin UI (**Settings → Browser automation**).
 |----------|---------|
 | `CHROME_CDP_PORT` | Loopback DevTools port (default `9221`). |
 | `CHROME_EXECUTABLE` | Explicit Chrome/Edge/Chromium path. Auto-detected from the standard Chrome/Edge install locations when unset. |
-| `START_CHROME=0` | Opt out of auto-launch (run your own browser on the CDP port). |
 | `BROWSER_MCP_ENTRY` | Override the tool-server entry path (defaults to `<repo>/browser-mcp/dist/index.js` on native checkouts). |
 
 **Troubleshooting.** The **Settings → Browser automation** card shows a health
@@ -159,7 +180,7 @@ point `CHROME_EXECUTABLE` at it), `external browser on port 9221` (something els
 already owns the port), or `Chrome crash-looped …` (check the app logs).
 
 > **Docker:** the container image bundles Chromium and supervises it itself
-> (`docker/chrome-supervisor.sh`, `START_CHROME=1`); the native supervisor
+> (`docker/chrome-supervisor.sh`); the native supervisor
 > described above is a no-op inside the container.
 
 > **Security note (SSRF / local-network reach).** The agent drives a real browser
@@ -211,17 +232,17 @@ kill -9 <pid>
 ```
 
 ### Database Issues
-The SQLite database is stored in your data directory. To reset:
+Data lives in the PostgreSQL database configured during setup (the
+`POSTGRES_*` values in `.env`). If the server refuses to start with a
+database error, check that Postgres is running and reachable, then re-run the
+connection setup:
 ```bash
-# Find and delete db.sqlite
-# Windows:
-del "%APPDATA%\ai-shuffle\db.sqlite"
-
-# macOS:
-rm ~/Library/Application\ Support/ai-shuffle/db.sqlite
-
-# Linux:
-rm ~/.local/share/ai-shuffle/db.sqlite
+python -c "import run_local; run_local.configure_database()"
+```
+To reset the app completely, drop and recreate the database:
+```sql
+DROP DATABASE ai_shuffle;
+CREATE DATABASE ai_shuffle;
 ```
 
 ## Development Mode
