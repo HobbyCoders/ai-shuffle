@@ -161,6 +161,29 @@ def _check_profile_modified(profile: dict) -> None:
     )
 
 
+@router.get("/templates")
+async def list_agent_templates(token: str = Depends(require_auth)):
+    """System-prompt templates for agent creation (ruling A12).
+
+    New agents start with an EMPTY prompt; the built-in subagent prompts are
+    offered as selectable starting points — templates are the ceiling, nothing
+    is ever injected implicitly. Served from the in-repo code definitions
+    (BUILTIN_SUBAGENTS), not the database.
+    """
+    from app.core.builtin_subagents import BUILTIN_SUBAGENTS
+
+    return [
+        {
+            "id": d["id"],
+            "name": d["name"],
+            "description": d.get("description") or "",
+            "prompt": d.get("prompt") or "",
+            "tools": d.get("tools"),
+        }
+        for d in BUILTIN_SUBAGENTS
+    ]
+
+
 @router.get("", response_model=List[Profile])
 async def list_profiles(request: Request, token: str = Depends(require_auth)):
     """List all agent profiles. API users only see their assigned profiles."""
