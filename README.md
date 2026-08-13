@@ -117,6 +117,7 @@ and you'll be guided through account setup and Claude authentication on first la
 |---|---|---|
 | `POSTGRES_PASSWORD` | — | **Required.** Database password — compose fails fast if unset. The app builds its own connection URL from the `POSTGRES_*` pieces |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining connection pieces — only set them if your database lives outside the bundled compose service |
+| `DATABASE_URL` | — | *Legacy.* Full connection string from pre-split installs — still honored and takes precedence when set, so existing `.env` files keep working unchanged |
 | `ADMIN_PASSWORD` | — | Master secret; the at-rest encryption key for stored credentials is derived from it (PBKDF2) |
 | `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
 | `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |

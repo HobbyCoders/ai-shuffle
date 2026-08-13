@@ -291,24 +291,35 @@ def check_prerequisites() -> None:
 
 
 def _warn_removed_env_vars() -> None:
-    """Scream (once, at boot) when a removed env var is still set.
+    """Log (once, at boot) about legacy / removed env vars that are still set.
 
     DATABASE_URL was replaced by the POSTGRES_HOST/PORT/USER/PASSWORD/DB
-    pieces; SESSION_STORE_MODE, PRESERVE_BACKGROUND_ON_INTERRUPT and
-    START_CHROME were removed outright (their enabled behavior is now
-    always-on / their feature retired). A deployment that still sets them
-    would otherwise have its intent silently ignored — worst case a custom
-    DATABASE_URL pointing somewhere the POSTGRES_* defaults do not.
+    pieces but is still honored as a legacy fallback — an existing install has
+    no way to re-run setup, so its old .env must keep working. It takes
+    precedence when set, which deserves a note (and a louder one when
+    POSTGRES_* values are ALSO configured, since those are then shadowed).
+    SESSION_STORE_MODE, PRESERVE_BACKGROUND_ON_INTERRUPT and START_CHROME were
+    removed outright (their enabled behavior is now always-on / their feature
+    retired), so setting them would be silently ignored — say so.
     """
+    if settings.database_url and settings.database_url.strip():
+        if settings.postgres_password:
+            logger.warning(
+                "Both the legacy DATABASE_URL and the POSTGRES_* settings are "
+                "configured — DATABASE_URL takes precedence and the POSTGRES_* "
+                "values are IGNORED. Remove DATABASE_URL from .env to switch "
+                "to the POSTGRES_* pieces."
+            )
+        else:
+            logger.info(
+                "Using the legacy DATABASE_URL connection string. This keeps "
+                "working, but consider migrating to the POSTGRES_HOST/"
+                "POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB "
+                "settings in .env (see .env.example)."
+            )
+
     import os
 
-    if os.environ.get("DATABASE_URL"):
-        logger.warning(
-            "DATABASE_URL is set but IGNORED — the connection URL is now built "
-            "from POSTGRES_HOST/POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/"
-            "POSTGRES_DB. If your DATABASE_URL pointed anywhere other than the "
-            "defaults, set the matching POSTGRES_* values in .env."
-        )
     for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT", "START_CHROME"):
         if os.environ.get(removed):
             logger.warning(

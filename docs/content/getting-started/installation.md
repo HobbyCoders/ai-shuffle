@@ -81,6 +81,7 @@ On first launch, you'll be directed to the setup page where you:
 | `CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed CORS origins (use `*` for development only) |
 | `POSTGRES_PASSWORD` | _(required)_ | PostgreSQL password. No default — the server refuses to start without it. Collected by `python run_local.py --setup` on local installs. |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `localhost`¹ / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining PostgreSQL connection pieces — the app assembles the connection URL itself. ¹`postgres` (the compose service) in Docker. |
+| `DATABASE_URL` | _(legacy)_ | Full connection string from installs that predate the `POSTGRES_*` split — still honored, and takes precedence when set. |
 
 ### Running in Production
 

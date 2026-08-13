@@ -110,11 +110,21 @@ class Settings(BaseSettings):
     #                       (run_local.py --setup writes it to .env; Docker
     #                       compose fails fast if unset).
     #   POSTGRES_DB       — default "ai_shuffle".
+    #   DATABASE_URL      — LEGACY full connection string from versions before
+    #                       the split. Still honored — an existing install that
+    #                       upgraded has no way to re-run setup, so its old
+    #                       .env must keep working as-is. Takes precedence when
+    #                       set (it captures the user's complete previous
+    #                       config, including a custom user/db/host the
+    #                       POSTGRES_* defaults would get wrong). New installs
+    #                       use the pieces above; setup comments the legacy URL
+    #                       out when it writes new values.
     postgres_host: Optional[str] = None
     postgres_port: int = 5432
     postgres_user: str = "ai_shuffle"
     postgres_password: Optional[str] = None
     postgres_db: str = "ai_shuffle"
+    database_url: Optional[str] = None
     db_pool_min: int = 2  # Min connections in PostgreSQL pool
     db_pool_max: int = 32  # Max connections in PostgreSQL pool
     # Headroom note: the rate-limit middleware does a synchronous DB auth
@@ -501,14 +511,22 @@ class Settings(BaseSettings):
     def get_database_url(self) -> str:
         """Assemble the PostgreSQL URL from the POSTGRES_* connection pieces.
 
+        A legacy DATABASE_URL (pre-split installs) takes precedence when set —
+        it captures the user's complete previous configuration verbatim, so an
+        upgraded install keeps connecting exactly where it always did.
+
         Credentials are percent-encoded so passwords containing '@', '/', or
         '%' survive the round-trip through app.db.base.parse_database_url.
         """
+        if self.database_url and self.database_url.strip():
+            return self.database_url.strip()
         if not self.postgres_password:
             raise ValueError(
-                "POSTGRES_PASSWORD is required. Set the database connection in "
-                ".env (POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD — see "
-                ".env.example), or re-run setup: python run_local.py --setup"
+                "Database connection is not configured. Set POSTGRES_HOST, "
+                "POSTGRES_USER, and POSTGRES_PASSWORD in .env (see "
+                ".env.example), or re-run setup: python run_local.py --setup. "
+                "(A legacy DATABASE_URL connection string is also still "
+                "honored.)"
             )
         from urllib.parse import quote
         user = quote(self.postgres_user, safe="")

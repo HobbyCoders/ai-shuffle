@@ -403,8 +403,14 @@ def _read_env_file(env_path: Path) -> dict:
     return values
 
 
-def _write_env_values(env_path: Path, updates: dict):
-    """Update KEY=VALUE pairs in .env in place, appending keys that are new."""
+def _write_env_values(env_path: Path, updates: dict, retire_keys: tuple = ()):
+    """Update KEY=VALUE pairs in .env in place, appending keys that are new.
+
+    Keys in ``retire_keys`` are commented out instead of kept — used to
+    disarm the legacy DATABASE_URL (which takes precedence over the
+    POSTGRES_* pieces) once setup has collected new values, so the freshly
+    entered connection details actually take effect.
+    """
     lines = []
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
@@ -417,6 +423,8 @@ def _write_env_values(env_path: Path, updates: dict):
         key = stripped.partition("=")[0].strip()
         if key in remaining:
             lines[i] = f"{key}={remaining.pop(key)}"
+        elif key in retire_keys:
+            lines[i] = f"# retired by setup (superseded by POSTGRES_*): {line}"
 
     if remaining:
         if lines and lines[-1].strip():
@@ -443,6 +451,28 @@ def configure_database():
     env_path = project_root / ".env"
     existing = _read_env_file(env_path)
 
+    # A pre-split install carries a legacy DATABASE_URL instead of POSTGRES_*
+    # values. Parse it so the prompts default to the connection the user
+    # already had, instead of making them re-derive host/user/password.
+    legacy_parts = {}
+    legacy_url = existing.get("DATABASE_URL", "")
+    if legacy_url:
+        try:
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(
+                legacy_url if "://" in legacy_url else f"postgresql://{legacy_url}"
+            )
+            legacy_parts = {
+                "host": parsed.hostname or "",
+                "port": str(parsed.port) if parsed.port else "",
+                "user": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
+                "db": parsed.path.lstrip("/"),
+            }
+            print_status("Found a legacy DATABASE_URL — defaults below are taken from it", "info")
+        except Exception:
+            legacy_parts = {}
+
     def ask(prompt: str, default: str) -> str:
         try:
             answer = input(f"   {prompt} [{default}]: ").strip()
@@ -450,21 +480,29 @@ def configure_database():
             answer = ""
         return answer or default
 
-    host = ask("Host / IP address", existing.get("POSTGRES_HOST", "localhost"))
-    port = ask("Port", existing.get("POSTGRES_PORT", "5432"))
-    user = ask("Username", existing.get("POSTGRES_USER", "ai_shuffle"))
-    db_name = ask("Database name", existing.get("POSTGRES_DB", "ai_shuffle"))
+    host = ask("Host / IP address",
+               existing.get("POSTGRES_HOST") or legacy_parts.get("host") or "localhost")
+    port = ask("Port",
+               existing.get("POSTGRES_PORT") or legacy_parts.get("port") or "5432")
+    user = ask("Username",
+               existing.get("POSTGRES_USER") or legacy_parts.get("user") or "ai_shuffle")
+    db_name = ask("Database name",
+                  existing.get("POSTGRES_DB") or legacy_parts.get("db") or "ai_shuffle")
 
+    stored_password = existing.get("POSTGRES_PASSWORD") or legacy_parts.get("password") or ""
     password = ""
     while not password:
         try:
             import getpass
-            password = getpass.getpass("   Password (input hidden): ").strip()
+            prompt = "   Password (input hidden{}): ".format(
+                ", Enter keeps current" if stored_password else ""
+            )
+            password = getpass.getpass(prompt).strip()
         except EOFError:
             break
-        if not password and existing.get("POSTGRES_PASSWORD"):
-            password = existing["POSTGRES_PASSWORD"]
-            print_status("Keeping the existing password from .env", "info")
+        if not password and stored_password:
+            password = stored_password
+            print_status("Keeping the existing password", "info")
             break
         if not password:
             print_status("A password is required", "warning")
@@ -479,7 +517,9 @@ def configure_database():
         "POSTGRES_USER": user,
         "POSTGRES_PASSWORD": password,
         "POSTGRES_DB": db_name,
-    })
+    }, retire_keys=("DATABASE_URL",))
+    if existing.get("DATABASE_URL"):
+        print_status("Legacy DATABASE_URL commented out — the POSTGRES_* values above now apply", "info")
     print_status(f"Database settings saved to {env_path}", "success")
 
     # Best-effort connectivity check via the venv's psycopg2 (installed with
@@ -688,9 +728,16 @@ def start_server(host: str, port: int, open_browser: bool):
         print_status("Frontend not built. Run with --setup first.", "error")
         sys.exit(1)
 
-    # Database credentials come from .env (written by --setup) or the process env
+    # Database credentials come from .env (written by --setup) or the process
+    # env. A legacy DATABASE_URL from a pre-split install also counts — the
+    # app still honors it, so an upgraded install starts without re-running
+    # setup.
     env_values = _read_env_file(project_root / ".env")
-    if not env.get("POSTGRES_PASSWORD") and not env_values.get("POSTGRES_PASSWORD"):
+    db_configured = any(
+        env.get(key) or env_values.get(key)
+        for key in ("POSTGRES_PASSWORD", "DATABASE_URL")
+    )
+    if not db_configured:
         print_status("Database not configured (no POSTGRES_PASSWORD). Run with --setup first.", "error")
         sys.exit(1)
 
