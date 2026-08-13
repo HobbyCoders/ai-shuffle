@@ -455,11 +455,6 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             logger.debug(f"Created built-in subagent: {subagent_id}")
             results[subagent_id] = "created"
 
-        elif existing.get("is_builtin") and not existing.get("default_prompt"):
-            _update_builtin_defaults(subagent_id, definition)
-            logger.debug(f"Repaired defaults for built-in subagent: {subagent_id}")
-            results[subagent_id] = "repaired"
-
         elif force_update and existing.get("is_builtin"):
             _update_builtin_defaults(subagent_id, definition)
             logger.debug(f"Updated defaults for built-in subagent: {subagent_id}")
@@ -472,77 +467,27 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             results[subagent_id] = "promoted"
 
         else:
-            # Check if code definition changed since last seed
-            old_default_prompt = existing.get("default_prompt", "")
-            old_default_model = existing.get("default_model")
-            new_prompt = definition["prompt"]
-            new_model = definition.get("model")
-            prompt_changed = old_default_prompt and old_default_prompt != new_prompt
-            model_changed = old_default_model != new_model
-            if prompt_changed or model_changed:
-                # Code definition changed — update defaults
-                _update_builtin_defaults(subagent_id, definition)
-                # If user hasn't customized, also update active values
-                prompt_uncustomized = existing.get("prompt") == old_default_prompt
-                model_uncustomized = existing.get("model") == old_default_model
-                update_kwargs: Dict[str, Any] = {}
-                if prompt_changed and prompt_uncustomized:
-                    update_kwargs["prompt"] = new_prompt
-                    update_kwargs["name"] = definition["name"]
-                    update_kwargs["description"] = definition["description"]
-                if model_changed and model_uncustomized:
-                    update_kwargs["model"] = new_model
-                if update_kwargs:
-                    database.update_subagent(subagent_id=subagent_id, **update_kwargs)
-                    logger.info(f"Auto-updated built-in subagent from new code: {subagent_id}")
-                    results[subagent_id] = "auto_updated"
-                else:
-                    logger.debug(f"Updated defaults for {subagent_id} (active config customized, not overwritten)")
-                    results[subagent_id] = "defaults_updated"
-            else:
-                results[subagent_id] = "exists"
+            # v71: the default_* snapshot columns are gone, so a diff between
+            # the row and the code definition can no longer be disambiguated
+            # (user customization vs new code version). Existing rows are left
+            # alone — the revert endpoint restores the code definition on
+            # demand, and new installs always seed the current version.
+            results[subagent_id] = "exists"
 
-    # Prune built-in agents that were removed from code definitions
-    builtin_ids = {d["id"] for d in BUILTIN_SUBAGENTS}
-    all_subagents = database.get_all_subagents()
-    for subagent in all_subagents:
-        if subagent.get("is_builtin") and subagent["id"] not in builtin_ids:
-            database.delete_subagent(subagent["id"])
-            logger.info(f"Pruned removed built-in subagent: {subagent['id']}")
-            results[subagent["id"]] = "pruned"
+    # v71: NO pruning. The unified ``agents`` table holds builtin PROFILE
+    # agents too (ids the BUILTIN_SUBAGENTS list has never heard of) — the old
+    # prune-by-id loop would delete them. A builtin subagent removed from code
+    # simply lives on as an ordinary agent.
 
     return results
 
 
 def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> None:
-    """Update only the default_* columns for a built-in subagent."""
-    import json
-    from datetime import datetime, timezone
-    from app.db.base import get_db
-
-    tools_json = json.dumps(definition.get("tools")) if definition.get("tools") is not None else None
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """UPDATE subagents SET
-                default_name = %s,
-                default_description = %s,
-                default_prompt = %s,
-                default_tools = %s,
-                default_model = %s,
-                updated_at = %s
-               WHERE id = %s AND is_builtin = TRUE""",
-            (
-                definition["name"],
-                definition["description"],
-                definition["prompt"],
-                tools_json,
-                definition.get("model"),
-                datetime.now(timezone.utc).isoformat(),
-                subagent_id
-            )
-        )
+    """No-op since v71: built-in defaults live in code (BUILTIN_SUBAGENTS) —
+    the old ``default_*`` snapshot columns died in the agents fold. Revert and
+    modified-detection read the code definitions directly
+    (app/db/subagents.py::_code_defaults)."""
+    return None
 
 
 def get_builtin_subagent_ids() -> List[str]:

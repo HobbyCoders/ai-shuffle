@@ -1164,27 +1164,25 @@ class TestBuiltinSubagentSeeding:
             # Verify set_subagent_builtin was called to fix the flag
             mock_db.set_subagent_builtin.assert_called_once_with("chat-history-summarizer", True)
 
-    def test_seed_repairs_builtin_missing_defaults(self):
-        """Seeding repairs built-in subagent missing default values."""
+    def test_seed_existing_builtin_without_defaults_is_left_alone(self):
+        """v71: defaults live in code — a builtin row missing the old
+        default_prompt column needs no 'repair' pass any more."""
         from app.core.builtin_subagents import seed_builtin_subagents
 
-        # Subagent is builtin but missing default_prompt (migration issue)
         existing_subagent = {
             "id": "chat-history-summarizer",
             "name": "Chat History Summarizer",
             "is_builtin": True,
-            "default_prompt": None  # Missing - needs repair
         }
 
         with patch("app.core.builtin_subagents.database") as mock_db, \
-             patch("app.core.builtin_subagents._update_builtin_defaults") as mock_update, \
              patch("app.core.builtin_subagents.BUILTIN_SUBAGENTS", [_CHS_DEF]):
             mock_db.get_subagent.return_value = existing_subagent
 
             results = seed_builtin_subagents()
 
-            assert results.get("chat-history-summarizer") == "repaired"
-            mock_update.assert_called_once()
+            assert results.get("chat-history-summarizer") == "exists"
+            mock_db.create_subagent.assert_not_called()
 
     def test_seed_skips_existing_builtin_with_defaults(self):
         """Seeding skips properly configured built-in subagents."""

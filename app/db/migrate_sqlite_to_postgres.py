@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import json
 import psycopg2
 import psycopg2.extras
 
@@ -34,7 +35,7 @@ PHASE_1 = [
     "system_settings",
     "admin",
     "schema_version",
-    "profiles",
+    "profiles",  # v71: lands in the `agents` table (see _TABLE_TARGETS)
     "projects",
     "tags",
     "fal_model_catalog",
@@ -46,7 +47,7 @@ PHASE_2 = [
     "api_users",
     "notes",
     "templates",
-    "subagents",
+    "subagents",  # v71: folded into `agents` (see _migrate_table special case)
     "automations",
     "connectors",
     "git_repositories",
@@ -154,11 +155,51 @@ def _migrate_table(
 
     pg_cur = pg_conn.cursor()
 
+    # v71 (agents unification): old sqlite ``subagents`` rows are FOLDED into
+    # the pg ``agents`` table — there is no pg subagents table any more.
+    if table_name == "subagents":
+        from app.db.database import subagent_row_to_agent_config
+
+        folded = 0
+        for raw in rows:
+            row = dict(zip(col_names, tuple(raw)))
+            config = subagent_row_to_agent_config(row)
+            try:
+                pg_cur.execute(
+                    """INSERT INTO agents (id, name, description, is_builtin,
+                                           config, mcp_tools, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT DO NOTHING""",
+                    (
+                        row["id"],
+                        row.get("name") or row["id"],
+                        row.get("description"),
+                        bool(row.get("is_builtin")),
+                        json.dumps(config),
+                        json.dumps([]),
+                        row.get("created_at"),
+                        row.get("updated_at"),
+                    ),
+                )
+                folded += 1
+            except Exception as exc:
+                pg_conn.rollback()
+                print(f"  ERR  subagents fold ({row.get('id')}): {exc}")
+                return folded
+        pg_conn.commit()
+        print(f"  OK   subagents: {folded} rows folded into agents")
+        return folded
+
+    # v71: the ``profiles`` table is named ``agents`` in postgres.
+    target_table = "agents" if table_name == "profiles" else table_name
+
     # Check table exists in Postgres
-    if not _table_exists_pg(pg_cur, table_name):
-        print(f"  SKIP {table_name} — not present in PostgreSQL "
+    if not _table_exists_pg(pg_cur, target_table):
+        print(f"  SKIP {target_table} — not present in PostgreSQL "
               "(run schema creation first)")
         return 0
+
+    table_name = target_table
 
     # Build INSERT ... VALUES template
     col_list = ", ".join(col_names)

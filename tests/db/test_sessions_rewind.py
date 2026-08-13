@@ -35,7 +35,7 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
     """Minimal schema needed for rewind DB tests."""
     cursor.execute(
         """
-        CREATE TABLE profiles (
+        CREATE TABLE agents (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT,
@@ -123,7 +123,7 @@ def mock_db(test_db):
         # Seed profile + session
         now = datetime.now(timezone.utc).isoformat()
         test_db.execute(
-            "INSERT INTO profiles (id, name, config) VALUES (?, ?, ?)",
+            "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
             ("p1", "Test", "{}"),
         )
         test_db.execute(

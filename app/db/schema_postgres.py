@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 70
+SCHEMA_VERSION = 71
 
 
 def create_postgres_schema(cursor) -> None:
@@ -72,10 +72,10 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 4. Agent profiles
+    # 4. Agents (unified agent entity — was `profiles`; ruling A4)
     # ------------------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
+        CREATE TABLE IF NOT EXISTS agents (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT,
@@ -125,7 +125,7 @@ def create_postgres_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_used_at TIMESTAMP WITH TIME ZONE,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL
         )
     """)
 
@@ -204,7 +204,7 @@ def create_postgres_schema(cursor) -> None:
             context_usage_json JSONB,
             provider_id TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
             FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
         )
@@ -328,7 +328,7 @@ def create_postgres_schema(cursor) -> None:
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (api_user_id, profile_id),
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE CASCADE
         )
     """)
 
@@ -388,29 +388,10 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 20. Global subagents
+    # 20. (RETIRED v71) Global subagents — folded into `agents` (ruling A4).
+    # Existing rows are migrated by database._migrate_profiles_to_agents();
+    # fresh installs never create the table.
     # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS subagents (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            tools JSONB,
-            model TEXT,
-            skills JSONB,
-            memory TEXT,
-            mcp_servers JSONB,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            default_name TEXT,
-            default_description TEXT,
-            default_prompt TEXT,
-            default_tools JSONB,
-            default_model TEXT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )
-    """)
 
     # ------------------------------------------------------------------
     # 21. Permission rules for tool access control
@@ -423,7 +404,7 @@ def create_postgres_schema(cursor) -> None:
             tool_pattern TEXT,
             decision TEXT NOT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE CASCADE
         )
     """)
 
@@ -469,7 +450,7 @@ def create_postgres_schema(cursor) -> None:
             is_builtin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL
         )
     """)
 
@@ -1035,7 +1016,7 @@ def create_postgres_schema(cursor) -> None:
             triggers TEXT DEFAULT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE RESTRICT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
         )
     """)
@@ -1278,8 +1259,6 @@ def create_postgres_schema(cursor) -> None:
     # -- user_preferences
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
 
-    # -- subagents
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
 
     # -- permission_rules
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")

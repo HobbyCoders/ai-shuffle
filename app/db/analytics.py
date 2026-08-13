@@ -362,7 +362,7 @@ def get_analytics_cost_breakdown(
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
                     COUNT(*) as query_count
                 FROM usage_log ul
-                LEFT JOIN profiles p ON ul.profile_id = p.id
+                LEFT JOIN agents p ON ul.profile_id = p.id
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 WHERE 1=1 {date_filter} {user_filter}
                 GROUP BY ul.profile_id, p.name
@@ -547,7 +547,7 @@ def get_analytics_top_sessions(
                 s.total_tokens_out,
                 s.created_at
             FROM sessions s
-            LEFT JOIN profiles p ON s.profile_id = p.id
+            LEFT JOIN agents p ON s.profile_id = p.id
             WHERE s.total_cost_usd > 0 {date_filter} {user_filter}
             ORDER BY s.total_cost_usd DESC
             LIMIT %s

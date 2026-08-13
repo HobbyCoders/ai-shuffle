@@ -276,7 +276,7 @@ def get_auth_session(token: str) -> Optional[AuthSessionRow]:
                 # Check if other tables have data (to rule out complete DB wipe)
                 cursor.execute("SELECT COUNT(*) as cnt FROM sessions")
                 sessions_count = cursor.fetchone()["cnt"]
-                cursor.execute("SELECT COUNT(*) as cnt FROM profiles")
+                cursor.execute("SELECT COUNT(*) as cnt FROM agents")
                 profiles_count = cursor.fetchone()["cnt"]
                 logger.warning(
                     f"Other table counts - sessions: {sessions_count}, profiles: {profiles_count}"

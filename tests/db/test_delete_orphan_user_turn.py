@@ -31,7 +31,7 @@ from app.db import sessions as sessions_mod
 def _create_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         """
-        CREATE TABLE profiles (
+        CREATE TABLE agents (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             config JSON NOT NULL DEFAULT '{}',
@@ -131,7 +131,7 @@ def mock_db(test_db):
          patch.object(db, "get_db", mock_get_db):
         now = datetime.now(timezone.utc).isoformat()
         test_db.execute(
-            "INSERT INTO profiles (id, name, config) VALUES (?, ?, ?)",
+            "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
             ("p1", "Test", "{}"),
         )
         # s1: plain session.  s2: worktree-backed session (worktree_id set) used

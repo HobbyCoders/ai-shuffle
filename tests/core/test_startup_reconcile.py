@@ -338,7 +338,9 @@ def test_schema_version_parity_v51():
     from app.db.schema_postgres import SCHEMA_VERSION as pg_version
 
     # database.py and schema_postgres.py must agree on the schema version.
-    # Bumped to 70 for omni_sessions.cli_session_id (additive nullable TEXT):
+    # Bumped to 71 for the agents unification (ruling A4): ``profiles`` renamed
+    # in place to ``agents`` (FKs follow), ``subagents`` rows folded into
+    # ``agents`` and the table dropped. v70 added omni_sessions.cli_session_id:
     # the delegated engine's ``claude --resume`` handle, which is a CLI-issued
     # uuid and NOT the omni session id. It used to live only on the in-process
     # engine, so after a restart the adapter resumed the CLI with the omni
@@ -369,8 +371,8 @@ def test_schema_version_parity_v51():
     # the Phase-2 turns table; v58 was the Phase-1 deletion (v2_stream forced
     # TRUE + default flipped); v57 added the opt-in flag; v56 added the Phase-0
     # primitives.
-    assert db_version == 70
-    assert pg_version == 70
+    assert db_version == 71
+    assert pg_version == 71
     assert db_version == pg_version
 
 

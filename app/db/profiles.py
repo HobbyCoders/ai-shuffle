@@ -15,7 +15,7 @@ from app.db.base import get_db, row_to_dict, rows_to_list, logger
 # ============================================================================
 
 class ProfileRow(TypedDict):
-    """Full profile row from SELECT * FROM profiles."""
+    """Full profile row from SELECT * FROM agents."""
     id: str
     name: str
     description: Optional[str]
@@ -30,7 +30,7 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
     """Get a profile by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles WHERE id = %s", (profile_id,))
+        cursor.execute("SELECT * FROM agents WHERE id = %s", (profile_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
@@ -42,7 +42,7 @@ def get_all_profiles() -> List[ProfileRow]:
     """Get all profiles"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles ORDER BY is_builtin DESC, name ASC")
+        cursor.execute("SELECT * FROM agents ORDER BY is_builtin DESC, name ASC")
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
             row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
@@ -63,7 +63,7 @@ def create_profile(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO profiles (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
+            """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []), now, now)
         )
@@ -112,7 +112,7 @@ def update_profile(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE profiles SET {', '.join(updates)} WHERE id = %s",
+                f"UPDATE agents SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -138,7 +138,7 @@ def delete_profile(profile_id: str) -> bool:
         # Unlink usage_log entries from this profile
         cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Now delete the profile
-        cursor.execute("DELETE FROM profiles WHERE id = %s", (profile_id,))
+        cursor.execute("DELETE FROM agents WHERE id = %s", (profile_id,))
         return cursor.rowcount > 0
 
 
@@ -167,7 +167,7 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE profiles SET is_builtin = %s, updated_at = %s WHERE id = %s",
+            "UPDATE agents SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0

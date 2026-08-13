@@ -1,4 +1,16 @@
-"""Subagent and permission rule database operations."""
+"""Subagent-shaped compat layer over the unified ``agents`` table + permission rules.
+
+v71 (agents-program ruling A4): the ``subagents`` table is gone — every former
+subagent row now lives in ``agents`` with its prompt/tools/model/memory folded
+into the config blob. Existing callers (the /subagents API until the P2b hard
+rename, query_options' enabled_agents resolution until P2c) keep working
+through this module, which projects agent rows into the old subagent dict
+shape and maps writes back onto agent configs.
+
+Built-in subagents' "revert to defaults" now compares against the CODE
+definitions in ``app.core.builtin_subagents.BUILTIN_SUBAGENTS`` — the old
+``default_*`` snapshot columns died in the fold.
+"""
 
 from __future__ import annotations
 
@@ -8,14 +20,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db import profiles as _agents_db
 
-
-# ============================================================================
-# TypedDict definitions
-# ============================================================================
 
 class SubagentRow(TypedDict):
-    """Full subagent row from SELECT * FROM subagents."""
+    """Subagent-shaped projection of an agent row."""
     id: str
     name: str
     description: str
@@ -26,11 +35,6 @@ class SubagentRow(TypedDict):
     memory: Optional[str]
     mcp_servers: Optional[List[Any]]
     is_builtin: bool
-    default_name: Optional[str]
-    default_description: Optional[str]
-    default_prompt: Optional[str]
-    default_tools: Optional[List[str]]
-    default_model: Optional[str]
     created_at: str
     updated_at: str
 
@@ -46,39 +50,93 @@ class PermissionRuleRow(TypedDict):
 
 
 # ============================================================================
-# Subagent Operations
+# Agent-row <-> subagent-shape projection
 # ============================================================================
 
 def _parse_json_fields(row: dict) -> dict:
-    """Parse JSON-serialized fields on a subagent row."""
-    if not row:
-        return row
-    for field in ("tools", "skills", "mcp_servers"):
-        val = row.get(field)
-        if val is not None and isinstance(val, str):
-            row[field] = json.loads(val)
-        # If val is already a list/dict (JSONB), leave it as-is
+    """Kept for import compatibility (database.py re-exports it); the agents
+    config blob is already parsed by the profiles accessor."""
     return row
 
 
+def _agent_to_subagent(agent: Optional[dict]) -> Optional[SubagentRow]:
+    if not agent:
+        return None
+    config = agent.get("config") or {}
+    sp = config.get("system_prompt") or {}
+    prompt = sp.get("content", "") if isinstance(sp, dict) else str(sp or "")
+    return {
+        "id": agent["id"],
+        "name": agent.get("name") or agent["id"],
+        "description": agent.get("description") or "",
+        "prompt": prompt or "",
+        "tools": config.get("allowed_tools"),
+        "model": config.get("model"),
+        "skills": config.get("skills"),
+        "memory": config.get("memory"),
+        "mcp_servers": config.get("mcp_servers"),
+        "is_builtin": bool(agent.get("is_builtin")),
+        "created_at": agent.get("created_at"),
+        "updated_at": agent.get("updated_at"),
+    }
+
+
+def _subagent_config(
+    prompt: str,
+    tools: Optional[List[str]],
+    model: Optional[str],
+    skills: Optional[List[str]],
+    memory: Optional[str],
+    mcp_servers: Optional[List[Any]],
+    base: Optional[dict] = None,
+) -> dict:
+    config = dict(base or {})
+    config["system_prompt"] = {"type": "custom", "content": prompt or ""}
+    if tools is not None:
+        config["allowed_tools"] = tools
+    else:
+        config.pop("allowed_tools", None)
+    if model:
+        config["model"] = model
+    else:
+        config.pop("model", None)
+    if skills is not None:
+        config["skills"] = skills
+    else:
+        config.pop("skills", None)
+    if memory is not None:
+        config["memory"] = memory
+    else:
+        config.pop("memory", None)
+    if mcp_servers is not None:
+        config["mcp_servers"] = mcp_servers
+    else:
+        config.pop("mcp_servers", None)
+    return config
+
+
+def _code_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
+    """The in-repo definition for a built-in subagent (revert source)."""
+    from app.core.builtin_subagents import BUILTIN_SUBAGENTS
+
+    for definition in BUILTIN_SUBAGENTS:
+        if definition.get("id") == subagent_id:
+            return definition
+    return None
+
+
+# ============================================================================
+# Subagent Operations (over agent rows)
+# ============================================================================
+
 def get_subagent(subagent_id: str) -> Optional[SubagentRow]:
-    """Get a subagent by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM subagents WHERE id = %s", (subagent_id,))
-        row = row_to_dict(cursor.fetchone())
-        return _parse_json_fields(row)
+    """Get a subagent-shaped view of an agent by ID"""
+    return _agent_to_subagent(_agents_db.get_profile(subagent_id))
 
 
 def get_all_subagents() -> List[SubagentRow]:
-    """Get all subagents"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM subagents ORDER BY name ASC")
-        rows = rows_to_list(cursor.fetchall())
-        for row in rows:
-            _parse_json_fields(row)
-        return rows
+    """All agents, subagent-shaped (unified entity: any agent is a target)."""
+    return [_agent_to_subagent(a) for a in _agents_db.get_all_profiles()]
 
 
 def create_subagent(
@@ -92,56 +150,17 @@ def create_subagent(
     memory: Optional[str] = None,
     mcp_servers: Optional[List[Any]] = None,
     is_builtin: bool = False,
-    store_defaults: bool = False
+    store_defaults: bool = False,
 ) -> SubagentRow:
-    """
-    Create a new subagent.
+    """Create an agent row from subagent-shaped fields.
 
-    Args:
-        subagent_id: Unique identifier for the subagent
-        name: Display name
-        description: When to use this subagent
-        prompt: System prompt for the subagent
-        tools: List of allowed tools (None = inherit all)
-        model: Model override (None = inherit from profile)
-        skills: List of skills the agent can use
-        memory: Memory scope: user, project, or local
-        mcp_servers: MCP servers the agent can access
-        is_builtin: Whether this is a built-in subagent (cannot be deleted)
-        store_defaults: If True, also store current values as defaults (for built-in subagents)
+    ``store_defaults`` is accepted for signature compatibility and ignored —
+    built-in defaults live in code (``BUILTIN_SUBAGENTS``) since v71.
     """
-    now = datetime.now(timezone.utc).isoformat()
-    # Use `is not None` — empty list [] must serialize as "[]", not NULL.
-    # NULL means "inherit all", [] means "no tools allowed".
-    tools_json = json.dumps(tools) if tools is not None else None
-    skills_json = json.dumps(skills) if skills is not None else None
-    mcp_servers_json = json.dumps(mcp_servers) if mcp_servers is not None else None
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if store_defaults:
-            # For built-in subagents, store both current values and defaults
-            cursor.execute(
-                """INSERT INTO subagents (
-                    id, name, description, prompt, tools, model, skills, memory, mcp_servers,
-                    is_builtin,
-                    default_name, default_description, default_prompt, default_tools, default_model,
-                    created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (subagent_id, name, description, prompt, tools_json, model,
-                 skills_json, memory, mcp_servers_json, is_builtin,
-                 name, description, prompt, tools_json, model,
-                 now, now)
-            )
-        else:
-            cursor.execute(
-                """INSERT INTO subagents (
-                    id, name, description, prompt, tools, model, skills, memory, mcp_servers,
-                    is_builtin, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (subagent_id, name, description, prompt, tools_json, model,
-                 skills_json, memory, mcp_servers_json, is_builtin, now, now)
-            )
+    config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
+    _agents_db.create_profile(
+        subagent_id, name, description, config, is_builtin=is_builtin
+    )
     return get_subagent(subagent_id)
 
 
@@ -156,141 +175,82 @@ def update_subagent(
     memory: Optional[str] = ...,  # type: ignore[assignment]
     mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
 ) -> Optional[SubagentRow]:
-    """
-    Update a subagent.
+    """Update the agent row behind a subagent-shaped view.
 
-    Uses Ellipsis (...) as default to distinguish between "not provided" and "explicitly set to None".
-    This allows clearing fields by passing None explicitly.
+    Uses Ellipsis (...) to distinguish "not provided" from "explicitly None".
     """
-    existing = get_subagent(subagent_id)
-    if not existing:
+    agent = _agents_db.get_profile(subagent_id)
+    if not agent:
         return None
-
-    updates = []
-    values = []
-    if name is not ...:
-        updates.append("name = %s")
-        values.append(name)
-    if description is not ...:
-        updates.append("description = %s")
-        values.append(description)
-    if prompt is not ...:
-        updates.append("prompt = %s")
-        values.append(prompt)
-    if tools is not ...:
-        updates.append("tools = %s")
-        values.append(json.dumps(tools) if tools is not None else None)
-    if model is not ...:
-        updates.append("model = %s")
-        values.append(model)
-    if skills is not ...:
-        updates.append("skills = %s")
-        values.append(json.dumps(skills) if skills is not None else None)
-    if memory is not ...:
-        updates.append("memory = %s")
-        values.append(memory)
-    if mcp_servers is not ...:
-        updates.append("mcp_servers = %s")
-        values.append(json.dumps(mcp_servers) if mcp_servers is not None else None)
-
-    if updates:
-        updates.append("updated_at = %s")
-        values.append(datetime.now(timezone.utc).isoformat())
-        values.append(subagent_id)
-
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"UPDATE subagents SET {', '.join(updates)} WHERE id = %s",
-                values
-            )
-
+    current = _agent_to_subagent(agent)
+    config = _subagent_config(
+        prompt=current["prompt"] if prompt is ... else (prompt or ""),
+        tools=current["tools"] if tools is ... else tools,
+        model=current["model"] if model is ... else model,
+        skills=current["skills"] if skills is ... else skills,
+        memory=current["memory"] if memory is ... else memory,
+        mcp_servers=current["mcp_servers"] if mcp_servers is ... else mcp_servers,
+        base=agent.get("config"),
+    )
+    _agents_db.update_profile(
+        subagent_id,
+        name=None if name is ... else name,
+        description=None if description is ... else description,
+        config=config,
+        allow_builtin=True,
+    )
     return get_subagent(subagent_id)
 
 
 def delete_subagent(subagent_id: str) -> bool:
-    """Delete a subagent"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM subagents WHERE id = %s", (subagent_id,))
-        return cursor.rowcount > 0
+    """Delete the agent row behind a subagent-shaped view"""
+    return _agents_db.delete_profile(subagent_id)
 
 
 def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
-    """Set the is_builtin flag for a subagent"""
+    """Set the is_builtin flag on the agent row"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE subagents SET is_builtin = %s, updated_at = %s WHERE id = %s",
+            "UPDATE agents SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
 
 
 def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
-    """
-    Revert a built-in subagent to its original default values.
-
-    Only works for built-in subagents that have stored defaults.
-    Returns the reverted subagent or None if not found/not built-in.
-    """
-    subagent = get_subagent(subagent_id)
-    if not subagent:
+    """Revert a built-in agent to its in-repo definition (BUILTIN_SUBAGENTS)."""
+    current = get_subagent(subagent_id)
+    if not current or not current.get("is_builtin"):
         return None
-
-    if not subagent.get("is_builtin"):
+    defaults = _code_defaults(subagent_id)
+    if not defaults:
         return None
-
-    # Check if defaults exist
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT default_name, default_description, default_prompt, default_tools, default_model
-               FROM subagents WHERE id = %s""",
-            (subagent_id,)
-        )
-        row = cursor.fetchone()
-        if not row or not row["default_prompt"]:
-            # No defaults stored
-            return None
-
-        # Revert to defaults
-        cursor.execute(
-            """UPDATE subagents SET
-                name = default_name,
-                description = default_description,
-                prompt = default_prompt,
-                tools = default_tools,
-                model = default_model,
-                updated_at = %s
-               WHERE id = %s""",
-            (datetime.now(timezone.utc).isoformat(), subagent_id)
-        )
-
-    return get_subagent(subagent_id)
+    return update_subagent(
+        subagent_id,
+        name=defaults.get("name"),
+        description=defaults.get("description"),
+        prompt=defaults.get("prompt"),
+        tools=defaults.get("tools"),
+        model=defaults.get("model"),
+    )
 
 
 def has_subagent_been_modified(subagent_id: str) -> bool:
-    """
-    Check if a built-in subagent has been modified from its defaults.
-
-    Returns True if any field differs from the stored default.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT
-                name != default_name OR
-                description != default_description OR
-                prompt != default_prompt OR
-                tools IS DISTINCT FROM default_tools OR
-                COALESCE(model, '') IS DISTINCT FROM COALESCE(default_model, '')
-               AS is_modified
-               FROM subagents WHERE id = %s AND is_builtin = %s""",
-            (subagent_id, True)
-        )
-        row = cursor.fetchone()
-        return bool(row and row["is_modified"])
+    """True when a built-in agent differs from its in-repo definition."""
+    current = get_subagent(subagent_id)
+    if not current or not current.get("is_builtin"):
+        return False
+    defaults = _code_defaults(subagent_id)
+    if not defaults:
+        return False
+    return (
+        current["name"] != defaults.get("name")
+        or current["description"] != (defaults.get("description") or "")
+        or current["prompt"] != (defaults.get("prompt") or "")
+        or (current["tools"] or None) != (defaults.get("tools") or None)
+        or (current["model"] or None) != (defaults.get("model") or None)
+    )
 
 
 # ============================================================================

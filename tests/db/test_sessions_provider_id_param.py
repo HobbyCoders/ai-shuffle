@@ -28,7 +28,7 @@ def _make_profile(profile_id: str, config: dict) -> None:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            "INSERT INTO profiles (id, name, config) VALUES (%s, %s, %s)",
+            "INSERT INTO agents (id, name, config) VALUES (%s, %s, %s)",
             (profile_id, profile_id, json.dumps(config)),
         )
 

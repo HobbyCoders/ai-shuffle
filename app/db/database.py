@@ -156,7 +156,109 @@ def _safe_json(value):
 #     session id). It was previously in-process only, so after a restart the
 #     adapter resumed the CLI with the omni session id and every turn died
 #     instantly. Additive/nullable, no index.
-SCHEMA_VERSION = 70
+# v71: agents unification (ruling A4). ``profiles`` is RENAMED in place to
+#     ``agents`` (all seven FK consumers follow the rename automatically);
+#     ``subagents`` rows are FOLDED into ``agents`` (prompt -> custom
+#     system_prompt, tools -> allowed_tools list, memory -> config.memory,
+#     inert prov:/subagent_provider fields dropped) and the table is dropped.
+#     Child FK COLUMN names (sessions.profile_id etc.) are unchanged — they
+#     now reference agents(id). See _migrate_profiles_to_agents().
+SCHEMA_VERSION = 71
+
+
+def _migrate_profiles_to_agents(cursor):
+    """v71 pre-schema migration: rename ``profiles`` -> ``agents`` and fold
+    ``subagents`` rows in.
+
+    MUST run before ``create_postgres_schema`` — otherwise the idempotent
+    ``CREATE TABLE IF NOT EXISTS agents`` would create a fresh empty table
+    alongside the still-named ``profiles`` and orphan every FK row.
+
+    Postgres carries FK constraints across ``ALTER TABLE ... RENAME``, so the
+    seven referencing tables (sessions, session_messages, usage_log,
+    templates, api_users, api_user_profiles, permission_rules, automations)
+    need no changes.
+    """
+    import json as _json
+
+    if table_exists(cursor, "profiles") and not table_exists(cursor, "agents"):
+        cursor.execute("ALTER TABLE profiles RENAME TO agents")
+        logger.info("v71: renamed profiles -> agents")
+
+    if not table_exists(cursor, "subagents") or not table_exists(cursor, "agents"):
+        return
+
+    cursor.execute("SELECT * FROM subagents")
+    rows = [dict(r) for r in (cursor.fetchall() or [])]
+    folded = 0
+    for row in rows:
+        agent_id = row["id"]
+        cursor.execute("SELECT 1 FROM agents WHERE id = %s", (agent_id,))
+        if cursor.fetchone():
+            agent_id = f"{agent_id}-agent"
+            cursor.execute("SELECT 1 FROM agents WHERE id = %s", (agent_id,))
+            if cursor.fetchone():
+                logger.warning("v71 fold: skipping subagent %s (id collision)", row["id"])
+                continue
+
+        config = subagent_row_to_agent_config(row)
+        cursor.execute(
+            """INSERT INTO agents (id, name, description, is_builtin, config, mcp_tools,
+                                   created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                agent_id,
+                row.get("name") or agent_id,
+                row.get("description"),
+                bool(row.get("is_builtin")),
+                _json.dumps(config),
+                _json.dumps([]),
+                row.get("created_at"),
+                row.get("updated_at"),
+            ),
+        )
+        folded += 1
+    cursor.execute("DROP TABLE subagents")
+    logger.info("v71: folded %d subagent row(s) into agents; subagents dropped", folded)
+
+
+def subagent_row_to_agent_config(row: dict) -> dict:
+    """Map an old ``subagents`` row onto an agent config blob (v71 fold shape).
+
+    Shared by the in-place v71 migration and the sqlite->postgres import tool.
+    ``prov:`` model composites (inert since ruling D4) are dropped — the agent
+    inherits the session model instead.
+    """
+    import json as _json
+
+    def _load(v):
+        if v is None or isinstance(v, (list, dict)):
+            return v
+        try:
+            return _json.loads(v)
+        except (ValueError, TypeError):
+            return None
+
+    tools = _load(row.get("tools"))
+    model = row.get("model")
+    if model and str(model).startswith("prov:"):
+        model = None
+    config = {
+        "system_prompt": {"type": "custom", "content": row.get("prompt") or ""},
+    }
+    if row.get("memory"):
+        config["memory"] = row["memory"]
+    if model:
+        config["model"] = model
+    if isinstance(tools, list) and tools:
+        config["allowed_tools"] = tools
+    skills = _load(row.get("skills"))
+    if skills:
+        config["skills"] = skills
+    mcp_servers = _load(row.get("mcp_servers"))
+    if mcp_servers:
+        config["mcp_servers"] = mcp_servers
+    return config
 
 
 def _run_column_migrations(cursor):
@@ -178,28 +280,8 @@ def _run_column_migrations(cursor):
             )
             migrations_applied.append("session_messages.profile_id")
 
-    # SDK 0.1.49 agent fields: skills, memory, mcp_servers
-    subagent_new_cols = {"skills": "JSON", "memory": "TEXT", "mcp_servers": "JSON"}
-    if table_exists(cursor, "subagents"):
-        for col, col_type in subagent_new_cols.items():
-            if not column_exists(cursor, "subagents", col):
-                _validate_identifier(col, "column name")
-                cursor.execute(f"ALTER TABLE subagents ADD COLUMN {col} {col_type}")
-                migrations_applied.append(f"subagents.{col}")
-
-    # Built-in subagent columns (v26)
-    subagent_cols = [
-        "default_name", "default_description", "default_prompt",
-        "default_tools", "default_model"
-    ]
-    if table_exists(cursor, "subagents"):
-        for col in subagent_cols:
-            _validate_identifier(col, "column name")  # Defense-in-depth
-            col_type = "JSON" if col == "default_tools" else "TEXT"
-            if not column_exists(cursor, "subagents", col):
-                sql = f"ALTER TABLE subagents ADD COLUMN {col} {col_type}"
-                cursor.execute(sql)
-                migrations_applied.append(f"subagents.{col}")
+    # (v71) subagents column migrations removed — the table is folded into
+    # ``agents`` by _migrate_profiles_to_agents() and no longer exists.
 
     # Drop unique index that prevented multiple worktrees on same branch
     # (Users should be able to have multiple worktrees on the same branch)
@@ -1430,6 +1512,9 @@ def init_database():
 
         if current_version < SCHEMA_VERSION:
             logger.info(f"Migrating database from version {current_version} to {SCHEMA_VERSION}")
+            # v71 rename/fold MUST precede the idempotent CREATE TABLEs (see
+            # _migrate_profiles_to_agents docstring).
+            _migrate_profiles_to_agents(cursor)
             from app.db.schema_postgres import create_postgres_schema
             create_postgres_schema(cursor)
             cursor.execute("DELETE FROM schema_version")
