@@ -835,6 +835,78 @@ describe('subagent cards', () => {
 		expect(after.messages.filter((m) => m.type === 'tool_use')).toHaveLength(0);
 	});
 
+	it('subagent.started absorbs a launch-keyed card already created for the dispatch', () => {
+		// One omni-leg Task dispatch emits TWO subagent.started events: the
+		// in-stream one keyed on the model's Task tool_use_id, then the WorkerFeed
+		// one keyed on the worker session id carrying launch_tool_use_id. The
+		// second must absorb the first (children and all) — not duplicate it.
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_X', description: 'bg work' }),
+			ev('subagent.progress', {
+				task_id: 'call_X',
+				kind: 'tool_use',
+				payload: { name: 'Grep', tool_use_id: 'c1', input: { q: 'z' } },
+			}),
+			ev('subagent.started', {
+				task_id: 'worker-sid',
+				description: 'Task · Helper',
+				launch_tool_use_id: 'call_X',
+			}),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		expect(cards[0].toolId).toBe('worker-sid');
+		expect(cards[0].agentLaunchToolUseId).toBe('call_X');
+		expect(cards[0].agentChildren).toHaveLength(1);
+		expect(cards[0].agentChildren![0]).toMatchObject({ toolId: 'c1', toolName: 'Grep' });
+	});
+
+	it('a late launch-keyed subagent.started does not duplicate the worker card', () => {
+		// Reverse ordering of the same dispatch: the worker card landed first, so
+		// the launch-keyed event arrives after and must be swallowed.
+		const s = fold([
+			ev('subagent.started', {
+				task_id: 'worker-sid',
+				description: 'Task · Helper',
+				launch_tool_use_id: 'call_X',
+			}),
+			ev('subagent.started', { task_id: 'call_X', description: 'bg work' }),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		expect(cards[0].toolId).toBe('worker-sid');
+	});
+
+	it('a terminal event for the absorbed launch id does not settle the worker card', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'call_X', description: 'bg work' }),
+			ev('subagent.started', {
+				task_id: 'worker-sid',
+				description: 'Task · Helper',
+				launch_tool_use_id: 'call_X',
+			}),
+			ev('subagent.completed', { task_id: 'call_X', status: 'completed', result_preview: 'done' }),
+		]);
+		const cards = s.messages.filter((m) => m.type === 'subagent');
+		expect(cards).toHaveLength(1);
+		expect(cards[0].agentStatus).toBe('running');
+	});
+
+	it('absorbing a launch-keyed card drops it from the speculative-settle record', () => {
+		const seeded = fold([ev('subagent.started', { task_id: 'call_X', description: 'bg work' })]);
+		const launchCard = seeded.messages.find((m) => m.type === 'subagent')!;
+		const s = reduce(
+			{ ...seeded, speculativelySettledCardIds: [launchCard.id] },
+			ev('subagent.started', {
+				task_id: 'worker-sid',
+				description: 'Task · Helper',
+				launch_tool_use_id: 'call_X',
+			})
+		);
+		expect(s.speculativelySettledCardIds).not.toContain(launchCard.id);
+		expect(s.messages.filter((m) => m.type === 'subagent')).toHaveLength(1);
+	});
+
 	it('a dispatch-rejection tool.result settles the spinning card to error', () => {
 		// The omni Task dispatcher rejects the launch before spawning a worker, so
 		// no terminal subagent event ever arrives — the rejection result joined by

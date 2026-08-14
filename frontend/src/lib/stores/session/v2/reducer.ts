@@ -1033,6 +1033,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (!taskId) return state;
 			let next = closeOpen(state);
 			if (findSubagentByTask(next.messages, taskId)) return next; // idempotent
+			// Reverse ordering of the same omni dispatch: the worker-keyed card
+			// already landed and absorbed THIS launch id, so a late launch-keyed
+			// `subagent.started` would duplicate it. The surviving card records the
+			// absorption on agentLaunchToolUseId — treat it as the idempotency key.
+			if (next.messages.some((m) => m.type === 'subagent' && m.agentLaunchToolUseId === taskId))
+				return next;
 			// The launch tool_use block emitted only tool.input_delta (never
 			// tool.use/tool.result), opening a `tooluse-${taskId}` placeholder
 			// that would spin forever. The subagent card is the designed surface
@@ -1040,8 +1046,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// Omni-leg Task workers key task_id on the WORKER session id, so the
 			// model's actual launch tool_use_id rides separately as
 			// launch_tool_use_id — absorb that block too, or the transcript shows
-			// both a Task tool call and the worker card for one dispatch.
+			// both a Task tool call and the worker card for one dispatch. That id
+			// may also already carry a full subagent CARD (the in-stream
+			// `subagent.started` keyed on the model's Task tool_use_id fired first
+			// on the native leg): absorb it as well — drop it and inherit its
+			// children below — so one dispatch renders exactly one card.
 			const launchToolUseId = str(event.launch_tool_use_id);
+			const absorbedCard = launchToolUseId
+				? next.messages.find((m) => m.type === 'subagent' && m.toolId === launchToolUseId)
+				: undefined;
 			next = {
 				...next,
 				messages: next.messages.filter(
@@ -1049,9 +1062,19 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						!(
 							m.type === 'tool_use' &&
 							(m.toolId === taskId || (launchToolUseId && m.toolId === launchToolUseId))
-						)
+						) && !(absorbedCard && m.id === absorbedCard.id)
 				),
 			};
+			// The absorbed card no longer exists, so a following turn.parked could
+			// never revive it — drop its id from the speculative-settle record.
+			if (absorbedCard && next.speculativelySettledCardIds.includes(absorbedCard.id)) {
+				next = {
+					...next,
+					speculativelySettledCardIds: next.speculativelySettledCardIds.filter(
+						(c) => c !== absorbedCard.id
+					),
+				};
+			}
 			const msg: ChatMessage = {
 				id: `subagent-${taskId}`,
 				role: 'assistant',
@@ -1063,7 +1086,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				agentDescription: typeof event.description === 'string' ? event.description : undefined,
 				agentPrompt: typeof event.prompt_preview === 'string' ? event.prompt_preview : undefined,
 				agentStatus: 'running',
-				agentChildren: [],
+				agentChildren: absorbedCard?.agentChildren ?? [],
+				agentLaunchToolUseId: launchToolUseId || undefined,
 				timestamp: createdAt || undefined,
 			};
 			return appendMessage(next, msg, seq);

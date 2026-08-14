@@ -106,6 +106,7 @@ export interface ChatMessage {
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
+	agentLaunchToolUseId?: string; // The model's Task launch tool_use_id absorbed into this card (omni-leg worker cards)
 	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats
 	// Team member fields (Claude Code agent-teams feature)
 	teamName?: string;
