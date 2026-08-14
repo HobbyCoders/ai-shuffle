@@ -683,6 +683,96 @@ def test_provider_kind_short_model_aliases():
     )
 
 
+# ─── 4b. Provider-ROW-shape preference (PA13 / W-R4) ─────────────────────────
+
+
+def _bound(model, provider_type, auth_mode=None, provider_id="pid"):
+    extra = {"provider_id": provider_id, "provider_type": provider_type}
+    if auth_mode:
+        extra["provider_auth_mode"] = auth_mode
+    return SessionOptions(model=model, extra=extra)
+
+
+def test_provider_kind_prefers_the_bound_row_type_over_the_model_sniff():
+    """The model-string sniff reads an id in isolation and mis-legs every
+    cross-provider pick it can't see the provider for. When the session carries a
+    bound provider row, the row's ``provider_type`` decides."""
+    # A bare claude id on an OpenRouter row sniffs as the DELEGATED claude CLI —
+    # the single worst misroute (wrong engine AND wrong credentials).
+    assert _decide_provider_kind(_bound("claude-3.5-sonnet", "openrouter")) == "openrouter"
+    # A short registry alias, same story.
+    assert _decide_provider_kind(_bound("opus", "openrouter")) == "openrouter"
+    # A slugged model on an OpenAI row sniffs as OpenRouter.
+    assert _decide_provider_kind(_bound("some-vendor/some-model", "openai")) == "openai_responses"
+    # A non-prefixed model on an OpenAI row would otherwise fall through to the
+    # bare `return "anthropic"` (an API-key-less Anthropic client → instant 401).
+    assert _decide_provider_kind(_bound("my-tuned-model", "openai")) == "openai_responses"
+    # A ChatGPT/Codex subscription row, in both of its shapes.
+    assert _decide_provider_kind(_bound("gpt-5-codex", "chatgpt")) == "openai_responses"
+    assert _decide_provider_kind(_bound("gpt-5-codex", "custom", "chatgpt")) == "openai_responses"
+
+
+def test_provider_kind_anthropic_row_respects_the_subscription_constraint():
+    """An Anthropic-API-KEY row drives the native anthropic client; a
+    SUBSCRIPTION-auth row must stay on the delegated claude CLI — Anthropic bans
+    third-party use of subscription tokens and ``resolve_provider_credentials``
+    raises for kind='anthropic' on such a row."""
+    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "anthropic")) == "anthropic"
+    for mode in ("oauth", "subscription", "claude", "max", "pro", "claude_subscription"):
+        assert (
+            _decide_provider_kind(_bound("claude-sonnet-4-5", "anthropic", mode))
+            == "delegated"
+        ), mode
+
+
+def test_provider_kind_explicit_hints_still_outrank_the_row():
+    """The omni_engine / omni_provider escape hatches keep top priority."""
+    opts = _bound("claude-3.5-sonnet", "openrouter")
+    opts.extra["omni_engine"] = "delegated"
+    assert _decide_provider_kind(opts) == "delegated"
+
+    opts2 = _bound("gpt-5", "openai")
+    opts2.extra["omni_provider"] = "openrouter"
+    assert _decide_provider_kind(opts2) == "openrouter"
+
+
+def test_provider_kind_unknown_row_type_falls_back_to_the_sniff():
+    """A row shape the mapping doesn't recognise must not swallow the decision."""
+    assert _decide_provider_kind(_bound("gpt-4o", "custom")) == "openai_responses"
+    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "custom")) == "delegated"
+
+
+def test_provider_kind_looks_the_row_up_when_the_shape_is_missing(monkeypatch):
+    """A SessionOptions built without the stamped shape fields (a hand-built
+    options object) still gets the row-type preference via a guarded lookup."""
+    import app.db.database as db
+
+    monkeypatch.setattr(
+        db, "get_model_provider", lambda pid, include_token=False: {
+            "id": pid, "provider_type": "openrouter", "auth_mode": None
+        }
+    )
+    opts = SessionOptions(model="claude-3.5-sonnet", extra={"provider_id": "pid"})
+    assert _decide_provider_kind(opts) == "openrouter"
+
+
+def test_provider_kind_lookup_failure_falls_back_to_the_sniff(monkeypatch):
+    import app.db.database as db
+
+    def _boom(pid, include_token=False):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db, "get_model_provider", _boom)
+    opts = SessionOptions(model="gpt-4o", extra={"provider_id": "pid"})
+    assert _decide_provider_kind(opts) == "openai_responses"
+
+
+def test_provider_kind_native_session_is_unchanged():
+    """No bound provider → the sniff is still the whole decision."""
+    assert _decide_provider_kind(SessionOptions(model="sonnet")) == "delegated"
+    assert _decide_provider_kind(SessionOptions(model="gpt-4o")) == "openai_responses"
+
+
 @pytest.mark.asyncio
 async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monkeypatch):
     """The delegated leg JSON-serializes its mcp_servers map into --mcp-config,
